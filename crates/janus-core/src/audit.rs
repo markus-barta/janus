@@ -2,7 +2,7 @@
 //!
 //! Schema is **action- and actor-generic from day one** so Janus-Forge
 //! can write to the same stream without a future migration.
-//! See PAIMOS `JANUS-1 §7` for the canonical schema.
+//! See PAIMOS guideline `architecture-v0 §7` for the canonical schema.
 
 use serde::{Deserialize, Serialize};
 

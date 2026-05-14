@@ -22,7 +22,7 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 secrecy.workspace = true
 
-# TODO (JANUS-1 §13.1): pick an MCP SDK crate. Candidates:
+# TODO (architecture-v0 §13.1): pick an MCP SDK crate. Candidates:
 #   - `rmcp`             (newer, may be official-blessed by 2026)
 #   - `mcp-rust-sdk`     (community, more permissive)
 # Eval feature parity + maintenance activity before first non-scaffold commit.

@@ -5,7 +5,7 @@
 //! `reqwest`, `1password`, `bitwarden`, or any other backend-specific
 //! crate. Adapters live in sibling crates and implement [`VaultBackend`].
 //!
-//! See PAIMOS `JANUS-1` for the engineering design doc.
+//! See PAIMOS guideline `architecture-v0` for the engineering design doc.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

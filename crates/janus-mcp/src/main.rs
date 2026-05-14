@@ -1,9 +1,9 @@
 //! Janus-Warden — MCP server entry point.
 //!
-//! See PAIMOS `JANUS-1` for the engineering design doc.
+//! See PAIMOS guideline `architecture-v0` for the engineering design doc.
 //!
 //! This is **scaffold only**. The MCP SDK crate is unselected (see
-//! `JANUS-1 §13.1`); refusing to serve until that decision lands keeps
+//! `architecture-v0 §13.1`); refusing to serve until that decision lands keeps
 //! the build green without committing to a transport we haven't audited.
 
 use anyhow::Result;
@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
-    // Production wiring (TODO, JANUS-1 §13):
+    // Production wiring (TODO, architecture-v0 §13):
     //   1. Load config from env:
     //      JANUS_VW_BASE_URL, JANUS_VW_CLIENT_ID, JANUS_VW_CLIENT_SECRET,
     //      JANUS_VW_COLLECTION_ID, JANUS_AUDIT_SINK, JANUS_ALLOWLIST_FIELD.
@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     //   * return Janus-domain types serialized as JSON
 
     anyhow::bail!(
-        "scaffold only — see PAIMOS JANUS-1 §13 for open questions \
+        "scaffold only — see PAIMOS guideline architecture-v0 §13 for open questions \
          that must resolve before this binary is wired"
     )
 }

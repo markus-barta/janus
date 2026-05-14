@@ -4,7 +4,7 @@
 //! Compatible with Vaultwarden (the Rust reimplementation) and the
 //! Bitwarden.com hosted service.
 //!
-//! See PAIMOS `JANUS-1 §3–§5` for the surface contract.
+//! See PAIMOS guideline `architecture-v0 §3–§5` for the surface contract.
 
 #![forbid(unsafe_code)]
 
@@ -35,7 +35,7 @@ pub struct VaultwardenConfig {
 /// Vaultwarden / Bitwarden REST adapter.
 pub struct VaultwardenBackend {
     _cfg: VaultwardenConfig,
-    // TODO (JANUS-1): reqwest::Client with retry, auth refresh, timeouts.
+    // TODO (architecture-v0): reqwest::Client with retry, auth refresh, timeouts.
 }
 
 impl VaultwardenBackend {
@@ -49,18 +49,18 @@ impl VaultwardenBackend {
 #[async_trait]
 impl VaultBackend for VaultwardenBackend {
     async fn health(&self) -> Result<HealthStatus, JanusError> {
-        // TODO (JANUS-1): GET /api/version + verify token still valid.
+        // TODO (architecture-v0): GET /api/version + verify token still valid.
         unimplemented!("janus-vaultwarden::health")
     }
 
     async fn list_items(&self) -> Result<Vec<ItemOverview>, JanusError> {
-        // TODO (JANUS-1): GET /api/ciphers filtered to our collection,
+        // TODO (architecture-v0): GET /api/ciphers filtered to our collection,
         //                 map via `mapping::dto_to_overview`.
         unimplemented!("janus-vaultwarden::list_items")
     }
 
     async fn get_item(&self, _id: &ItemId) -> Result<JanusItem, JanusError> {
-        // TODO (JANUS-1): GET /api/ciphers/{id}, map via
+        // TODO (architecture-v0): GET /api/ciphers/{id}, map via
         //                 `mapping::dto_to_item`.
         unimplemented!("janus-vaultwarden::get_item")
     }

@@ -1,6 +1,6 @@
 //! Bitwarden REST client — auth, token refresh, transport.
 //!
-//! TODO (JANUS-1):
+//! TODO (architecture-v0):
 //!   - OAuth2 client_credentials flow against `/identity/connect/token`.
 //!   - Bearer token cache with proactive refresh on 60s-to-expiry.
 //!   - Retry policy: 1 immediate retry on 5xx, then jittered exponential

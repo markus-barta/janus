@@ -5,7 +5,7 @@ job of a separate sibling (Janus-Forge, future).
 
 ## Docs
 
-- **Engineering design doc**: `JANUS-1` in PAIMOS (https://pm.barta.cm)
+- **Engineering design doc**: guideline `architecture-v0` in PAIMOS (https://pm.barta.cm)
 - **High-level rationale**: `modules/janus/readme.md` in the `inspr` repo
 - **Tracking epics**: `INSPR-180` (Janus-Warden), `INSPR-181` (Janus-Forge)
 
@@ -27,6 +27,6 @@ crates/
 
 ## Status
 
-**v0 scaffold.** Open questions tracked in `JANUS-1 §13` (MCP SDK crate
+**v0 scaffold.** Open questions tracked in `architecture-v0 §13` (MCP SDK crate
 choice, SIEM sink concretization, allowlist field naming, concealed-reveal
 MFA, container base).

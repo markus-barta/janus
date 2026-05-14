@@ -6,7 +6,7 @@
 //! and reconsider — the Janus domain should describe what an LLM
 //! consumer needs, not what Bitwarden happens to provide.
 //!
-//! TODO (JANUS-1):
+//! TODO (architecture-v0):
 //!   - `fn dto_to_overview(BwCipher) -> ItemOverview`
 //!       * extract title, id
 //!       * scan `fields[]` for the allowlist marker to set `allowlisted`
