@@ -13,4 +13,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-secrecy = { workspace = true, features = ["serde"] }
+# NB: janus-core itself does not depend on `secrecy` in v0. Field values
+# are plain `String`; concealed protection is via redaction (None-ing the
+# value) before serialization. The `secrecy` crate is used by
+# janus-vaultwarden for the long-lived API client_secret, not here.

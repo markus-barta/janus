@@ -6,13 +6,10 @@
 //!
 //! The `rmcp` types are exercised end-to-end (`ServerHandler` impl, three
 //! tool registrations, stdio transport boot), but every tool call
-//! currently returns a "scaffold only — backend not wired" message. The
-//! binary CAN run and CAN serve MCP — it just refuses to read any vault
-//! item until the `janus-vaultwarden` adapter is implemented.
-//!
-//! Note: API surface tracks `rmcp` `1.7.0`. If field names have drifted,
-//! cross-check against the SDK README before adjusting the impl below —
-//! the *intent* is the source of truth, not the exact symbol names.
+//! currently returns a "scaffold only — backend not wired" error
+//! response. The binary CAN run and CAN serve MCP — it just refuses to
+//! return any vault item until the `janus-vaultwarden` adapter is
+//! implemented.
 
 #![forbid(unsafe_code)]
 
@@ -20,9 +17,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use rmcp::{
+    ErrorData,
     model::{
-        CallToolRequestParam, CallToolResult, Content, Implementation,
-        ListToolsResult, PaginatedRequestParam, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResult, Content, Implementation,
+        ListToolsResult, PaginatedRequestParams, ServerInfo, Tool,
     },
     service::{RequestContext, RoleServer},
     transport::stdio,
@@ -42,32 +40,31 @@ struct Warden {
 
 impl ServerHandler for Warden {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            server_info: Implementation {
-                name: "janus-warden".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-            },
-            instructions: Some(
-                "Janus-Warden — read-only broker between an LLM and a \
-                 credential vault, under tag-based allowlist control. See \
-                 PAIMOS · JANUS · guideline architecture-v0."
-                    .into(),
-            ),
-            ..Default::default()
-        }
+        // ServerInfo is `#[non_exhaustive]`; build from default, then
+        // override the parts we care about.
+        let mut info = ServerInfo::default();
+        info.server_info =
+            Implementation::new("janus-warden", env!("CARGO_PKG_VERSION"));
+        info.instructions = Some(
+            "Janus-Warden — read-only broker between an LLM and a \
+             credential vault, under tag-based allowlist control. See \
+             PAIMOS · JANUS · guideline architecture-v0."
+                .into(),
+        );
+        info
     }
 
     async fn list_tools(
         &self,
-        _: Option<PaginatedRequestParam>,
+        _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, rmcp::Error> {
+    ) -> Result<ListToolsResult, ErrorData> {
         // Tool descriptions are STATIC + code-reviewed. This is the
         // structural defense against tool-description poisoning
         // (architecture-v0 §9). Do not derive descriptions from
         // doc-comments or runtime config.
         let tools = vec![
-            tool(
+            make_tool(
                 "list_secrets",
                 "List vault items that bear the allowlist marker (`llm-ok`). Read-only. \
                  Returns minimal overview: id, title, allowlisted flag. Concealed values \
@@ -78,7 +75,7 @@ impl ServerHandler for Warden {
                     "additionalProperties": false
                 }),
             ),
-            tool(
+            make_tool(
                 "read_secret",
                 "Fetch a single allowlisted vault item by id. Concealed fields (passwords, \
                  API keys, tokens) are redacted unless `reveal_concealed = true` is passed, \
@@ -101,7 +98,7 @@ impl ServerHandler for Warden {
                     "additionalProperties": false
                 }),
             ),
-            tool(
+            make_tool(
                 "health",
                 "Backend liveness + auth check. No parameters. Returns backend name, \
                  reachability, and last successful check time.",
@@ -112,50 +109,51 @@ impl ServerHandler for Warden {
                 }),
             ),
         ];
-        Ok(ListToolsResult { tools, next_cursor: None })
+        Ok(ListToolsResult { meta: None, next_cursor: None, tools })
     }
 
     async fn call_tool(
         &self,
-        req: CallToolRequestParam,
+        req: CallToolRequestParams,
         _: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+    ) -> Result<CallToolResult, ErrorData> {
         // TODO (architecture-v0 §6): dispatch by `req.name` to the
         //   backend, then re-check `janus_core::allowlist::check`, then
         //   redact via `janus_core::allowlist::redact`, then emit an
         //   AuditEvent, then return the Janus-domain JSON.
         //
         // Until then: log the attempt and return an explicit
-        // scaffold-only error response so callers know the tool is
+        // `CallToolResult::error` so the client knows the tool is
         // registered but unimplemented.
         tracing::warn!(
             target: "janus.audit",
             tool = %req.name,
             "tool call refused — scaffold only, backend not wired"
         );
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "ERROR: scaffold only — tool `{}` is registered but the \
-             Vaultwarden backend is unimplemented. See PAIMOS guideline \
+        Ok(CallToolResult::error(vec![Content::text(format!(
+            "scaffold only — tool `{}` is registered but the Vaultwarden \
+             backend is unimplemented. See PAIMOS guideline \
              architecture-v0 §13 for open questions blocking full wiring.",
             req.name
         ))]))
     }
 }
 
-/// Helper to build a `Tool` from a static description + JSON schema.
-/// Keeps `list_tools` readable.
-fn tool(name: &str, description: &str, schema: serde_json::Value) -> Tool {
-    Tool {
-        name: name.into(),
-        description: Some(description.into()),
-        input_schema: Arc::new(
-            schema
-                .as_object()
-                .expect("tool schema must be a JSON object")
-                .clone(),
-        ),
-        annotations: None,
-    }
+/// Helper to build a `Tool` from a static description + JSON schema
+/// literal. Keeps `list_tools` readable.
+///
+/// `JsonObject` in rmcp is `serde_json::Map<String, serde_json::Value>`;
+/// we accept a `serde_json::Value` from `json!` and unwrap its object.
+fn make_tool(
+    name: &'static str,
+    description: &'static str,
+    schema: serde_json::Value,
+) -> Tool {
+    let schema_map = schema
+        .as_object()
+        .expect("tool schema must be a JSON object")
+        .clone();
+    Tool::new(name, description, Arc::new(schema_map))
 }
 
 #[tokio::main]
@@ -168,9 +166,9 @@ async fn main() -> Result<()> {
 
     let warden = Warden::default();
 
-    // serve() takes ownership; .waiting() blocks until the transport
-    // closes. Stdio transport will keep the server alive as long as the
-    // client (LLM host) has the pipe open.
+    // `serve(transport)` consumes self; `.waiting()` blocks until the
+    // transport closes. Stdio transport keeps the server alive as long
+    // as the client (LLM host) has the pipe open.
     let server = warden.serve(stdio()).await?;
     server.waiting().await?;
     Ok(())

@@ -16,8 +16,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
         toolchain = fenix.packages.${system}.fromToolchainFile {
           file = ./rust-toolchain.toml;
-          # First run: replace with actual sha (nix will print on mismatch).
-          sha256 = pkgs.lib.fakeSha256;
+          sha256 = "sha256-gh/xTkxKHL4eiRXzWv8KP7vfjSk61Iq48x47BEDFgfk=";
         };
       in {
         devShells.default = pkgs.mkShell {

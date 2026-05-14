@@ -12,7 +12,9 @@ pub enum JanusError {
     /// Soft-allowlist check failed.
     #[error("allowlist denied for item {item_id}: {reason}")]
     AllowlistDenied {
+        /// Backend-assigned item id that was denied.
         item_id: String,
+        /// Why the marker check failed (missing field, wrong value, …).
         reason: String,
     },
 

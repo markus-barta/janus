@@ -37,13 +37,11 @@ impl Default for AllowlistConfig {
 /// Returns [`JanusError::AllowlistDenied`] if the marker field is absent
 /// or carries an unexpected value.
 pub fn check(item: &JanusItem, cfg: &AllowlistConfig) -> Result<(), JanusError> {
-    use secrecy::ExposeSecret;
     let marker = item
         .fields
         .iter()
         .find(|f| f.name == cfg.marker_field)
-        .and_then(|f| f.value.as_ref())
-        .map(|s| s.expose_secret().to_string());
+        .and_then(|f| f.value.as_deref());
 
     match marker {
         Some(v) if v == cfg.marker_value => Ok(()),
@@ -77,7 +75,6 @@ pub fn redact(item: &mut JanusItem, reveal: bool) {
 mod tests {
     use super::*;
     use crate::types::{ItemId, JanusField};
-    use secrecy::SecretString;
 
     fn item_with(fields: Vec<JanusField>) -> JanusItem {
         JanusItem {
@@ -92,7 +89,7 @@ mod tests {
         JanusField {
             name: name.into(),
             kind,
-            value: val.map(|v| SecretString::new(v.to_string().into())),
+            value: val.map(|v| v.to_string()),
         }
     }
 

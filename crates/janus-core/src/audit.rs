@@ -25,10 +25,15 @@ pub enum Actor {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
+    /// Read a vault item (Janus-Warden's primary action).
     Read,
+    /// Rotate a credential (Janus-Forge, future).
     Rotate,
+    /// Revoke a credential (Janus-Forge, future).
     Revoke,
+    /// Create a new credential (Janus-Forge, future).
     Create,
+    /// Backend health / liveness check.
     Health,
 }
 
@@ -36,42 +41,63 @@ pub enum Action {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
+    /// Action completed successfully.
     Ok,
     /// Backend returned 4xx/5xx — hard-allowlist breach or upstream
     /// failure. Should only happen on misconfiguration.
     DeniedBackend,
     /// Soft-allowlist check failed (item exists but lacks marker).
     DeniedAllowlist,
-    /// Other error.
+    /// Other error (transport, parse, internal).
     Error,
 }
 
 /// A single audit event. Serialized one-per-line as JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
+    /// Schema version — bumped if the schema changes incompatibly.
     pub schema_version: &'static str,
+    /// ISO-8601 timestamp set by the emitter.
     pub ts: String,
+    /// Which Janus actor produced this event.
     pub actor: Actor,
+    /// Instance identifier of the actor (e.g. `warden-prod-01`).
     pub actor_instance: String,
+    /// What action was attempted.
     pub action: Action,
+    /// Outcome of the action.
     pub outcome: Outcome,
+    /// Backend-assigned item id (the only backend-shaped field in the schema).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub item_id_backend: Option<String>,
+    /// Human-readable item title (no concealed values).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub item_title: Option<String>,
+    /// Handle of the vault/collection the item was read from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vault_handle: Option<String>,
+    /// Names of fields whose values were returned (concealed values are
+    /// listed by name only; values are never logged).
     #[serde(default)]
     pub fields_returned: Vec<String>,
+    /// True iff this read returned concealed values verbatim
+    /// (`reveal_concealed=true`).
     pub concealed_revealed: bool,
+    /// MCP tool name that handled this call.
     pub tool_name: String,
+    /// Optional MCP session identifier for correlation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_session_id: Option<String>,
+    /// SHA-256 of the last user prompt — gives correlation without
+    /// leaking the prompt content.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_hash: Option<String>,
+    /// Identity of the caller (e.g. `claude-code/mba`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller_principal: Option<String>,
+    /// Backend name (e.g. `vaultwarden`, `1password`).
     pub backend: String,
+    /// Wall-clock duration of the action in milliseconds.
     pub duration_ms: u64,
 }
 

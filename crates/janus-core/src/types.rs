@@ -3,8 +3,15 @@
 //! Adapters MUST map their backend DTOs into these. Nothing
 //! backend-shaped should appear in this module — except [`ItemId`],
 //! which is deliberately opaque.
+//!
+//! **Note on secret protection (v0):** field values are plain `String`.
+//! The redaction story relies on [`crate::allowlist::redact`] stripping
+//! concealed values to `None` BEFORE serialization. A future hardening
+//! pass (see guideline `architecture-v0` §13.6) can wrap concealed
+//! values in `secrecy::SecretString` with an explicit serializer to add
+//! `Debug`-leak protection — for v0 that's deferred to keep the
+//! scaffold simple.
 
-use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 /// Opaque backend item identifier. Adapters decide how this is parsed.
@@ -40,19 +47,18 @@ pub enum FieldKind {
     Email,
 }
 
-/// A single field on an item. Values are wrapped in [`SecretString`] to
-/// prevent accidental `Debug`/`Display` leakage. Use
-/// [`crate::allowlist::redact`] to strip concealed values before returning
-/// to the LLM (unless explicit reveal was requested).
+/// A single field on an item. Use [`crate::allowlist::redact`] to strip
+/// concealed values to `None` before returning to the LLM (unless
+/// explicit reveal was requested).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JanusField {
     /// Field name (e.g. "username", "password", "llm-ok").
     pub name: String,
     /// Field kind — drives redaction.
     pub kind: FieldKind,
-    /// Field value. `None` after redaction.
+    /// Field value. `None` after redaction of a concealed field.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<SecretString>,
+    pub value: Option<String>,
 }
 
 /// Full item, with field values possibly populated.
