@@ -1,0 +1,16 @@
+[package]
+name = "janus-core"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Janus core — VaultBackend trait, Janus-domain types, allowlist + audit logic. Backend-agnostic."
+
+[dependencies]
+async-trait.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+secrecy = { workspace = true, features = ["serde"] }

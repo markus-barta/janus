@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+
+# nix / direnv
+result
+result-*
+.direnv/
+.envrc.local
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

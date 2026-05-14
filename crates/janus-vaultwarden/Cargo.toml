@@ -1,0 +1,19 @@
+[package]
+name = "janus-vaultwarden"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Vaultwarden / Bitwarden REST adapter for Janus."
+
+[dependencies]
+janus-core = { path = "../janus-core" }
+async-trait.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+secrecy = { workspace = true, features = ["serde"] }
+url.workspace = true

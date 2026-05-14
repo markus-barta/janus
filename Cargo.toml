@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/janus-core",
+    "crates/janus-vaultwarden",
+    "crates/janus-mcp",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.78"
+authors = ["Markus Barta <markus.barta@bytepoets.com>"]
+license = "Proprietary"
+repository = ""
+
+[workspace.dependencies]
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+secrecy = { version = "0.8", features = ["serde"] }
+url = "2"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
