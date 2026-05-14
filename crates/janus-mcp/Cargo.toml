@@ -22,7 +22,9 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 secrecy.workspace = true
 
-# TODO (architecture-v0 §13.1): pick an MCP SDK crate. Candidates:
-#   - `rmcp`             (newer, may be official-blessed by 2026)
-#   - `mcp-rust-sdk`     (community, more permissive)
-# Eval feature parity + maintenance activity before first non-scaffold commit.
+# Official Anthropic Rust MCP SDK — decision recorded in PAIMOS guideline
+# architecture-v0 §13.1. The community alternative `mcp-rust-sdk` was
+# archived 2025-07 and now redirects here. Feature-gated to keep the dep
+# tree audit-friendly: stdio only, no HTTP/SSE/auth/reqwest. Pinned to an
+# exact version for supply-chain hygiene; bumps require a code review.
+rmcp = { version = "=1.7.0", default-features = false, features = ["server", "transport-io"] }
