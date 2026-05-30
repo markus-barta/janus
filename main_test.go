@@ -704,6 +704,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"assurance"`) || !strings.Contains(body, `"route_value_leak_sentinel":true`) || !strings.Contains(body, `"json_errors_request_id":true`) || !strings.Contains(body, `"backend_source_paths":"not_returned"`) || !strings.Contains(body, `"route_value_leak_sentinel"`) || !strings.Contains(body, `"request_correlated_json_errors"`) {
 		t.Fatalf("posture response should include route value-leak assurance: %s", body)
 	}
+	if !strings.Contains(body, `"mode_posture"`) || !strings.Contains(body, `"current":"Self-hosted"`) || !strings.Contains(body, `"enterprise":"not_claimed"`) || !strings.Contains(body, `"mode_posture_evidence"`) {
+		t.Fatalf("posture response should include product-mode evidence: %s", body)
+	}
 	if !strings.Contains(body, `"response_hardening"`) || !strings.Contains(body, `"no_store_responses"`) {
 		t.Fatalf("posture response should include response hardening: %s", body)
 	}
@@ -885,6 +888,37 @@ func TestRolePolicyExplicitOwnerBindingClosesBootstrapGate(t *testing.T) {
 	}
 }
 
+func TestProductModePostureDistinguishesClaims(t *testing.T) {
+	policy := RolePolicy{
+		AdminSubjects:    map[string]bool{"markus@barta.com": true},
+		AuditorSubjects:  map[string]bool{"markus@barta.com": true},
+		OperatorSubjects: map[string]bool{"markus@barta.com": true},
+		BootstrapOwner:   false,
+	}
+	access := AccessPostureFor(policy)
+	audit := AuditPosture{ChainVerified: true, SinkWritable: true}
+
+	selfHosted := ProductModePostureFor(Config{ProductMode: "self_hosted", RolePolicy: policy}, true, nil, access, audit, 0)
+	if selfHosted.Current != "Self-hosted" || selfHosted.Baseline != "ready" || selfHosted.Enterprise != "not_claimed" || selfHosted.ValueReturned {
+		t.Fatalf("self-hosted mode should be healthy without claiming enterprise: %#v", selfHosted)
+	}
+
+	dev := ProductModePostureFor(Config{ProductMode: "dev", RolePolicy: policy}, true, nil, access, audit, 0)
+	if dev.Current != "Dev" || dev.Baseline != "dev_only" || dev.Enterprise != "not_claimed" {
+		t.Fatalf("dev mode should stay clearly non-enterprise: %#v", dev)
+	}
+
+	enterpriseBlocked := ProductModePostureFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, []string{"remote audit missing"}, access, audit, 0)
+	if enterpriseBlocked.Current != "Enterprise" || enterpriseBlocked.Enterprise != "blocked" {
+		t.Fatalf("enterprise mode with gates should be blocked: %#v", enterpriseBlocked)
+	}
+
+	enterpriseCandidate := ProductModePostureFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, nil, access, audit, 0)
+	if enterpriseCandidate.Enterprise != "candidate" || enterpriseCandidate.Baseline != "ready" {
+		t.Fatalf("enterprise mode with clear gates should be a candidate: %#v", enterpriseCandidate)
+	}
+}
+
 func TestDockerComposePinsExplicitJanusRoleBindings(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "docker-compose.yml"))
 	if err != nil {
@@ -917,7 +951,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Scope boundary", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "not_claimed", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Scope boundary", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}

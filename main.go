@@ -325,6 +325,23 @@ type SessionPosture struct {
 	ValueReturned      bool   `json:"value_returned"`
 }
 
+type ProductModePosture struct {
+	Mode          string               `json:"mode"`
+	Current       string               `json:"current"`
+	Baseline      string               `json:"baseline"`
+	Enterprise    string               `json:"enterprise"`
+	Summary       string               `json:"summary"`
+	Controls      []ProductModeControl `json:"controls"`
+	ValueReturned bool                 `json:"value_returned"`
+}
+
+type ProductModeControl struct {
+	Label  string `json:"label"`
+	State  string `json:"state"`
+	Detail string `json:"detail"`
+	Tone   string `json:"tone"`
+}
+
 type UIActionResult struct {
 	Title          string `json:"title"`
 	Outcome        string `json:"outcome"`
@@ -859,6 +876,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Scope":             scopePosture,
 		"Lifecycle":         lifecyclePosture,
 		"ApprovedUse":       approvedUsePosture,
+		"ModePosture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
 		"EvidenceHash":      evidenceHash,
 		"CanExportEvidence": canViewAudit,
 		"CanViewAudit":      canViewAudit,
@@ -1750,6 +1768,107 @@ func enterpriseChecks(cfg Config) []string {
 	return issues
 }
 
+func ProductModePostureFor(cfg Config, ready bool, issues []string, access AccessPosture, audit AuditPosture, catalogGateCount int) ProductModePosture {
+	mode := strings.TrimSpace(cfg.ProductMode)
+	if mode == "" {
+		mode = "self_hosted"
+	}
+
+	posture := ProductModePosture{
+		Mode:          mode,
+		Current:       productModeLabel(mode),
+		Baseline:      "review",
+		Enterprise:    "not_claimed",
+		Summary:       "Self-hosted mode can be healthy without claiming enterprise evidence.",
+		ValueReturned: false,
+	}
+	if mode == "dev" {
+		posture.Baseline = "dev_only"
+		posture.Summary = "Dev mode is local proof only and does not claim production or enterprise evidence."
+	} else if ready && catalogGateCount == 0 && len(issues) == 0 {
+		posture.Baseline = "ready"
+	}
+
+	if mode == "enterprise" {
+		posture.Enterprise = "blocked"
+		posture.Summary = "Enterprise mode is strict: missing controls stay visible until evidence is complete."
+		if ready && len(issues) == 0 && access.ExplicitBindings && audit.ChainVerified {
+			posture.Enterprise = "candidate"
+		}
+	}
+
+	roleState := "bootstrap"
+	roleTone := "warn"
+	roleDetail := "bootstrap owner policy is active"
+	if access.ExplicitBindings {
+		roleState = "explicit"
+		roleTone = "ok"
+		roleDetail = "admin, auditor, and operator bindings are configured"
+	}
+
+	auditState := "review"
+	auditTone := "warn"
+	auditDetail := "audit chain needs review"
+	if audit.ChainVerified {
+		auditState = "verified"
+		auditTone = "ok"
+		auditDetail = "local tamper-evident chain is verified"
+	}
+
+	baselineTone := "warn"
+	baselineDetail := "readiness or catalog gates need review"
+	if posture.Baseline == "ready" {
+		baselineTone = "ok"
+		baselineDetail = "redacted health, catalog gates, local audit, and role gates are clear"
+	}
+	if posture.Baseline == "dev_only" {
+		baselineDetail = "developer posture only"
+	}
+
+	enterpriseTone := "info"
+	enterpriseDetail := "remote audit, break-glass review, restore drills, and integration conformance are not claimed"
+	if posture.Enterprise == "blocked" {
+		enterpriseTone = "warn"
+		enterpriseDetail = "enterprise mode has open gates"
+	}
+	if posture.Enterprise == "candidate" {
+		enterpriseTone = "ok"
+		enterpriseDetail = "configured controls are clear; attach external evidence before relying on this"
+	}
+
+	gateState := "clear"
+	gateTone := "ok"
+	gateDetail := "no dashboard readiness gates"
+	if len(issues) > 0 || catalogGateCount > 0 {
+		gateState = fmt.Sprintf("%d open", len(issues)+catalogGateCount)
+		gateTone = "warn"
+		gateDetail = "open gates stay visible"
+	}
+
+	posture.Controls = []ProductModeControl{
+		{Label: "Current mode", State: posture.Current, Detail: "runtime claim shown in UI, health, and evidence", Tone: "info"},
+		{Label: "Self-hosted baseline", State: posture.Baseline, Detail: baselineDetail, Tone: baselineTone},
+		{Label: "Role bindings", State: roleState, Detail: roleDetail, Tone: roleTone},
+		{Label: "Audit evidence", State: auditState, Detail: auditDetail, Tone: auditTone},
+		{Label: "Enterprise evidence", State: posture.Enterprise, Detail: enterpriseDetail, Tone: enterpriseTone},
+		{Label: "Open gates", State: gateState, Detail: gateDetail, Tone: gateTone},
+	}
+	return posture
+}
+
+func productModeLabel(mode string) string {
+	switch mode {
+	case "dev":
+		return "Dev"
+	case "enterprise":
+		return "Enterprise"
+	case "self_hosted":
+		return "Self-hosted"
+	default:
+		return mode
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
@@ -1807,6 +1926,8 @@ func (app *App) postureBody() map[string]any {
 	lifecyclePosture := LifecyclePostureFor(descriptors, time.Now().UTC())
 	approvedUsePosture := ApprovedUsePostureFor(descriptors)
 	permitPosture := PermitPosture{ValueReturned: false}
+	readiness, ready := app.readinessBody()
+	auditPosture := app.store.AuditPosture()
 	if app.permits != nil {
 		permitPosture = app.permits.Posture()
 	}
@@ -1825,6 +1946,7 @@ func (app *App) postureBody() map[string]any {
 		"lifecycle":          lifecyclePosture,
 		"approved_use":       approvedUsePosture,
 		"permits":            permitPosture,
+		"mode_posture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
 			"pkce_s256":                   app.cfg.OIDCConfigured(),
@@ -1895,11 +2017,8 @@ func (app *App) postureBody() map[string]any {
 			"rate_limit_error_value_free": true,
 			"value_returned":              false,
 		},
-		"readiness": func() any {
-			body, _ := app.readinessBody()
-			return body
-		}(),
-		"audit": app.store.AuditPosture(),
+		"readiness": readiness,
+		"audit":     auditPosture,
 		"capabilities": []string{
 			"value_free_metadata_catalog",
 			"broker_principal_chain",
@@ -1938,6 +2057,7 @@ func (app *App) postureBody() map[string]any {
 			"deny_by_default_cors",
 			"request_correlated_json_errors",
 			"route_value_leak_sentinel",
+			"mode_posture_evidence",
 		},
 		"value_returned": false,
 	}
@@ -2227,6 +2347,27 @@ func mustTemplates() *template.Template {
     .trust-step strong { font-size: 16px; line-height: 1.15; overflow-wrap: anywhere; }
     .trust-step.ok strong { color: var(--accent); }
     .trust-step.warn strong { color: var(--amber); }
+    .mode-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .mode-item {
+      min-height: 104px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      padding: 12px;
+      display: grid;
+      align-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+    .mode-item span { color: var(--muted); font-size: 12px; }
+    .mode-item strong { font-size: 17px; line-height: 1.15; overflow-wrap: anywhere; }
+    .mode-item.ok strong { color: var(--accent); }
+    .mode-item.warn strong { color: var(--amber); }
+    .mode-item.info strong { color: var(--blue); }
     .assurance-flow {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2404,6 +2545,7 @@ func mustTemplates() *template.Template {
       .facts { grid-template-columns: 1fr; gap: 10px; }
       .verdict { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .role-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-step:nth-child(2n) { border-right: 0; }
@@ -2415,6 +2557,7 @@ func mustTemplates() *template.Template {
       .status-body { grid-template-columns: 1fr; }
       .verdict { grid-template-columns: 1fr; }
       .role-matrix { grid-template-columns: 1fr; }
+      .mode-grid { grid-template-columns: 1fr; }
       .assurance-flow { grid-template-columns: 1fr; }
       .trust-rail { grid-template-columns: 1fr; }
       .trust-step { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -2550,6 +2693,25 @@ func mustTemplates() *template.Template {
         <span class="pill warn">auditor</span>
         {{ end }}
       </div>
+    </div>
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="mode-posture">
+  <div class="panel-head">
+    <h2>Deployment mode</h2>
+    <span class="pill info">{{ .ModePosture.Current }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .ModePosture.Summary }}</p>
+    <p><span class="pill ok">value_returned=false</span> <span class="pill {{ if eq .ModePosture.Enterprise "candidate" }}ok{{ else }}warn{{ end }}">enterprise {{ .ModePosture.Enterprise }}</span></p>
+    <div class="mode-grid" aria-label="Deployment mode posture">
+      {{ range .ModePosture.Controls }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+      </div>
+      {{ end }}
     </div>
   </div>
 </section>
