@@ -698,6 +698,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"request_correlation"`) || !strings.Contains(body, `"request_correlation_ids"`) {
 		t.Fatalf("posture response should include request correlation: %s", body)
 	}
+	if !strings.Contains(body, `"cors"`) || !strings.Contains(body, `"policy":"deny_by_default"`) || !strings.Contains(body, `"access_control_allow_origin":"absent"`) || !strings.Contains(body, `"deny_by_default_cors"`) {
+		t.Fatalf("posture response should include deny-by-default CORS posture: %s", body)
+	}
 	if !strings.Contains(body, `"response_hardening"`) || !strings.Contains(body, `"no_store_responses"`) {
 		t.Fatalf("posture response should include response hardening: %s", body)
 	}
@@ -1054,6 +1057,69 @@ func TestSafeMethodBoundaryFailureJSON(t *testing.T) {
 	}
 	if strings.Contains(body, "Method Not Allowed") || strings.Contains(body, "plaintext") {
 		t.Fatalf("method boundary failure should not use default plain response: %s", body)
+	}
+}
+
+func TestCORSDeniedByDefault(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	cases := []struct {
+		method string
+		path   string
+		status int
+	}{
+		{http.MethodGet, "/healthz", http.StatusOK},
+		{http.MethodGet, "/readyz", http.StatusOK},
+		{http.MethodGet, "/api/posture", http.StatusOK},
+		{http.MethodGet, "/missing", http.StatusNotFound},
+		{http.MethodOptions, "/api/posture", http.StatusMethodNotAllowed},
+	}
+
+	for _, tc := range cases {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req.Header.Set("Origin", "https://evil.example")
+		req.Header.Set("Access-Control-Request-Method", "GET")
+		out := httptest.NewRecorder()
+		app.routes().ServeHTTP(out, req)
+		if out.Code != tc.status {
+			t.Fatalf("%s %s: expected %d, got %d body=%s", tc.method, tc.path, tc.status, out.Code, out.Body.String())
+		}
+		for _, header := range []string{"Access-Control-Allow-Origin", "Access-Control-Allow-Credentials", "Access-Control-Allow-Headers", "Access-Control-Allow-Methods"} {
+			if got := out.Header().Get(header); got != "" {
+				t.Fatalf("%s %s: expected no %s header, got %q", tc.method, tc.path, header, got)
+			}
+		}
+		if strings.Contains(out.Body.String(), "plaintext") || strings.Contains(out.Body.String(), "secret-cookie-secret") {
+			t.Fatalf("%s %s: CORS denial path should remain value-free: %s", tc.method, tc.path, out.Body.String())
+		}
+	}
+}
+
+func TestAPIPreflightUsesSafeMethodBoundary(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/posture", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	req.Header.Set("X-Request-Id", "cors-preflight-1")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d body=%s", out.Code, out.Body.String())
+	}
+	if got := out.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Fatalf("expected Allow GET, HEAD, got %q", got)
+	}
+	body := out.Body.String()
+	for _, want := range []string{`"error":"method_not_allowed"`, `"request_id":"cors-preflight-1"`, `"value_returned":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("preflight denial should include %s: %s", want, body)
+		}
+	}
+	if out.Header().Get("Access-Control-Allow-Origin") != "" || strings.Contains(body, "plaintext") {
+		t.Fatalf("preflight denial should not open CORS or leak values: headers=%#v body=%s", out.Header(), body)
 	}
 }
 

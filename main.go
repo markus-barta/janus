@@ -1813,6 +1813,13 @@ func (app *App) postureBody() map[string]any {
 			"sanitized":       true,
 			"value_returned":  false,
 		},
+		"cors": map[string]any{
+			"policy":                      "deny_by_default",
+			"access_control_allow_origin": "absent",
+			"credentialed_cross_origin":   false,
+			"preflight":                   "safe_method_boundary",
+			"value_returned":              false,
+		},
 		"response_hardening": map[string]any{
 			"cache_control":                  "no-store",
 			"auth_error_view":                "safe_category_request_id",
@@ -1884,6 +1891,7 @@ func (app *App) postureBody() map[string]any {
 			"degraded_sensitive_action_guard",
 			"degraded_dashboard_banner",
 			"operational_rate_limit_denials",
+			"deny_by_default_cors",
 		},
 		"value_returned": false,
 	}
