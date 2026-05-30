@@ -33,6 +33,7 @@ const (
 	hostNonceCookie   = "__Host-janus_oidc_nonce"
 	pkceCookie        = "janus_oidc_pkce"
 	hostPKCECookie    = "__Host-janus_oidc_pkce"
+	defaultSessionTTL = 12 * time.Hour
 )
 
 type Config struct {
@@ -270,6 +271,17 @@ type Session struct {
 	Name    string    `json:"name,omitempty"`
 	Roles   []string  `json:"roles,omitempty"`
 	Expiry  time.Time `json:"exp"`
+}
+
+type SessionPosture struct {
+	AbsoluteTTLSeconds int    `json:"absolute_ttl_seconds"`
+	TTLLabel           string `json:"ttl_label"`
+	ExpiresAt          string `json:"expires_at,omitempty"`
+	ExpiresLabel       string `json:"expires_label,omitempty"`
+	SecondsRemaining   int    `json:"seconds_remaining,omitempty"`
+	CSRFBound          bool   `json:"csrf_bound"`
+	CookieSigned       bool   `json:"cookie_signed"`
+	ValueReturned      bool   `json:"value_returned"`
 }
 
 type UIActionResult struct {
@@ -617,6 +629,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Posture":           auditPosture,
 		"CatalogGates":      catalogGates,
 		"Access":            accessPosture,
+		"SessionPosture":    app.sessionPosture(session),
 		"Scope":             scopePosture,
 		"Lifecycle":         lifecyclePosture,
 		"EvidenceHash":      evidenceHash,
@@ -1071,7 +1084,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Email:   claims.Email,
 		Name:    claims.Name,
 		Roles:   DeriveRoles(claims.Subject, claims.Email, ClaimRoleInputs(claims.Groups, claims.Roles, claims.ProjectRoles), app.cfg.RolePolicy),
-		Expiry:  time.Now().UTC().Add(12 * time.Hour),
+		Expiry:  time.Now().UTC().Add(defaultSessionTTL),
 	}
 	app.writeSession(w, session)
 	app.clearOIDCLoginCookies(w)
@@ -1147,6 +1160,36 @@ func (app *App) readSession(r *http.Request) (Session, bool) {
 		session.Roles = DeriveRoles(session.Subject, session.Email, nil, app.cfg.RolePolicy)
 	}
 	return session, true
+}
+
+func (app *App) sessionPosture(session Session) SessionPosture {
+	posture := SessionPosture{
+		AbsoluteTTLSeconds: int(defaultSessionTTL.Seconds()),
+		TTLLabel:           durationLabel(defaultSessionTTL),
+		CSRFBound:          true,
+		CookieSigned:       len(app.cfg.CookieKey) >= 32,
+		ValueReturned:      false,
+	}
+	if !session.Expiry.IsZero() {
+		remaining := int(time.Until(session.Expiry).Seconds())
+		if remaining < 0 {
+			remaining = 0
+		}
+		posture.ExpiresAt = session.Expiry.UTC().Format(time.RFC3339)
+		posture.ExpiresLabel = session.Expiry.UTC().Format("15:04 UTC")
+		posture.SecondsRemaining = remaining
+	}
+	return posture
+}
+
+func durationLabel(d time.Duration) string {
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	}
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	}
+	return d.String()
 }
 
 func firstCookie(r *http.Request, names ...string) (*http.Cookie, error) {
@@ -1455,6 +1498,7 @@ func (app *App) postureBody() map[string]any {
 			"pkce_s256":      app.cfg.OIDCConfigured(),
 			"value_returned": false,
 		},
+		"session": app.sessionPosture(Session{}),
 		"cookies": map[string]any{
 			"host_prefixed":  app.cfg.SessionCookieName() == hostSessionCookie && app.cfg.StateCookieName() == hostStateCookie && app.cfg.NonceCookieName() == hostNonceCookie && app.cfg.PKCECookieName() == hostPKCECookie,
 			"secure":         app.cfg.SecureCookies(),
@@ -1498,6 +1542,7 @@ func (app *App) postureBody() map[string]any {
 			"no_store_responses",
 			"api_json_auth_errors",
 			"value_free_readiness",
+			"signed_session_expiry",
 		},
 		"value_returned": false,
 	}
@@ -2102,6 +2147,8 @@ func mustTemplates() *template.Template {
         <div class="fact"><strong>{{ .Access.GateCount }}</strong><span class="muted">role gates</span></div>
         <div class="fact"><strong>{{ if .Access.BootstrapOwner }}on{{ else }}off{{ end }}</strong><span class="muted">bootstrap owner</span></div>
         <div class="fact"><strong>auditor</strong><span class="muted">evidence role</span></div>
+        <div class="fact"><strong>{{ .SessionPosture.TTLLabel }}</strong><span class="muted">session ttl</span></div>
+        <div class="fact"><strong>{{ .SessionPosture.ExpiresLabel }}</strong><span class="muted">expires</span></div>
       </div>
       {{ range .Access.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
     </div>

@@ -211,6 +211,29 @@ func TestReadSessionAcceptsLegacyCookieDuringHostPrefixMigration(t *testing.T) {
 	}
 }
 
+func TestSessionPostureIsValueFree(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "user-1", Email: "user@example.test", Expiry: time.Now().UTC().Add(time.Hour)}
+
+	posture := app.sessionPosture(session)
+	if posture.AbsoluteTTLSeconds != int(defaultSessionTTL.Seconds()) || posture.TTLLabel != "12h" {
+		t.Fatalf("unexpected session ttl posture: %#v", posture)
+	}
+	if posture.SecondsRemaining <= 0 || posture.ExpiresAt == "" || posture.ExpiresLabel == "" {
+		t.Fatalf("session expiry should be visible without values: %#v", posture)
+	}
+	if !posture.CSRFBound || !posture.CookieSigned || posture.ValueReturned {
+		t.Fatalf("unexpected session controls: %#v", posture)
+	}
+	raw, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "user-1") || strings.Contains(string(raw), "user@example.test") {
+		t.Fatalf("session posture should not include identity values: %s", raw)
+	}
+}
+
 func TestConfigUsesHostPrefixedStateCookieForHTTPS(t *testing.T) {
 	app := newTestApp(t)
 
@@ -483,6 +506,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"auth"`) || !strings.Contains(body, `"oidc_nonce_bound_login"`) || !strings.Contains(body, `"pkce_s256_auth_code"`) {
 		t.Fatalf("posture response should include hardened OIDC login controls: %s", body)
 	}
+	if !strings.Contains(body, `"session"`) || !strings.Contains(body, `"signed_session_expiry"`) {
+		t.Fatalf("posture response should include session posture: %s", body)
+	}
 }
 
 func TestEvidenceExportIsValueFree(t *testing.T) {
@@ -596,7 +622,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Live posture", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "Scope boundary", "Lifecycle posture"} {
+	for _, want := range []string{"Live posture", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "Scope boundary", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
