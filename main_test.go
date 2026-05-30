@@ -680,6 +680,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"safe_failure_pages":true`) || !strings.Contains(body, `"safe_auth_failure_pages"`) || !strings.Contains(body, `"auth_error_view":"safe_category_request_id"`) {
 		t.Fatalf("posture response should include safe auth failure pages: %s", body)
 	}
+	if !strings.Contains(body, `"safe_http_boundary_failures":true`) || !strings.Contains(body, `"safe_http_boundary_failures"`) || !strings.Contains(body, `"http_boundary_error_view":"safe_category_request_id"`) {
+		t.Fatalf("posture response should include safe HTTP boundary failures: %s", body)
+	}
 	if !strings.Contains(body, `"script_src":"none"`) || !strings.Contains(body, `"no_script_csp"`) {
 		t.Fatalf("posture response should include no-script CSP hardening: %s", body)
 	}
@@ -907,6 +910,81 @@ func TestSecurityHeadersUseStyleNonce(t *testing.T) {
 	}
 	if got := out.Header().Get("X-Permitted-Cross-Domain-Policies"); got != "none" {
 		t.Fatalf("expected cross-domain policy lockout, got %q", got)
+	}
+}
+
+func TestSafeBrowserBoundaryFailurePage(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/missing", nil)
+	req.Header.Set("X-Request-Id", "edge-browser-404")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", out.Code, out.Body.String())
+	}
+	if got := out.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("browser boundary failure should be HTML, got %q", got)
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Janus stopped at the edge", "Safe boundary", "route_not_found", "value_returned=false", "request_id=edge-browser-404"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("safe boundary page should render %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"plaintext", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("safe boundary page leaked %q: %s", forbidden, body)
+		}
+	}
+	if got := out.Header().Get("Content-Security-Policy"); !strings.Contains(got, "script-src 'none'") {
+		t.Fatalf("safe boundary page should keep no-script CSP, got %q", got)
+	}
+}
+
+func TestSafeAPIBoundaryFailureJSON(t *testing.T) {
+	app := newTestApp(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/missing", nil)
+	req.Header.Set("X-Request-Id", "edge-api-404")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{`"error":"route_not_found"`, `"request_id":"edge-api-404"`, `"value_returned":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("API boundary failure should include %s: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "<!doctype") || strings.Contains(body, "plaintext") {
+		t.Fatalf("API boundary failure should stay JSON and value-free: %s", body)
+	}
+}
+
+func TestSafeMethodBoundaryFailureJSON(t *testing.T) {
+	app := newTestApp(t)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/posture", nil)
+	req.Header.Set("X-Request-Id", "edge-api-405")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d body=%s", out.Code, out.Body.String())
+	}
+	if got := out.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Fatalf("expected Allow GET, HEAD, got %q", got)
+	}
+	body := out.Body.String()
+	for _, want := range []string{`"error":"method_not_allowed"`, `"allowed_methods":["GET","HEAD"]`, `"request_id":"edge-api-405"`, `"value_returned":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("method boundary failure should include %s: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "Method Not Allowed") || strings.Contains(body, "plaintext") {
+		t.Fatalf("method boundary failure should not use default plain response: %s", body)
 	}
 }
 

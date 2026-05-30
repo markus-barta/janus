@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -314,6 +315,20 @@ type AuthErrorView struct {
 	ValueReturned bool
 }
 
+type SafeFailureView struct {
+	Title          string
+	CSPNonce       string
+	Mode           string
+	Session        Session
+	CSRF           string
+	StatusCode     int
+	ReasonCode     string
+	Message        string
+	RequestID      string
+	AllowedMethods []string
+	ValueReturned  bool
+}
+
 type DescriptorFocus struct {
 	Descriptor       SecretDescriptor `json:"descriptor"`
 	Gates            []CatalogGate    `json:"gates"`
@@ -437,7 +452,74 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /ui/permits", app.withAuth(app.handleCreatePermitUI))
 	mux.HandleFunc("POST /ui/permits/{permitID}/run", app.withAuth(app.handleRunPermitUI))
 	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
-	return app.securityHeaders(app.requestIDs(app.rateLimit(app.limitRequestBody(mux))))
+	return app.securityHeaders(app.requestIDs(app.rateLimit(app.limitRequestBody(app.safeHTTPBoundary(mux)))))
+}
+
+func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		allowed, known := allowedMethodsForPath(r.URL.Path)
+		if !known {
+			app.renderSafeFailure(w, r, http.StatusNotFound, "route_not_found", "Janus does not expose that route.", nil)
+			return
+		}
+		if !methodAllowed(allowed, r.Method) {
+			displayAllowed := displayAllowedMethods(allowed)
+			app.renderSafeFailure(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "That route does not accept this action.", displayAllowed)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func allowedMethodsForPath(path string) ([]string, bool) {
+	switch path {
+	case "/", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/posture", "/api/evidence":
+		return []string{http.MethodGet}, true
+	case "/logout", "/api/warden/resolve", "/api/permits", "/ui/warden/resolve", "/ui/permits":
+		return []string{http.MethodPost}, true
+	}
+	switch {
+	case singleSegmentRunPath(path, "/api/permits/"):
+		return []string{http.MethodPost}, true
+	case singleSegmentRunPath(path, "/ui/permits/"):
+		return []string{http.MethodPost}, true
+	default:
+		return nil, false
+	}
+}
+
+func singleSegmentRunPath(path, prefix string) bool {
+	rest, ok := strings.CutPrefix(path, prefix)
+	if !ok {
+		return false
+	}
+	permitID, ok := strings.CutSuffix(rest, "/run")
+	return ok && permitID != "" && !strings.Contains(permitID, "/")
+}
+
+func methodAllowed(allowed []string, method string) bool {
+	for _, item := range allowed {
+		if item == method || item == http.MethodGet && method == http.MethodHead {
+			return true
+		}
+	}
+	return false
+}
+
+func displayAllowedMethods(allowed []string) []string {
+	seen := make(map[string]bool, len(allowed)+1)
+	for _, method := range allowed {
+		seen[method] = true
+		if method == http.MethodGet {
+			seen[http.MethodHead] = true
+		}
+	}
+	display := make([]string, 0, len(seen))
+	for method := range seen {
+		display = append(display, method)
+	}
+	sort.Strings(display)
+	return display
 }
 
 func (app *App) securityHeaders(next http.Handler) http.Handler {
@@ -541,7 +623,7 @@ func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func isAPIRequest(r *http.Request) bool {
-	return strings.HasPrefix(r.URL.Path, "/api/")
+	return r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/")
 }
 
 func (app *App) requireRole(role, action string, next http.HandlerFunc) http.HandlerFunc {
@@ -616,7 +698,7 @@ func (app *App) readinessBody() (map[string]any, bool) {
 
 func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
-		http.NotFound(w, r)
+		app.renderSafeFailure(w, r, http.StatusNotFound, "route_not_found", "Janus does not expose that route.", nil)
 		return
 	}
 	app.audit(r, "dashboard.view", "allowed", actorFromContext(r.Context()), "")
@@ -1554,6 +1636,37 @@ func writeJSONError(w http.ResponseWriter, status int, code, message string) {
 	})
 }
 
+func (app *App) renderSafeFailure(w http.ResponseWriter, r *http.Request, status int, code, message string, allowed []string) {
+	if status == http.StatusMethodNotAllowed && len(allowed) > 0 {
+		w.Header().Set("Allow", strings.Join(allowed, ", "))
+	}
+	if isAPIRequest(r) {
+		body := map[string]any{
+			"error":          code,
+			"message":        message,
+			"request_id":     requestID(r),
+			"value_returned": false,
+		}
+		if len(allowed) > 0 {
+			body["allowed_methods"] = allowed
+		}
+		writeJSON(w, status, body)
+		return
+	}
+	renderTemplateStatus(w, app.templates, "safe_error", status, SafeFailureView{
+		Title:          "Janus",
+		CSPNonce:       cspNonceFromContext(r.Context()),
+		Mode:           app.cfg.ProductMode,
+		Session:        currentSession(r.Context()),
+		StatusCode:     status,
+		ReasonCode:     code,
+		Message:        message,
+		RequestID:      requestID(r),
+		AllowedMethods: allowed,
+		ValueReturned:  false,
+	})
+}
+
 func (app *App) postureBody() map[string]any {
 	allDescriptors := app.store.Descriptors()
 	descriptors := app.cfg.ScopePolicy.Filter(allDescriptors)
@@ -1607,6 +1720,8 @@ func (app *App) postureBody() map[string]any {
 		"response_hardening": map[string]any{
 			"cache_control":                "no-store",
 			"auth_error_view":              "safe_category_request_id",
+			"http_boundary_error_view":     "safe_category_request_id",
+			"safe_http_boundary_failures":  true,
 			"script_src":                   "none",
 			"cross_origin_resource_policy": "same-origin",
 			"cross_domain_policy":          "none",
@@ -1654,6 +1769,7 @@ func (app *App) postureBody() map[string]any {
 			"request_body_size_limit",
 			"browser_isolation_headers",
 			"same_origin_mutation_guard",
+			"safe_http_boundary_failures",
 		},
 		"value_returned": false,
 	}
@@ -2620,6 +2736,33 @@ func mustTemplates() *template.Template {
     <div class="panel-body stack">
       <p>Janus cleared the temporary login cookies and did not create a session.</p>
       <p><span class="pill ok">value_returned=false</span></p>
+      <p class="mono">request_id={{ .RequestID }}</p>
+    </div>
+  </div>
+</section>
+{{ template "base_bottom" . }}
+{{- end }}
+
+{{ define "safe_error" -}}
+{{ template "base_top" . }}
+<section class="overview">
+  <div class="intro">
+    <div class="intro-copy">
+      <div class="eyebrow">{{ .Mode }} / boundary</div>
+      <h1>Janus stopped at the edge</h1>
+      <p>{{ .Message }}</p>
+    </div>
+    <div class="toolbar">
+      <a class="button primary" href="/">Return to Janus</a>
+      <a class="button quiet" href="/login">Sign in</a>
+    </div>
+  </div>
+  <div class="status">
+    <div class="status-head"><h2>Safe boundary</h2><span class="pill warn">{{ .ReasonCode }}</span></div>
+    <div class="panel-body stack">
+      <p>Janus returned a controlled failure and did not reveal secret data.</p>
+      <p><span class="pill ok">value_returned=false</span> <span class="pill">{{ .StatusCode }}</span></p>
+      {{ if .AllowedMethods }}<p class="mono">allow={{ range $index, $method := .AllowedMethods }}{{ if $index }},{{ end }}{{ $method }}{{ end }}</p>{{ end }}
       <p class="mono">request_id={{ .RequestID }}</p>
     </div>
   </div>
