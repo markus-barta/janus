@@ -34,7 +34,11 @@ const (
 	hostNonceCookie   = "__Host-janus_oidc_nonce"
 	pkceCookie        = "janus_oidc_pkce"
 	hostPKCECookie    = "__Host-janus_oidc_pkce"
+	attemptCookie     = "janus_oidc_attempt"
+	hostAttemptCookie = "__Host-janus_oidc_attempt"
 	defaultSessionTTL = 12 * time.Hour
+	loginAttemptTTL   = 10 * time.Minute
+	maxLoginAttempts  = 3
 	maxRequestBody    = int64(4096)
 )
 
@@ -88,6 +92,13 @@ func (c Config) PKCECookieName() string {
 		return hostPKCECookie
 	}
 	return pkceCookie
+}
+
+func (c Config) AttemptCookieName() string {
+	if c.SecureCookies() {
+		return hostAttemptCookie
+	}
+	return attemptCookie
 }
 
 type SecretDescriptor struct {
@@ -314,6 +325,11 @@ type Session struct {
 	Expiry  time.Time `json:"exp"`
 }
 
+type OIDCLoginAttempt struct {
+	Count     int   `json:"count"`
+	StartedAt int64 `json:"started_at"`
+}
+
 type SessionPosture struct {
 	AbsoluteTTLSeconds int    `json:"absolute_ttl_seconds"`
 	TTLLabel           string `json:"ttl_label"`
@@ -368,8 +384,16 @@ type AuthErrorView struct {
 	Mode          string
 	Session       Session
 	CSRF          string
+	StatusCode    int
 	ReasonCode    string
+	Headline      string
 	Message       string
+	NextAction    string
+	PrimaryHref   string
+	PrimaryLabel  string
+	SecondaryHref string
+	SecondaryText string
+	Posture       AuthFailurePosture
 	RequestID     string
 	ValueReturned bool
 }
@@ -885,6 +909,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	evidenceBoundary := EvidenceBoundaryFor(canViewAudit, evidenceHash != "")
 	evidenceReceipt := EvidenceReceiptFor(evidenceBoundary, nil)
 	supplyChain := SupplyChainPostureFor(evidenceBoundary)
+	authFailure := AuthFailurePostureFor(app.cfg)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
@@ -928,6 +953,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"ActionReadiness":     actionReadiness,
 		"OperationalStatus":   operationalStatus,
 		"SupplyChain":         supplyChain,
+		"AuthFailure":         authFailure,
 		"CommandCenter":       commandCenter,
 		"Ready":               ready,
 		"Readiness":           readinessBody,
@@ -1467,6 +1493,20 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		app.renderSetup(w, r)
 		return
 	}
+	if r.URL.Query().Get("reset") == "1" {
+		app.clearOIDCLoginCookies(w)
+		app.clearOIDCLoginAttemptCookie(w)
+		app.audit(r, "auth.login.reset", "allowed", "", "")
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	attempt := app.bumpOIDCLoginAttempt(w, r)
+	if attempt.Count > maxLoginAttempts {
+		app.clearOIDCLoginCookies(w)
+		app.audit(r, "auth.login.start", "denied", "", "login loop paused")
+		app.renderAuthError(w, r, http.StatusTooManyRequests, "login_loop_paused", "Login paused after several starts. Reset the browser session, then try again from a clean Janus page.")
+		return
+	}
 
 	state := randomToken(32)
 	nonce := randomToken(32)
@@ -1507,6 +1547,12 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		app.renderSetup(w, r)
 		return
 	}
+	if r.URL.Query().Get("error") != "" {
+		app.clearOIDCLoginCookies(w)
+		app.audit(r, "auth.login.callback", "denied", "", "provider error")
+		app.renderAuthError(w, r, http.StatusBadRequest, "identity_login_denied", "Zitadel did not complete login. Janus kept the provider details out of the response.")
+		return
+	}
 
 	state, err := firstCookie(r, app.cfg.StateCookieName(), stateCookie)
 	if err != nil || state.Value == "" || state.Value != r.URL.Query().Get("state") {
@@ -1530,7 +1576,15 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := app.oauth.Exchange(r.Context(), r.URL.Query().Get("code"), oauth2.VerifierOption(pkce.Value))
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		app.clearOIDCLoginCookies(w)
+		app.audit(r, "auth.login.callback", "denied", "", "missing code")
+		app.renderAuthError(w, r, http.StatusBadRequest, "authorization_code_missing", "Login did not return a usable completion code.")
+		return
+	}
+
+	token, err := app.oauth.Exchange(r.Context(), code, oauth2.VerifierOption(pkce.Value))
 	if err != nil {
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "code exchange failed")
@@ -1591,6 +1645,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	app.writeSession(w, session)
 	app.clearOIDCLoginCookies(w)
+	app.clearOIDCLoginAttemptCookie(w)
 	app.audit(r, "auth.login.complete", "allowed", session.Subject, "")
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -1607,6 +1662,7 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if app.cfg.SessionCookieName() != sessionCookie {
 		app.clearCookie(w, sessionCookie)
 	}
+	app.clearOIDCLoginAttemptCookie(w)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -1625,16 +1681,50 @@ func (app *App) renderSetup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) renderAuthError(w http.ResponseWriter, r *http.Request, status int, reasonCode, message string) {
+	headline, nextAction := authErrorCopy(reasonCode)
+	primaryHref := "/login"
+	primaryLabel := "Try again"
+	secondaryHref := "/login?reset=1"
+	secondaryText := "Reset login session"
+	if reasonCode == "login_loop_paused" {
+		primaryHref = "/login?reset=1"
+		primaryLabel = "Reset login session"
+		secondaryHref = "/"
+		secondaryText = "Back to Janus"
+	}
 	renderTemplateStatus(w, app.templates, "auth_error", status, AuthErrorView{
 		Title:         "Janus login",
 		CSPNonce:      cspNonceFromContext(r.Context()),
 		Mode:          app.cfg.ProductMode,
 		CSRF:          "",
+		StatusCode:    status,
 		ReasonCode:    reasonCode,
+		Headline:      headline,
 		Message:       message,
+		NextAction:    nextAction,
+		PrimaryHref:   primaryHref,
+		PrimaryLabel:  primaryLabel,
+		SecondaryHref: secondaryHref,
+		SecondaryText: secondaryText,
+		Posture:       AuthFailurePostureFor(app.cfg),
 		RequestID:     requestID(r),
 		ValueReturned: false,
 	})
+}
+
+func authErrorCopy(reasonCode string) (string, string) {
+	switch reasonCode {
+	case "login_loop_paused":
+		return "Login loop paused", "Janus stopped before another identity redirect. Reset temporary login cookies, then try once from a clean tab."
+	case "identity_login_denied":
+		return "Login was not completed", "Retry from Janus. If this repeats, keep the request id and review the identity provider outside Janus."
+	case "identity_response_failed", "authorization_code_missing":
+		return "Identity response needs review", "Try again once. If it repeats, use the request id for server-side audit lookup."
+	case "login_integrity_check_failed", "logout_integrity_check_failed":
+		return "Login integrity check failed", "Reload Janus and start again so state, nonce, PKCE, and CSRF checks are fresh."
+	default:
+		return "Login needs a fresh start", "Start a clean login from Janus."
+	}
 }
 
 func (app *App) writeSession(w http.ResponseWriter, s Session) {
@@ -1750,6 +1840,62 @@ func (app *App) clearOIDCLoginCookies(w http.ResponseWriter) {
 	app.clearCookie(w, app.cfg.PKCECookieName())
 	if app.cfg.PKCECookieName() != pkceCookie {
 		app.clearCookie(w, pkceCookie)
+	}
+}
+
+func (app *App) bumpOIDCLoginAttempt(w http.ResponseWriter, r *http.Request) OIDCLoginAttempt {
+	now := time.Now().UTC()
+	attempt, ok := app.readOIDCLoginAttempt(r)
+	if !ok || time.Unix(attempt.StartedAt, 0).Add(loginAttemptTTL).Before(now) {
+		attempt = OIDCLoginAttempt{StartedAt: now.Unix()}
+	}
+	attempt.Count++
+	app.writeOIDCLoginAttempt(w, attempt)
+	return attempt
+}
+
+func (app *App) readOIDCLoginAttempt(r *http.Request) (OIDCLoginAttempt, bool) {
+	if len(app.cfg.CookieKey) < 32 {
+		return OIDCLoginAttempt{}, false
+	}
+	cookie, err := firstCookie(r, app.cfg.AttemptCookieName(), attemptCookie)
+	if err != nil || cookie.Value == "" {
+		return OIDCLoginAttempt{}, false
+	}
+	parts := strings.Split(cookie.Value, ".")
+	if len(parts) != 2 || !verify(app.cfg.CookieKey, parts[0], parts[1]) {
+		return OIDCLoginAttempt{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return OIDCLoginAttempt{}, false
+	}
+	var attempt OIDCLoginAttempt
+	if err := json.Unmarshal(raw, &attempt); err != nil || attempt.Count < 0 || attempt.StartedAt <= 0 {
+		return OIDCLoginAttempt{}, false
+	}
+	return attempt, true
+}
+
+func (app *App) writeOIDCLoginAttempt(w http.ResponseWriter, attempt OIDCLoginAttempt) {
+	raw, _ := json.Marshal(attempt)
+	payload := base64.RawURLEncoding.EncodeToString(raw)
+	mac := sign(app.cfg.CookieKey, payload)
+	http.SetCookie(w, &http.Cookie{
+		Name:     app.cfg.AttemptCookieName(),
+		Value:    payload + "." + mac,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   app.cfg.SecureCookies(),
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(loginAttemptTTL.Seconds()),
+	})
+}
+
+func (app *App) clearOIDCLoginAttemptCookie(w http.ResponseWriter) {
+	app.clearCookie(w, app.cfg.AttemptCookieName())
+	if app.cfg.AttemptCookieName() != attemptCookie {
+		app.clearCookie(w, attemptCookie)
 	}
 }
 
@@ -2360,6 +2506,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	evidenceBoundary := EvidenceBoundaryFor(canExportEvidence, canExportEvidence)
 	evidenceReceipt := EvidenceReceiptFor(evidenceBoundary, nil)
 	supplyChain := SupplyChainPostureFor(evidenceBoundary)
+	authFailure := AuthFailurePostureFor(app.cfg)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
@@ -2430,10 +2577,12 @@ func (app *App) postureBody(session Session) map[string]any {
 		"audit_failure_drill":              auditDrill,
 		"operational_status":               operationalStatus,
 		"supply_chain_posture":             supplyChain,
+		"auth_failure_posture":             authFailure,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
 			"pkce_s256":                   app.cfg.OIDCConfigured(),
 			"oidc_login_cookie_same_site": "Lax",
+			"oidc_redirect_loop_guard":    "bounded_attempt_cookie",
 			"safe_failure_pages":          true,
 			"value_returned":              false,
 		},
@@ -2477,6 +2626,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_dry_run":               "self_hosted_to_enterprise_checklist",
 			"enterprise_claim_review":          "presence_only_claim_review",
 			"enterprise_release_gate":          "single_value_free_release_decision",
+			"auth_failure_posture":             "safe_reason_codes_no_provider_values",
 			"external_evidence_workflow":       "presence_only_no_refs",
 			"attachment_review":                "presence_only_owner_review",
 			"restore_drill_proof":              "dashboard_posture_evidence",
@@ -2505,6 +2655,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"response_hardening": map[string]any{
 			"cache_control":                  "no-store",
 			"auth_error_view":                "safe_category_request_id",
+			"oidc_redirect_loop_guard":       "bounded_attempt_cookie_no_values",
 			"http_boundary_error_view":       "safe_category_request_id",
 			"public_health_redacted":         true,
 			"public_readiness_auth_redacted": true,
@@ -2563,6 +2714,8 @@ func (app *App) postureBody(session Session) map[string]any {
 			"approved_metadata_use_enforced",
 			"no_script_csp",
 			"safe_auth_failure_pages",
+			"auth_failure_posture",
+			"oidc_redirect_loop_guard",
 			"audit_event_severity",
 			"strict_session_cookie",
 			"request_body_size_limit",
@@ -2655,6 +2808,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	canExportEvidence := HasRole(session, RoleAuditor)
 	evidenceBoundary := EvidenceBoundaryFor(canExportEvidence, canExportEvidence)
 	supplyChain := SupplyChainPostureFor(evidenceBoundary)
+	authFailure := AuthFailurePostureFor(app.cfg)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
@@ -2684,6 +2838,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Posture:             app.postureBody(session),
 		Operational:         operationalStatus,
 		SupplyChain:         supplyChain,
+		AuthFailure:         authFailure,
 		ModeGuardrails:      modeGuardrails,
 		ActionReadiness:     actionReadiness,
 		AssuranceGates:      assuranceGates,
@@ -2927,9 +3082,9 @@ func mustTemplates() *template.Template {
       white-space: nowrap;
     }
     main { padding: 26px 0 52px; }
-    h1 { margin: 0; font-size: 40px; line-height: 1.04; letter-spacing: 0; }
-    h2 { margin: 0; font-size: 18px; letter-spacing: 0; }
-    h3 { margin: 0; font-size: 14px; letter-spacing: 0; }
+    h1 { margin: 0; font-size: 40px; line-height: 1.04; letter-spacing: 0; overflow-wrap: anywhere; }
+    h2 { margin: 0; font-size: 18px; letter-spacing: 0; overflow-wrap: anywhere; }
+    h3 { margin: 0; font-size: 14px; letter-spacing: 0; overflow-wrap: anywhere; }
     p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
     a { color: inherit; }
     button, .button {
@@ -2964,6 +3119,7 @@ func mustTemplates() *template.Template {
       border-radius: 8px;
       background: var(--panel);
       box-shadow: var(--shadow);
+      min-width: 0;
     }
     .security-state {
       border-color: color-mix(in srgb, var(--amber) 48%, var(--line));
@@ -3594,6 +3750,39 @@ func mustTemplates() *template.Template {
 		      {{ end }}
 		    </div>
 		{{ end }}
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="auth-failure-posture">
+	  <div class="panel-head">
+	    <h2>Auth failure posture</h2>
+	    <span class="pill {{ if eq .AuthFailure.State "ready" }}ok{{ else if eq .AuthFailure.State "local_auth_disabled" }}info{{ else }}warn{{ end }}">{{ .AuthFailure.State }}</span>
+	  </div>
+	  <div class="panel-body stack">
+	    <p>{{ .AuthFailure.Summary }}</p>
+	    <p><span class="pill info">{{ .AuthFailure.IdentityProvider }}</span> <span class="pill info">{{ .AuthFailure.EvidenceSignal }}</span> <span class="pill info">Redirect loop guard {{ .AuthFailure.LoopGuard.State }}</span> <span class="pill ok">raw_callback_query_returned=false</span> <span class="pill ok">provider_error_returned=false</span> <span class="pill ok">redirect_url_returned=false</span> <span class="pill ok">token_returned=false</span> <span class="pill ok">cookie_value_returned=false</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">env_returned=false</span> <span class="pill ok">backend_path_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+	    <p><span class="pill info">loop window</span> {{ .AuthFailure.LoopGuard.MaxAttempts }} starts / {{ .AuthFailure.LoopGuard.WindowSeconds }} seconds <span class="pill info">{{ .AuthFailure.LoopGuard.ResetAction }}</span></p>
+	    <div class="mode-grid" aria-label="Auth failure reasons">
+	      {{ range .AuthFailure.Reasons }}
+	      <div class="mode-item {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Detail }}</p>
+	        <p><span class="pill info">{{ .Key }}</span> <span class="pill info">next</span> {{ .Next }}</p>
+	        <p><span class="pill ok">raw query not returned</span> <span class="pill ok">provider detail not returned</span></p>
+	      </div>
+	      {{ end }}
+	    </div>
+	    <p><strong>Safe actions</strong></p>
+	    <div class="mode-grid" aria-label="Auth failure actions">
+	      {{ range .AuthFailure.Actions }}
+	      <div class="mode-item ok">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .Key }}</strong>
+	        <p>{{ .Safety }}</p>
+	        <p><span class="pill info">next</span> {{ .Next }}</p>
+	      </div>
+	      {{ end }}
+	    </div>
 	  </div>
 	</section>
 	<section class="panel" style="margin-bottom:16px" id="supply-chain-posture">
@@ -4776,19 +4965,38 @@ func mustTemplates() *template.Template {
   <div class="intro">
     <div class="intro-copy">
       <div class="eyebrow">{{ .Mode }} / login</div>
-      <h1>Login needs a fresh start</h1>
+      <h1>{{ .Headline }}</h1>
       <p>{{ .Message }}</p>
+      <p>{{ .NextAction }}</p>
     </div>
     <div class="toolbar">
-      <a class="button primary" href="/login">Try again</a>
+      <a class="button primary" href="{{ .PrimaryHref }}">{{ .PrimaryLabel }}</a>
+      <a class="button quiet" href="{{ .SecondaryHref }}">{{ .SecondaryText }}</a>
     </div>
   </div>
   <div class="status">
-    <div class="status-head"><h2>Safe failure</h2><span class="pill warn">{{ .ReasonCode }}</span></div>
+    <div class="status-head"><h2>Safe login failure</h2><span class="pill warn">{{ .ReasonCode }}</span></div>
     <div class="panel-body stack">
       <p>Janus cleared the temporary login cookies and did not create a session.</p>
-      <p><span class="pill ok">value_returned=false</span></p>
+      <p><span class="pill info">{{ .StatusCode }}</span> <span class="pill ok">value_returned=false</span> <span class="pill ok">raw_callback_query_returned=false</span> <span class="pill ok">provider_error_returned=false</span> <span class="pill ok">token_returned=false</span> <span class="pill ok">cookie_value_returned=false</span></p>
       <p class="mono">request_id={{ .RequestID }}</p>
+      <div class="mode-grid" aria-label="Auth recovery posture">
+        <div class="mode-item info">
+          <span>Redirect loop guard</span>
+          <strong>{{ .Posture.LoopGuard.State }}</strong>
+          <p>{{ .Posture.LoopGuard.MaxAttempts }} starts in {{ .Posture.LoopGuard.WindowSeconds }} seconds before Janus pauses.</p>
+        </div>
+        <div class="mode-item ok">
+          <span>Support handle</span>
+          <strong>request id</strong>
+          <p>No token, callback query, provider detail, or cookie value is returned.</p>
+        </div>
+        <div class="mode-item warn">
+          <span>Next</span>
+          <strong>clean retry</strong>
+          <p>Reset temporary login cookies if this repeats.</p>
+        </div>
+      </div>
     </div>
   </div>
 </section>

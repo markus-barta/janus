@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +105,30 @@ func cookieByName(t *testing.T, cookies []*http.Cookie, name string) *http.Cooki
 	}
 	t.Fatalf("expected cookie %s in %#v", name, cookies)
 	return nil
+}
+
+func mergeCookieJar(existing []*http.Cookie, updates []*http.Cookie) []*http.Cookie {
+	jar := make(map[string]*http.Cookie, len(existing)+len(updates))
+	for _, cookie := range existing {
+		jar[cookie.Name] = cookie
+	}
+	for _, cookie := range updates {
+		if cookie.MaxAge < 0 {
+			delete(jar, cookie.Name)
+			continue
+		}
+		jar[cookie.Name] = cookie
+	}
+	names := make([]string, 0, len(jar))
+	for name := range jar {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]*http.Cookie, 0, len(names))
+	for _, name := range names {
+		out = append(out, jar[name])
+	}
+	return out
 }
 
 func testOAuthConfig() *oauth2.Config {
@@ -387,16 +412,20 @@ func TestLoginRedirectBindsOIDCStateNonceAndPKCE(t *testing.T) {
 	}
 
 	cookies := out.Result().Cookies()
-	if len(cookies) != 3 {
-		t.Fatalf("expected state, nonce, and PKCE cookies, got %#v", cookies)
+	if len(cookies) != 4 {
+		t.Fatalf("expected state, nonce, PKCE, and attempt cookies, got %#v", cookies)
 	}
 	state := cookieByName(t, cookies, hostStateCookie)
 	nonce := cookieByName(t, cookies, hostNonceCookie)
 	pkce := cookieByName(t, cookies, hostPKCECookie)
+	attempt := cookieByName(t, cookies, hostAttemptCookie)
 	for _, cookie := range []*http.Cookie{state, nonce, pkce} {
 		if cookie.Value == "" || !cookie.Secure || !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.MaxAge != 300 {
 			t.Fatalf("OIDC cookie should be short-lived, secure, httponly, lax: %#v", cookie)
 		}
+	}
+	if attempt.Value == "" || !attempt.Secure || !attempt.HttpOnly || attempt.SameSite != http.SameSiteLaxMode || attempt.MaxAge != int(loginAttemptTTL.Seconds()) {
+		t.Fatalf("attempt cookie should be short-lived, secure, httponly, lax: %#v", attempt)
 	}
 
 	redirectURL, err := url.Parse(out.Header().Get("Location"))
@@ -490,6 +519,96 @@ func TestCallbackBadStateRendersValueFreeAuthError(t *testing.T) {
 	for _, name := range []string{hostStateCookie, hostNonceCookie, hostPKCECookie, stateCookie, nonceCookie, pkceCookie} {
 		if !cleared[name] {
 			t.Fatalf("expected callback failure to clear %s; cleared=%#v cookies=%#v", name, cleared, out.Result().Cookies())
+		}
+	}
+}
+
+func TestCallbackProviderErrorRendersSafeAuthFailure(t *testing.T) {
+	app := newTestApp(t)
+	app.oauth = testOAuthConfig()
+	app.verifier = &oidc.IDTokenVerifier{}
+
+	req := httptest.NewRequest(http.MethodGet, "/oidc/callback?state=state-cookie-secret&error=access_denied&error_description=raw-secret-value", nil)
+	req.AddCookie(&http.Cookie{Name: hostStateCookie, Value: "state-cookie-secret"})
+	req.AddCookie(&http.Cookie{Name: hostNonceCookie, Value: "nonce-cookie-secret"})
+	req.AddCookie(&http.Cookie{Name: hostPKCECookie, Value: "pkce-cookie-secret"})
+	req.Header.Set("X-Request-Id", "auth-provider-error-123")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Login was not completed", "identity_login_denied", "provider_error_returned=false", "raw_callback_query_returned=false", "token_returned=false", "request_id=auth-provider-error-123", "Reset login session"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("provider error page should include %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"access_denied", "raw-secret-value", "state-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("provider error page leaked %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestLoginLoopGuardPausesBeforeAnotherRedirect(t *testing.T) {
+	app := newTestApp(t)
+	app.oauth = testOAuthConfig()
+
+	var jar []*http.Cookie
+	for i := 0; i < maxLoginAttempts; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/login", nil)
+		for _, cookie := range jar {
+			req.AddCookie(cookie)
+		}
+		out := httptest.NewRecorder()
+		app.routes().ServeHTTP(out, req)
+		if out.Code != http.StatusFound {
+			t.Fatalf("attempt %d should redirect, got %d body=%s", i+1, out.Code, out.Body.String())
+		}
+		jar = mergeCookieJar(jar, out.Result().Cookies())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	req.Header.Set("X-Request-Id", "loop-guard-123")
+	for _, cookie := range jar {
+		req.AddCookie(cookie)
+	}
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected loop guard 429, got %d body=%s", out.Code, out.Body.String())
+	}
+	if got := out.Header().Get("Location"); got != "" {
+		t.Fatalf("loop guard should render Janus page instead of redirecting, got Location %q", got)
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Login loop paused", "login_loop_paused", "Redirect loop guard", "Reset login session", "request_id=loop-guard-123", "provider_error_returned=false", "cookie_value_returned=false", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("loop guard page should include %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"auth.example.test", "state-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret", "raw-secret-value"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("loop guard page leaked %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestAuthFailurePostureIsValueFree(t *testing.T) {
+	posture := AuthFailurePostureFor(testConfig())
+	if posture.State != "ready" || posture.Label != "Auth failure posture" || posture.EvidenceSignal != "presence_only_auth_failure_posture" {
+		t.Fatalf("unexpected auth failure posture: %#v", posture)
+	}
+	if posture.LoopGuard.State != "enabled" || posture.LoopGuard.MaxAttempts != maxLoginAttempts || posture.LoopGuard.WindowSeconds != int(loginAttemptTTL.Seconds()) {
+		t.Fatalf("loop guard should be explicit: %#v", posture.LoopGuard)
+	}
+	if posture.RawCallbackQueryReturned || posture.ProviderErrorReturned || posture.RedirectURLReturned || posture.TokenReturned || posture.CookieValueReturned || posture.RequestBodyReturned || posture.EnvReturned || posture.BackendPathReturned || posture.ValueReturned {
+		t.Fatalf("auth failure posture should stay value-free: %#v", posture)
+	}
+	for _, key := range []string{"login_restart_required", "login_integrity_check_failed", "identity_login_denied", "authorization_code_missing", "identity_response_failed", "login_loop_paused"} {
+		if !authFailurePostureHasReason(posture, key) {
+			t.Fatalf("auth failure posture should include %q: %#v", key, posture)
 		}
 	}
 }
@@ -830,6 +949,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"enterprise_release_gate"`) || !strings.Contains(body, `"label":"Enterprise release gate"`) || !strings.Contains(body, `"verdict":"enterprise_blocked"`) || !strings.Contains(body, `"claim":"self_hosted_not_enterprise"`) || !strings.Contains(body, `"current_mode":"self_hosted"`) || !strings.Contains(body, `"target_mode":"enterprise"`) || !strings.Contains(body, `"evidence_signal":"presence_only_enterprise_release_gate"`) || !strings.Contains(body, `"key":"supply_chain"`) || !strings.Contains(body, `"key":"evidence_boundary"`) || !strings.Contains(body, `"scanner_output_returned":false`) || !strings.Contains(body, `"artifact_returned":false`) || !strings.Contains(body, `"payload_returned":false`) || !strings.Contains(body, `"enterprise_release_gate":"single_value_free_release_decision"`) || !strings.Contains(body, `"enterprise_release_gate_decision"`) {
 		t.Fatalf("posture response should include enterprise release gate: %s", body)
 	}
+	if !strings.Contains(body, `"auth_failure_posture"`) || !strings.Contains(body, `"label":"Auth failure posture"`) || !strings.Contains(body, `"evidence_signal":"presence_only_auth_failure_posture"`) || !strings.Contains(body, `"identity_provider":"zitadel_oidc"`) || !strings.Contains(body, `"key":"login_loop_paused"`) || !strings.Contains(body, `"raw_callback_query_returned":false`) || !strings.Contains(body, `"provider_error_returned":false`) || !strings.Contains(body, `"redirect_url_returned":false`) || !strings.Contains(body, `"token_returned":false`) || !strings.Contains(body, `"cookie_value_returned":false`) || !strings.Contains(body, `"request_body_returned":false`) || !strings.Contains(body, `"env_returned":false`) || !strings.Contains(body, `"backend_path_returned":false`) || !strings.Contains(body, `"auth_failure_posture":"safe_reason_codes_no_provider_values"`) || !strings.Contains(body, `"oidc_redirect_loop_guard"`) {
+		t.Fatalf("posture response should include auth failure posture: %s", body)
+	}
 	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
 		t.Fatalf("posture response should include scope policy: %s", body)
 	}
@@ -902,7 +1024,7 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"degraded_dashboard_banner"`) {
 		t.Fatalf("posture response should include degraded dashboard banner capability: %s", body)
 	}
-	if !strings.Contains(body, `"safe_failure_pages":true`) || !strings.Contains(body, `"safe_auth_failure_pages"`) || !strings.Contains(body, `"auth_error_view":"safe_category_request_id"`) {
+	if !strings.Contains(body, `"safe_failure_pages":true`) || !strings.Contains(body, `"safe_auth_failure_pages"`) || !strings.Contains(body, `"auth_error_view":"safe_category_request_id"`) || !strings.Contains(body, `"oidc_redirect_loop_guard":"bounded_attempt_cookie_no_values"`) {
 		t.Fatalf("posture response should include safe auth failure pages: %s", body)
 	}
 	if !strings.Contains(body, `"safe_http_boundary_failures":true`) || !strings.Contains(body, `"safe_http_boundary_failures"`) || !strings.Contains(body, `"http_boundary_error_view":"safe_category_request_id"`) {
@@ -938,7 +1060,7 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"readiness"`) || !strings.Contains(body, `"value_free_readiness"`) {
 		t.Fatalf("posture response should include readiness posture: %s", body)
 	}
-	if !strings.Contains(body, `"auth"`) || !strings.Contains(body, `"oidc_nonce_bound_login"`) || !strings.Contains(body, `"pkce_s256_auth_code"`) {
+	if !strings.Contains(body, `"auth"`) || !strings.Contains(body, `"oidc_nonce_bound_login"`) || !strings.Contains(body, `"pkce_s256_auth_code"`) || !strings.Contains(body, `"oidc_redirect_loop_guard":"bounded_attempt_cookie"`) {
 		t.Fatalf("posture response should include hardened OIDC login controls: %s", body)
 	}
 	if !strings.Contains(body, `"session"`) || !strings.Contains(body, `"signed_session_expiry"`) {
@@ -1221,6 +1343,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed supply-chain posture")
 	}
+	postureAuthFailure, ok := posture["auth_failure_posture"].(AuthFailurePosture)
+	if !ok {
+		t.Fatalf("posture should expose typed auth failure posture")
+	}
 	postureAttachmentReview, ok := posture["attachment_review"].(AttachmentReview)
 	if !ok {
 		t.Fatalf("posture should expose typed attachment review")
@@ -1284,6 +1410,9 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(postureSupplyChain, pack.SupplyChain) {
 		t.Fatalf("posture and evidence should share the same supply-chain posture: posture=%#v evidence=%#v", postureSupplyChain, pack.SupplyChain)
+	}
+	if !reflect.DeepEqual(postureAuthFailure, pack.AuthFailure) {
+		t.Fatalf("posture and evidence should share the same auth failure posture: posture=%#v evidence=%#v", postureAuthFailure, pack.AuthFailure)
 	}
 	if !reflect.DeepEqual(postureAttachmentReview, pack.AttachmentReview) {
 		t.Fatalf("posture and evidence should share the same attachment review: posture=%#v evidence=%#v", postureAttachmentReview, pack.AttachmentReview)
@@ -2708,6 +2837,15 @@ func enterpriseReleaseGateIsValueFree(gate EnterpriseReleaseGate) bool {
 	return true
 }
 
+func authFailurePostureHasReason(posture AuthFailurePosture, key string) bool {
+	for _, reason := range posture.Reasons {
+		if reason.Key == key && !reason.RawQueryReturned && !reason.ProviderDetailReturned && !reason.TokenReturned && !reason.ValueReturned {
+			return true
+		}
+	}
+	return false
+}
+
 func accessSourceHasState(items []RoleBindingSource, key, state string) bool {
 	for _, item := range items {
 		if item.Key == key && item.State == state && !item.ValueReturned {
@@ -2813,6 +2951,11 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 	for _, want := range []string{"Enterprise release gate", "Enterprise release gate checklist", "verdict enterprise_blocked", "presence_only_enterprise_release_gate", "release cadence", "scanner_output_returned=false", "artifact_returned=false", "payload_returned=false", "Supply chain", "Audit health", "Role policy"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render enterprise release gate %q: %s", want, body)
+		}
+	}
+	for _, want := range []string{"Auth failure posture", "Redirect loop guard", "presence_only_auth_failure_posture", "login_loop_paused", "raw_callback_query_returned=false", "provider_error_returned=false", "redirect_url_returned=false", "token_returned=false", "cookie_value_returned=false", "Reset login session"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render auth failure posture %q: %s", want, body)
 		}
 	}
 	for _, want := range []string{"External evidence workflow", "Presence-only external evidence workflow", "records presence only", "no refs stored", "Mark present"} {

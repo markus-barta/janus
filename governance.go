@@ -30,6 +30,7 @@ type EvidencePack struct {
 	Posture             map[string]any                 `json:"posture"`
 	Operational         OperationalStatus              `json:"operational_status"`
 	SupplyChain         SupplyChainPosture             `json:"supply_chain_posture"`
+	AuthFailure         AuthFailurePosture             `json:"auth_failure_posture"`
 	ModeGuardrails      ModeGuardrails                 `json:"mode_guardrails"`
 	ActionReadiness     ActionReadiness                `json:"action_readiness"`
 	AssuranceGates      AssuranceGates                 `json:"assurance_gates"`
@@ -418,6 +419,7 @@ func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
 			"scope_posture",
 			"lifecycle_posture",
 			"permit_posture",
+			"auth_failure_posture",
 			"enterprise_release_gate",
 			"enterprise_claim_review",
 			"external_evidence_presence",
