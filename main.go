@@ -874,6 +874,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"CatalogGates":      catalogGates,
 		"Access":            accessPosture,
 		"RoleBoundaries":    RoleBoundariesFor(session),
+		"RoleAvailability":  RoleAvailabilityFor(session),
 		"Ready":             ready,
 		"Readiness":         readinessBody,
 		"SessionPosture":    app.sessionPosture(session),
@@ -1947,11 +1948,16 @@ func (app *App) postureBody() map[string]any {
 		"catalog_gates":      catalogGates,
 		"catalog_gate_count": len(catalogGates),
 		"access":             accessPosture,
-		"scope":              scopePosture,
-		"lifecycle":          lifecyclePosture,
-		"approved_use":       approvedUsePosture,
-		"permits":            permitPosture,
-		"mode_posture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"role_availability": map[string]any{
+			"dashboard_strip": true,
+			"duties":          []string{"posture", "use_actions", "audit_export", "admin_policy"},
+			"value_returned":  false,
+		},
+		"scope":        scopePosture,
+		"lifecycle":    lifecyclePosture,
+		"approved_use": approvedUsePosture,
+		"permits":      permitPosture,
+		"mode_posture": ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
 			"pkce_s256":                   app.cfg.OIDCConfigured(),
@@ -2072,6 +2078,7 @@ func (app *App) postureBody() map[string]any {
 			"route_value_leak_sentinel",
 			"mode_posture_evidence",
 			"evidence_export_boundary_ux",
+			"role_availability_ux",
 		},
 		"value_returned": false,
 	}
@@ -2708,6 +2715,23 @@ func mustTemplates() *template.Template {
         <span class="pill warn">auditor</span>
         {{ end }}
       </div>
+    </div>
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="available-to-you">
+  <div class="panel-head">
+    <h2>Available to you</h2>
+    <span class="pill info">role gated</span>
+  </div>
+  <div class="panel-body">
+    <div class="mode-grid" aria-label="Available to you">
+      {{ range .RoleAvailability }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+      </div>
+      {{ end }}
     </div>
   </div>
 </section>

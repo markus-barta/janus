@@ -48,6 +48,13 @@ type RoleBoundary struct {
 	Active  bool
 }
 
+type RoleAvailability struct {
+	Label  string
+	State  string
+	Detail string
+	Tone   string
+}
+
 func LoadRolePolicyFromEnv() RolePolicy {
 	return RolePolicy{
 		AdminSubjects:    splitSet(envDefault("JANUS_ADMIN_SUBJECTS", "")),
@@ -182,6 +189,59 @@ func RoleBoundariesFor(session Session) []RoleBoundary {
 			Active:  HasRole(session, RoleViewer),
 		},
 	}
+}
+
+func RoleAvailabilityFor(session Session) []RoleAvailability {
+	operator := HasRole(session, RoleOperator)
+	auditor := HasRole(session, RoleAuditor)
+	admin := HasRole(session, RoleAdmin)
+	return []RoleAvailability{
+		{
+			Label:  "Posture",
+			State:  "available",
+			Detail: "Safe posture and descriptor views are available.",
+			Tone:   "ok",
+		},
+		{
+			Label:  "Use actions",
+			State:  availabilityState(operator),
+			Detail: availabilityDetail(operator, "Handle and permit controls are available.", "Operator role required."),
+			Tone:   availabilityTone(operator),
+		},
+		{
+			Label:  "Audit export",
+			State:  availabilityState(auditor),
+			Detail: availabilityDetail(auditor, "Audit rows and evidence export are available.", "Auditor role required."),
+			Tone:   availabilityTone(auditor),
+		},
+		{
+			Label:  "Admin policy",
+			State:  availabilityState(admin),
+			Detail: availabilityDetail(admin, "Admin policy review is available.", "Admin role required."),
+			Tone:   availabilityTone(admin),
+		},
+	}
+}
+
+func availabilityState(allowed bool) string {
+	if allowed {
+		return "available"
+	}
+	return "blocked"
+}
+
+func availabilityTone(allowed bool) string {
+	if allowed {
+		return "ok"
+	}
+	return "warn"
+}
+
+func availabilityDetail(allowed bool, yes, no string) string {
+	if allowed {
+		return yes
+	}
+	return no
 }
 
 func ClaimRoleInputs(groups, roles []string, projectRoles map[string]any) []string {

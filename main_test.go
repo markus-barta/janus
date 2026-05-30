@@ -683,6 +683,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"role_duty_matrix":true`) || !strings.Contains(body, `"duty_model":"separated_admin_auditor_operator_viewer"`) {
 		t.Fatalf("posture response should include role duty matrix posture: %s", body)
 	}
+	if !strings.Contains(body, `"role_availability"`) || !strings.Contains(body, `"dashboard_strip":true`) || !strings.Contains(body, `"role_availability_ux"`) {
+		t.Fatalf("posture response should include role availability UX: %s", body)
+	}
 	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
 		t.Fatalf("posture response should include scope policy: %s", body)
 	}
@@ -960,7 +963,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "not_claimed", "Evidence export", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Scope boundary", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "not_claimed", "Evidence export", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Scope boundary", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
@@ -1461,6 +1464,102 @@ func TestDashboardHidesOperatorActionsForViewer(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("viewer dashboard rendered operator action %q: %s", forbidden, body)
 		}
+	}
+}
+
+func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
+	cases := []struct {
+		name      string
+		roles     []string
+		want      []string
+		forbidden []string
+	}{
+		{
+			name:  "viewer",
+			roles: []string{RoleViewer},
+			want: []string{
+				"Available to you",
+				"Safe posture and descriptor views are available.",
+				"Operator role required.",
+				"Auditor role required.",
+				"Admin role required.",
+			},
+			forbidden: []string{
+				"Handle and permit controls are available.",
+				"Audit rows and evidence export are available.",
+				"Admin policy review is available.",
+			},
+		},
+		{
+			name:  "auditor",
+			roles: []string{RoleViewer, RoleAuditor},
+			want: []string{
+				"Available to you",
+				"Audit rows and evidence export are available.",
+				"Operator role required.",
+				"Admin role required.",
+			},
+			forbidden: []string{
+				"Handle and permit controls are available.",
+				"Admin policy review is available.",
+			},
+		},
+		{
+			name:  "operator",
+			roles: []string{RoleViewer, RoleOperator},
+			want: []string{
+				"Available to you",
+				"Handle and permit controls are available.",
+				"Auditor role required.",
+				"Admin role required.",
+			},
+			forbidden: []string{
+				"Audit rows and evidence export are available.",
+				"Admin policy review is available.",
+			},
+		},
+		{
+			name:  "all roles",
+			roles: []string{RoleViewer, RoleOperator, RoleAuditor, RoleAdmin},
+			want: []string{
+				"Available to you",
+				"Handle and permit controls are available.",
+				"Audit rows and evidence export are available.",
+				"Admin policy review is available.",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app := newTestApp(t)
+			session := Session{Subject: tc.name, Roles: tc.roles, Expiry: time.Now().UTC().Add(time.Hour)}
+			rr := httptest.NewRecorder()
+			app.writeSession(rr, session)
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.AddCookie(rr.Result().Cookies()[0])
+			out := httptest.NewRecorder()
+			app.withAuth(app.handleDashboard)(out, req)
+			if out.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+			}
+			body := out.Body.String()
+			for _, want := range tc.want {
+				if !strings.Contains(body, want) {
+					t.Fatalf("%s dashboard should render %q: %s", tc.name, want, body)
+				}
+			}
+			for _, forbidden := range tc.forbidden {
+				if strings.Contains(body, forbidden) {
+					t.Fatalf("%s dashboard should not render %q: %s", tc.name, forbidden, body)
+				}
+			}
+			for _, marker := range []string{"plaintext", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+				if strings.Contains(body, marker) {
+					t.Fatalf("%s dashboard leaked %q: %s", tc.name, marker, body)
+				}
+			}
+		})
 	}
 }
 
