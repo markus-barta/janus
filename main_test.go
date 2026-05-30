@@ -806,6 +806,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"restore_drill_workflow"`) || !strings.Contains(body, `"label":"Restore drill workflow"`) || !strings.Contains(body, `"control_key":"restore_drill"`) || !strings.Contains(body, `"review_cadence"`) || !strings.Contains(body, `"key":"metadata_inventory"`) || !strings.Contains(body, `"restore_drill_workflow":"presence_only_recovery_evidence"`) || !strings.Contains(body, `"restore_drill_presence_workflow"`) {
 		t.Fatalf("posture response should include restore drill workflow: %s", body)
 	}
+	if !strings.Contains(body, `"release_provenance_workflow"`) || !strings.Contains(body, `"label":"Release provenance workflow"`) || !strings.Contains(body, `"control_key":"release_provenance"`) || !strings.Contains(body, `"artifact_returned":false`) || !strings.Contains(body, `"key":"build_identity"`) || !strings.Contains(body, `"release_provenance_workflow":"presence_only_release_evidence"`) || !strings.Contains(body, `"release_provenance_presence_workflow"`) {
+		t.Fatalf("posture response should include release provenance workflow: %s", body)
+	}
 	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
 		t.Fatalf("posture response should include scope policy: %s", body)
 	}
@@ -1173,6 +1176,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed restore drill workflow")
 	}
+	postureReleaseWorkflow, ok := posture["release_provenance_workflow"].(ReleaseProvenanceWorkflow)
+	if !ok {
+		t.Fatalf("posture should expose typed release provenance workflow")
+	}
 	postureAttachmentReview, ok := posture["attachment_review"].(AttachmentReview)
 	if !ok {
 		t.Fatalf("posture should expose typed attachment review")
@@ -1210,6 +1217,9 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(postureRestoreWorkflow, pack.RestoreWorkflow) {
 		t.Fatalf("posture and evidence should share the same restore drill workflow: posture=%#v evidence=%#v", postureRestoreWorkflow, pack.RestoreWorkflow)
+	}
+	if !reflect.DeepEqual(postureReleaseWorkflow, pack.ReleaseWorkflow) {
+		t.Fatalf("posture and evidence should share the same release provenance workflow: posture=%#v evidence=%#v", postureReleaseWorkflow, pack.ReleaseWorkflow)
 	}
 	if !reflect.DeepEqual(postureAttachmentReview, pack.AttachmentReview) {
 		t.Fatalf("posture and evidence should share the same attachment review: posture=%#v evidence=%#v", postureAttachmentReview, pack.AttachmentReview)
@@ -1367,6 +1377,71 @@ func TestRestoreDrillWorkflowTracksPresenceOnlyAttachment(t *testing.T) {
 				}
 			}
 			assertRouteResponseValueFree(t, route.name+" restore workflow", out)
+		})
+	}
+}
+
+func TestReleaseProvenanceWorkflowTracksPresenceOnlyAttachment(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	body := `{"control_key":"release_provenance","attestation":"external_evidence_exists","external_ref":"https://evidence.example/secret-cookie-secret-/run/agenix/release-provenance"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/evidence/attachments", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-Id", "release-provenance-workflow-1")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", out.Code, out.Body.String())
+	}
+	attachBody := out.Body.String()
+	for _, want := range []string{`"control_key":"release_provenance"`, `"attachment":"attached_presence_only"`, `"evidence_signal":"presence_only_workflow"`, `"request_body_returned":false`, `"request_id":"release-provenance-workflow-1"`, `"value_returned":false`} {
+		if !strings.Contains(attachBody, want) {
+			t.Fatalf("release provenance attach response should include %s: %s", want, attachBody)
+		}
+	}
+
+	routes := []struct {
+		name string
+		path string
+	}{
+		{name: "dashboard", path: "/"},
+		{name: "posture", path: "/api/posture"},
+		{name: "evidence", path: "/api/evidence"},
+	}
+	for _, route := range routes {
+		t.Run(route.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, route.path, nil)
+			out := httptest.NewRecorder()
+			app.routes().ServeHTTP(out, req)
+			if out.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+			}
+			got := out.Body.String()
+			for _, want := range []string{"Release provenance workflow", "release_provenance", "attached_presence_only", "presence_only_workflow", "evidence_ref_returned", "value_returned"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("%s should include release workflow marker %q: %s", route.name, want, got)
+				}
+			}
+			if route.name == "dashboard" {
+				for _, want := range []string{"review cadence", "artifact_returned=false", "presence recorded", "release evidence stays external", "Build identity", "SBOM review", "Channel trust"} {
+					if !strings.Contains(got, want) {
+						t.Fatalf("dashboard should include release workflow cue %q: %s", want, got)
+					}
+				}
+			} else {
+				for _, want := range []string{"review_cadence", `"artifact_returned":false`} {
+					if !strings.Contains(got, want) {
+						t.Fatalf("%s should include release workflow JSON marker %q: %s", route.name, want, got)
+					}
+				}
+			}
+			for _, forbidden := range []string{"external_ref", "https://evidence.example", "secret-cookie-secret", "/run/agenix"} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("%s leaked request-only release evidence ref %q: %s", route.name, forbidden, got)
+				}
+			}
+			assertRouteResponseValueFree(t, route.name+" release workflow", out)
 		})
 	}
 }
@@ -2190,7 +2265,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Command center", "Command center status", "Safe quick actions", "Safety state", "Role access", "Enterprise review", "Now", "metadata_only", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Enterprise dry run", "Enterprise dry-run checklist", "self_hosted now", "enterprise target", "blockers", "required=true", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill workflow", "Mark restore drill present", "review cadence", "Metadata inventory", "Policy and identity", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "claim policy", "subject bindings", "group bindings", "Role policy proof", "Implicit elevated claims", "disabled", "Claim names are not trusted by convention", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Command center", "Command center status", "Safe quick actions", "Safety state", "Role access", "Enterprise review", "Now", "metadata_only", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Enterprise dry run", "Enterprise dry-run checklist", "self_hosted now", "enterprise target", "blockers", "required=true", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill workflow", "Mark restore drill present", "review cadence", "Metadata inventory", "Policy and identity", "Release provenance workflow", "Mark release provenance present", "artifact_returned=false", "Build identity", "SBOM review", "Channel trust", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "claim policy", "subject bindings", "group bindings", "Role policy proof", "Implicit elevated claims", "disabled", "Claim names are not trusted by convention", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
