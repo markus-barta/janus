@@ -660,6 +660,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"script_src":"none"`) || !strings.Contains(body, `"no_script_csp"`) {
 		t.Fatalf("posture response should include no-script CSP hardening: %s", body)
 	}
+	if !strings.Contains(body, `"cross_origin_resource_policy":"same-origin"`) || !strings.Contains(body, `"cross_domain_policy":"none"`) || !strings.Contains(body, `"browser_isolation_headers"`) {
+		t.Fatalf("posture response should include browser isolation headers: %s", body)
+	}
 	if !strings.Contains(body, `"audit_event_severity"`) || !strings.Contains(body, `"severity_counts"`) {
 		t.Fatalf("posture response should include audit severity: %s", body)
 	}
@@ -870,6 +873,12 @@ func TestSecurityHeadersUseStyleNonce(t *testing.T) {
 	nonce := strings.SplitN(parts[1], `"`, 2)[0]
 	if nonce == "" || !strings.Contains(csp, "'nonce-"+nonce+"'") {
 		t.Fatalf("CSP nonce should match style nonce: csp=%s nonce=%q", csp, nonce)
+	}
+	if got := out.Header().Get("Cross-Origin-Resource-Policy"); got != "same-origin" {
+		t.Fatalf("expected same-origin CORP header, got %q", got)
+	}
+	if got := out.Header().Get("X-Permitted-Cross-Domain-Policies"); got != "none" {
+		t.Fatalf("expected cross-domain policy lockout, got %q", got)
 	}
 }
 

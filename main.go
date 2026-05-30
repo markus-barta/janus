@@ -447,6 +447,7 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'none'; object-src 'none'; worker-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; font-src 'self'; img-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-"+nonce+"'; upgrade-insecure-requests")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		w.Header().Set("Expires", "0")
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -455,6 +456,7 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Permitted-Cross-Domain-Policies", "none")
 		w.Header().Set("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
 		next.ServeHTTP(w, r)
 	})
@@ -1572,11 +1574,13 @@ func (app *App) postureBody() map[string]any {
 			"value_returned":  false,
 		},
 		"response_hardening": map[string]any{
-			"cache_control":        "no-store",
-			"auth_error_view":      "safe_category_request_id",
-			"script_src":           "none",
-			"legacy_cache_headers": true,
-			"value_returned":       false,
+			"cache_control":                "no-store",
+			"auth_error_view":              "safe_category_request_id",
+			"script_src":                   "none",
+			"cross_origin_resource_policy": "same-origin",
+			"cross_domain_policy":          "none",
+			"legacy_cache_headers":         true,
+			"value_returned":               false,
 		},
 		"request_limits": map[string]any{
 			"max_body_bytes": maxRequestBody,
@@ -1617,6 +1621,7 @@ func (app *App) postureBody() map[string]any {
 			"audit_event_severity",
 			"strict_session_cookie",
 			"request_body_size_limit",
+			"browser_isolation_headers",
 		},
 		"value_returned": false,
 	}
