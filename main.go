@@ -4039,7 +4039,33 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .AssuranceSummary.Summary }}</p>
-    <p><span class="pill ok">value_returned=false</span> <span class="pill info">human readable evidence</span></p>
+    <div class="witness-grid" aria-label="Assurance summary witness">
+      <div class="witness-card {{ if .AssuranceSummary.Review }}warn{{ else }}ok{{ end }}">
+        <span>Proof decision</span>
+        <strong>{{ .AssuranceSummary.Verdict }}</strong>
+        <p>{{ len .AssuranceSummary.Proven }} proven controls; {{ len .AssuranceSummary.Review }} review items.</p>
+      </div>
+      <div class="witness-card {{ if .AssuranceSummary.Review }}warn{{ else }}ok{{ end }}">
+        <span>Review posture</span>
+        <strong>{{ if .AssuranceSummary.Review }}review needed{{ else }}clear{{ end }}</strong>
+        <p>Review items stay visible before stronger claims are trusted.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>values withheld</strong>
+        <p>Human-readable evidence is shown without returning secret values.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Assurance summary evidence flags</summary>
+      <div class="flag-cloud" aria-label="Assurance summary value-free evidence flags">
+        <span class="pill info">verdict {{ .AssuranceSummary.Verdict }}</span>
+        <span class="pill ok">{{ len .AssuranceSummary.Proven }} proven</span>
+        <span class="pill {{ if .AssuranceSummary.Review }}warn{{ else }}ok{{ end }}">{{ len .AssuranceSummary.Review }} review</span>
+        <span class="pill info">human readable evidence</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     <p><strong>Proven controls</strong></p>
     <div class="mode-grid" aria-label="Proven assurance controls">
       {{ range .AssuranceSummary.Proven }}
@@ -4071,7 +4097,32 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .AssuranceGates.Summary }}</p>
-    <p><span class="pill ok">value_returned=false</span> <span class="pill info">abuse tested</span></p>
+    <div class="witness-grid" aria-label="Assurance gates witness">
+      <div class="witness-card {{ if .AssuranceGates.ReviewCount }}warn{{ else }}ok{{ end }}">
+        <span>Gate coverage</span>
+        <strong>{{ if .AssuranceGates.ReviewCount }}{{ .AssuranceGates.ReviewCount }} review{{ else }}covered{{ end }}</strong>
+        <p>{{ len .AssuranceGates.Gates }} abuse and invariant gates are visible.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Abuse posture</span>
+        <strong>abuse tested</strong>
+        <p>Role denial, catalog metadata, degraded action, and value-leak sentinels stay explicit.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>values withheld</strong>
+        <p>Gate proof returns control state only, not secret material.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Assurance gate evidence flags</summary>
+      <div class="flag-cloud" aria-label="Assurance gate value-free evidence flags">
+        <span class="pill info">{{ len .AssuranceGates.Gates }} gates</span>
+        <span class="pill {{ if .AssuranceGates.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .AssuranceGates.ReviewCount }} review</span>
+        <span class="pill info">abuse tested</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     <div class="mode-grid" aria-label="Assurance gate proofs">
       {{ range .AssuranceGates.Gates }}
       <div class="mode-item {{ .Tone }}">
@@ -4090,7 +4141,32 @@ func mustTemplates() *template.Template {
 	  </div>
 	  <div class="panel-body stack">
 	    <p>{{ .NegativePath.Summary }}</p>
-	    <p><span class="pill ok">value_returned=false</span> <span class="pill info">{{ .NegativePath.CoveredCount }} covered</span></p>
+	    <div class="witness-grid" aria-label="Blocked-path witness">
+	      <div class="witness-card {{ if .NegativePath.ReviewCount }}warn{{ else }}ok{{ end }}">
+	        <span>Denied path coverage</span>
+	        <strong>{{ .NegativePath.CoveredCount }} covered</strong>
+	        <p>{{ .NegativePath.ReviewCount }} review items across {{ len .NegativePath.Cases }} negative-path cases.</p>
+	      </div>
+	      <div class="witness-card ok">
+	        <span>Failure behavior</span>
+	        <strong>fail closed</strong>
+	        <p>Wrong roles, catalog gaps, audit-down states, and sensitive actions stay explicit.</p>
+	      </div>
+	      <div class="witness-card ok">
+	        <span>Value boundary</span>
+	        <strong>values withheld</strong>
+	        <p>Denied paths return safe status and request correlation, not secret data.</p>
+	      </div>
+	    </div>
+	    <details class="evidence-flags">
+	      <summary>Blocked-path evidence flags</summary>
+	      <div class="flag-cloud" aria-label="Blocked-path value-free evidence flags">
+	        <span class="pill info">{{ .NegativePath.CoveredCount }} covered</span>
+	        <span class="pill {{ if .NegativePath.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .NegativePath.ReviewCount }} review</span>
+	        <span class="pill info">{{ len .NegativePath.Cases }} cases</span>
+	        <span class="pill ok">value_returned=false</span>
+	      </div>
+	    </details>
 	    <div class="mode-grid" aria-label="Negative-path assurance">
 	      {{ range .NegativePath.Cases }}
 	      <div class="mode-item {{ .Tone }}">
