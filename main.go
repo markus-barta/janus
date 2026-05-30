@@ -390,7 +390,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /ui/permits", app.withAuth(app.handleCreatePermitUI))
 	mux.HandleFunc("POST /ui/permits/{permitID}/run", app.withAuth(app.handleRunPermitUI))
 	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
-	return app.securityHeaders(app.rateLimit(mux))
+	return app.securityHeaders(app.requestIDs(app.rateLimit(mux)))
 }
 
 func (app *App) securityHeaders(next http.Handler) http.Handler {
@@ -422,6 +422,17 @@ func (app *App) rateLimit(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+func (app *App) requestIDs(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := inboundRequestID(r)
+		if id == "" {
+			id = randomToken(12)
+		}
+		w.Header().Set("X-Request-Id", id)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id)))
 	})
 }
 
@@ -1081,6 +1092,8 @@ type sessionKey struct{}
 
 type cspNonceKey struct{}
 
+type requestIDKey struct{}
+
 func currentSession(ctx context.Context) Session {
 	session, _ := ctx.Value(sessionKey{}).(Session)
 	return session
@@ -1158,12 +1171,41 @@ func actorHash(actor string) string {
 }
 
 func requestID(r *http.Request) string {
+	if value, _ := r.Context().Value(requestIDKey{}).(string); value != "" {
+		return value
+	}
+	if value := inboundRequestID(r); value != "" {
+		return value
+	}
+	return randomToken(12)
+}
+
+func inboundRequestID(r *http.Request) string {
 	for _, header := range []string{"Cf-Ray", "X-Request-Id", "X-Correlation-Id"} {
-		if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
+		if value := sanitizeRequestID(r.Header.Get(header)); value != "" {
 			return value
 		}
 	}
-	return randomToken(12)
+	return ""
+}
+
+func sanitizeRequestID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 96 {
+		return ""
+	}
+	for _, ch := range value {
+		if ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' {
+			continue
+		}
+		switch ch {
+		case '-', '_', '.', ':':
+			continue
+		default:
+			return ""
+		}
+	}
+	return value
 }
 
 func randomToken(n int) string {
@@ -1279,6 +1321,12 @@ func (app *App) postureBody() map[string]any {
 			"secure":         app.cfg.SecureCookies(),
 			"value_returned": false,
 		},
+		"request_correlation": map[string]any{
+			"response_header": "X-Request-Id",
+			"audit_field":     "request_id",
+			"sanitized":       true,
+			"value_returned":  false,
+		},
 		"audit": app.store.AuditPosture(),
 		"capabilities": []string{
 			"value_free_metadata_catalog",
@@ -1292,6 +1340,7 @@ func (app *App) postureBody() map[string]any {
 			"lifecycle_gated_normal_use",
 			"persistent_permit_records",
 			"host_prefixed_cookies",
+			"request_correlation_ids",
 		},
 		"value_returned": false,
 	}

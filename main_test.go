@@ -299,6 +299,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"cookies"`) || !strings.Contains(body, `"host_prefixed_cookies"`) {
 		t.Fatalf("posture response should include cookie hardening: %s", body)
 	}
+	if !strings.Contains(body, `"request_correlation"`) || !strings.Contains(body, `"request_correlation_ids"`) {
+		t.Fatalf("posture response should include request correlation: %s", body)
+	}
 }
 
 func TestEvidenceExportIsValueFree(t *testing.T) {
@@ -443,6 +446,43 @@ func TestSecurityHeadersUseStyleNonce(t *testing.T) {
 	nonce := strings.SplitN(parts[1], `"`, 2)[0]
 	if nonce == "" || !strings.Contains(csp, "'nonce-"+nonce+"'") {
 		t.Fatalf("CSP nonce should match style nonce: csp=%s nonce=%q", csp, nonce)
+	}
+}
+
+func TestRequestIDHeaderAndAuditCorrelation(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/api/posture", nil)
+	req.Header.Set("X-Request-Id", "req-test_123")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	if got := out.Header().Get("X-Request-Id"); got != "req-test_123" {
+		t.Fatalf("expected request id response header, got %q", got)
+	}
+	recent := app.store.RecentAudit(1)
+	if len(recent) != 1 || recent[0].RequestID != "req-test_123" {
+		t.Fatalf("expected audit event to reuse request id: %#v", recent)
+	}
+}
+
+func TestRequestIDRejectsUnsafeInboundValue(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/api/posture", nil)
+	req.Header.Set("X-Request-Id", "bad\r\nInjected: yes")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	got := out.Header().Get("X-Request-Id")
+	if got == "" || strings.Contains(got, "Injected") || got == "bad\r\nInjected: yes" {
+		t.Fatalf("unsafe request id should be replaced, got %q", got)
 	}
 }
 
