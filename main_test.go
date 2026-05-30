@@ -38,11 +38,15 @@ func newTestApp(t *testing.T) *App {
 	if err != nil {
 		t.Fatal(err)
 	}
+	permitStore, err := NewPermitStore(tTempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &App{
 		cfg:       testConfig(),
 		store:     store,
 		broker:    NewBroker(store),
-		permits:   NewPermitStore(),
+		permits:   permitStore,
 		templates: mustTemplates(),
 	}
 }
@@ -260,6 +264,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"lifecycle"`) || !strings.Contains(body, `"lifecycle_gated_normal_use"`) {
 		t.Fatalf("posture response should include lifecycle policy: %s", body)
 	}
+	if !strings.Contains(body, `"permits"`) || !strings.Contains(body, `"persistent_permit_records"`) {
+		t.Fatalf("posture response should include permit persistence: %s", body)
+	}
 }
 
 func TestEvidenceExportIsValueFree(t *testing.T) {
@@ -284,6 +291,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"lifecycle_posture"`) {
 		t.Fatalf("evidence response should include lifecycle posture: %s", body)
+	}
+	if !strings.Contains(body, `"permit_posture"`) {
+		t.Fatalf("evidence response should include permit posture: %s", body)
 	}
 	if !strings.Contains(body, `"integrity"`) || !strings.Contains(body, `"pack_hash"`) {
 		t.Fatalf("evidence response should include integrity metadata: %s", body)
@@ -576,7 +586,9 @@ func TestPermitRunUIReturnsNoExecutionValueFreeResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.permits.Put(permit)
+	if err := app.permits.Put(permit); err != nil {
+		t.Fatal(err)
+	}
 
 	req := httptest.NewRequest(http.MethodPost, "/ui/permits/"+permit.ID+"/run", nil)
 	req.SetPathValue("permitID", permit.ID)
@@ -607,7 +619,9 @@ func TestDashboardRendersRecentPermits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.permits.Put(permit)
+	if err := app.permits.Put(permit); err != nil {
+		t.Fatal(err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	out := httptest.NewRecorder()
@@ -616,7 +630,7 @@ func TestDashboardRendersRecentPermits(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Recent permits", permit.ID, "Run safety check", "approved_metadata_only"} {
+	for _, want := range []string{"Recent permits", permit.ID, "Run safety check", "approved_metadata_only", "durable"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render recent permit %q: %s", want, body)
 		}
@@ -768,6 +782,67 @@ func TestPermitRunIsNoopAndValueFree(t *testing.T) {
 	result := RunPermit(permit)
 	if result.ValueReturned || !result.OutputScrubbed || result.Status != "not_executed" {
 		t.Fatalf("unexpected permit run result: %#v", result)
+	}
+}
+
+func TestPermitStorePersistsAndReloadsValueFreeRecords(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := NewPermitStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permit := Permit{
+		ID:            "p_test",
+		SecretRef:     "zitadel-janus-oidc",
+		Action:        "metadata_use",
+		Reason:        "audit trail",
+		Status:        "approved_metadata_only",
+		ValueReturned: true,
+		PrincipalHash: "actor-hash",
+		CreatedAt:     time.Now().UTC(),
+		ExpiresAt:     time.Now().UTC().Add(time.Minute),
+	}
+	if err := store.Put(permit); err != nil {
+		t.Fatal(err)
+	}
+	permitFile := filepath.Join(dataDir, "permits.json")
+	info, err := os.Stat(permitFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("permit file mode should be 0600, got %o", info.Mode().Perm())
+	}
+	raw, err := os.ReadFile(permitFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	if !strings.Contains(body, `"value_returned": false`) || strings.Contains(body, "plaintext") {
+		t.Fatalf("permit store should be value-free: %s", body)
+	}
+
+	reloaded, err := NewPermitStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := reloaded.Get("p_test")
+	if !ok || got.SecretRef != permit.SecretRef || got.ValueReturned {
+		t.Fatalf("unexpected reloaded permit: %#v ok=%t", got, ok)
+	}
+	posture := reloaded.Posture()
+	if posture.Count != 1 || !posture.Persisted || posture.ValueReturned {
+		t.Fatalf("unexpected permit posture: %#v", posture)
+	}
+}
+
+func TestPermitStoreRejectsCorruptPersistenceFile(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "permits.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewPermitStore(dataDir); err == nil {
+		t.Fatal("expected corrupt permit store to fail closed")
 	}
 }
 

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -221,17 +224,103 @@ func RunPermit(permit Permit) PermitRunResult {
 
 type PermitStore struct {
 	mu      sync.RWMutex
+	file    string
 	permits map[string]Permit
 }
 
-func NewPermitStore() *PermitStore {
-	return &PermitStore{permits: make(map[string]Permit)}
+type PermitPosture struct {
+	Count         int  `json:"count"`
+	Persisted     bool `json:"persisted"`
+	ValueReturned bool `json:"value_returned"`
 }
 
-func (s *PermitStore) Put(permit Permit) {
+type permitStoreSnapshot struct {
+	Version       int      `json:"version"`
+	Permits       []Permit `json:"permits"`
+	ValueReturned bool     `json:"value_returned"`
+}
+
+func NewPermitStore(dataDir string) (*PermitStore, error) {
+	store := &PermitStore{permits: make(map[string]Permit)}
+	if strings.TrimSpace(dataDir) == "" {
+		return store, nil
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return nil, err
+	}
+	store.file = filepath.Join(dataDir, "permits.json")
+	if err := store.load(); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+func (s *PermitStore) load() error {
+	raw, err := os.ReadFile(s.file)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(raw)) == "" {
+		return nil
+	}
+	var snapshot permitStoreSnapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return err
+	}
+	for _, permit := range snapshot.Permits {
+		if strings.TrimSpace(permit.ID) != "" {
+			permit.ValueReturned = false
+			s.permits[permit.ID] = permit
+		}
+	}
+	return nil
+}
+
+func (s *PermitStore) Put(permit Permit) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	permit.ValueReturned = false
 	s.permits[permit.ID] = permit
+	return s.persistLocked()
+}
+
+func (s *PermitStore) persistLocked() error {
+	if s.file == "" {
+		return nil
+	}
+	permits := make([]Permit, 0, len(s.permits))
+	for _, permit := range s.permits {
+		permit.ValueReturned = false
+		permits = append(permits, permit)
+	}
+	sort.Slice(permits, func(i, j int) bool {
+		return permits[i].CreatedAt.After(permits[j].CreatedAt)
+	})
+	raw, err := json.MarshalIndent(permitStoreSnapshot{
+		Version:       1,
+		Permits:       permits,
+		ValueReturned: false,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	tmp := s.file + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, s.file); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func (s *PermitStore) Get(id string) (Permit, bool) {
@@ -255,6 +344,16 @@ func (s *PermitStore) Recent(limit int) []Permit {
 		permits = permits[:limit]
 	}
 	return permits
+}
+
+func (s *PermitStore) Posture() PermitPosture {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return PermitPosture{
+		Count:         len(s.permits),
+		Persisted:     s.file != "",
+		ValueReturned: false,
+	}
 }
 
 func stringsTrim(value string) string {

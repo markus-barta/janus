@@ -324,11 +324,15 @@ func loadConfig() (Config, error) {
 }
 
 func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
+	permitStore, err := NewPermitStore(cfg.DataDir)
+	if err != nil {
+		return nil, fmt.Errorf("permit store: %w", err)
+	}
 	app := &App{
 		cfg:       cfg,
 		store:     store,
 		broker:    NewBroker(store).WithScopePolicy(cfg.ScopePolicy),
-		permits:   NewPermitStore(),
+		permits:   permitStore,
 		limiter:   NewRateLimiter(180, time.Minute),
 		templates: mustTemplates(),
 	}
@@ -523,6 +527,7 @@ func (app *App) dashboardData(session Session, actionResult *UIActionResult, sel
 		"CanOperate":        HasRole(session, RoleOperator),
 		"ActionResult":      actionResult,
 		"Permits":           app.permits.Recent(8),
+		"PermitPosture":     app.permits.Posture(),
 		"SelectedRef":       focus.Descriptor.ID,
 		"Focus":             focus,
 	}
@@ -687,7 +692,11 @@ func (app *App) handleCreatePermit(w http.ResponseWriter, r *http.Request) {
 		app.handleBrokerError(w, r, "permit.create", session.Subject, req.Ref, err)
 		return
 	}
-	app.permits.Put(permit)
+	if err := app.permits.Put(permit); err != nil {
+		app.auditWithRef(r, "permit.create", "denied", session.Subject, permit.SecretRef, "permit persistence failed")
+		writeJSONError(w, http.StatusInternalServerError, "permit_store_failed", "Permit could not be recorded")
+		return
+	}
 	app.auditWithRef(r, "permit.create", permit.Status, session.Subject, permit.SecretRef, permit.DenialReason)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"permit":         permit,
@@ -769,7 +778,12 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	app.permits.Put(permit)
+	if err := app.permits.Put(permit); err != nil {
+		app.auditWithRef(r, "permit.create.ui", "denied", session.Subject, permit.SecretRef, "permit persistence failed")
+		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "Permit could not be recorded.", ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusInternalServerError, app.dashboardData(session, &result, permit.SecretRef))
+		return
+	}
 	app.auditWithRef(r, "permit.create.ui", permit.Status, session.Subject, permit.SecretRef, permit.DenialReason)
 	outcome := "allowed"
 	title := "Permit recorded"
@@ -1192,6 +1206,7 @@ func (app *App) postureBody() map[string]any {
 		"access":             accessPosture,
 		"scope":              scopePosture,
 		"lifecycle":          lifecyclePosture,
+		"permits":            app.permits.Posture(),
 		"audit":              app.store.AuditPosture(),
 		"capabilities": []string{
 			"value_free_metadata_catalog",
@@ -1203,6 +1218,7 @@ func (app *App) postureBody() map[string]any {
 			"role_gated_audit_evidence",
 			"scope_bound_metadata",
 			"lifecycle_gated_normal_use",
+			"persistent_permit_records",
 		},
 		"value_returned": false,
 	}
@@ -1228,6 +1244,7 @@ func (app *App) evidencePack() EvidencePack {
 		CatalogGates:     ValidateCatalog(descriptors),
 		ScopePosture:     app.scopePosture(allDescriptors),
 		LifecyclePosture: LifecyclePostureFor(descriptors, time.Now().UTC()),
+		PermitPosture:    app.permits.Posture(),
 		AccessPosture:    app.accessPosture(),
 		AuditPosture:     app.store.AuditPosture(),
 		RecentAudit:      app.store.RecentAudit(50),
@@ -1761,7 +1778,7 @@ func mustTemplates() *template.Template {
   <div class="panel">
     <div class="panel-head">
       <h2>Recent permits</h2>
-      <span class="pill ok">{{ len .Permits }} tracked</span>
+      {{ if .PermitPosture.Persisted }}<span class="pill ok">{{ len .Permits }} durable</span>{{ else }}<span class="pill warn">{{ len .Permits }} in memory</span>{{ end }}
     </div>
     <div class="table-wrap">
       <table>
