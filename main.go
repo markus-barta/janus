@@ -109,6 +109,43 @@ type SecretDescriptor struct {
 	Tags           []string  `json:"tags"`
 }
 
+func (d SecretDescriptor) MarshalJSON() ([]byte, error) {
+	type publicDescriptor struct {
+		ID             string    `json:"id"`
+		DisplayName    string    `json:"display_name"`
+		Provider       string    `json:"provider"`
+		Classification string    `json:"classification"`
+		Owner          string    `json:"owner"`
+		Scope          string    `json:"scope,omitempty"`
+		RotationDays   int       `json:"rotation_days"`
+		LastCheckedAt  time.Time `json:"last_checked_at"`
+		Lifecycle      string    `json:"lifecycle"`
+		Status         string    `json:"status"`
+		RevealAllowed  bool      `json:"reveal_allowed"`
+		UseEnabled     bool      `json:"use_enabled"`
+		ConsumerCount  int       `json:"consumer_count"`
+		EgressMode     string    `json:"egress_mode,omitempty"`
+		Tags           []string  `json:"tags"`
+	}
+	return json.Marshal(publicDescriptor{
+		ID:             d.ID,
+		DisplayName:    d.DisplayName,
+		Provider:       d.Provider,
+		Classification: d.Classification,
+		Owner:          d.Owner,
+		Scope:          d.Scope,
+		RotationDays:   d.RotationDays,
+		LastCheckedAt:  d.LastCheckedAt,
+		Lifecycle:      d.Lifecycle,
+		Status:         d.Status,
+		RevealAllowed:  d.RevealAllowed,
+		UseEnabled:     d.UseEnabled,
+		ConsumerCount:  d.ConsumerCount,
+		EgressMode:     d.EgressMode,
+		Tags:           d.Tags,
+	})
+}
+
 type Store struct {
 	mu                  sync.RWMutex
 	catalogFile         string
@@ -579,7 +616,7 @@ func (app *App) limitRequestBody(next http.Handler) http.Handler {
 			return
 		}
 		if r.ContentLength > maxRequestBody {
-			writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body too large")
+			writeJSONError(w, r, http.StatusRequestEntityTooLarge, "request_too_large", "Request body too large")
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
@@ -613,7 +650,7 @@ func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		if !app.cfg.OIDCConfigured() {
 			if isAPIRequest(r) {
 				app.audit(r, "auth.setup", "denied", "", "auth incomplete")
-				writeJSONError(w, http.StatusServiceUnavailable, "auth_not_configured", "OIDC is not configured")
+				writeJSONError(w, r, http.StatusServiceUnavailable, "auth_not_configured", "OIDC is not configured")
 				return
 			}
 			app.renderSetup(w, r)
@@ -624,7 +661,7 @@ func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		if !ok {
 			app.audit(r, "auth.required", "denied", "", "missing session")
 			if isAPIRequest(r) {
-				writeJSONError(w, http.StatusUnauthorized, "auth_required", "Authentication required")
+				writeJSONError(w, r, http.StatusUnauthorized, "auth_required", "Authentication required")
 				return
 			}
 			http.Redirect(w, r, "/login", http.StatusFound)
@@ -643,7 +680,7 @@ func (app *App) requireRole(role, action string, next http.HandlerFunc) http.Han
 		session := currentSession(r.Context())
 		if !HasRole(session, role) {
 			app.audit(r, action, "denied", session.Subject, "role "+role+" required")
-			writeJSONError(w, http.StatusForbidden, "role_denied", role+" role required")
+			writeJSONError(w, r, http.StatusForbidden, "role_denied", role+" role required")
 			return
 		}
 		next(w, r)
@@ -900,7 +937,7 @@ func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "warden.resolve", "denied", session.Subject, "csrf failed")
-		writeJSONError(w, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
 		return
 	}
 	if !app.requireReadyAPI(w, r, session, "warden.resolve") {
@@ -909,7 +946,7 @@ func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
 
 	var req HandleRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "bad_json", "Request body must be JSON")
+		writeJSONError(w, r, http.StatusBadRequest, "bad_json", "Request body must be JSON")
 		return
 	}
 	handle, err := app.broker.ResolveHandle(principalFromSession(session), req)
@@ -991,7 +1028,7 @@ func (app *App) handleCreatePermit(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "permit.create", "denied", session.Subject, "csrf failed")
-		writeJSONError(w, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
 		return
 	}
 	if !app.requireReadyAPI(w, r, session, "permit.create") {
@@ -1000,7 +1037,7 @@ func (app *App) handleCreatePermit(w http.ResponseWriter, r *http.Request) {
 
 	var req PermitRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "bad_json", "Request body must be JSON")
+		writeJSONError(w, r, http.StatusBadRequest, "bad_json", "Request body must be JSON")
 		return
 	}
 	permit, err := app.broker.CreatePermit(principalFromSession(session), req)
@@ -1010,7 +1047,7 @@ func (app *App) handleCreatePermit(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := app.permits.Put(permit); err != nil {
 		app.auditWithRef(r, "permit.create", "denied", session.Subject, permit.SecretRef, "permit persistence failed")
-		writeJSONError(w, http.StatusInternalServerError, "permit_store_failed", "Permit could not be recorded")
+		writeJSONError(w, r, http.StatusInternalServerError, "permit_store_failed", "Permit could not be recorded")
 		return
 	}
 	app.auditWithRef(r, "permit.create", permit.Status, session.Subject, permit.SecretRef, permit.DenialReason)
@@ -1024,7 +1061,7 @@ func (app *App) handleRunPermit(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "permit.run", "denied", session.Subject, "csrf failed")
-		writeJSONError(w, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
 		return
 	}
 	if !app.requireReadyAPI(w, r, session, "permit.run") {
@@ -1035,7 +1072,7 @@ func (app *App) handleRunPermit(w http.ResponseWriter, r *http.Request) {
 	permit, ok := app.permits.Get(permitID)
 	if !ok {
 		app.audit(r, "permit.run", "denied", session.Subject, "permit not found")
-		writeJSONError(w, http.StatusNotFound, "permit_not_found", "Permit not found")
+		writeJSONError(w, r, http.StatusNotFound, "permit_not_found", "Permit not found")
 		return
 	}
 	result := RunPermit(permit)
@@ -1720,10 +1757,11 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func writeJSONError(w http.ResponseWriter, status int, code, message string) {
+func writeJSONError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
 	writeJSON(w, status, map[string]any{
 		"error":          code,
 		"message":        message,
+		"request_id":     requestID(r),
 		"value_returned": false,
 	})
 }
@@ -1820,6 +1858,12 @@ func (app *App) postureBody() map[string]any {
 			"preflight":                   "safe_method_boundary",
 			"value_returned":              false,
 		},
+		"assurance": map[string]any{
+			"route_value_leak_sentinel": true,
+			"json_errors_request_id":    true,
+			"backend_source_paths":      "not_returned",
+			"value_returned":            false,
+		},
 		"response_hardening": map[string]any{
 			"cache_control":                  "no-store",
 			"auth_error_view":                "safe_category_request_id",
@@ -1892,6 +1936,8 @@ func (app *App) postureBody() map[string]any {
 			"degraded_dashboard_banner",
 			"operational_rate_limit_denials",
 			"deny_by_default_cors",
+			"request_correlated_json_errors",
+			"route_value_leak_sentinel",
 		},
 		"value_returned": false,
 	}
@@ -1936,13 +1982,13 @@ func (app *App) handleBrokerError(w http.ResponseWriter, r *http.Request, action
 	switch {
 	case errors.Is(err, ErrNotFound):
 		app.auditWithRef(r, action, "denied", actor, "", "not found")
-		writeJSONError(w, http.StatusNotFound, "not_found", "Descriptor not found")
+		writeJSONError(w, r, http.StatusNotFound, "not_found", "Descriptor not found")
 	case errors.Is(err, ErrPolicyDenied):
 		app.auditWithRef(r, action, "denied", actor, "", err.Error())
-		writeJSONError(w, http.StatusForbidden, "policy_denied", err.Error())
+		writeJSONError(w, r, http.StatusForbidden, "policy_denied", err.Error())
 	default:
 		app.auditWithRef(r, action, "denied", actor, "", "broker error")
-		writeJSONError(w, http.StatusBadRequest, "broker_error", err.Error())
+		writeJSONError(w, r, http.StatusBadRequest, "broker_error", err.Error())
 	}
 }
 

@@ -89,7 +89,7 @@ func TestDescriptorsNeverExposeValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(raw)
-	for _, forbidden := range []string{"\"value\"", "\"secret_value\"", "\"plaintext\""} {
+	for _, forbidden := range []string{"\"value\"", "\"secret_value\"", "\"plaintext\"", "\"source\"", "secrets/"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("descriptor response exposed forbidden field %s in %s", forbidden, body)
 		}
@@ -701,6 +701,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"cors"`) || !strings.Contains(body, `"policy":"deny_by_default"`) || !strings.Contains(body, `"access_control_allow_origin":"absent"`) || !strings.Contains(body, `"deny_by_default_cors"`) {
 		t.Fatalf("posture response should include deny-by-default CORS posture: %s", body)
 	}
+	if !strings.Contains(body, `"assurance"`) || !strings.Contains(body, `"route_value_leak_sentinel":true`) || !strings.Contains(body, `"json_errors_request_id":true`) || !strings.Contains(body, `"backend_source_paths":"not_returned"`) || !strings.Contains(body, `"route_value_leak_sentinel"`) || !strings.Contains(body, `"request_correlated_json_errors"`) {
+		t.Fatalf("posture response should include route value-leak assurance: %s", body)
+	}
 	if !strings.Contains(body, `"response_hardening"`) || !strings.Contains(body, `"no_store_responses"`) {
 		t.Fatalf("posture response should include response hardening: %s", body)
 	}
@@ -1120,6 +1123,163 @@ func TestAPIPreflightUsesSafeMethodBoundary(t *testing.T) {
 	}
 	if out.Header().Get("Access-Control-Allow-Origin") != "" || strings.Contains(body, "plaintext") {
 		t.Fatalf("preflight denial should not open CORS or leak values: headers=%#v body=%s", out.Header(), body)
+	}
+}
+
+func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	app.oauth = testOAuthConfig()
+	app.verifier = &oidc.IDTokenVerifier{}
+
+	cases := []struct {
+		name        string
+		method      string
+		path        string
+		body        string
+		contentType string
+		status      int
+		setup       func(*http.Request)
+	}{
+		{name: "health", method: http.MethodGet, path: "/healthz", status: http.StatusOK},
+		{name: "ready", method: http.MethodGet, path: "/readyz", status: http.StatusOK},
+		{name: "favicon", method: http.MethodGet, path: "/favicon.ico", status: http.StatusNoContent},
+		{name: "login", method: http.MethodGet, path: "/login", status: http.StatusFound},
+		{
+			name:   "bad callback",
+			method: http.MethodGet,
+			path:   "/oidc/callback?state=wrong&code=raw-secret-value",
+			status: http.StatusBadRequest,
+			setup: func(req *http.Request) {
+				req.AddCookie(&http.Cookie{Name: hostStateCookie, Value: "state-cookie-secret"})
+				req.AddCookie(&http.Cookie{Name: hostNonceCookie, Value: "nonce-cookie-secret"})
+				req.AddCookie(&http.Cookie{Name: hostPKCECookie, Value: "pkce-cookie-secret"})
+			},
+		},
+		{name: "browser missing", method: http.MethodGet, path: "/missing?ref=secret-cookie-secret", status: http.StatusNotFound},
+		{name: "api missing", method: http.MethodGet, path: "/api/missing?ref=raw-secret-value", status: http.StatusNotFound},
+		{name: "api method", method: http.MethodDelete, path: "/api/posture", status: http.StatusMethodNotAllowed},
+		{name: "posture", method: http.MethodGet, path: "/api/posture", status: http.StatusOK},
+		{name: "descriptors", method: http.MethodGet, path: "/api/warden/descriptors", status: http.StatusOK},
+		{name: "audit", method: http.MethodGet, path: "/api/audit/recent", status: http.StatusOK},
+		{name: "evidence", method: http.MethodGet, path: "/api/evidence", status: http.StatusOK},
+		{name: "resolve", method: http.MethodPost, path: "/api/warden/resolve", body: `{"ref":"zitadel-janus-oidc","reason":"local smoke"}`, contentType: "application/json", status: http.StatusOK},
+		{name: "resolve bad json", method: http.MethodPost, path: "/api/warden/resolve", body: `{"ref":"raw-secret-value"`, contentType: "application/json", status: http.StatusBadRequest},
+		{name: "permit", method: http.MethodPost, path: "/api/permits", body: `{"ref":"zitadel-janus-oidc","action":"metadata_use","destination":"dashboard","reason":"local smoke"}`, contentType: "application/json", status: http.StatusCreated},
+		{name: "permit missing run", method: http.MethodPost, path: "/api/permits/missing/run", status: http.StatusNotFound},
+		{name: "dashboard", method: http.MethodGet, path: "/", status: http.StatusOK},
+		{name: "ui resolve", method: http.MethodPost, path: "/ui/warden/resolve", body: "ref=zitadel-janus-oidc&reason=local+smoke", contentType: "application/x-www-form-urlencoded", status: http.StatusOK},
+		{name: "ui permit", method: http.MethodPost, path: "/ui/permits", body: "ref=zitadel-janus-oidc&action=metadata_use&destination=dashboard&reason=local+smoke", contentType: "application/x-www-form-urlencoded", status: http.StatusOK},
+		{name: "ui permit missing run", method: http.MethodPost, path: "/ui/permits/missing/run", status: http.StatusNotFound},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reqID := "route-sentinel-" + strings.NewReplacer(" ", "-", "/", "-").Replace(tc.name)
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("X-Request-Id", reqID)
+			if tc.contentType != "" {
+				req.Header.Set("Content-Type", tc.contentType)
+			}
+			if tc.setup != nil {
+				tc.setup(req)
+			}
+			out := httptest.NewRecorder()
+			app.routes().ServeHTTP(out, req)
+			if out.Code != tc.status {
+				t.Fatalf("expected %d, got %d body=%s", tc.status, out.Code, out.Body.String())
+			}
+			assertRouteResponseValueFree(t, tc.name, out)
+			assertJSONErrorRequestCorrelated(t, tc.name, reqID, out)
+		})
+	}
+}
+
+func TestJSONErrorResponsesAreRequestCorrelated(t *testing.T) {
+	app := newTestApp(t)
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		status int
+	}{
+		{name: "auth required posture", method: http.MethodGet, path: "/api/posture", status: http.StatusUnauthorized},
+		{name: "auth required resolve", method: http.MethodPost, path: "/api/warden/resolve", status: http.StatusUnauthorized},
+		{name: "auth required evidence", method: http.MethodGet, path: "/api/evidence", status: http.StatusUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqID := "json-error-" + strings.NewReplacer(" ", "-", "/", "-").Replace(tc.name)
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("X-Request-Id", reqID)
+			out := httptest.NewRecorder()
+			app.routes().ServeHTTP(out, req)
+			if out.Code != tc.status {
+				t.Fatalf("expected %d, got %d body=%s", tc.status, out.Code, out.Body.String())
+			}
+			assertRouteResponseValueFree(t, tc.name, out)
+			assertJSONErrorRequestCorrelated(t, tc.name, reqID, out)
+		})
+	}
+
+	setupApp := newTestApp(t)
+	setupApp.cfg.OIDCSecret = ""
+	req := httptest.NewRequest(http.MethodGet, "/api/posture", nil)
+	req.Header.Set("X-Request-Id", "json-error-setup")
+	out := httptest.NewRecorder()
+	setupApp.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", out.Code, out.Body.String())
+	}
+	assertRouteResponseValueFree(t, "auth setup", out)
+	assertJSONErrorRequestCorrelated(t, "auth setup", "json-error-setup", out)
+}
+
+func assertRouteResponseValueFree(t *testing.T, name string, out *httptest.ResponseRecorder) {
+	t.Helper()
+	var haystack strings.Builder
+	haystack.WriteString(out.Body.String())
+	for key, values := range out.Result().Header {
+		haystack.WriteString("\n")
+		haystack.WriteString(key)
+		haystack.WriteString(":")
+		haystack.WriteString(strings.Join(values, "\n"))
+	}
+	body := strings.ToLower(haystack.String())
+	for _, marker := range []string{
+		"plaintext",
+		"raw-secret-value",
+		"state-cookie-secret",
+		"nonce-cookie-secret",
+		"pkce-cookie-secret",
+		"secret-cookie-secret",
+		"cookie_key",
+		"oidc_secret",
+		"oidcsecret",
+		"client_secret",
+		"/run/agenix",
+		"secrets/",
+		".age\"",
+		"\"source\"",
+		"\"value_returned\":true",
+		"value_returned=true",
+	} {
+		if strings.Contains(body, marker) {
+			t.Fatalf("%s response leaked marker %q: headers=%#v body=%s", name, marker, out.Result().Header, out.Body.String())
+		}
+	}
+}
+
+func assertJSONErrorRequestCorrelated(t *testing.T, name, reqID string, out *httptest.ResponseRecorder) {
+	t.Helper()
+	if out.Code < http.StatusBadRequest || !strings.Contains(out.Header().Get("Content-Type"), "application/json") {
+		return
+	}
+	body := out.Body.String()
+	for _, want := range []string{`"request_id":"` + reqID + `"`, `"value_returned":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("%s JSON error should include %s: %s", name, want, body)
+		}
 	}
 }
 
