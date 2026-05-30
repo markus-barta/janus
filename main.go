@@ -299,6 +299,7 @@ type UIActionResult struct {
 	Status         string `json:"status,omitempty"`
 	ExpiresAt      string `json:"expires_at,omitempty"`
 	RunReason      string `json:"run_reason,omitempty"`
+	RequestID      string `json:"request_id,omitempty"`
 	OutputScrubbed bool   `json:"output_scrubbed,omitempty"`
 	ValueReturned  bool   `json:"value_returned"`
 }
@@ -638,6 +639,39 @@ func (app *App) requireRole(role, action string, next http.HandlerFunc) http.Han
 	}
 }
 
+func (app *App) requireReadyAPI(w http.ResponseWriter, r *http.Request, session Session, action string) bool {
+	if _, ready := app.readinessBody(); ready {
+		return true
+	}
+	app.audit(r, action, "denied", session.Subject, "system degraded")
+	readiness, _ := app.publicReadinessBody()
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+		"error":          "system_degraded",
+		"message":        "Janus readiness is degraded; sensitive action blocked.",
+		"request_id":     requestID(r),
+		"readiness":      readiness,
+		"value_returned": false,
+	})
+	return false
+}
+
+func (app *App) requireReadyUI(w http.ResponseWriter, r *http.Request, session Session, action, title, selectedRef string) bool {
+	if _, ready := app.readinessBody(); ready {
+		return true
+	}
+	app.audit(r, action, "denied", session.Subject, "system degraded")
+	result := UIActionResult{
+		Title:         title,
+		Outcome:       "denied",
+		Message:       "Janus readiness is degraded; sensitive action blocked until checks recover.",
+		RunReason:     "system_degraded",
+		RequestID:     requestID(r),
+		ValueReturned: false,
+	}
+	renderTemplateStatus(w, app.templates, "dashboard", http.StatusServiceUnavailable, app.dashboardData(r, session, &result, selectedRef))
+	return false
+}
+
 func (app *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -742,8 +776,14 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	scopePosture := app.scopePosture(app.store.Descriptors())
 	lifecyclePosture := LifecyclePostureFor(descriptors, time.Now().UTC())
 	approvedUsePosture := ApprovedUsePostureFor(descriptors)
+	permitPosture := PermitPosture{ValueReturned: false}
+	var recentPermits []Permit
+	if app.permits != nil {
+		permitPosture = app.permits.Posture()
+		recentPermits = app.permits.Recent(8)
+	}
 	evidenceHash := ""
-	if canViewAudit {
+	if canViewAudit && app.permits != nil {
 		evidencePack := app.evidencePack()
 		if evidencePack.Integrity != nil {
 			evidenceHash = evidencePack.Integrity.PackHash
@@ -776,8 +816,8 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"CanViewAudit":      canViewAudit,
 		"CanOperate":        HasRole(session, RoleOperator),
 		"ActionResult":      actionResult,
-		"Permits":           app.permits.Recent(8),
-		"PermitPosture":     app.permits.Posture(),
+		"Permits":           recentPermits,
+		"PermitPosture":     permitPosture,
 		"SelectedRef":       focus.Descriptor.ID,
 		"Focus":             focus,
 	}
@@ -838,6 +878,9 @@ func (app *App) handlePosture(w http.ResponseWriter, r *http.Request) {
 
 func (app *App) handleEvidence(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
+	if !app.requireReadyAPI(w, r, session, "evidence.export") {
+		return
+	}
 	app.audit(r, "evidence.export", "allowed", session.Subject, "")
 	writeJSON(w, http.StatusOK, app.evidencePack())
 }
@@ -847,6 +890,9 @@ func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "warden.resolve", "denied", session.Subject, "csrf failed")
 		writeJSONError(w, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		return
+	}
+	if !app.requireReadyAPI(w, r, session, "warden.resolve") {
 		return
 	}
 
@@ -894,6 +940,9 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(r, session, &result, req.Ref))
 		return
 	}
+	if !app.requireReadyUI(w, r, session, "warden.resolve.ui", "Handle blocked", req.Ref) {
+		return
+	}
 	handle, err := app.broker.ResolveHandle(principalFromSession(session), req)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -934,6 +983,9 @@ func (app *App) handleCreatePermit(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusForbidden, "csrf_failed", "CSRF token required")
 		return
 	}
+	if !app.requireReadyAPI(w, r, session, "permit.create") {
+		return
+	}
 
 	var req PermitRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
@@ -962,6 +1014,9 @@ func (app *App) handleRunPermit(w http.ResponseWriter, r *http.Request) {
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "permit.run", "denied", session.Subject, "csrf failed")
 		writeJSONError(w, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		return
+	}
+	if !app.requireReadyAPI(w, r, session, "permit.run") {
 		return
 	}
 
@@ -1007,6 +1062,9 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 		app.audit(r, "permit.create.ui", "denied", session.Subject, "reason required")
 		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "Reason required.", ValueReturned: false}
 		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(r, session, &result, req.Ref))
+		return
+	}
+	if !app.requireReadyUI(w, r, session, "permit.create.ui", "Permit blocked", req.Ref) {
 		return
 	}
 
@@ -1069,6 +1127,9 @@ func (app *App) handleRunPermitUI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !app.requireOperatorUI(w, r, session, "permit.run.ui", "") {
+		return
+	}
+	if !app.requireReadyUI(w, r, session, "permit.run.ui", "Run blocked", "") {
 		return
 	}
 	permitID := r.PathValue("permitID")
@@ -1409,6 +1470,9 @@ func (app *App) audit(r *http.Request, action, outcome, actor, reason string) {
 }
 
 func (app *App) auditWithRef(r *http.Request, action, outcome, actor, secretRef, reason string) {
+	if app.store == nil {
+		return
+	}
 	app.store.AppendAudit(AuditEntry{
 		Action:    action,
 		Outcome:   outcome,
@@ -1693,6 +1757,10 @@ func (app *App) postureBody() map[string]any {
 	scopePosture := app.scopePosture(allDescriptors)
 	lifecyclePosture := LifecyclePostureFor(descriptors, time.Now().UTC())
 	approvedUsePosture := ApprovedUsePostureFor(descriptors)
+	permitPosture := PermitPosture{ValueReturned: false}
+	if app.permits != nil {
+		permitPosture = app.permits.Posture()
+	}
 	return map[string]any{
 		"service":            "janus",
 		"mode":               app.cfg.ProductMode,
@@ -1707,7 +1775,7 @@ func (app *App) postureBody() map[string]any {
 		"scope":              scopePosture,
 		"lifecycle":          lifecyclePosture,
 		"approved_use":       approvedUsePosture,
-		"permits":            app.permits.Posture(),
+		"permits":            permitPosture,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
 			"pkce_s256":                   app.cfg.OIDCConfigured(),
@@ -1751,6 +1819,11 @@ func (app *App) postureBody() map[string]any {
 			"applies_to":     "mutations",
 			"value_returned": false,
 		},
+		"availability": map[string]any{
+			"sensitive_actions_require_readiness": true,
+			"degraded_action_status":              "system_degraded_503",
+			"value_returned":                      false,
+		},
 		"api_errors": map[string]any{
 			"auth_denials_json": true,
 			"value_returned":    false,
@@ -1790,6 +1863,7 @@ func (app *App) postureBody() map[string]any {
 			"safe_http_boundary_failures",
 			"role_duty_matrix",
 			"redacted_public_readiness",
+			"degraded_sensitive_action_guard",
 		},
 		"value_returned": false,
 	}
@@ -1815,12 +1889,15 @@ func (app *App) evidencePack() EvidencePack {
 		CatalogGates:     ValidateCatalog(descriptors),
 		ScopePosture:     app.scopePosture(allDescriptors),
 		LifecyclePosture: LifecyclePostureFor(descriptors, time.Now().UTC()),
-		PermitPosture:    app.permits.Posture(),
+		PermitPosture:    PermitPosture{ValueReturned: false},
 		AccessPosture:    app.accessPosture(),
 		AuditPosture:     app.store.AuditPosture(),
 		RecentAudit:      app.store.RecentAudit(50),
 		ValueReturned:    false,
 		RedactionModel:   "metadata-only; secret values are not stored, read, rendered, logged, or exported by Janus V1.x",
+	}
+	if app.permits != nil {
+		pack.PermitPosture = app.permits.Posture()
 	}
 	integrity := EvidenceIntegrityFor(pack)
 	pack.Integrity = &integrity
@@ -2414,6 +2491,8 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .ActionResult.Message }}</p>
+    {{ if .ActionResult.RunReason }}<p class="warn">{{ .ActionResult.RunReason }}</p>{{ end }}
+    {{ if .ActionResult.RequestID }}<p class="mono">request_id={{ .ActionResult.RequestID }}</p>{{ end }}
     {{ if .ActionResult.PermitID }}
     <div class="verdict" aria-label="Permit safety verdict">
       <span><strong>Metadata only</strong> secret value withheld</span>
@@ -2435,7 +2514,6 @@ func mustTemplates() *template.Template {
       <div class="fact"><strong>{{ .ActionResult.Status }}</strong><span class="muted">status</span></div>
       <div class="fact"><strong>{{ .ActionResult.Action }}</strong><span class="muted">action</span></div>
     </div>
-    {{ if .ActionResult.RunReason }}<p class="warn">{{ .ActionResult.RunReason }}</p>{{ end }}
     {{ if .ActionResult.OutputScrubbed }}<p><span class="pill ok">output_scrubbed=true</span></p>{{ end }}
     {{ if .CanOperate }}
     <form method="post" action="/ui/permits/{{ .ActionResult.PermitID }}/run">

@@ -598,6 +598,30 @@ func TestWardenResolveWorksWhenAuthDisabledForLocalSmoke(t *testing.T) {
 	}
 }
 
+func TestSensitiveAPIFailsClosedWhenReadinessDegraded(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	app.permits = nil
+
+	req := httptest.NewRequest(http.MethodPost, "/api/warden/resolve", strings.NewReader(`{"ref":"zitadel-janus-oidc","reason":"local smoke"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-Id", "degraded-api-1")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{`"error":"system_degraded"`, `"request_id":"degraded-api-1"`, `"redacted":true`, `"value_returned":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("degraded API denial should include %s: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "plaintext") || strings.Contains(body, "secret-cookie-secret") {
+		t.Fatalf("degraded API denial should remain value-free: %s", body)
+	}
+}
+
 func TestOversizedAPIRequestIsRejectedValueFree(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
@@ -679,6 +703,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"request_limits"`) || !strings.Contains(body, `"max_body_bytes":4096`) || !strings.Contains(body, `"request_body_size_limit"`) {
 		t.Fatalf("posture response should include request body limits: %s", body)
+	}
+	if !strings.Contains(body, `"availability"`) || !strings.Contains(body, `"sensitive_actions_require_readiness":true`) || !strings.Contains(body, `"degraded_sensitive_action_guard"`) {
+		t.Fatalf("posture response should include degraded sensitive-action guard: %s", body)
 	}
 	if !strings.Contains(body, `"safe_failure_pages":true`) || !strings.Contains(body, `"safe_auth_failure_pages"`) || !strings.Contains(body, `"auth_error_view":"safe_category_request_id"`) {
 		t.Fatalf("posture response should include safe auth failure pages: %s", body)
@@ -1147,6 +1174,30 @@ func TestWardenResolveUIReturnsValueFreeHandle(t *testing.T) {
 	}
 	if strings.Contains(body, "plaintext") {
 		t.Fatalf("UI handle response should remain value-free: %s", body)
+	}
+}
+
+func TestSensitiveUIFailsClosedWhenReadinessDegraded(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	app.permits = nil
+
+	req := httptest.NewRequest(http.MethodPost, "/ui/warden/resolve", strings.NewReader("ref=zitadel-janus-oidc&reason=local+smoke"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Request-Id", "degraded-ui-1")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Handle blocked", "system_degraded", "request_id=degraded-ui-1", "sensitive action blocked", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("degraded UI denial should render %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "plaintext") || strings.Contains(body, "secret-cookie-secret") {
+		t.Fatalf("degraded UI denial should remain value-free: %s", body)
 	}
 }
 
