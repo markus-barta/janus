@@ -851,10 +851,12 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		recentPermits = app.permits.Recent(8)
 	}
 	evidenceHash := ""
+	evidenceHashFull := ""
 	if canViewAudit && app.permits != nil {
 		evidencePack := app.evidencePack(session)
 		if evidencePack.Integrity != nil {
-			evidenceHash = evidencePack.Integrity.PackHash
+			evidenceHashFull = evidencePack.Integrity.PackHash
+			evidenceHash = evidenceHashFull
 			if len(evidenceHash) > 12 {
 				evidenceHash = evidenceHash[:12]
 			}
@@ -888,6 +890,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"ModePosture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
 		"AssuranceSummary":  assuranceSummary,
 		"EvidenceHash":      evidenceHash,
+		"EvidenceHashFull":  evidenceHashFull,
 		"EvidenceBoundary":  evidenceBoundary,
 		"CanExportEvidence": canViewAudit,
 		"CanViewAudit":      canViewAudit,
@@ -959,6 +962,7 @@ func (app *App) handleEvidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app.audit(r, "evidence.export", "allowed", session.Subject, "")
+	w.Header().Set("Content-Disposition", `attachment; filename="janus-evidence.json"`)
 	writeJSON(w, http.StatusOK, app.evidencePack(session))
 }
 
@@ -2007,6 +2011,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"json_errors_request_id":    true,
 			"backend_source_paths":      "not_returned",
 			"evidence_export_boundary":  "dashboard_and_json",
+			"evidence_download":         "auditor_json_with_pack_hash",
 			"human_readable_summary":    "dashboard_posture_evidence",
 			"operational_status":        "dashboard_posture_strip",
 			"value_returned":            false,
@@ -2094,6 +2099,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"role_availability_ux",
 			"human_readable_assurance_summary",
 			"operational_status_strip",
+			"evidence_download_receipt",
 		},
 		"value_returned": false,
 	}
@@ -2577,6 +2583,19 @@ func mustTemplates() *template.Template {
       text-transform: uppercase;
     }
     .role-card p { font-size: 13px; line-height: 1.3; }
+    .receipt {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      padding: 12px;
+      min-width: 0;
+    }
+    .receipt strong { display: block; font-size: 16px; line-height: 1.2; }
+    .hash-copy input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 1040px; }
     th, td { padding: 12px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
@@ -2617,6 +2636,7 @@ func mustTemplates() *template.Template {
       .role-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .ops-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .receipt { grid-template-columns: 1fr; }
       .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-step:nth-child(2n) { border-right: 0; }
@@ -2630,6 +2650,7 @@ func mustTemplates() *template.Template {
       .role-matrix { grid-template-columns: 1fr; }
       .ops-strip { grid-template-columns: 1fr; }
       .mode-grid { grid-template-columns: 1fr; }
+      .receipt { grid-template-columns: 1fr; }
       .assurance-flow { grid-template-columns: 1fr; }
       .trust-rail { grid-template-columns: 1fr; }
       .trust-step { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -2853,6 +2874,29 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p><span class="pill ok">{{ .EvidenceBoundary.RedactionModel }}</span> <span class="pill ok">value_returned=false</span> <span class="pill info">audience {{ .EvidenceBoundary.Audience }}</span></p>
+    {{ if .CanExportEvidence }}
+    <div class="receipt" aria-label="Evidence download receipt">
+      <div>
+        <strong>Download evidence</strong>
+        <p>Evidence JSON includes <span class="mono">integrity.pack_hash</span>; values stay withheld.</p>
+      </div>
+      <a class="button primary" href="/api/evidence" download="janus-evidence.json">Download JSON</a>
+    </div>
+    {{ if .EvidenceHashFull }}
+    <label class="hash-copy">Hash preview
+      <input readonly value="{{ .EvidenceHashFull }}" aria-label="Evidence hash preview">
+    </label>
+    <p><span class="pill info">sha256-json-v1</span> <span class="pill ok">copy-safe metadata</span></p>
+    {{ end }}
+    {{ else }}
+    <div class="receipt" aria-label="Evidence download receipt">
+      <div>
+        <strong>Download restricted</strong>
+        <p>Auditor role is required before Janus returns an evidence pack.</p>
+      </div>
+      <span class="pill warn">auditor required</span>
+    </div>
+    {{ end }}
     <div class="mode-grid" aria-label="Evidence export boundary">
       <div class="mode-item {{ if .CanExportEvidence }}ok{{ else }}warn{{ end }}">
         <span>Export role</span>
