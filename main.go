@@ -1864,6 +1864,7 @@ func (app *App) postureBody() map[string]any {
 			"role_duty_matrix",
 			"redacted_public_readiness",
 			"degraded_sensitive_action_guard",
+			"degraded_dashboard_banner",
 		},
 		"value_returned": false,
 	}
@@ -2122,6 +2123,10 @@ func mustTemplates() *template.Template {
       border-radius: 8px;
       background: var(--panel);
       box-shadow: var(--shadow);
+    }
+    .security-state {
+      border-color: color-mix(in srgb, var(--amber) 48%, var(--line));
+      background: color-mix(in srgb, var(--amber) 7%, var(--panel));
     }
     .intro { padding: 22px; display: grid; gap: 16px; align-content: center; min-width: 0; }
     .intro-copy { max-width: 720px; display: grid; gap: 10px; min-width: 0; }
@@ -2441,7 +2446,7 @@ func mustTemplates() *template.Template {
   <div class="status">
     <div class="status-head">
       <h2>Live posture</h2>
-      {{ if .Issues }}<span class="pill warn">{{ len .Issues }} gates</span>{{ else }}<span class="pill ok">ready</span>{{ end }}
+      {{ if not .Ready }}<span class="pill warn">restricted</span>{{ else if .Issues }}<span class="pill warn">{{ len .Issues }} gates</span>{{ else }}<span class="pill ok">ready</span>{{ end }}
     </div>
     <div class="status-body">
       <div class="signal">
@@ -2475,6 +2480,15 @@ func mustTemplates() *template.Template {
     </div>
   </div>
 </section>
+{{ if not .Ready }}
+<section class="panel security-state" style="margin-bottom:16px" id="security-state">
+  <div class="panel-head"><h2>Security state</h2><span class="pill warn">restricted</span></div>
+  <div class="panel-body stack">
+    <p>Sensitive actions are blocked until readiness checks recover.</p>
+    <p><span class="pill warn">ready=false</span> <span class="pill ok">value_returned=false</span></p>
+  </div>
+</section>
+{{ end }}
 {{ if .Issues }}
 <section class="panel" style="margin-bottom:16px" id="gates">
   <div class="panel-head"><h2>Readiness gates</h2><span class="pill warn">action needed</span></div>

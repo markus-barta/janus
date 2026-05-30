@@ -707,6 +707,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"availability"`) || !strings.Contains(body, `"sensitive_actions_require_readiness":true`) || !strings.Contains(body, `"degraded_sensitive_action_guard"`) {
 		t.Fatalf("posture response should include degraded sensitive-action guard: %s", body)
 	}
+	if !strings.Contains(body, `"degraded_dashboard_banner"`) {
+		t.Fatalf("posture response should include degraded dashboard banner capability: %s", body)
+	}
 	if !strings.Contains(body, `"safe_failure_pages":true`) || !strings.Contains(body, `"safe_auth_failure_pages"`) || !strings.Contains(body, `"auth_error_view":"safe_category_request_id"`) {
 		t.Fatalf("posture response should include safe auth failure pages: %s", body)
 	}
@@ -907,6 +910,30 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 	for _, forbidden := range []string{"plaintext", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("dashboard should remain value-free, found %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestDashboardShowsRestrictedStateWhenReadinessDegraded(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	app.permits = nil
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Security state", "restricted", "Sensitive actions are blocked", "ready=false", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("degraded dashboard should render %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"plaintext", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("degraded dashboard leaked %q: %s", forbidden, body)
 		}
 	}
 }
