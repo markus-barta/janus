@@ -3062,7 +3062,12 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 			t.Fatalf("dashboard should render supply-chain posture %q: %s", want, body)
 		}
 	}
-	for _, want := range []string{"Enterprise claim review", "current mode self_hosted", "target mode enterprise", "claim self_hosted_not_enterprise", "presence_only_enterprise_claim_review", "Enterprise claim owner review", "Enterprise claim checklist", "procedure_returned=false", "ticket_url_returned=false", "backend_path_returned=false", "request_body_returned=false", "env_returned=false"} {
+	for _, want := range []string{"Enterprise dry run", "Promotion dry-run witness", "Enterprise dry-run witness", "Promotion path", "Enterprise dry-run evidence flags", "self_hosted now", "enterprise target", "evidence_ref_returned=false", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render enterprise dry-run witness %q: %s", want, body)
+		}
+	}
+	for _, want := range []string{"Enterprise claim review", "Claim review witness", "Enterprise claim witness", "Owner evidence", "Enterprise claim evidence flags", "current mode self_hosted", "target mode enterprise", "claim self_hosted_not_enterprise", "presence_only_enterprise_claim_review", "Enterprise claim owner review", "Enterprise claim checklist", "procedure_returned=false", "ticket_url_returned=false", "backend_path_returned=false", "request_body_returned=false", "env_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render enterprise claim review %q: %s", want, body)
 		}

@@ -4193,7 +4193,35 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .EnterpriseDryRun.Summary }}</p>
-    <p><span class="pill info">{{ .EnterpriseDryRun.CurrentMode }} now</span> <span class="pill warn">{{ .EnterpriseDryRun.TargetMode }} target</span> <span class="pill {{ if .EnterpriseDryRun.Missing }}warn{{ else }}ok{{ end }}">{{ .EnterpriseDryRun.Missing }} blockers</span> <span class="pill info">{{ .EnterpriseDryRun.Required }} required</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <p><span class="pill info">Promotion dry-run witness</span> target path visible, evidence values private</p>
+    <div class="witness-grid" aria-label="Enterprise dry-run witness">
+      <div class="witness-card info">
+        <span>Promotion path</span>
+        <strong>{{ .EnterpriseDryRun.CurrentMode }} to {{ .EnterpriseDryRun.TargetMode }}</strong>
+        <p>Current mode stays explicit before any enterprise claim.</p>
+      </div>
+      <div class="witness-card {{ if .EnterpriseDryRun.Missing }}warn{{ else }}ok{{ end }}">
+        <span>Blockers</span>
+        <strong>{{ .EnterpriseDryRun.Missing }}</strong>
+        <p>{{ .EnterpriseDryRun.Required }} controls required before promotion.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Evidence boundary</span>
+        <strong>values withheld</strong>
+        <p>No external evidence ref or secret value is shown in the dry run.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Enterprise dry-run evidence flags</summary>
+      <div class="flag-cloud" aria-label="Enterprise dry-run value-free evidence flags">
+        <span class="pill info">{{ .EnterpriseDryRun.CurrentMode }} now</span>
+        <span class="pill warn">{{ .EnterpriseDryRun.TargetMode }} target</span>
+        <span class="pill {{ if .EnterpriseDryRun.Missing }}warn{{ else }}ok{{ end }}">{{ .EnterpriseDryRun.Missing }} blockers</span>
+        <span class="pill info">{{ .EnterpriseDryRun.Required }} required</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     <div class="mode-grid" aria-label="Enterprise dry-run checklist">
       {{ range .EnterpriseDryRun.Checks }}
       <div class="mode-item {{ .Tone }}">
@@ -4215,7 +4243,46 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .EnterpriseClaim.Summary }}</p>
-    <p><span class="pill info">current mode {{ .EnterpriseClaim.CurrentMode }}</span> <span class="pill warn">target mode {{ .EnterpriseClaim.TargetMode }}</span> <span class="pill {{ if eq .EnterpriseClaim.Claim "enterprise_candidate" }}ok{{ else }}warn{{ end }}">claim {{ .EnterpriseClaim.Claim }}</span> <span class="pill info">{{ .EnterpriseClaim.Required }} required</span> <span class="pill ok">{{ .EnterpriseClaim.Ready }} ready</span> <span class="pill info">{{ .EnterpriseClaim.Attached }} attached</span> <span class="pill {{ if .EnterpriseClaim.Missing }}warn{{ else }}ok{{ end }}">{{ .EnterpriseClaim.Missing }} missing</span> <span class="pill info">{{ .EnterpriseClaim.ReviewCount }} review</span> <span class="pill info">{{ .EnterpriseClaim.EvidenceSignal }}</span> <span class="pill info">gate {{ .EnterpriseClaim.EvidenceGate }}</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">procedure_returned=false</span> <span class="pill ok">ticket_url_returned=false</span> <span class="pill ok">backend_path_returned=false</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">env_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <p><span class="pill info">Claim review witness</span> owner readiness visible, evidence values private</p>
+    <div class="witness-grid" aria-label="Enterprise claim witness">
+      <div class="witness-card {{ if eq .EnterpriseClaim.Claim "enterprise_candidate" }}ok{{ else }}warn{{ end }}">
+        <span>Claim</span>
+        <strong>{{ .EnterpriseClaim.Claim }}</strong>
+        <p>{{ .EnterpriseClaim.CurrentMode }} now; {{ .EnterpriseClaim.TargetMode }} target.</p>
+      </div>
+      <div class="witness-card {{ if .EnterpriseClaim.Missing }}warn{{ else }}ok{{ end }}">
+        <span>Owner evidence</span>
+        <strong>{{ .EnterpriseClaim.Ready }} ready</strong>
+        <p>{{ .EnterpriseClaim.Attached }} attached, {{ .EnterpriseClaim.Missing }} missing, {{ .EnterpriseClaim.ReviewCount }} review.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Evidence boundary</span>
+        <strong>values withheld</strong>
+        <p>No evidence ref, procedure, ticket URL, backend path, request body, env, or secret value is shown.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Enterprise claim evidence flags</summary>
+      <div class="flag-cloud" aria-label="Enterprise claim value-free evidence flags">
+        <span class="pill info">current mode {{ .EnterpriseClaim.CurrentMode }}</span>
+        <span class="pill warn">target mode {{ .EnterpriseClaim.TargetMode }}</span>
+        <span class="pill {{ if eq .EnterpriseClaim.Claim "enterprise_candidate" }}ok{{ else }}warn{{ end }}">claim {{ .EnterpriseClaim.Claim }}</span>
+        <span class="pill info">{{ .EnterpriseClaim.Required }} required</span>
+        <span class="pill ok">{{ .EnterpriseClaim.Ready }} ready</span>
+        <span class="pill info">{{ .EnterpriseClaim.Attached }} attached</span>
+        <span class="pill {{ if .EnterpriseClaim.Missing }}warn{{ else }}ok{{ end }}">{{ .EnterpriseClaim.Missing }} missing</span>
+        <span class="pill info">{{ .EnterpriseClaim.ReviewCount }} review</span>
+        <span class="pill info">{{ .EnterpriseClaim.EvidenceSignal }}</span>
+        <span class="pill info">gate {{ .EnterpriseClaim.EvidenceGate }}</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill ok">procedure_returned=false</span>
+        <span class="pill ok">ticket_url_returned=false</span>
+        <span class="pill ok">backend_path_returned=false</span>
+        <span class="pill ok">request_body_returned=false</span>
+        <span class="pill ok">env_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     <p><span class="pill info">review cadence</span> {{ .EnterpriseClaim.ReviewCadence }}</p>
     <div class="mode-grid" aria-label="Enterprise claim owner review">
       {{ range .EnterpriseClaim.Owners }}
