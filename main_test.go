@@ -215,7 +215,15 @@ func TestConfigUsesHostPrefixedNonceCookieForHTTPS(t *testing.T) {
 	}
 }
 
-func TestLoginRedirectBindsOIDCStateAndNonce(t *testing.T) {
+func TestConfigUsesHostPrefixedPKCECookieForHTTPS(t *testing.T) {
+	app := newTestApp(t)
+
+	if app.cfg.PKCECookieName() != hostPKCECookie {
+		t.Fatalf("secure deployments should use host-prefixed PKCE cookie, got %s", app.cfg.PKCECookieName())
+	}
+}
+
+func TestLoginRedirectBindsOIDCStateNonceAndPKCE(t *testing.T) {
 	app := newTestApp(t)
 	app.oauth = &oauth2.Config{
 		ClientID:    "client",
@@ -235,12 +243,13 @@ func TestLoginRedirectBindsOIDCStateAndNonce(t *testing.T) {
 	}
 
 	cookies := out.Result().Cookies()
-	if len(cookies) != 2 {
-		t.Fatalf("expected state and nonce cookies, got %#v", cookies)
+	if len(cookies) != 3 {
+		t.Fatalf("expected state, nonce, and PKCE cookies, got %#v", cookies)
 	}
 	state := cookieByName(t, cookies, hostStateCookie)
 	nonce := cookieByName(t, cookies, hostNonceCookie)
-	for _, cookie := range []*http.Cookie{state, nonce} {
+	pkce := cookieByName(t, cookies, hostPKCECookie)
+	for _, cookie := range []*http.Cookie{state, nonce, pkce} {
 		if cookie.Value == "" || !cookie.Secure || !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.MaxAge != 300 {
 			t.Fatalf("OIDC cookie should be short-lived, secure, httponly, lax: %#v", cookie)
 		}
@@ -255,6 +264,15 @@ func TestLoginRedirectBindsOIDCStateAndNonce(t *testing.T) {
 	}
 	if got := redirectURL.Query().Get("nonce"); got != nonce.Value {
 		t.Fatalf("redirect nonce should match nonce cookie, got %q want %q", got, nonce.Value)
+	}
+	if got := redirectURL.Query().Get("code_challenge_method"); got != "S256" {
+		t.Fatalf("redirect should request S256 PKCE challenge, got %q", got)
+	}
+	if got := redirectURL.Query().Get("code_challenge"); got == "" || got == pkce.Value {
+		t.Fatalf("redirect should include derived PKCE challenge, got %q verifier %q", got, pkce.Value)
+	}
+	if got := redirectURL.Query().Get("code_verifier"); got != "" {
+		t.Fatalf("redirect must not leak PKCE verifier, got %q", got)
 	}
 }
 
@@ -388,8 +406,8 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"request_correlation"`) || !strings.Contains(body, `"request_correlation_ids"`) {
 		t.Fatalf("posture response should include request correlation: %s", body)
 	}
-	if !strings.Contains(body, `"auth"`) || !strings.Contains(body, `"oidc_nonce_bound_login"`) {
-		t.Fatalf("posture response should include nonce-bound OIDC login: %s", body)
+	if !strings.Contains(body, `"auth"`) || !strings.Contains(body, `"oidc_nonce_bound_login"`) || !strings.Contains(body, `"pkce_s256_auth_code"`) {
+		t.Fatalf("posture response should include hardened OIDC login controls: %s", body)
 	}
 }
 

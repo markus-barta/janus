@@ -31,6 +31,8 @@ const (
 	hostStateCookie   = "__Host-janus_oidc_state"
 	nonceCookie       = "janus_oidc_nonce"
 	hostNonceCookie   = "__Host-janus_oidc_nonce"
+	pkceCookie        = "janus_oidc_pkce"
+	hostPKCECookie    = "__Host-janus_oidc_pkce"
 )
 
 type Config struct {
@@ -76,6 +78,13 @@ func (c Config) NonceCookieName() string {
 		return hostNonceCookie
 	}
 	return nonceCookie
+}
+
+func (c Config) PKCECookieName() string {
+	if c.SecureCookies() {
+		return hostPKCECookie
+	}
+	return pkceCookie
 }
 
 type SecretDescriptor struct {
@@ -895,6 +904,7 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	state := randomToken(32)
 	nonce := randomToken(32)
+	verifier := oauth2.GenerateVerifier()
 	http.SetCookie(w, &http.Cookie{
 		Name:     app.cfg.StateCookieName(),
 		Value:    state,
@@ -913,8 +923,17 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   300,
 	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     app.cfg.PKCECookieName(),
+		Value:    verifier,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   app.cfg.SecureCookies(),
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   300,
+	})
 	app.audit(r, "auth.login.start", "allowed", "", "")
-	http.Redirect(w, r, app.oauth.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce)), http.StatusFound)
+	http.Redirect(w, r, app.oauth.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce), oauth2.S256ChallengeOption(verifier)), http.StatusFound)
 }
 
 func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
@@ -937,8 +956,15 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid login nonce", http.StatusBadRequest)
 		return
 	}
+	pkce, err := firstCookie(r, app.cfg.PKCECookieName(), pkceCookie)
+	if err != nil || pkce.Value == "" {
+		app.clearOIDCLoginCookies(w)
+		app.audit(r, "auth.login.callback", "denied", "", "missing pkce verifier")
+		http.Error(w, "invalid login verifier", http.StatusBadRequest)
+		return
+	}
 
-	token, err := app.oauth.Exchange(r.Context(), r.URL.Query().Get("code"))
+	token, err := app.oauth.Exchange(r.Context(), r.URL.Query().Get("code"), oauth2.VerifierOption(pkce.Value))
 	if err != nil {
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "code exchange failed")
@@ -1110,6 +1136,10 @@ func (app *App) clearOIDCLoginCookies(w http.ResponseWriter) {
 	app.clearCookie(w, app.cfg.NonceCookieName())
 	if app.cfg.NonceCookieName() != nonceCookie {
 		app.clearCookie(w, nonceCookie)
+	}
+	app.clearCookie(w, app.cfg.PKCECookieName())
+	if app.cfg.PKCECookieName() != pkceCookie {
+		app.clearCookie(w, pkceCookie)
 	}
 }
 
@@ -1372,10 +1402,11 @@ func (app *App) postureBody() map[string]any {
 		"permits":            app.permits.Posture(),
 		"auth": map[string]any{
 			"oidc_nonce":     app.cfg.OIDCConfigured(),
+			"pkce_s256":      app.cfg.OIDCConfigured(),
 			"value_returned": false,
 		},
 		"cookies": map[string]any{
-			"host_prefixed":  app.cfg.SessionCookieName() == hostSessionCookie && app.cfg.StateCookieName() == hostStateCookie && app.cfg.NonceCookieName() == hostNonceCookie,
+			"host_prefixed":  app.cfg.SessionCookieName() == hostSessionCookie && app.cfg.StateCookieName() == hostStateCookie && app.cfg.NonceCookieName() == hostNonceCookie && app.cfg.PKCECookieName() == hostPKCECookie,
 			"secure":         app.cfg.SecureCookies(),
 			"value_returned": false,
 		},
@@ -1400,6 +1431,7 @@ func (app *App) postureBody() map[string]any {
 			"host_prefixed_cookies",
 			"request_correlation_ids",
 			"oidc_nonce_bound_login",
+			"pkce_s256_auth_code",
 		},
 		"value_returned": false,
 	}
