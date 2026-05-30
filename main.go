@@ -519,18 +519,52 @@ func (app *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (app *App) handleReady(w http.ResponseWriter, _ *http.Request) {
-	ready := !app.cfg.RequireAuth || app.cfg.OIDCConfigured()
+	body, ready := app.readinessBody()
 	status := http.StatusOK
 	if !ready {
 		status = http.StatusServiceUnavailable
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ready":           ready,
-		"auth_required":   app.cfg.RequireAuth,
-		"oidc_configured": app.cfg.OIDCConfigured(),
-	})
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func (app *App) readinessBody() (map[string]any, bool) {
+	authReady := !app.cfg.RequireAuth || app.cfg.OIDCConfigured()
+	descriptorReady := app.store != nil
+	descriptorCount := 0
+	auditSinkReady := false
+	auditChainReady := false
+	permitStoreReady := false
+
+	if app.store != nil {
+		descriptorCount = len(app.store.Descriptors())
+		audit := app.store.AuditPosture()
+		auditSinkReady = audit.SinkWritable
+		auditChainReady = audit.ChainVerified
+	}
+	if app.permits != nil {
+		permitStoreReady = app.permits.Posture().Persisted
+	}
+
+	checks := map[string]bool{
+		"auth":             authReady,
+		"descriptor_store": descriptorReady,
+		"audit_sink":       auditSinkReady,
+		"audit_chain":      auditChainReady,
+		"permit_store":     permitStoreReady,
+		"value_returned":   false,
+	}
+	ready := authReady && descriptorReady && auditSinkReady && auditChainReady && permitStoreReady
+	return map[string]any{
+		"ready":            ready,
+		"service":          "janus",
+		"checks":           checks,
+		"auth_required":    app.cfg.RequireAuth,
+		"oidc_configured":  app.cfg.OIDCConfigured(),
+		"descriptor_count": descriptorCount,
+		"value_returned":   false,
+	}, ready
 }
 
 func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -1441,6 +1475,10 @@ func (app *App) postureBody() map[string]any {
 			"auth_denials_json": true,
 			"value_returned":    false,
 		},
+		"readiness": func() any {
+			body, _ := app.readinessBody()
+			return body
+		}(),
 		"audit": app.store.AuditPosture(),
 		"capabilities": []string{
 			"value_free_metadata_catalog",
@@ -1459,6 +1497,7 @@ func (app *App) postureBody() map[string]any {
 			"pkce_s256_auth_code",
 			"no_store_responses",
 			"api_json_auth_errors",
+			"value_free_readiness",
 		},
 		"value_returned": false,
 	}
