@@ -5738,12 +5738,49 @@ func mustTemplates() *template.Template {
       {{ if .Lifecycle.Gates }}<span class="pill warn">{{ .Lifecycle.GateCount }} gates</span>{{ else }}<span class="pill ok">normal use clear</span>{{ end }}
     </div>
     <div class="panel-body stack">
+      <div class="witness-grid" aria-label="Lifecycle posture witness">
+        <div class="witness-card {{ if .Lifecycle.Gates }}warn{{ else }}ok{{ end }}">
+          <span>Normal-use gate</span>
+          <strong>{{ if .Lifecycle.Gates }}review{{ else }}clear{{ end }}</strong>
+          <p>Only active or rotating descriptors with an approved profile can move into normal metadata use.</p>
+        </div>
+        <div class="witness-card {{ if .Lifecycle.BlockedCount }}warn{{ else }}ok{{ end }}">
+          <span>Blocked lifecycle</span>
+          <strong>{{ .Lifecycle.BlockedCount }} blocked</strong>
+          <p>Draft, deprecated, disabled, pending-delete, destroyed, or unknown states fail closed.</p>
+        </div>
+        <div class="witness-card {{ if .Lifecycle.StaleCount }}warn{{ else }}ok{{ end }}">
+          <span>Freshness review</span>
+          <strong>{{ .Lifecycle.StaleCount }} stale</strong>
+          <p>Missing or old freshness timestamps stay visible before stronger lifecycle claims.</p>
+        </div>
+        <div class="witness-card ok">
+          <span>Value boundary</span>
+          <strong>metadata only</strong>
+          <p>Lifecycle evidence uses state, counts, safe refs, and reasons; secret values stay outside Janus.</p>
+        </div>
+      </div>
       <p>{{ range .Lifecycle.StateCounts }}<span class="pill info">{{ .State }} {{ .Count }}</span> {{ end }}</p>
       <div class="facts">
         <div class="fact"><strong>{{ .Lifecycle.ActiveCount }}</strong><span class="muted">active</span></div>
         <div class="fact"><strong>{{ .Lifecycle.BlockedCount }}</strong><span class="muted">blocked</span></div>
         <div class="fact"><strong>{{ .Lifecycle.StaleCount }}</strong><span class="muted">stale</span></div>
       </div>
+      <details class="evidence-flags">
+        <summary>Lifecycle posture evidence flags</summary>
+        <div class="flag-cloud" aria-label="Lifecycle value-free evidence flags">
+          <span class="pill ok">supported_states={{ len .Lifecycle.SupportedStates }}</span>
+          <span class="pill ok">active_count={{ .Lifecycle.ActiveCount }}</span>
+          <span class="pill {{ if .Lifecycle.BlockedCount }}warn{{ else }}ok{{ end }}">blocked_count={{ .Lifecycle.BlockedCount }}</span>
+          <span class="pill {{ if .Lifecycle.StaleCount }}warn{{ else }}ok{{ end }}">stale_count={{ .Lifecycle.StaleCount }}</span>
+          <span class="pill {{ if .Lifecycle.Gates }}warn{{ else }}ok{{ end }}">gate_count={{ .Lifecycle.GateCount }}</span>
+          <span class="pill ok">normal_use_fail_closed=true</span>
+          <span class="pill ok">secret_value_returned=false</span>
+          <span class="pill ok">backend_path_returned=false</span>
+          <span class="pill ok">request_body_returned=false</span>
+          <span class="pill ok">value_returned=false</span>
+        </div>
+      </details>
       {{ range .Lifecycle.Gates }}<p class="warn">{{ .SecretRef }}: {{ .Message }}</p>{{ end }}
     </div>
   </div>
