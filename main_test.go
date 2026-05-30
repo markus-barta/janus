@@ -725,6 +725,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"mode_posture"`) || !strings.Contains(body, `"current":"Self-hosted"`) || !strings.Contains(body, `"enterprise":"not_claimed"`) || !strings.Contains(body, `"mode_posture_evidence"`) {
 		t.Fatalf("posture response should include product-mode evidence: %s", body)
 	}
+	if !strings.Contains(body, `"enterprise_validation"`) || !strings.Contains(body, `"status":"not_claimed"`) || !strings.Contains(body, `"key":"remote_audit"`) || !strings.Contains(body, `"enterprise_validation_clarity"`) || !strings.Contains(body, `"enterprise_validation":"self_hosted_safe_enterprise_required"`) {
+		t.Fatalf("posture response should include enterprise validation clarity: %s", body)
+	}
 	if !strings.Contains(body, `"response_hardening"`) || !strings.Contains(body, `"no_store_responses"`) {
 		t.Fatalf("posture response should include response hardening: %s", body)
 	}
@@ -821,6 +824,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"assurance_gates"`) || !strings.Contains(body, `"key":"value_leak_sentinel"`) {
 		t.Fatalf("evidence response should include assurance gates: %s", body)
+	}
+	if !strings.Contains(body, `"enterprise_validation"`) || !strings.Contains(body, `"key":"privacy_policy"`) {
+		t.Fatalf("evidence response should include enterprise validation: %s", body)
 	}
 	if !strings.Contains(body, `"scope_posture"`) {
 		t.Fatalf("evidence response should include scope posture: %s", body)
@@ -1009,6 +1015,55 @@ func TestProductModePostureDistinguishesClaims(t *testing.T) {
 	}
 }
 
+func TestEnterpriseValidationDistinguishesClaims(t *testing.T) {
+	policy := RolePolicy{
+		AdminSubjects:    map[string]bool{"markus@barta.com": true},
+		AuditorSubjects:  map[string]bool{"markus@barta.com": true},
+		OperatorSubjects: map[string]bool{"markus@barta.com": true},
+		BootstrapOwner:   false,
+	}
+	access := AccessPostureFor(policy)
+	audit := AuditPosture{ChainVerified: true, SinkWritable: true}
+
+	selfHosted := EnterpriseValidationFor(Config{ProductMode: "self_hosted", RolePolicy: policy}, true, access, audit, 0)
+	if selfHosted.Status != "not_claimed" || selfHosted.MissingCount != 0 || selfHosted.ValueReturned {
+		t.Fatalf("self-hosted validation should not claim enterprise evidence: %#v", selfHosted)
+	}
+	if !enterpriseControlHasState(selfHosted.Controls, "remote_audit", "not_claimed") {
+		t.Fatalf("self-hosted validation should list enterprise requirements as not claimed: %#v", selfHosted)
+	}
+
+	t.Run("enterprise missing external controls", func(t *testing.T) {
+		for _, spec := range enterpriseValidationSpecs() {
+			t.Setenv(spec.EnvKey, "")
+		}
+		validation := EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, access, audit, 0)
+		if validation.Status != "blocked" || validation.MissingCount != len(enterpriseValidationSpecs()) {
+			t.Fatalf("enterprise validation should be blocked when external controls are missing: %#v", validation)
+		}
+		for _, spec := range enterpriseValidationSpecs() {
+			if !enterpriseControlHasState(validation.Controls, spec.Key, "missing") {
+				t.Fatalf("enterprise validation should mark %s missing: %#v", spec.Key, validation)
+			}
+		}
+	})
+
+	t.Run("enterprise attached controls become candidate", func(t *testing.T) {
+		for _, spec := range enterpriseValidationSpecs() {
+			t.Setenv(spec.EnvKey, "attached")
+		}
+		validation := EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, access, audit, 0)
+		if validation.Status != "candidate" || validation.MissingCount != 0 {
+			t.Fatalf("enterprise validation should become candidate when external controls are attached: %#v", validation)
+		}
+		for _, spec := range enterpriseValidationSpecs() {
+			if !enterpriseControlHasState(validation.Controls, spec.Key, "attached") {
+				t.Fatalf("enterprise validation should mark %s attached: %#v", spec.Key, validation)
+			}
+		}
+	})
+}
+
 func TestAssuranceSummaryDistinguishesProofAndReview(t *testing.T) {
 	access := AccessPosture{ExplicitBindings: true}
 	audit := AuditPosture{ChainVerified: true}
@@ -1072,6 +1127,24 @@ func catalogGateHasCode(items []CatalogGate, code string) bool {
 	return false
 }
 
+func enterpriseControlHasState(items []EnterpriseValidationControl, key, state string) bool {
+	for _, item := range items {
+		if item.Key == key && item.State == state {
+			return true
+		}
+	}
+	return false
+}
+
+func issueContains(items []string, want string) bool {
+	for _, item := range items {
+		if strings.Contains(item, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDockerComposePinsExplicitJanusRoleBindings(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "docker-compose.yml"))
 	if err != nil {
@@ -1104,7 +1177,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "not_claimed", "Evidence export", "Download evidence", "integrity.pack_hash", "Download JSON", "Hash preview", "copy-safe metadata", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "not_claimed", "Evidence export", "Download evidence", "integrity.pack_hash", "Download JSON", "Hash preview", "copy-safe metadata", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
@@ -2359,6 +2432,9 @@ func TestSetupPageRendersWhenAuthMissing(t *testing.T) {
 }
 
 func TestEnterpriseChecksRequireAuditControls(t *testing.T) {
+	for _, spec := range enterpriseValidationSpecs() {
+		t.Setenv(spec.EnvKey, "")
+	}
 	issues := enterpriseChecks(Config{
 		ProductMode:  "enterprise",
 		RequireAuth:  true,
@@ -2367,7 +2443,12 @@ func TestEnterpriseChecksRequireAuditControls(t *testing.T) {
 		OIDCSecret:   "secret",
 		CookieKey:    []byte("0123456789abcdef0123456789abcdef"),
 	})
-	if len(issues) != 3 {
-		t.Fatalf("expected three enterprise gates, got %d: %#v", len(issues), issues)
+	if len(issues) != 7 {
+		t.Fatalf("expected seven enterprise gates, got %d: %#v", len(issues), issues)
+	}
+	for _, want := range []string{"remote audit", "break-glass", "restore drill", "integration conformance", "release provenance", "privacy and retention", "Explicit Janus role bindings"} {
+		if !issueContains(issues, want) {
+			t.Fatalf("enterprise gates should include %q: %#v", want, issues)
+		}
 	}
 }

@@ -865,6 +865,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	evidenceBoundary := EvidenceBoundaryFor(canViewAudit, evidenceHash != "")
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
+	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
 	roleAvailability := RoleAvailabilityFor(session)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	data := map[string]any{
@@ -889,6 +890,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Lifecycle":         lifecyclePosture,
 		"ApprovedUse":       approvedUsePosture,
 		"ModePosture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"Enterprise":        enterpriseValidation,
 		"AssuranceSummary":  assuranceSummary,
 		"AssuranceGates":    assuranceGates,
 		"EvidenceHash":      evidenceHash,
@@ -1775,6 +1777,16 @@ func enterpriseChecks(cfg Config) []string {
 	if cfg.ProductMode == "enterprise" && os.Getenv("JANUS_BREAK_GLASS_REVIEW") == "" {
 		issues = append(issues, "Enterprise mode needs a documented break-glass review owner.")
 	}
+	if cfg.ProductMode == "enterprise" {
+		for _, spec := range enterpriseValidationSpecs() {
+			if spec.EnvKey == "JANUS_REMOTE_AUDIT" || spec.EnvKey == "JANUS_BREAK_GLASS_REVIEW" {
+				continue
+			}
+			if os.Getenv(spec.EnvKey) == "" {
+				issues = append(issues, spec.Missing)
+			}
+		}
+	}
 	if !cfg.RolePolicy.Configured() {
 		message := "Explicit Janus role bindings are not configured."
 		if cfg.RolePolicy.BootstrapOwner {
@@ -1783,6 +1795,124 @@ func enterpriseChecks(cfg Config) []string {
 		issues = append(issues, message)
 	}
 	return issues
+}
+
+type enterpriseValidationSpec struct {
+	Key     string
+	Label   string
+	EnvKey  string
+	Missing string
+	Detail  string
+}
+
+func enterpriseValidationSpecs() []enterpriseValidationSpec {
+	return []enterpriseValidationSpec{
+		{
+			Key:     "remote_audit",
+			Label:   "Remote audit",
+			EnvKey:  "JANUS_REMOTE_AUDIT",
+			Missing: "Enterprise mode needs remote audit shipping before production use.",
+			Detail:  "Audit evidence must leave the host and be reviewed outside Janus.",
+		},
+		{
+			Key:     "break_glass_review",
+			Label:   "Break-glass review",
+			EnvKey:  "JANUS_BREAK_GLASS_REVIEW",
+			Missing: "Enterprise mode needs a documented break-glass review owner.",
+			Detail:  "Emergency access needs a named review path and owner.",
+		},
+		{
+			Key:     "restore_drill",
+			Label:   "Restore drill",
+			EnvKey:  "JANUS_RESTORE_DRILL",
+			Missing: "Enterprise mode needs a recent restore drill record.",
+			Detail:  "Recovery evidence must prove metadata, audit, scope, and policy survive restore.",
+		},
+		{
+			Key:     "integration_conformance",
+			Label:   "Integration conformance",
+			EnvKey:  "JANUS_INTEGRATION_CONFORMANCE",
+			Missing: "Enterprise mode needs integration conformance evidence.",
+			Detail:  "Identity, audit, ticketing, SIEM, and custody integrations need reviewed conformance.",
+		},
+		{
+			Key:     "release_provenance",
+			Label:   "Release provenance",
+			EnvKey:  "JANUS_RELEASE_PROVENANCE",
+			Missing: "Enterprise mode needs trusted release provenance.",
+			Detail:  "Operators need provenance, channel, and build evidence before stronger claims.",
+		},
+		{
+			Key:     "privacy_policy",
+			Label:   "Privacy policy",
+			EnvKey:  "JANUS_PRIVACY_POLICY",
+			Missing: "Enterprise mode needs privacy and retention policy evidence.",
+			Detail:  "Evidence exports, audit, retention, and raw metadata access need a reviewed policy.",
+		},
+	}
+}
+
+func EnterpriseValidationFor(cfg Config, ready bool, access AccessPosture, audit AuditPosture, catalogGateCount int) EnterpriseValidation {
+	mode := strings.TrimSpace(cfg.ProductMode)
+	if mode == "" {
+		mode = "self_hosted"
+	}
+	validation := EnterpriseValidation{
+		Mode:          mode,
+		Status:        "not_claimed",
+		Summary:       "Self-hosted mode can be ready without claiming enterprise evidence.",
+		ValueReturned: false,
+	}
+
+	enterpriseMode := mode == "enterprise"
+	if enterpriseMode {
+		validation.Status = "blocked"
+		validation.Summary = "Enterprise mode is blocked until every required external control has evidence."
+	}
+
+	validation.Controls = append(validation.Controls, EnterpriseValidationControl{
+		Key:      "self_hosted_baseline",
+		Label:    "Self-hosted baseline",
+		State:    "ready",
+		Required: true,
+		Detail:   "Redacted readiness, explicit roles, catalog gates, and local audit must be clear.",
+		Tone:     "ok",
+	})
+	if !ready || !access.ExplicitBindings || !audit.ChainVerified || catalogGateCount > 0 {
+		validation.Controls[0].State = "review"
+		validation.Controls[0].Tone = "warn"
+		if enterpriseMode {
+			validation.MissingCount++
+		}
+	}
+
+	for _, spec := range enterpriseValidationSpecs() {
+		control := EnterpriseValidationControl{
+			Key:      spec.Key,
+			Label:    spec.Label,
+			State:    "not_claimed",
+			Required: enterpriseMode,
+			Detail:   spec.Detail,
+			Tone:     "info",
+		}
+		if enterpriseMode {
+			control.State = "missing"
+			control.Tone = "warn"
+			if os.Getenv(spec.EnvKey) != "" {
+				control.State = "attached"
+				control.Tone = "ok"
+			} else {
+				validation.MissingCount++
+			}
+		}
+		validation.Controls = append(validation.Controls, control)
+	}
+
+	if enterpriseMode && validation.MissingCount == 0 {
+		validation.Status = "candidate"
+		validation.Summary = "Enterprise controls are attached; keep external review evidence before relying on this claim."
+	}
+	return validation
 }
 
 func ProductModePostureFor(cfg Config, ready bool, issues []string, access AccessPosture, audit AuditPosture, catalogGateCount int) ProductModePosture {
@@ -1951,6 +2081,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	evidenceBoundary := EvidenceBoundaryFor(true, true)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
+	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
 	roleAvailability := RoleAvailabilityFor(session)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	return map[string]any{
@@ -1969,14 +2100,15 @@ func (app *App) postureBody(session Session) map[string]any {
 			"duties":          []string{"posture", "use_actions", "audit_export", "admin_policy"},
 			"value_returned":  false,
 		},
-		"scope":              scopePosture,
-		"lifecycle":          lifecyclePosture,
-		"approved_use":       approvedUsePosture,
-		"permits":            permitPosture,
-		"mode_posture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
-		"assurance_summary":  assuranceSummary,
-		"assurance_gates":    assuranceGates,
-		"operational_status": operationalStatus,
+		"scope":                 scopePosture,
+		"lifecycle":             lifecyclePosture,
+		"approved_use":          approvedUsePosture,
+		"permits":               permitPosture,
+		"mode_posture":          ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"enterprise_validation": enterpriseValidation,
+		"assurance_summary":     assuranceSummary,
+		"assurance_gates":       assuranceGates,
+		"operational_status":    operationalStatus,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
 			"pkce_s256":                   app.cfg.OIDCConfigured(),
@@ -2016,6 +2148,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"backend_source_paths":      "not_returned",
 			"evidence_export_boundary":  "dashboard_and_json",
 			"evidence_download":         "auditor_json_with_pack_hash",
+			"enterprise_validation":     "self_hosted_safe_enterprise_required",
 			"human_readable_summary":    "dashboard_posture_evidence",
 			"assurance_gate_proofs":     "role_catalog_degraded_value_leak",
 			"operational_status":        "dashboard_posture_strip",
@@ -2106,6 +2239,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"operational_status_strip",
 			"evidence_download_receipt",
 			"assurance_gate_proof_strip",
+			"enterprise_validation_clarity",
 		},
 		"value_returned": false,
 	}
@@ -2131,6 +2265,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	evidenceBoundary := EvidenceBoundaryFor(true, true)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
+	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, RoleAvailabilityFor(session))
 	pack := EvidencePack{
 		GeneratedAt:      time.Now().UTC(),
@@ -2140,6 +2275,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Operational:      operationalStatus,
 		AssuranceGates:   assuranceGates,
 		AssuranceSummary: assuranceSummary,
+		Enterprise:       enterpriseValidation,
 		Descriptors:      descriptors,
 		CatalogGates:     catalogGates,
 		ScopePosture:     scopePosture,
@@ -2885,6 +3021,25 @@ func mustTemplates() *template.Template {
     <p><span class="pill ok">value_returned=false</span> <span class="pill {{ if eq .ModePosture.Enterprise "candidate" }}ok{{ else }}warn{{ end }}">enterprise {{ .ModePosture.Enterprise }}</span></p>
     <div class="mode-grid" aria-label="Deployment mode posture">
       {{ range .ModePosture.Controls }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+      </div>
+      {{ end }}
+    </div>
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="enterprise-validation">
+  <div class="panel-head">
+    <h2>Enterprise validation</h2>
+    <span class="pill {{ if eq .Enterprise.Status "candidate" }}ok{{ else if eq .Enterprise.Status "not_claimed" }}info{{ else }}warn{{ end }}">{{ .Enterprise.Status }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .Enterprise.Summary }}</p>
+    <p><span class="pill ok">value_returned=false</span> <span class="pill info">self-hosted safe</span> <span class="pill warn">enterprise required</span></p>
+    <div class="mode-grid" aria-label="Enterprise validation controls">
+      {{ range .Enterprise.Controls }}
       <div class="mode-item {{ .Tone }}">
         <span>{{ .Label }}</span>
         <strong>{{ .State }}</strong>

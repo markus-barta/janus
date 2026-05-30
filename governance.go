@@ -24,25 +24,26 @@ type ApprovedUsePosture struct {
 }
 
 type EvidencePack struct {
-	GeneratedAt      time.Time          `json:"generated_at"`
-	Service          string             `json:"service"`
-	Mode             string             `json:"mode"`
-	Posture          map[string]any     `json:"posture"`
-	Operational      OperationalStatus  `json:"operational_status"`
-	AssuranceGates   AssuranceGates     `json:"assurance_gates"`
-	AssuranceSummary AssuranceSummary   `json:"assurance_summary"`
-	EvidenceBoundary EvidenceBoundary   `json:"evidence_boundary"`
-	Descriptors      []SecretDescriptor `json:"descriptors"`
-	CatalogGates     []CatalogGate      `json:"catalog_gates"`
-	ScopePosture     ScopePosture       `json:"scope_posture"`
-	LifecyclePosture LifecyclePosture   `json:"lifecycle_posture"`
-	PermitPosture    PermitPosture      `json:"permit_posture"`
-	AccessPosture    AccessPosture      `json:"access_posture"`
-	AuditPosture     AuditPosture       `json:"audit_posture"`
-	RecentAudit      []AuditEntry       `json:"recent_audit"`
-	Integrity        *EvidenceIntegrity `json:"integrity,omitempty"`
-	ValueReturned    bool               `json:"value_returned"`
-	RedactionModel   string             `json:"redaction_model"`
+	GeneratedAt      time.Time            `json:"generated_at"`
+	Service          string               `json:"service"`
+	Mode             string               `json:"mode"`
+	Posture          map[string]any       `json:"posture"`
+	Operational      OperationalStatus    `json:"operational_status"`
+	AssuranceGates   AssuranceGates       `json:"assurance_gates"`
+	AssuranceSummary AssuranceSummary     `json:"assurance_summary"`
+	Enterprise       EnterpriseValidation `json:"enterprise_validation"`
+	EvidenceBoundary EvidenceBoundary     `json:"evidence_boundary"`
+	Descriptors      []SecretDescriptor   `json:"descriptors"`
+	CatalogGates     []CatalogGate        `json:"catalog_gates"`
+	ScopePosture     ScopePosture         `json:"scope_posture"`
+	LifecyclePosture LifecyclePosture     `json:"lifecycle_posture"`
+	PermitPosture    PermitPosture        `json:"permit_posture"`
+	AccessPosture    AccessPosture        `json:"access_posture"`
+	AuditPosture     AuditPosture         `json:"audit_posture"`
+	RecentAudit      []AuditEntry         `json:"recent_audit"`
+	Integrity        *EvidenceIntegrity   `json:"integrity,omitempty"`
+	ValueReturned    bool                 `json:"value_returned"`
+	RedactionModel   string               `json:"redaction_model"`
 }
 
 type EvidenceBoundary struct {
@@ -99,6 +100,24 @@ type AssuranceGateItem struct {
 	State  string `json:"state"`
 	Detail string `json:"detail"`
 	Tone   string `json:"tone"`
+}
+
+type EnterpriseValidation struct {
+	Mode          string                        `json:"mode"`
+	Status        string                        `json:"status"`
+	Summary       string                        `json:"summary"`
+	MissingCount  int                           `json:"missing_count"`
+	Controls      []EnterpriseValidationControl `json:"controls"`
+	ValueReturned bool                          `json:"value_returned"`
+}
+
+type EnterpriseValidationControl struct {
+	Key      string `json:"key"`
+	Label    string `json:"label"`
+	State    string `json:"state"`
+	Required bool   `json:"required"`
+	Detail   string `json:"detail"`
+	Tone     string `json:"tone"`
 }
 
 func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
