@@ -237,13 +237,18 @@ type Session struct {
 }
 
 type UIActionResult struct {
-	Title         string `json:"title"`
-	Outcome       string `json:"outcome"`
-	Message       string `json:"message"`
-	HandleID      string `json:"handle_id,omitempty"`
-	SecretRef     string `json:"secret_ref,omitempty"`
-	ExpiresAt     string `json:"expires_at,omitempty"`
-	ValueReturned bool   `json:"value_returned"`
+	Title          string `json:"title"`
+	Outcome        string `json:"outcome"`
+	Message        string `json:"message"`
+	HandleID       string `json:"handle_id,omitempty"`
+	PermitID       string `json:"permit_id,omitempty"`
+	SecretRef      string `json:"secret_ref,omitempty"`
+	Action         string `json:"action,omitempty"`
+	Status         string `json:"status,omitempty"`
+	ExpiresAt      string `json:"expires_at,omitempty"`
+	RunReason      string `json:"run_reason,omitempty"`
+	OutputScrubbed bool   `json:"output_scrubbed,omitempty"`
+	ValueReturned  bool   `json:"value_returned"`
 }
 
 func main() {
@@ -351,6 +356,8 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /api/permits", app.withAuth(app.handleCreatePermit))
 	mux.HandleFunc("POST /api/permits/{permitID}/run", app.withAuth(app.handleRunPermit))
 	mux.HandleFunc("POST /ui/warden/resolve", app.withAuth(app.handleResolveHandleUI))
+	mux.HandleFunc("POST /ui/permits", app.withAuth(app.handleCreatePermitUI))
+	mux.HandleFunc("POST /ui/permits/{permitID}/run", app.withAuth(app.handleRunPermitUI))
 	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
 	return app.securityHeaders(app.rateLimit(mux))
 }
@@ -654,6 +661,116 @@ func (app *App) handleRunPermit(w http.ResponseWriter, r *http.Request) {
 		"result":         result,
 		"value_returned": false,
 	})
+}
+
+func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "permit.create.ui", "denied", session.Subject, "csrf failed")
+		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result))
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		app.audit(r, "permit.create.ui", "denied", session.Subject, "bad form")
+		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "Request form could not be read.", ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result))
+		return
+	}
+	req := PermitRequest{
+		Ref:         strings.TrimSpace(r.Form.Get("ref")),
+		Action:      strings.TrimSpace(r.Form.Get("action")),
+		Destination: strings.TrimSpace(r.Form.Get("destination")),
+		Reason:      strings.TrimSpace(r.Form.Get("reason")),
+	}
+	if req.Reason == "" {
+		app.audit(r, "permit.create.ui", "denied", session.Subject, "reason required")
+		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "Reason required.", ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result))
+		return
+	}
+
+	permit, err := app.broker.CreatePermit(principalFromSession(session), req)
+	if err != nil {
+		status := http.StatusBadRequest
+		message := "Permit request was denied."
+		switch {
+		case errors.Is(err, ErrNotFound):
+			status = http.StatusNotFound
+			message = "Descriptor not found."
+			app.auditWithRef(r, "permit.create.ui", "denied", session.Subject, "", "not found")
+		case errors.Is(err, ErrPolicyDenied):
+			status = http.StatusForbidden
+			message = "Policy denied."
+			app.auditWithRef(r, "permit.create.ui", "denied", session.Subject, "", err.Error())
+		default:
+			app.auditWithRef(r, "permit.create.ui", "denied", session.Subject, "", "broker error")
+		}
+		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: message, ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(session, &result))
+		return
+	}
+
+	app.permits.Put(permit)
+	app.auditWithRef(r, "permit.create.ui", permit.Status, session.Subject, permit.SecretRef, permit.DenialReason)
+	outcome := "allowed"
+	title := "Permit recorded"
+	message := "Metadata-only permit created. Execution stays blocked until an approved connector exists."
+	if permit.Status == "denied" {
+		outcome = "denied"
+		title = "Permit denied"
+		message = permit.DenialReason
+	}
+	result := UIActionResult{
+		Title:         title,
+		Outcome:       outcome,
+		Message:       message,
+		PermitID:      permit.ID,
+		SecretRef:     permit.SecretRef,
+		Action:        permit.Action,
+		Status:        permit.Status,
+		ExpiresAt:     permit.ExpiresAt.Format("15:04:05"),
+		ValueReturned: false,
+	}
+	renderTemplate(w, app.templates, "dashboard", app.dashboardData(session, &result))
+}
+
+func (app *App) handleRunPermitUI(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "permit.run.ui", "denied", session.Subject, "csrf failed")
+		result := UIActionResult{Title: "Run blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result))
+		return
+	}
+	permitID := r.PathValue("permitID")
+	permit, ok := app.permits.Get(permitID)
+	if !ok {
+		app.audit(r, "permit.run.ui", "denied", session.Subject, "permit not found")
+		result := UIActionResult{Title: "Run blocked", Outcome: "denied", Message: "Permit not found.", ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusNotFound, app.dashboardData(session, &result))
+		return
+	}
+	run := RunPermit(permit)
+	app.auditWithRef(r, "permit.run.ui", run.Status, session.Subject, permit.SecretRef, run.Reason)
+	outcome := "allowed"
+	if run.Status == "denied" {
+		outcome = "denied"
+	}
+	result := UIActionResult{
+		Title:          "Safety check complete",
+		Outcome:        outcome,
+		Message:        "Run evaluated. No secret value or command output was returned.",
+		PermitID:       permit.ID,
+		SecretRef:      permit.SecretRef,
+		Action:         permit.Action,
+		Status:         run.Status,
+		ExpiresAt:      permit.ExpiresAt.Format("15:04:05"),
+		RunReason:      run.Reason,
+		OutputScrubbed: run.OutputScrubbed,
+		ValueReturned:  run.ValueReturned,
+	}
+	renderTemplateStatus(w, app.templates, "dashboard", http.StatusAccepted, app.dashboardData(session, &result))
 }
 
 func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -1328,6 +1445,7 @@ func mustTemplates() *template.Template {
     <nav class="nav" aria-label="Primary">
       <a href="#overview">Overview</a>
       <a href="#warden">Warden</a>
+      <a href="#permit">Permit</a>
       <a href="#posture">Posture</a>
       <a href="#audit">Audit</a>
       <a href="#catalog">Catalog</a>
@@ -1417,6 +1535,19 @@ func mustTemplates() *template.Template {
       <div class="fact"><strong>{{ .ActionResult.ExpiresAt }}</strong><span class="muted">expires</span></div>
     </div>
     {{ end }}
+    {{ if .ActionResult.PermitID }}
+    <div class="facts">
+      <div class="fact"><strong class="mono">{{ .ActionResult.PermitID }}</strong><span class="muted">permit id</span></div>
+      <div class="fact"><strong>{{ .ActionResult.Status }}</strong><span class="muted">status</span></div>
+      <div class="fact"><strong>{{ .ActionResult.Action }}</strong><span class="muted">action</span></div>
+    </div>
+    {{ if .ActionResult.RunReason }}<p class="warn">{{ .ActionResult.RunReason }}</p>{{ end }}
+    {{ if .ActionResult.OutputScrubbed }}<p><span class="pill ok">output_scrubbed=true</span></p>{{ end }}
+    <form method="post" action="/ui/permits/{{ .ActionResult.PermitID }}/run">
+      <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+      <button class="button quiet" type="submit">Run safety check</button>
+    </form>
+    {{ end }}
     <p><span class="pill ok">value_returned=false</span></p>
   </div>
 </section>
@@ -1439,6 +1570,37 @@ func mustTemplates() *template.Template {
           <input name="reason" maxlength="160" required placeholder="maintenance, audit, rotation">
         </label>
         <button class="primary" type="submit">Issue handle</button>
+      </form>
+    </div>
+  </div>
+</section>
+<section class="grid" id="permit">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Request permit</h2>
+      <span class="pill warn">no execution connector</span>
+    </div>
+    <div class="panel-body">
+      <form class="flow" method="post" action="/ui/permits">
+        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+        <label>Descriptor
+          <select name="ref" required>
+            {{ range .Descriptors }}<option value="{{ .ID }}">{{ .DisplayName }}</option>{{ end }}
+          </select>
+        </label>
+        <label>Action
+          <select name="action" required>
+            <option value="metadata_use">metadata_use</option>
+            <option value="resolve_handle">resolve_handle</option>
+          </select>
+        </label>
+        <label>Destination
+          <input name="destination" maxlength="120" placeholder="janus dashboard">
+        </label>
+        <label>Reason
+          <input name="reason" maxlength="160" required placeholder="audit, rotation, incident review">
+        </label>
+        <button class="primary" type="submit">Create permit</button>
       </form>
     </div>
   </div>

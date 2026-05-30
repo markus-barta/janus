@@ -340,7 +340,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Live posture", "Evidence JSON", "Access policy", "bootstrap owner", "Scope boundary"} {
+	for _, want := range []string{"Live posture", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "Scope boundary"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
@@ -385,6 +385,75 @@ func TestWardenResolveUIRequiresReason(t *testing.T) {
 	}
 	if !strings.Contains(out.Body.String(), "Reason required") || strings.Contains(out.Body.String(), "plaintext") {
 		t.Fatalf("UI denial should be clear and value-free: %s", out.Body.String())
+	}
+}
+
+func TestPermitCreateUIReturnsValueFreePermit(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodPost, "/ui/permits", strings.NewReader("ref=zitadel-janus-oidc&action=metadata_use&destination=dashboard&reason=local+smoke"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleCreatePermitUI)(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Permit recorded", "approved_metadata_only", "Run safety check", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("permit UI response should render %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "plaintext") {
+		t.Fatalf("permit UI response should remain value-free: %s", body)
+	}
+}
+
+func TestPermitCreateUIRequiresReason(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodPost, "/ui/permits", strings.NewReader("ref=zitadel-janus-oidc&action=metadata_use"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleCreatePermitUI)(out, req)
+	if out.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", out.Code, out.Body.String())
+	}
+	if !strings.Contains(out.Body.String(), "Reason required") || strings.Contains(out.Body.String(), "plaintext") {
+		t.Fatalf("permit UI denial should be clear and value-free: %s", out.Body.String())
+	}
+}
+
+func TestPermitRunUIReturnsNoExecutionValueFreeResult(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	permit, err := app.broker.CreatePermit(principalFromSession(Session{Subject: "user-1"}), PermitRequest{
+		Ref:    "zitadel-janus-oidc",
+		Action: "metadata_use",
+		Reason: "local smoke",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.permits.Put(permit)
+
+	req := httptest.NewRequest(http.MethodPost, "/ui/permits/"+permit.ID+"/run", nil)
+	req.SetPathValue("permitID", permit.ID)
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleRunPermitUI)(out, req)
+	if out.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Safety check complete", "not_executed", "output_scrubbed=true", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("permit run UI response should render %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "plaintext") {
+		t.Fatalf("permit run UI response should remain value-free: %s", body)
 	}
 }
 
