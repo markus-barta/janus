@@ -47,19 +47,26 @@ func (p AgeMetadataProvider) Find(ref string) (SecretDescriptor, bool) {
 }
 
 type Broker struct {
-	provider SecretProvider
-	store    *Store
+	provider    SecretProvider
+	store       *Store
+	scopePolicy ScopePolicy
 }
 
 func NewBroker(store *Store) *Broker {
 	return &Broker{
-		provider: AgeMetadataProvider{store: store},
-		store:    store,
+		provider:    AgeMetadataProvider{store: store},
+		store:       store,
+		scopePolicy: ScopePolicy{AllowedScopes: map[string]bool{"csb1": true}, Strict: true},
 	}
 }
 
+func (b *Broker) WithScopePolicy(policy ScopePolicy) *Broker {
+	b.scopePolicy = policy
+	return b
+}
+
 func (b *Broker) Descriptors(_ PrincipalChain) []SecretDescriptor {
-	return b.store.Descriptors()
+	return b.scopePolicy.Filter(b.store.Descriptors())
 }
 
 type HandleRequest struct {
@@ -81,6 +88,9 @@ func (b *Broker) ResolveHandle(principal PrincipalChain, req HandleRequest) (Sec
 	desc, ok := b.provider.Find(req.Ref)
 	if !ok {
 		return SecretHandle{}, ErrNotFound
+	}
+	if !b.scopePolicy.Allows(desc.Scope) {
+		return SecretHandle{}, ErrPolicyDenied
 	}
 	if principal.HumanSubject == "" {
 		return SecretHandle{}, ErrPolicyDenied
@@ -130,6 +140,9 @@ func (b *Broker) CreatePermit(principal PrincipalChain, req PermitRequest) (Perm
 	desc, ok := b.provider.Find(req.Ref)
 	if !ok {
 		return Permit{}, ErrNotFound
+	}
+	if !b.scopePolicy.Allows(desc.Scope) {
+		return Permit{}, ErrPolicyDenied
 	}
 	if principal.HumanSubject == "" {
 		return Permit{}, ErrPolicyDenied

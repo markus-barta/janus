@@ -41,6 +41,7 @@ type Config struct {
 	OIDCSecret   string
 	CookieKey    []byte
 	RolePolicy   RolePolicy
+	ScopePolicy  ScopePolicy
 }
 
 func (c Config) OIDCConfigured() bool {
@@ -113,6 +114,7 @@ func (s *Store) loadOrSeed() error {
 	raw, err := os.ReadFile(s.catalogFile)
 	if errors.Is(err, os.ErrNotExist) {
 		s.items = seedCatalog()
+		s.normalizeLocked()
 		return s.persistLocked()
 	}
 	if err != nil {
@@ -284,6 +286,7 @@ func loadConfig() (Config, error) {
 		cfg.CookieKey = key
 	}
 	cfg.RolePolicy = LoadRolePolicyFromEnv()
+	cfg.ScopePolicy = LoadScopePolicyFromEnv()
 
 	if _, err := url.ParseRequestURI(cfg.PublicURL); err != nil {
 		return cfg, fmt.Errorf("JANUS_PUBLIC_URL is invalid: %w", err)
@@ -298,7 +301,7 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 	app := &App{
 		cfg:       cfg,
 		store:     store,
-		broker:    NewBroker(store),
+		broker:    NewBroker(store).WithScopePolicy(cfg.ScopePolicy),
 		permits:   NewPermitStore(),
 		limiter:   NewRateLimiter(180, time.Minute),
 		templates: mustTemplates(),
@@ -448,6 +451,7 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	recentAudit := app.store.RecentAudit(8)
 	catalogGates := ValidateCatalog(descriptors)
 	accessPosture := app.accessPosture()
+	scopePosture := app.scopePosture(app.store.Descriptors())
 	data := map[string]any{
 		"Title":        "Janus",
 		"Session":      session,
@@ -459,6 +463,7 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"Posture":      auditPosture,
 		"CatalogGates": catalogGates,
 		"Access":       accessPosture,
+		"Scope":        scopePosture,
 	}
 	renderTemplate(w, app.templates, "dashboard", data)
 }
@@ -891,10 +896,12 @@ func writeJSONError(w http.ResponseWriter, status int, code, message string) {
 }
 
 func (app *App) postureBody() map[string]any {
-	descriptors := app.store.Descriptors()
+	allDescriptors := app.store.Descriptors()
+	descriptors := app.cfg.ScopePolicy.Filter(allDescriptors)
 	issues := enterpriseChecks(app.cfg)
 	catalogGates := ValidateCatalog(descriptors)
 	accessPosture := app.accessPosture()
+	scopePosture := app.scopePosture(allDescriptors)
 	return map[string]any{
 		"service":            "janus",
 		"mode":               app.cfg.ProductMode,
@@ -906,6 +913,7 @@ func (app *App) postureBody() map[string]any {
 		"catalog_gates":      catalogGates,
 		"catalog_gate_count": len(catalogGates),
 		"access":             accessPosture,
+		"scope":              scopePosture,
 		"audit":              app.store.AuditPosture(),
 		"capabilities": []string{
 			"value_free_metadata_catalog",
@@ -915,6 +923,7 @@ func (app *App) postureBody() map[string]any {
 			"csrf_guarded_mutations",
 			"rate_limited_runtime",
 			"role_gated_audit_evidence",
+			"scope_bound_metadata",
 		},
 		"value_returned": false,
 	}
@@ -924,8 +933,13 @@ func (app *App) accessPosture() AccessPosture {
 	return AccessPostureFor(app.cfg.RolePolicy)
 }
 
+func (app *App) scopePosture(descriptors []SecretDescriptor) ScopePosture {
+	return ScopePostureFor(app.cfg.ScopePolicy, descriptors)
+}
+
 func (app *App) evidencePack() EvidencePack {
-	descriptors := app.store.Descriptors()
+	allDescriptors := app.store.Descriptors()
+	descriptors := app.cfg.ScopePolicy.Filter(allDescriptors)
 	return EvidencePack{
 		GeneratedAt:    time.Now().UTC(),
 		Service:        "janus",
@@ -933,6 +947,7 @@ func (app *App) evidencePack() EvidencePack {
 		Posture:        app.postureBody(),
 		Descriptors:    descriptors,
 		CatalogGates:   ValidateCatalog(descriptors),
+		ScopePosture:   app.scopePosture(allDescriptors),
 		AccessPosture:  app.accessPosture(),
 		AuditPosture:   app.store.AuditPosture(),
 		RecentAudit:    app.store.RecentAudit(50),
@@ -1204,6 +1219,23 @@ func mustTemplates() *template.Template {
         <div class="kpi"><strong>auditor</strong><span class="muted">evidence role</span></div>
       </div>
       {{ range .Access.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
+    </div>
+  </div>
+</section>
+<section class="grid" style="margin-bottom:16px">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Scope boundary</h2>
+      {{ if .Scope.Gates }}<span class="pill">review</span>{{ else }}<span class="pill">enforced</span>{{ end }}
+    </div>
+    <div style="padding:16px" class="stack">
+      <p>{{ range .Scope.AllowedScopes }}<span class="pill">{{ . }}</span> {{ end }}</p>
+      <div class="kpis">
+        <div class="kpi"><strong>{{ .Scope.DescriptorCount }}</strong><span class="muted">catalog descriptors</span></div>
+        <div class="kpi"><strong>{{ .Scope.OutOfScopeCount }}</strong><span class="muted">out of scope</span></div>
+        <div class="kpi"><strong>{{ if .Scope.Strict }}on{{ else }}off{{ end }}</strong><span class="muted">strict mode</span></div>
+      </div>
+      {{ range .Scope.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
     </div>
   </div>
 </section>

@@ -19,6 +19,7 @@ type EvidencePack struct {
 	Posture        map[string]any     `json:"posture"`
 	Descriptors    []SecretDescriptor `json:"descriptors"`
 	CatalogGates   []CatalogGate      `json:"catalog_gates"`
+	ScopePosture   ScopePosture       `json:"scope_posture"`
 	AccessPosture  AccessPosture      `json:"access_posture"`
 	AuditPosture   AuditPosture       `json:"audit_posture"`
 	RecentAudit    []AuditEntry       `json:"recent_audit"`

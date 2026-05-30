@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,6 +25,7 @@ func testConfig() Config {
 		OIDCSecret:   "secret",
 		CookieKey:    []byte("0123456789abcdef0123456789abcdef"),
 		RolePolicy:   RolePolicy{BootstrapOwner: true},
+		ScopePolicy:  ScopePolicy{AllowedScopes: map[string]bool{"csb1": true}, Strict: true},
 	}
 }
 
@@ -252,6 +254,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"access"`) || !strings.Contains(body, `"role_gated_audit_evidence"`) {
 		t.Fatalf("posture response should include access policy: %s", body)
 	}
+	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
+		t.Fatalf("posture response should include scope policy: %s", body)
+	}
 }
 
 func TestEvidenceExportIsValueFree(t *testing.T) {
@@ -270,6 +275,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"redaction_model"`) {
 		t.Fatalf("evidence response should explain redaction model: %s", body)
+	}
+	if !strings.Contains(body, `"scope_posture"`) {
+		t.Fatalf("evidence response should include scope posture: %s", body)
 	}
 }
 
@@ -329,8 +337,51 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	if !strings.Contains(body, "Access policy") || !strings.Contains(body, "bootstrap owner") {
-		t.Fatalf("dashboard should render access posture: %s", body)
+	if !strings.Contains(body, "Access policy") || !strings.Contains(body, "bootstrap owner") || !strings.Contains(body, "Scope boundary") {
+		t.Fatalf("dashboard should render access and scope posture: %s", body)
+	}
+}
+
+func TestScopePolicyFiltersDescriptorsAndDeniesResolve(t *testing.T) {
+	dataDir := t.TempDir()
+	catalogPath := filepath.Join(t.TempDir(), "catalog.json")
+	if err := os.WriteFile(catalogPath, []byte(`[{
+		"id":"in-scope",
+		"display_name":"In scope",
+		"provider":"agenix",
+		"classification":"high",
+		"owner":"platform",
+		"scope":"csb1",
+		"source":"secrets/in-scope.age",
+		"consumer_count":1
+	},{
+		"id":"out-of-scope",
+		"display_name":"Out of scope",
+		"provider":"agenix",
+		"classification":"high",
+		"owner":"platform",
+		"scope":"csb2",
+		"source":"secrets/out-of-scope.age",
+		"consumer_count":1
+	}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(dataDir, catalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := NewBroker(store).WithScopePolicy(ScopePolicy{AllowedScopes: map[string]bool{"csb1": true}, Strict: true})
+	descriptors := broker.Descriptors(PrincipalChain{HumanSubject: "user-1"})
+	if len(descriptors) != 1 || descriptors[0].ID != "in-scope" {
+		t.Fatalf("expected only in-scope descriptor, got %#v", descriptors)
+	}
+	_, err = broker.ResolveHandle(PrincipalChain{HumanSubject: "user-1"}, HandleRequest{Ref: "out-of-scope"})
+	if !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("expected out-of-scope denial, got %v", err)
+	}
+	posture := ScopePostureFor(broker.scopePolicy, store.Descriptors())
+	if posture.OutOfScopeCount != 1 || posture.GateCount != 1 || posture.ValueReturned {
+		t.Fatalf("unexpected scope posture: %#v", posture)
 	}
 }
 
