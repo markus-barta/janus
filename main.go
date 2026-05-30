@@ -708,14 +708,12 @@ func (app *App) handleReady(w http.ResponseWriter, _ *http.Request) {
 func (app *App) publicReadinessBody() (map[string]any, bool) {
 	body, ready := app.readinessBody()
 	return map[string]any{
-		"ready":           ready,
-		"service":         body["service"],
-		"mode":            body["mode"],
-		"checks":          body["checks"],
-		"auth_required":   body["auth_required"],
-		"oidc_configured": body["oidc_configured"],
-		"redacted":        true,
-		"value_returned":  false,
+		"ready":          ready,
+		"service":        body["service"],
+		"mode":           body["mode"],
+		"checks":         body["checks"],
+		"redacted":       true,
+		"value_returned": false,
 	}, ready
 }
 
@@ -1816,17 +1814,18 @@ func (app *App) postureBody() map[string]any {
 			"value_returned":  false,
 		},
 		"response_hardening": map[string]any{
-			"cache_control":                "no-store",
-			"auth_error_view":              "safe_category_request_id",
-			"http_boundary_error_view":     "safe_category_request_id",
-			"public_health_redacted":       true,
-			"public_readiness_redacted":    true,
-			"safe_http_boundary_failures":  true,
-			"script_src":                   "none",
-			"cross_origin_resource_policy": "same-origin",
-			"cross_domain_policy":          "none",
-			"legacy_cache_headers":         true,
-			"value_returned":               false,
+			"cache_control":                  "no-store",
+			"auth_error_view":                "safe_category_request_id",
+			"http_boundary_error_view":       "safe_category_request_id",
+			"public_health_redacted":         true,
+			"public_readiness_auth_redacted": true,
+			"public_readiness_redacted":      true,
+			"safe_http_boundary_failures":    true,
+			"script_src":                     "none",
+			"cross_origin_resource_policy":   "same-origin",
+			"cross_domain_policy":            "none",
+			"legacy_cache_headers":           true,
+			"value_returned":                 false,
 		},
 		"request_limits": map[string]any{
 			"max_body_bytes": maxRequestBody,
@@ -1881,6 +1880,7 @@ func (app *App) postureBody() map[string]any {
 			"role_duty_matrix",
 			"redacted_public_readiness",
 			"redacted_public_health",
+			"minimal_public_readiness",
 			"degraded_sensitive_action_guard",
 			"degraded_dashboard_banner",
 			"operational_rate_limit_denials",

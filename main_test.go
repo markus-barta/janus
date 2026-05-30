@@ -722,6 +722,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"public_readiness_redacted":true`) || !strings.Contains(body, `"redacted_public_readiness"`) {
 		t.Fatalf("posture response should include redacted public readiness: %s", body)
 	}
+	if !strings.Contains(body, `"public_readiness_auth_redacted":true`) || !strings.Contains(body, `"minimal_public_readiness"`) {
+		t.Fatalf("posture response should include minimal public readiness: %s", body)
+	}
 	if !strings.Contains(body, `"script_src":"none"`) || !strings.Contains(body, `"no_script_csp"`) {
 		t.Fatalf("posture response should include no-script CSP hardening: %s", body)
 	}
@@ -1701,7 +1704,7 @@ func TestReadyzLockedWhenAuthMissing(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), `"auth":false`) || !strings.Contains(rr.Body.String(), `"value_returned":false`) {
 		t.Fatalf("readyz should explain value-free failed checks: %s", rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), `"redacted":true`) || strings.Contains(rr.Body.String(), "descriptor_count") {
+	if !strings.Contains(rr.Body.String(), `"redacted":true`) || strings.Contains(rr.Body.String(), "descriptor_count") || strings.Contains(rr.Body.String(), "oidc_configured") || strings.Contains(rr.Body.String(), "auth_required") {
 		t.Fatalf("readyz should stay public-redacted: %s", rr.Body.String())
 	}
 }
@@ -1720,7 +1723,7 @@ func TestReadyzReportsValueFreeChecks(t *testing.T) {
 			t.Fatalf("readyz should include %s: %s", want, body)
 		}
 	}
-	for _, forbidden := range []string{"descriptor_count", "audit_entries", "secret_count"} {
+	for _, forbidden := range []string{"descriptor_count", "audit_entries", "secret_count", "oidc_configured", "auth_required"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("readyz should not expose inventory count %q: %s", forbidden, body)
 		}
