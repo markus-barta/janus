@@ -824,6 +824,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"supply_chain_posture"`) || !strings.Contains(body, `"label":"Supply-chain posture"`) || !strings.Contains(body, `"builder":"golang:1.26.3-alpine"`) || !strings.Contains(body, `"dependency_state":"no_open_alerts_at_release_review"`) || !strings.Contains(body, `"scanner_output_returned":false`) || !strings.Contains(body, `"package_lock_returned":false`) || !strings.Contains(body, `"backend_path_returned":false`) || !strings.Contains(body, `"env_returned":false`) || !strings.Contains(body, `"key":"dependency_alerts"`) || !strings.Contains(body, `"supply_chain_posture":"summary_only_dependency_security_evidence"`) || !strings.Contains(body, `"supply_chain_posture_summary"`) {
 		t.Fatalf("posture response should include supply-chain posture: %s", body)
 	}
+	if !strings.Contains(body, `"enterprise_claim_review"`) || !strings.Contains(body, `"label":"Enterprise claim review"`) || !strings.Contains(body, `"claim":"self_hosted_not_enterprise"`) || !strings.Contains(body, `"current_mode":"self_hosted"`) || !strings.Contains(body, `"target_mode":"enterprise"`) || !strings.Contains(body, `"evidence_signal":"presence_only_enterprise_claim_review"`) || !strings.Contains(body, `"procedure_returned":false`) || !strings.Contains(body, `"ticket_url_returned":false`) || !strings.Contains(body, `"backend_path_returned":false`) || !strings.Contains(body, `"request_body_returned":false`) || !strings.Contains(body, `"env_returned":false`) || !strings.Contains(body, `"enterprise_claim_review":"presence_only_claim_review"`) || !strings.Contains(body, `"enterprise_claim_review_workflow"`) {
+		t.Fatalf("posture response should include enterprise claim review: %s", body)
+	}
 	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
 		t.Fatalf("posture response should include scope policy: %s", body)
 	}
@@ -1223,6 +1226,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed enterprise dry-run")
 	}
+	postureEnterpriseClaim, ok := posture["enterprise_claim_review"].(EnterpriseClaimReview)
+	if !ok {
+		t.Fatalf("posture should expose typed enterprise claim review")
+	}
 	postureExternalEvidence, ok := posture["external_evidence"].(ExternalEvidencePosture)
 	if !ok {
 		t.Fatalf("posture should expose typed external evidence")
@@ -1276,6 +1283,9 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(postureEnterpriseDryRun, pack.EnterpriseDryRun) {
 		t.Fatalf("posture and evidence should share the same enterprise dry-run: posture=%#v evidence=%#v", postureEnterpriseDryRun, pack.EnterpriseDryRun)
+	}
+	if !reflect.DeepEqual(postureEnterpriseClaim, pack.EnterpriseClaim) {
+		t.Fatalf("posture and evidence should share the same enterprise claim review: posture=%#v evidence=%#v", postureEnterpriseClaim, pack.EnterpriseClaim)
 	}
 	if !reflect.DeepEqual(postureExternalEvidence, pack.ExternalEvidence) {
 		t.Fatalf("posture and evidence should share the same external evidence posture: posture=%#v evidence=%#v", postureExternalEvidence, pack.ExternalEvidence)
@@ -2199,6 +2209,68 @@ func TestEnterpriseDryRunDistinguishesClaims(t *testing.T) {
 	})
 }
 
+func TestEnterpriseClaimReviewDistinguishesSelfHostedFromEnterpriseClaim(t *testing.T) {
+	policy := RolePolicy{
+		AdminSubjects:    map[string]bool{"markus@barta.com": true},
+		AuditorSubjects:  map[string]bool{"markus@barta.com": true},
+		OperatorSubjects: map[string]bool{"markus@barta.com": true},
+		BootstrapOwner:   false,
+	}
+	access := AccessPostureFor(policy)
+	audit := AuditPosture{ChainVerified: true, SinkWritable: true}
+	boundary := EvidenceBoundaryFor(true, true)
+
+	t.Run("self-hosted claim review blocks missing enterprise evidence", func(t *testing.T) {
+		for _, spec := range enterpriseValidationSpecs() {
+			t.Setenv(spec.EnvKey, "")
+		}
+		selfHostedValidation := EnterpriseValidationFor(Config{ProductMode: "self_hosted", RolePolicy: policy}, true, access, audit, 0)
+		enterpriseValidation := EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, access, audit, 0)
+		dryRun := EnterpriseDryRunFor("self_hosted", enterpriseValidation)
+		review := EnterpriseClaimReviewFor("self_hosted", selfHostedValidation, dryRun, boundary)
+		if review.Status != "blocked" || review.Claim != "self_hosted_not_enterprise" || review.CurrentMode != "self_hosted" || review.TargetMode != "enterprise" || review.Required != len(enterpriseValidationSpecs())+1 || review.Missing != len(enterpriseValidationSpecs()) || review.ReviewCount != len(enterpriseValidationSpecs()) {
+			t.Fatalf("self-hosted claim review should explain blocked enterprise evidence without claiming enterprise: %#v", review)
+		}
+		if !enterpriseClaimHasCheck(review.Checks, "remote_audit", "missing") || !enterpriseClaimHasOwner(review.Owners, "auditor", 1) || !enterpriseClaimReviewIsValueFree(review) {
+			t.Fatalf("self-hosted claim review should name owner-owned missing controls and stay value-free: %#v", review)
+		}
+	})
+
+	t.Run("complete evidence remains a review step in self-hosted mode", func(t *testing.T) {
+		for _, spec := range enterpriseValidationSpecs() {
+			t.Setenv(spec.EnvKey, "secret-cookie-secret-/run/agenix/"+spec.Key)
+		}
+		enterpriseValidation := EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, access, audit, 0)
+		dryRun := EnterpriseDryRunFor("self_hosted", enterpriseValidation)
+		review := EnterpriseClaimReviewFor("self_hosted", enterpriseValidation, dryRun, boundary)
+		if review.Status != "ready_for_review" || review.Claim != "self_hosted_not_enterprise" || review.Missing != 0 || review.Attached != len(enterpriseValidationSpecs()) || review.Ready != len(enterpriseValidationSpecs())+1 || review.ValueReturned {
+			t.Fatalf("complete self-hosted claim review should be ready for owner review without claiming enterprise: %#v", review)
+		}
+		if !enterpriseClaimHasCheck(review.Checks, "privacy_policy", "attached") || !enterpriseClaimReviewIsValueFree(review) {
+			t.Fatalf("complete self-hosted claim review should keep evidence presence useful and value-free: %#v", review)
+		}
+		raw, err := json.Marshal(review)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "secret-cookie-secret") || strings.Contains(string(raw), "/run/agenix") {
+			t.Fatalf("enterprise claim review leaked env-backed evidence refs: %s", raw)
+		}
+	})
+
+	t.Run("enterprise mode can become candidate after evidence review", func(t *testing.T) {
+		for _, spec := range enterpriseValidationSpecs() {
+			t.Setenv(spec.EnvKey, "secret-cookie-secret-/run/agenix/"+spec.Key)
+		}
+		enterpriseValidation := EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, access, audit, 0)
+		dryRun := EnterpriseDryRunFor("enterprise", enterpriseValidation)
+		review := EnterpriseClaimReviewFor("enterprise", enterpriseValidation, dryRun, boundary)
+		if review.Status != "candidate" || review.Claim != "enterprise_candidate" || review.CurrentMode != "enterprise" || review.Missing != 0 || review.ReviewCount != 0 || !enterpriseClaimReviewIsValueFree(review) {
+			t.Fatalf("enterprise claim review should become candidate only in enterprise mode with complete evidence: %#v", review)
+		}
+	})
+}
+
 func TestPrivacyPostureKeepsEvidenceUsefulAndValueFree(t *testing.T) {
 	posture := PrivacyPostureFor(EvidenceBoundaryFor(true, true), AuditPosture{ChainVerified: true, SinkWritable: true})
 	if posture.Redaction != "metadata_only" || posture.ValueReturned {
@@ -2498,6 +2570,41 @@ func enterpriseDryRunIsValueFree(dryRun EnterpriseDryRun) bool {
 	return true
 }
 
+func enterpriseClaimHasCheck(items []EnterpriseClaimReviewItem, key, state string) bool {
+	for _, item := range items {
+		if item.Key == key && item.State == state {
+			return true
+		}
+	}
+	return false
+}
+
+func enterpriseClaimHasOwner(items []EnterpriseClaimOwnerReview, role string, missing int) bool {
+	for _, item := range items {
+		if item.Role == role && item.Missing == missing && !item.ValueReturned {
+			return true
+		}
+	}
+	return false
+}
+
+func enterpriseClaimReviewIsValueFree(review EnterpriseClaimReview) bool {
+	if review.ValueReturned || review.EvidenceRefReturned || review.ProcedureReturned || review.TicketURLReturned || review.BackendPathReturned || review.RequestBodyReturned || review.EnvReturned {
+		return false
+	}
+	for _, owner := range review.Owners {
+		if owner.ValueReturned {
+			return false
+		}
+	}
+	for _, item := range review.Checks {
+		if item.ValueReturned || item.EvidenceRefReturned {
+			return false
+		}
+	}
+	return true
+}
+
 func accessSourceHasState(items []RoleBindingSource, key, state string) bool {
 	for _, item := range items {
 		if item.Key == key && item.State == state && !item.ValueReturned {
@@ -2593,6 +2700,11 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 	for _, want := range []string{"Supply-chain posture", "Dependency alerts", "Patched builder", "Module integrity", "Vulnerability scan", "Evidence boundary", "golang:1.26.3-alpine", "no_open_alerts_at_release_review", "scanner_output_returned=false", "package_lock_returned=false", "backend_path_returned=false", "env_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render supply-chain posture %q: %s", want, body)
+		}
+	}
+	for _, want := range []string{"Enterprise claim review", "current mode self_hosted", "target mode enterprise", "claim self_hosted_not_enterprise", "presence_only_enterprise_claim_review", "Enterprise claim owner review", "Enterprise claim checklist", "procedure_returned=false", "ticket_url_returned=false", "backend_path_returned=false", "request_body_returned=false", "env_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render enterprise claim review %q: %s", want, body)
 		}
 	}
 	for _, want := range []string{"External evidence workflow", "Presence-only external evidence workflow", "records presence only", "no refs stored", "Mark present"} {
