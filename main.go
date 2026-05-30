@@ -872,6 +872,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
+	auditDrill := AuditFailureDrillFor(ready, auditPosture)
 	roleAvailability := RoleAvailabilityFor(session)
 	actionReadiness := ActionReadinessFor(session, ready)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
@@ -905,6 +906,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"AssuranceGates":    assuranceGates,
 		"NegativePath":      negativePath,
 		"Guidance":          degradedGuidance,
+		"AuditDrill":        auditDrill,
 		"EvidenceHash":      evidenceHash,
 		"EvidenceHashFull":  evidenceHashFull,
 		"EvidenceBoundary":  evidenceBoundary,
@@ -2168,6 +2170,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
+	auditDrill := AuditFailureDrillFor(ready, auditPosture)
 	roleAvailability := RoleAvailabilityFor(session)
 	actionReadiness := ActionReadinessFor(session, ready)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
@@ -2201,6 +2204,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"assurance_gates":         assuranceGates,
 		"negative_path_assurance": negativePath,
 		"degraded_guidance":       degradedGuidance,
+		"audit_failure_drill":     auditDrill,
 		"operational_status":      operationalStatus,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
@@ -2251,6 +2255,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"privacy_retention":         "dashboard_posture_evidence",
 			"negative_path_assurance":   "dashboard_posture_evidence",
 			"degraded_guidance":         "dashboard_posture_evidence",
+			"audit_failure_drill":       "fail_closed_dashboard_posture_evidence",
 			"human_readable_summary":    "dashboard_posture_evidence",
 			"assurance_gate_proofs":     "role_catalog_degraded_value_leak",
 			"operational_status":        "dashboard_posture_strip",
@@ -2351,6 +2356,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"privacy_retention_posture",
 			"negative_path_assurance_matrix",
 			"degraded_guidance_panel",
+			"audit_failure_drill",
 		},
 		"value_returned": false,
 	}
@@ -2382,6 +2388,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
+	auditDrill := AuditFailureDrillFor(ready, auditPosture)
 	actionReadiness := ActionReadinessFor(session, ready)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, RoleAvailabilityFor(session))
 	pack := EvidencePack{
@@ -2395,6 +2402,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		AssuranceGates:   assuranceGates,
 		NegativePath:     negativePath,
 		Guidance:         degradedGuidance,
+		AuditDrill:       auditDrill,
 		AssuranceSummary: assuranceSummary,
 		Enterprise:       enterpriseValidation,
 		Privacy:          privacyPosture,
@@ -3131,6 +3139,26 @@ func mustTemplates() *template.Template {
 	        <strong>{{ .State }}</strong>
 	        <p>{{ .Impact }}</p>
 	        <p><span class="pill info">{{ .Role }}</span> {{ .Action }}</p>
+	      </div>
+	      {{ end }}
+	    </div>
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="audit-failure-drill">
+	  <div class="panel-head">
+	    <h2>Audit failure drill</h2>
+	    <span class="pill {{ if .AuditDrill.BlockedCount }}warn{{ else }}ok{{ end }}">{{ .AuditDrill.Status }}</span>
+	  </div>
+	  <div class="panel-body stack">
+	    <p>{{ .AuditDrill.Summary }}</p>
+	    <p><span class="pill info">{{ .AuditDrill.Scenario }}</span> <span class="pill info">role {{ .AuditDrill.RecoveryRole }}</span> <span class="pill ok">value_returned=false</span></p>
+	    <div class="mode-grid" aria-label="Audit failure drill">
+	      {{ range .AuditDrill.Checks }}
+	      <div class="mode-item {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Proof }}</p>
+	        <p><span class="pill info">next</span> {{ .Next }}</p>
 	      </div>
 	      {{ end }}
 	    </div>

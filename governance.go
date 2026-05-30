@@ -34,6 +34,7 @@ type EvidencePack struct {
 	AssuranceGates   AssuranceGates        `json:"assurance_gates"`
 	NegativePath     NegativePathAssurance `json:"negative_path_assurance"`
 	Guidance         DegradedGuidance      `json:"degraded_guidance"`
+	AuditDrill       AuditFailureDrill     `json:"audit_failure_drill"`
 	AssuranceSummary AssuranceSummary      `json:"assurance_summary"`
 	Enterprise       EnterpriseValidation  `json:"enterprise_validation"`
 	Privacy          PrivacyPosture        `json:"privacy_posture"`
@@ -204,6 +205,26 @@ type DegradedGuidanceItem struct {
 	Action string `json:"action"`
 	Role   string `json:"role"`
 	Tone   string `json:"tone"`
+}
+
+type AuditFailureDrill struct {
+	Summary       string                  `json:"summary"`
+	Scenario      string                  `json:"scenario"`
+	Status        string                  `json:"status"`
+	Checks        []AuditFailureDrillItem `json:"checks"`
+	BlockedCount  int                     `json:"blocked_count"`
+	RecoveryRole  string                  `json:"recovery_role"`
+	ValueReturned bool                    `json:"value_returned"`
+}
+
+type AuditFailureDrillItem struct {
+	Key           string `json:"key"`
+	Label         string `json:"label"`
+	State         string `json:"state"`
+	Proof         string `json:"proof"`
+	Next          string `json:"next"`
+	Tone          string `json:"tone"`
+	ValueReturned bool   `json:"value_returned"`
 }
 
 type EnterpriseValidation struct {
@@ -746,6 +767,104 @@ func DegradedGuidanceFor(ready bool, audit AuditPosture, boundary EvidenceBounda
 
 func (g *DegradedGuidance) add(item DegradedGuidanceItem) {
 	g.Items = append(g.Items, item)
+}
+
+func AuditFailureDrillFor(ready bool, audit AuditPosture) AuditFailureDrill {
+	drill := AuditFailureDrill{
+		Summary:       "Audit failure drill shows how Janus fails closed when audit evidence is unsafe.",
+		Scenario:      "audit_sink_or_chain_degraded",
+		Status:        "armed",
+		RecoveryRole:  "operator",
+		ValueReturned: false,
+	}
+
+	sinkState := "writable"
+	sinkTone := "ok"
+	sinkProof := "Readiness checks confirm audit storage can accept new events."
+	sinkNext := "Keep audit storage writable and included in backup."
+	if !audit.SinkWritable {
+		sinkState = "blocked"
+		sinkTone = "warn"
+		sinkProof = "Audit writes are unsafe, so readiness fails before sensitive action work starts."
+		sinkNext = "Recover audit storage, then reload readiness before retrying."
+	}
+	drill.add(AuditFailureDrillItem{
+		Key:   "sink_write",
+		Label: "Audit writes",
+		State: sinkState,
+		Proof: sinkProof,
+		Next:  sinkNext,
+		Tone:  sinkTone,
+	})
+
+	chainState := "verified"
+	chainTone := "ok"
+	chainProof := "Audit event hashes form a verified local chain."
+	chainNext := "Keep the chain with the audit backup and evidence pack."
+	if !audit.ChainVerified {
+		chainState = "blocked"
+		chainTone = "warn"
+		chainProof = "The audit chain does not verify, so stronger claims are blocked."
+		chainNext = "Restore or review the audit log until the chain verifies."
+	}
+	drill.add(AuditFailureDrillItem{
+		Key:   "chain_verify",
+		Label: "Audit chain",
+		State: chainState,
+		Proof: chainProof,
+		Next:  chainNext,
+		Tone:  chainTone,
+	})
+
+	actionState := "armed"
+	actionTone := "ok"
+	actionProof := "Sensitive API and UI actions check readiness before broker or permit work."
+	actionNext := "Use normal role-gated actions while readiness stays healthy."
+	if !ready {
+		actionState = "blocking"
+		actionTone = "warn"
+		actionProof = "Readiness is degraded, so handle, permit, run, and evidence actions return safe denials."
+		actionNext = "Recover the failed readiness check before retrying sensitive actions."
+	}
+	drill.add(AuditFailureDrillItem{
+		Key:   "sensitive_actions",
+		Label: "Sensitive actions",
+		State: actionState,
+		Proof: actionProof,
+		Next:  actionNext,
+		Tone:  actionTone,
+	})
+
+	drill.add(AuditFailureDrillItem{
+		Key:   "public_readiness",
+		Label: "Public readiness",
+		State: "redacted",
+		Proof: "The public readiness route returns booleans and redaction flags, not secret-bearing detail.",
+		Next:  "Use an authenticated operator or auditor view for recovery context.",
+		Tone:  "ok",
+	})
+
+	drill.add(AuditFailureDrillItem{
+		Key:   "operator_recovery",
+		Label: "Recovery path",
+		State: "documented",
+		Proof: "The dashboard, posture JSON, and evidence pack name the same blocked checks and next action.",
+		Next:  "Fix audit storage first, then confirm ready=true and chain_verified=true.",
+		Tone:  "ok",
+	})
+
+	if drill.BlockedCount > 0 {
+		drill.Status = "blocking"
+	}
+	return drill
+}
+
+func (d *AuditFailureDrill) add(item AuditFailureDrillItem) {
+	item.ValueReturned = false
+	if item.Tone == "warn" || item.State == "blocked" || item.State == "blocking" {
+		d.BlockedCount++
+	}
+	d.Checks = append(d.Checks, item)
 }
 
 func PrivacyPostureFor(boundary EvidenceBoundary, audit AuditPosture) PrivacyPosture {

@@ -792,6 +792,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"action_receipts":"mutation_result_receipts"`) || !strings.Contains(body, `"action_receipt_integrity":"tamper_evident_hash_proof"`) || !strings.Contains(body, `"value_free_action_receipts"`) || !strings.Contains(body, `"tamper_evident_action_receipts"`) {
 		t.Fatalf("posture response should include action receipt capability: %s", body)
 	}
+	if !strings.Contains(body, `"audit_failure_drill"`) || !strings.Contains(body, `"scenario":"audit_sink_or_chain_degraded"`) || !strings.Contains(body, `"key":"sink_write"`) || !strings.Contains(body, `"key":"public_readiness"`) || !strings.Contains(body, `"audit_failure_drill":"fail_closed_dashboard_posture_evidence"`) {
+		t.Fatalf("posture response should include audit failure drill: %s", body)
+	}
 	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
 		t.Fatalf("posture response should include scope policy: %s", body)
 	}
@@ -1144,6 +1147,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed action readiness")
 	}
+	postureAuditDrill, ok := posture["audit_failure_drill"].(AuditFailureDrill)
+	if !ok {
+		t.Fatalf("posture should expose typed audit failure drill")
+	}
 	pack := app.evidencePack(session)
 	if !reflect.DeepEqual(postureProof, pack.NegativePath) {
 		t.Fatalf("posture and evidence should share the same negative-path proof: posture=%#v evidence=%#v", postureProof, pack.NegativePath)
@@ -1157,8 +1164,37 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !reflect.DeepEqual(postureActionReadiness, pack.ActionReadiness) {
 		t.Fatalf("posture and evidence should share the same action readiness: posture=%#v evidence=%#v", postureActionReadiness, pack.ActionReadiness)
 	}
+	if !reflect.DeepEqual(postureAuditDrill, pack.AuditDrill) {
+		t.Fatalf("posture and evidence should share the same audit failure drill: posture=%#v evidence=%#v", postureAuditDrill, pack.AuditDrill)
+	}
 	if pack.NegativePath.ValueReturned || !negativePathHasKey(pack.NegativePath.Cases, "value_leak_sentinel") {
 		t.Fatalf("negative-path evidence should stay value-free and include leak sentinel: %#v", pack.NegativePath)
+	}
+}
+
+func TestAuditFailureDrillCoversHealthyAndDegradedStates(t *testing.T) {
+	healthy := AuditFailureDrillFor(true, AuditPosture{SinkWritable: true, ChainVerified: true})
+	if healthy.ValueReturned || healthy.Status != "armed" || healthy.BlockedCount != 0 {
+		t.Fatalf("healthy audit drill should be armed and value-free: %#v", healthy)
+	}
+	for _, key := range []string{"sink_write", "chain_verify", "sensitive_actions", "public_readiness", "operator_recovery"} {
+		if !auditDrillHasKey(healthy.Checks, key) {
+			t.Fatalf("healthy audit drill should include %q: %#v", key, healthy)
+		}
+	}
+	if !auditDrillHasState(healthy.Checks, "public_readiness", "redacted") || !auditDrillHasState(healthy.Checks, "operator_recovery", "documented") {
+		t.Fatalf("healthy audit drill should prove redaction and recovery docs: %#v", healthy)
+	}
+
+	degraded := AuditFailureDrillFor(false, AuditPosture{ChainVerified: false})
+	if degraded.Status != "blocking" || degraded.BlockedCount < 2 || degraded.ValueReturned {
+		t.Fatalf("degraded audit drill should block and stay value-free: %#v", degraded)
+	}
+	if !auditDrillHasState(degraded.Checks, "sink_write", "blocked") || !auditDrillHasState(degraded.Checks, "chain_verify", "blocked") || !auditDrillHasState(degraded.Checks, "sensitive_actions", "blocking") {
+		t.Fatalf("degraded audit drill should name blocking controls: %#v", degraded)
+	}
+	if !auditDrillHasNext(degraded.Checks, "operator_recovery", "Fix audit storage first") {
+		t.Fatalf("degraded audit drill should include operator recovery: %#v", degraded)
 	}
 }
 
@@ -1228,6 +1264,11 @@ func TestAuditSinkDegradedBlocksSensitiveActions(t *testing.T) {
 	checks, ok := readiness["checks"].(map[string]bool)
 	if !ok || checks["audit_sink"] {
 		t.Fatalf("readiness should show audit sink degraded: %#v", readiness)
+	}
+	posture := app.postureBody(Session{Subject: "operator", Roles: AllRoles(), Expiry: time.Now().UTC().Add(time.Hour)})
+	drill, ok := posture["audit_failure_drill"].(AuditFailureDrill)
+	if !ok || drill.Status != "blocking" || !auditDrillHasState(drill.Checks, "sink_write", "blocked") || drill.ValueReturned {
+		t.Fatalf("posture should expose blocking audit failure drill: %#v", posture["audit_failure_drill"])
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/warden/resolve", strings.NewReader(`{"ref":"raw-secret-value","reason":"plaintext body should not echo"}`))
@@ -1595,6 +1636,33 @@ func degradedGuidanceHasAction(items []DegradedGuidanceItem, key, action string)
 	return false
 }
 
+func auditDrillHasKey(items []AuditFailureDrillItem, key string) bool {
+	for _, item := range items {
+		if item.Key == key && !item.ValueReturned {
+			return true
+		}
+	}
+	return false
+}
+
+func auditDrillHasState(items []AuditFailureDrillItem, key, state string) bool {
+	for _, item := range items {
+		if item.Key == key && item.State == state && !item.ValueReturned {
+			return true
+		}
+	}
+	return false
+}
+
+func auditDrillHasNext(items []AuditFailureDrillItem, key, next string) bool {
+	for _, item := range items {
+		if item.Key == key && strings.Contains(item.Next, next) && !item.ValueReturned {
+			return true
+		}
+	}
+	return false
+}
+
 func modeGuardrailHasState(items []ModeGuardrailItem, key, state string) bool {
 	for _, item := range items {
 		if item.Key == key && item.State == state {
@@ -1726,7 +1794,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
