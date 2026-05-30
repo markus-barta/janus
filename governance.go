@@ -47,6 +47,7 @@ type EvidencePack struct {
 	Enterprise          EnterpriseValidation           `json:"enterprise_validation"`
 	EnterpriseDryRun    EnterpriseDryRun               `json:"enterprise_dry_run"`
 	EnterpriseClaim     EnterpriseClaimReview          `json:"enterprise_claim_review"`
+	EnterpriseRelease   EnterpriseReleaseGate          `json:"enterprise_release_gate"`
 	AttachmentReview    AttachmentReview               `json:"attachment_review"`
 	ExternalEvidence    ExternalEvidencePosture        `json:"external_evidence"`
 	Privacy             PrivacyPosture                 `json:"privacy_posture"`
@@ -417,6 +418,7 @@ func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
 			"scope_posture",
 			"lifecycle_posture",
 			"permit_posture",
+			"enterprise_release_gate",
 			"enterprise_claim_review",
 			"external_evidence_presence",
 			"restore_drill_workflow",

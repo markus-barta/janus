@@ -900,6 +900,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	remoteAuditWorkflow := RemoteAuditWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	breakGlassWorkflow := BreakGlassReviewWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	enterpriseReleaseGate := EnterpriseReleaseGateFor(app.cfg.ProductMode, enterpriseClaim, supplyChain, remoteAuditWorkflow, restoreWorkflow, releaseWorkflow, privacyWorkflow, integrationWorkflow, breakGlassWorkflow, auditPosture, accessPosture, app.cfg.RolePolicy, evidenceBoundary)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -939,6 +940,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Enterprise":          enterpriseValidation,
 		"EnterpriseDryRun":    enterpriseDryRun,
 		"EnterpriseClaim":     enterpriseClaim,
+		"EnterpriseRelease":   enterpriseReleaseGate,
 		"AttachmentReview":    attachmentReview,
 		"ExternalEvidence":    externalEvidence,
 		"RestoreProof":        restoreProof,
@@ -2373,6 +2375,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	remoteAuditWorkflow := RemoteAuditWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	breakGlassWorkflow := BreakGlassReviewWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	enterpriseReleaseGate := EnterpriseReleaseGateFor(app.cfg.ProductMode, enterpriseClaim, supplyChain, remoteAuditWorkflow, restoreWorkflow, releaseWorkflow, privacyWorkflow, integrationWorkflow, breakGlassWorkflow, auditPosture, accessPosture, app.cfg.RolePolicy, evidenceBoundary)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2406,6 +2409,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"enterprise_validation":            enterpriseValidation,
 		"enterprise_dry_run":               enterpriseDryRun,
 		"enterprise_claim_review":          enterpriseClaim,
+		"enterprise_release_gate":          enterpriseReleaseGate,
 		"attachment_review":                attachmentReview,
 		"external_evidence":                externalEvidence,
 		"restore_drill_proof":              restoreProof,
@@ -2472,6 +2476,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_attachments":           "presence_only_no_refs",
 			"enterprise_dry_run":               "self_hosted_to_enterprise_checklist",
 			"enterprise_claim_review":          "presence_only_claim_review",
+			"enterprise_release_gate":          "single_value_free_release_decision",
 			"external_evidence_workflow":       "presence_only_no_refs",
 			"attachment_review":                "presence_only_owner_review",
 			"restore_drill_proof":              "dashboard_posture_evidence",
@@ -2590,6 +2595,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_attachment_review_workflow",
 			"enterprise_dry_run_checklist",
 			"enterprise_claim_review_workflow",
+			"enterprise_release_gate_decision",
 			"external_evidence_presence_workflow",
 			"restore_drill_proof",
 			"restore_drill_presence_workflow",
@@ -2664,6 +2670,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	remoteAuditWorkflow := RemoteAuditWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	breakGlassWorkflow := BreakGlassReviewWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	enterpriseReleaseGate := EnterpriseReleaseGateFor(app.cfg.ProductMode, enterpriseClaim, supplyChain, remoteAuditWorkflow, restoreWorkflow, releaseWorkflow, privacyWorkflow, integrationWorkflow, breakGlassWorkflow, auditPosture, accessPosture, app.cfg.RolePolicy, evidenceBoundary)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2693,6 +2700,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Enterprise:          enterpriseValidation,
 		EnterpriseDryRun:    enterpriseDryRun,
 		EnterpriseClaim:     enterpriseClaim,
+		EnterpriseRelease:   enterpriseReleaseGate,
 		AttachmentReview:    attachmentReview,
 		ExternalEvidence:    externalEvidence,
 		RestoreProof:        restoreProof,
@@ -3797,6 +3805,29 @@ func mustTemplates() *template.Template {
       {{ end }}
     </div>
 	</div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="enterprise-release-gate">
+  <div class="panel-head">
+    <h2>Enterprise release gate</h2>
+    <span class="pill {{ if eq .EnterpriseRelease.Status "candidate" }}ok{{ else if eq .EnterpriseRelease.Status "ready_for_review" }}info{{ else }}warn{{ end }}">{{ .EnterpriseRelease.Status }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .EnterpriseRelease.Summary }}</p>
+    <p><span class="pill info">current mode {{ .EnterpriseRelease.CurrentMode }}</span> <span class="pill warn">target mode {{ .EnterpriseRelease.TargetMode }}</span> <span class="pill {{ if eq .EnterpriseRelease.Claim "enterprise_candidate" }}ok{{ else }}warn{{ end }}">claim {{ .EnterpriseRelease.Claim }}</span> <span class="pill info">verdict {{ .EnterpriseRelease.Verdict }}</span> <span class="pill info">{{ .EnterpriseRelease.Required }} required</span> <span class="pill ok">{{ .EnterpriseRelease.Passed }} passed</span> <span class="pill {{ if .EnterpriseRelease.Blocked }}warn{{ else }}ok{{ end }}">{{ .EnterpriseRelease.Blocked }} blocked</span> <span class="pill info">{{ .EnterpriseRelease.ReviewCount }} review</span> <span class="pill info">{{ .EnterpriseRelease.EvidenceSignal }}</span> <span class="pill info">gate {{ .EnterpriseRelease.EvidenceGate }}</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">procedure_returned=false</span> <span class="pill ok">ticket_url_returned=false</span> <span class="pill ok">backend_path_returned=false</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">env_returned=false</span> <span class="pill ok">scanner_output_returned=false</span> <span class="pill ok">artifact_returned=false</span> <span class="pill ok">payload_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <p><span class="pill info">release cadence</span> {{ .EnterpriseRelease.ReleaseCadence }}</p>
+    <p><span class="pill info">next</span> {{ .EnterpriseRelease.Next }}</p>
+    <div class="mode-grid" aria-label="Enterprise release gate checklist">
+      {{ range .EnterpriseRelease.Checks }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+        <p><span class="pill info">owner {{ .OwnerRole }}</span> <span class="pill {{ if .Required }}warn{{ else }}info{{ end }}">required={{ .Required }}</span> <span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
+        <p><span class="pill info">next</span> {{ .Next }}</p>
+      </div>
+      {{ end }}
+    </div>
+  </div>
 </section>
 <section class="panel" style="margin-bottom:16px" id="enterprise-dry-run">
   <div class="panel-head">

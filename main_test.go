@@ -827,6 +827,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"enterprise_claim_review"`) || !strings.Contains(body, `"label":"Enterprise claim review"`) || !strings.Contains(body, `"claim":"self_hosted_not_enterprise"`) || !strings.Contains(body, `"current_mode":"self_hosted"`) || !strings.Contains(body, `"target_mode":"enterprise"`) || !strings.Contains(body, `"evidence_signal":"presence_only_enterprise_claim_review"`) || !strings.Contains(body, `"procedure_returned":false`) || !strings.Contains(body, `"ticket_url_returned":false`) || !strings.Contains(body, `"backend_path_returned":false`) || !strings.Contains(body, `"request_body_returned":false`) || !strings.Contains(body, `"env_returned":false`) || !strings.Contains(body, `"enterprise_claim_review":"presence_only_claim_review"`) || !strings.Contains(body, `"enterprise_claim_review_workflow"`) {
 		t.Fatalf("posture response should include enterprise claim review: %s", body)
 	}
+	if !strings.Contains(body, `"enterprise_release_gate"`) || !strings.Contains(body, `"label":"Enterprise release gate"`) || !strings.Contains(body, `"verdict":"enterprise_blocked"`) || !strings.Contains(body, `"claim":"self_hosted_not_enterprise"`) || !strings.Contains(body, `"current_mode":"self_hosted"`) || !strings.Contains(body, `"target_mode":"enterprise"`) || !strings.Contains(body, `"evidence_signal":"presence_only_enterprise_release_gate"`) || !strings.Contains(body, `"key":"supply_chain"`) || !strings.Contains(body, `"key":"evidence_boundary"`) || !strings.Contains(body, `"scanner_output_returned":false`) || !strings.Contains(body, `"artifact_returned":false`) || !strings.Contains(body, `"payload_returned":false`) || !strings.Contains(body, `"enterprise_release_gate":"single_value_free_release_decision"`) || !strings.Contains(body, `"enterprise_release_gate_decision"`) {
+		t.Fatalf("posture response should include enterprise release gate: %s", body)
+	}
 	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
 		t.Fatalf("posture response should include scope policy: %s", body)
 	}
@@ -1230,6 +1233,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed enterprise claim review")
 	}
+	postureEnterpriseRelease, ok := posture["enterprise_release_gate"].(EnterpriseReleaseGate)
+	if !ok {
+		t.Fatalf("posture should expose typed enterprise release gate")
+	}
 	postureExternalEvidence, ok := posture["external_evidence"].(ExternalEvidencePosture)
 	if !ok {
 		t.Fatalf("posture should expose typed external evidence")
@@ -1286,6 +1293,9 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(postureEnterpriseClaim, pack.EnterpriseClaim) {
 		t.Fatalf("posture and evidence should share the same enterprise claim review: posture=%#v evidence=%#v", postureEnterpriseClaim, pack.EnterpriseClaim)
+	}
+	if !reflect.DeepEqual(postureEnterpriseRelease, pack.EnterpriseRelease) {
+		t.Fatalf("posture and evidence should share the same enterprise release gate: posture=%#v evidence=%#v", postureEnterpriseRelease, pack.EnterpriseRelease)
 	}
 	if !reflect.DeepEqual(postureExternalEvidence, pack.ExternalEvidence) {
 		t.Fatalf("posture and evidence should share the same external evidence posture: posture=%#v evidence=%#v", postureExternalEvidence, pack.ExternalEvidence)
@@ -2271,6 +2281,78 @@ func TestEnterpriseClaimReviewDistinguishesSelfHostedFromEnterpriseClaim(t *test
 	})
 }
 
+func TestEnterpriseReleaseGateDistinguishesClaims(t *testing.T) {
+	policy := RolePolicy{
+		AdminSubjects:    map[string]bool{"markus@barta.com": true},
+		AuditorSubjects:  map[string]bool{"markus@barta.com": true},
+		OperatorSubjects: map[string]bool{"markus@barta.com": true},
+		BootstrapOwner:   false,
+	}
+	access := AccessPostureFor(policy)
+	audit := AuditPosture{ChainVerified: true, SinkWritable: true}
+	boundary := EvidenceBoundaryFor(true, true)
+	session := Session{Subject: "release-reviewer", Roles: AllRoles(), Expiry: time.Now().UTC().Add(time.Hour)}
+	if !rolePolicyReleaseReady(policy) || rolePolicyReleaseReady(RolePolicy{AdminSubjects: map[string]bool{"markus@barta.com": true}, BootstrapOwner: false}) {
+		t.Fatalf("enterprise release role policy should require admin, auditor, and operator lanes")
+	}
+
+	buildGate := func(mode string, validation EnterpriseValidation) EnterpriseReleaseGate {
+		enterpriseValidation := EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, access, audit, 0)
+		dryRun := EnterpriseDryRunFor(mode, enterpriseValidation)
+		claim := EnterpriseClaimReviewFor(mode, validation, dryRun, boundary)
+		return EnterpriseReleaseGateFor(
+			mode,
+			claim,
+			SupplyChainPostureFor(boundary),
+			RemoteAuditWorkflowFor(validation, nil, session),
+			RestoreDrillWorkflowFor(validation, nil, session),
+			ReleaseProvenanceWorkflowFor(validation, nil, session),
+			PrivacyRetentionWorkflowFor(validation, nil, session),
+			IntegrationConformanceWorkflowFor(validation, nil, session),
+			BreakGlassReviewWorkflowFor(validation, nil, session),
+			audit,
+			access,
+			policy,
+			boundary,
+		)
+	}
+
+	t.Run("self-hosted gate stays blocked and not claimed", func(t *testing.T) {
+		for _, spec := range enterpriseValidationSpecs() {
+			t.Setenv(spec.EnvKey, "")
+		}
+		validation := EnterpriseValidationFor(Config{ProductMode: "self_hosted", RolePolicy: policy}, true, access, audit, 0)
+		gate := buildGate("self_hosted", validation)
+		if gate.Status != "blocked" || gate.Verdict != "enterprise_blocked" || gate.Claim != "self_hosted_not_enterprise" || gate.CurrentMode != "self_hosted" || gate.TargetMode != "enterprise" || gate.Blocked == 0 || gate.ValueReturned {
+			t.Fatalf("self-hosted release gate should block enterprise release without claiming enterprise: %#v", gate)
+		}
+		if !enterpriseReleaseGateHasCheck(gate.Checks, "enterprise_claim", "not_claimed") || !enterpriseReleaseGateHasCheck(gate.Checks, "supply_chain", "clean") || !enterpriseReleaseGateIsValueFree(gate) {
+			t.Fatalf("self-hosted release gate should explain claim and supply-chain state value-free: %#v", gate)
+		}
+	})
+
+	t.Run("enterprise mode becomes candidate only when every gate passes", func(t *testing.T) {
+		for _, spec := range enterpriseValidationSpecs() {
+			t.Setenv(spec.EnvKey, "secret-cookie-secret-/run/agenix/"+spec.Key)
+		}
+		validation := EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, access, audit, 0)
+		gate := buildGate("enterprise", validation)
+		if gate.Status != "candidate" || gate.Verdict != "enterprise_release_candidate" || gate.Claim != "enterprise_candidate" || gate.Blocked != 0 || gate.Required != gate.Passed || gate.ReviewCount != 0 {
+			t.Fatalf("enterprise release gate should become candidate only when all required gates pass: %#v", gate)
+		}
+		if !enterpriseReleaseGateHasCheck(gate.Checks, "remote_audit", "attached") || !enterpriseReleaseGateHasCheck(gate.Checks, "evidence_boundary", "ready") || !enterpriseReleaseGateIsValueFree(gate) {
+			t.Fatalf("enterprise release gate should include attached controls and value-free boundary: %#v", gate)
+		}
+		raw, err := json.Marshal(gate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "secret-cookie-secret") || strings.Contains(string(raw), "/run/agenix") {
+			t.Fatalf("enterprise release gate leaked env-backed evidence refs: %s", raw)
+		}
+	})
+}
+
 func TestPrivacyPostureKeepsEvidenceUsefulAndValueFree(t *testing.T) {
 	posture := PrivacyPostureFor(EvidenceBoundaryFor(true, true), AuditPosture{ChainVerified: true, SinkWritable: true})
 	if posture.Redaction != "metadata_only" || posture.ValueReturned {
@@ -2605,6 +2687,27 @@ func enterpriseClaimReviewIsValueFree(review EnterpriseClaimReview) bool {
 	return true
 }
 
+func enterpriseReleaseGateHasCheck(items []EnterpriseReleaseGateItem, key, state string) bool {
+	for _, item := range items {
+		if item.Key == key && item.State == state {
+			return true
+		}
+	}
+	return false
+}
+
+func enterpriseReleaseGateIsValueFree(gate EnterpriseReleaseGate) bool {
+	if gate.ValueReturned || gate.EvidenceRefReturned || gate.ProcedureReturned || gate.TicketURLReturned || gate.BackendPathReturned || gate.RequestBodyReturned || gate.EnvReturned || gate.ScannerOutputReturned || gate.ArtifactReturned || gate.PayloadReturned {
+		return false
+	}
+	for _, item := range gate.Checks {
+		if item.ValueReturned || item.EvidenceRefReturned {
+			return false
+		}
+	}
+	return true
+}
+
 func accessSourceHasState(items []RoleBindingSource, key, state string) bool {
 	for _, item := range items {
 		if item.Key == key && item.State == state && !item.ValueReturned {
@@ -2705,6 +2808,11 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 	for _, want := range []string{"Enterprise claim review", "current mode self_hosted", "target mode enterprise", "claim self_hosted_not_enterprise", "presence_only_enterprise_claim_review", "Enterprise claim owner review", "Enterprise claim checklist", "procedure_returned=false", "ticket_url_returned=false", "backend_path_returned=false", "request_body_returned=false", "env_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render enterprise claim review %q: %s", want, body)
+		}
+	}
+	for _, want := range []string{"Enterprise release gate", "Enterprise release gate checklist", "verdict enterprise_blocked", "presence_only_enterprise_release_gate", "release cadence", "scanner_output_returned=false", "artifact_returned=false", "payload_returned=false", "Supply chain", "Audit health", "Role policy"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render enterprise release gate %q: %s", want, body)
 		}
 	}
 	for _, want := range []string{"External evidence workflow", "Presence-only external evidence workflow", "records presence only", "no refs stored", "Mark present"} {
