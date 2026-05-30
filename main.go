@@ -5214,6 +5214,28 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p><span class="pill ok">{{ .EvidenceBoundary.RedactionModel }}</span> <span class="pill ok">value_returned=false</span> <span class="pill info">audience {{ .EvidenceBoundary.Audience }}</span></p>
+    <div class="witness-grid" aria-label="Evidence export witness">
+      <div class="witness-card {{ if .CanExportEvidence }}ok{{ else }}warn{{ end }}">
+        <span>Audit proof</span>
+        <strong>{{ if .CanExportEvidence }}ready{{ else }}role gated{{ end }}</strong>
+        <p>Export proves posture, controls, recent audit refs, and integrity without carrying secret-bearing payloads.</p>
+      </div>
+      <div class="witness-card {{ if .EvidenceBoundary.HashAvailable }}ok{{ else }}warn{{ end }}">
+        <span>Download gate</span>
+        <strong>{{ if .CanExportEvidence }}exact receipt{{ else }}auditor only{{ end }}</strong>
+        <p>{{ .EvidenceReceipt.Verification }}</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>metadata only</strong>
+        <p>Secret values, tokens, cookies, request bodies, env, command output, and backend paths stay out.</p>
+      </div>
+      <div class="witness-card info">
+        <span>Retention posture</span>
+        <strong>{{ .Privacy.Retention }}</strong>
+        <p>Evidence is useful for review while excluded data remains outside Janus retention and export.</p>
+      </div>
+    </div>
     {{ if .CanExportEvidence }}
     <div class="receipt" aria-label="Evidence download receipt">
       <div>
@@ -5259,8 +5281,17 @@ func mustTemplates() *template.Template {
         <p>No secret-bearing payloads are exported. Coverage: {{ .EvidenceReceipt.Coverage }}.</p>
       </div>
     </div>
-    <p><strong>Included evidence</strong><br>{{ range .EvidenceBoundary.Includes }}<span class="pill info">{{ . }}</span> {{ end }}</p>
-    <p><strong>Never exported</strong><br>{{ range .EvidenceBoundary.Excludes }}<span class="pill warn">{{ . }}</span> {{ end }}</p>
+    <details class="evidence-flags">
+      <summary>Evidence export evidence flags</summary>
+      <div class="flag-cloud" aria-label="Included evidence">
+        <span class="pill ok">Included evidence</span>
+        {{ range .EvidenceBoundary.Includes }}<span class="pill info">{{ . }}</span>{{ end }}
+      </div>
+      <div class="flag-cloud" aria-label="Never exported evidence">
+        <span class="pill ok">Never exported</span>
+        {{ range .EvidenceBoundary.Excludes }}<span class="pill warn">{{ . }}</span>{{ end }}
+      </div>
+    </details>
   </div>
 </section>
 <section class="panel" style="margin-bottom:16px" id="role-workbench">
