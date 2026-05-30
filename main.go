@@ -484,18 +484,24 @@ func (app *App) dashboardData(session Session, actionResult *UIActionResult, sel
 	}
 	focus := focusDescriptor(descriptors, selectedRef)
 	issues := enterpriseChecks(app.cfg)
+	canViewAudit := HasRole(session, RoleAuditor)
 	auditPosture := app.store.AuditPosture()
-	recentAudit := app.store.RecentAudit(8)
+	var recentAudit []AuditEntry
+	if canViewAudit {
+		recentAudit = app.store.RecentAudit(8)
+	}
 	catalogGates := ValidateCatalog(descriptors)
 	accessPosture := app.accessPosture()
 	scopePosture := app.scopePosture(app.store.Descriptors())
 	lifecyclePosture := LifecyclePostureFor(descriptors, time.Now().UTC())
-	evidencePack := app.evidencePack()
 	evidenceHash := ""
-	if evidencePack.Integrity != nil {
-		evidenceHash = evidencePack.Integrity.PackHash
-		if len(evidenceHash) > 12 {
-			evidenceHash = evidenceHash[:12]
+	if canViewAudit {
+		evidencePack := app.evidencePack()
+		if evidencePack.Integrity != nil {
+			evidenceHash = evidencePack.Integrity.PackHash
+			if len(evidenceHash) > 12 {
+				evidenceHash = evidenceHash[:12]
+			}
 		}
 	}
 	data := map[string]any{
@@ -512,7 +518,8 @@ func (app *App) dashboardData(session Session, actionResult *UIActionResult, sel
 		"Scope":             scopePosture,
 		"Lifecycle":         lifecyclePosture,
 		"EvidenceHash":      evidenceHash,
-		"CanExportEvidence": HasRole(session, RoleAuditor),
+		"CanExportEvidence": canViewAudit,
+		"CanViewAudit":      canViewAudit,
 		"CanOperate":        HasRole(session, RoleOperator),
 		"ActionResult":      actionResult,
 		"Permits":           app.permits.Recent(8),
@@ -1587,8 +1594,13 @@ func mustTemplates() *template.Template {
       </div>
       <div class="signal">
         <span class="muted">Evidence hash</span>
+        {{ if .CanViewAudit }}
         <strong class="mono">{{ if .EvidenceHash }}{{ .EvidenceHash }}{{ else }}pending{{ end }}</strong>
         <span class="pill info">sha256</span>
+        {{ else }}
+        <strong>restricted</strong>
+        <span class="pill warn">auditor</span>
+        {{ end }}
       </div>
     </div>
   </div>
@@ -1833,8 +1845,13 @@ func mustTemplates() *template.Template {
   <div class="panel">
     <div class="panel-head">
       <h2>Audit posture</h2>
+      {{ if .CanViewAudit }}
       {{ if .Posture.LegacyEntries }}<span class="pill warn">chain partial</span>{{ else if .Posture.ChainVerified }}<span class="pill ok">chain verified</span>{{ else }}<span class="pill warn">chain needs review</span>{{ end }}
+      {{ else }}
+      <span class="pill warn">auditor required</span>
+      {{ end }}
     </div>
+    {{ if .CanViewAudit }}
     <div class="table-wrap">
       <table>
         <thead><tr><th>Time</th><th>Action</th><th>Outcome</th><th>Method</th><th>Path</th><th>Secret ref</th><th>Reason</th></tr></thead>
@@ -1853,6 +1870,12 @@ func mustTemplates() *template.Template {
         </tbody>
       </table>
     </div>
+    {{ else }}
+    <div class="panel-body stack">
+      <p class="warn">Auditor role required.</p>
+      <p>Audit rows and evidence hashes are restricted to auditor sessions.</p>
+    </div>
+    {{ end }}
   </div>
 </section>
 {{ if .CatalogGates }}

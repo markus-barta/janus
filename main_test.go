@@ -404,6 +404,50 @@ func TestDashboardHidesOperatorActionsForViewer(t *testing.T) {
 	}
 }
 
+func TestDashboardAuditRowsRequireAuditorRole(t *testing.T) {
+	app := newTestApp(t)
+	app.store.AppendAudit(AuditEntry{
+		Action:    "secret.review",
+		Outcome:   "allowed",
+		Method:    http.MethodPost,
+		Path:      "/api/example",
+		SecretRef: "private-ref",
+		Reason:    "audit seed",
+	})
+
+	viewer := Session{Subject: "viewer", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	viewerCookie := httptest.NewRecorder()
+	app.writeSession(viewerCookie, viewer)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(viewerCookie.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleDashboard)(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected viewer dashboard 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	viewerBody := out.Body.String()
+	if !strings.Contains(viewerBody, "Auditor role required") || !strings.Contains(viewerBody, "restricted") {
+		t.Fatalf("viewer dashboard should gate audit rows: %s", viewerBody)
+	}
+	if strings.Contains(viewerBody, "private-ref") {
+		t.Fatalf("viewer dashboard leaked audit secret ref: %s", viewerBody)
+	}
+
+	auditor := Session{Subject: "auditor", Roles: []string{RoleAuditor, RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	auditorCookie := httptest.NewRecorder()
+	app.writeSession(auditorCookie, auditor)
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(auditorCookie.Result().Cookies()[0])
+	out = httptest.NewRecorder()
+	app.withAuth(app.handleDashboard)(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected auditor dashboard 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	if !strings.Contains(out.Body.String(), "private-ref") {
+		t.Fatalf("auditor dashboard should include audit rows: %s", out.Body.String())
+	}
+}
+
 func TestDashboardRendersDescriptorFocus(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
