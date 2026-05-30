@@ -2822,7 +2822,23 @@ func mustTemplates() *template.Template {
       color: var(--ink);
       font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       letter-spacing: 0;
+      -webkit-font-smoothing: antialiased;
     }
+    .skip-link {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      z-index: 100;
+      transform: translateY(-160%);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--ink);
+      padding: 8px 12px;
+      text-decoration: none;
+      box-shadow: var(--shadow);
+    }
+    .skip-link:focus { transform: translateY(0); }
     header {
       border-bottom: 1px solid var(--line);
       background: color-mix(in srgb, var(--panel) 90%, transparent);
@@ -2832,6 +2848,7 @@ func mustTemplates() *template.Template {
       backdrop-filter: blur(16px);
     }
     .bar, main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
+    section { scroll-margin-top: 82px; }
     .bar {
       min-height: 66px;
       display: grid;
@@ -2904,7 +2921,9 @@ func mustTemplates() *template.Template {
       align-items: center;
       justify-content: center;
       min-height: 38px;
-      white-space: nowrap;
+      max-width: 100%;
+      text-align: center;
+      white-space: normal;
     }
     .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
     .quiet { background: var(--panel-soft); }
@@ -2930,6 +2949,27 @@ func mustTemplates() *template.Template {
     .intro-copy { max-width: 720px; display: grid; gap: 10px; min-width: 0; }
     .eyebrow { color: var(--accent); font-weight: 720; font-size: 13px; letter-spacing: 0; }
     .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .safety-ribbon {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .safety-chip {
+      min-height: 62px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--panel-soft) 88%, transparent);
+      padding: 9px 10px;
+      display: grid;
+      align-content: space-between;
+      gap: 5px;
+      min-width: 0;
+    }
+    .safety-chip span { color: var(--muted); font-size: 12px; line-height: 1.15; }
+    .safety-chip strong { font-size: 15px; line-height: 1.12; overflow-wrap: anywhere; }
+    .safety-chip.ok strong { color: var(--accent); }
+    .safety-chip.info strong { color: var(--blue); }
+    .safety-chip.warn strong { color: var(--amber); }
     .ops-strip {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3043,6 +3083,7 @@ func mustTemplates() *template.Template {
     .mode-item.ok strong { color: var(--accent); }
     .mode-item.warn strong { color: var(--amber); }
     .mode-item.info strong { color: var(--blue); }
+    .mode-item p, .command-card p, .ops-item p { font-size: 13px; line-height: 1.35; }
     .assurance-flow {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -3102,6 +3143,7 @@ func mustTemplates() *template.Template {
       justify-content: space-between;
       gap: 12px;
       align-items: center;
+      flex-wrap: wrap;
     }
     .status-body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .signal {
@@ -3244,7 +3286,7 @@ func mustTemplates() *template.Template {
     .hash-copy input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 1040px; }
-    th, td { padding: 12px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th, td { padding: 12px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
     th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0; }
     tr:hover td { background: var(--panel-soft); }
     tr.selected td { background: color-mix(in srgb, var(--accent) 7%, var(--panel)); }
@@ -3258,7 +3300,10 @@ func mustTemplates() *template.Template {
       border: 1px solid var(--line);
       color: var(--muted);
       font-size: 12px;
-      white-space: nowrap;
+      line-height: 1.2;
+      text-align: center;
+      white-space: normal;
+      overflow-wrap: anywhere;
       max-width: 100%;
     }
     .pill.ok { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 46%, var(--line)); }
@@ -3268,7 +3313,7 @@ func mustTemplates() *template.Template {
     .muted { color: var(--muted); }
     .warn { color: var(--amber); }
     .danger { color: var(--danger); }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
     form { margin: 0; }
     @media (max-width: 860px) {
       .bar { grid-template-columns: 1fr auto; padding: 12px 0; }
@@ -3280,6 +3325,7 @@ func mustTemplates() *template.Template {
       .facts { grid-template-columns: 1fr; gap: 10px; }
       .verdict { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .role-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .safety-ribbon { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .ops-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .command-top { grid-template-columns: 1fr; }
       .command-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -3295,10 +3341,17 @@ func mustTemplates() *template.Template {
     }
     @media (max-width: 560px) {
       .bar, main { width: calc(100% - 22px); max-width: 1180px; }
+      main { padding-top: 14px; }
+      .intro { padding: 16px; gap: 12px; }
+      .panel-body { padding: 13px; }
+      .status-head, .panel-head { padding: 13px; align-items: flex-start; }
+      .signal { min-height: auto; padding: 12px 13px; }
+      .mode-item, .command-card, .ops-item, .assurance-step, .safety-chip { min-height: auto; }
       .status-body { grid-template-columns: 1fr; }
       .verdict { grid-template-columns: 1fr; }
       .role-matrix { grid-template-columns: 1fr; }
       .ops-strip { grid-template-columns: 1fr; }
+      .safety-ribbon { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .command-grid { grid-template-columns: 1fr; }
       .command-actions { display: grid; grid-template-columns: 1fr; }
       .command-actions .button { width: 100%; }
@@ -3314,9 +3367,14 @@ func mustTemplates() *template.Template {
       .toolbar { display: grid; grid-template-columns: 1fr; }
       .toolbar .button { width: 100%; }
     }
+    @media (max-width: 380px) {
+      .safety-ribbon { grid-template-columns: 1fr; }
+      h1 { font-size: 28px; }
+    }
   </style>
 </head>
 <body>
+<a class="skip-link" href="#command-center">Skip to command center</a>
 <header>
   <div class="bar">
     <div class="brand"><div class="mark">J</div><div>Janus</div></div>
@@ -3366,6 +3424,24 @@ func mustTemplates() *template.Template {
       <div class="eyebrow">{{ .ModeGuardrails.Current }} / {{ .ModeGuardrails.Claim }} / metadata-only</div>
       <h1>Vault control plane</h1>
       <p>Ownership, posture, and audit-safe descriptors for secrets. Secret values stay outside Janus.</p>
+    </div>
+    <div class="safety-ribbon" aria-label="Current safety posture">
+      <div class="safety-chip info">
+        <span>Service</span>
+        <strong>Janus</strong>
+      </div>
+      <div class="safety-chip {{ if eq .ModeGuardrails.Current "enterprise" }}ok{{ else }}info{{ end }}">
+        <span>Mode</span>
+        <strong>{{ .ModeGuardrails.Current }}</strong>
+      </div>
+      <div class="safety-chip ok">
+        <span>Boundary</span>
+        <strong>values withheld</strong>
+      </div>
+      <div class="safety-chip {{ if .CommandCenter.BlockedActions }}warn{{ else }}ok{{ end }}">
+        <span>Actions</span>
+        <strong>{{ .CommandCenter.AvailableActions }} safe</strong>
+      </div>
     </div>
     <div class="toolbar">
       {{ if .CanExportEvidence }}<a class="button primary" href="/api/evidence">Evidence JSON</a>{{ end }}
