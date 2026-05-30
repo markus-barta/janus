@@ -25,8 +25,10 @@ import (
 )
 
 const (
-	sessionCookie = "janus_session"
-	stateCookie   = "janus_oidc_state"
+	sessionCookie     = "janus_session"
+	hostSessionCookie = "__Host-janus_session"
+	stateCookie       = "janus_oidc_state"
+	hostStateCookie   = "__Host-janus_oidc_state"
 )
 
 type Config struct {
@@ -51,6 +53,20 @@ func (c Config) OIDCConfigured() bool {
 func (c Config) SecureCookies() bool {
 	u, err := url.Parse(c.PublicURL)
 	return err == nil && u.Scheme == "https"
+}
+
+func (c Config) SessionCookieName() string {
+	if c.SecureCookies() {
+		return hostSessionCookie
+	}
+	return sessionCookie
+}
+
+func (c Config) StateCookieName() string {
+	if c.SecureCookies() {
+		return hostStateCookie
+	}
+	return stateCookie
 }
 
 type SecretDescriptor struct {
@@ -859,7 +875,7 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	state := randomToken(32)
 	http.SetCookie(w, &http.Cookie{
-		Name:     stateCookie,
+		Name:     app.cfg.StateCookieName(),
 		Value:    state,
 		Path:     "/",
 		HttpOnly: true,
@@ -877,7 +893,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state, err := r.Cookie(stateCookie)
+	state, err := firstCookie(r, app.cfg.StateCookieName(), stateCookie)
 	if err != nil || state.Value == "" || state.Value != r.URL.Query().Get("state") {
 		app.audit(r, "auth.login.callback", "denied", "", "bad state")
 		http.Error(w, "invalid login state", http.StatusBadRequest)
@@ -932,7 +948,10 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Expiry:  time.Now().UTC().Add(12 * time.Hour),
 	}
 	app.writeSession(w, session)
-	http.SetCookie(w, &http.Cookie{Name: stateCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: app.cfg.SecureCookies(), SameSite: http.SameSiteLaxMode})
+	app.clearCookie(w, app.cfg.StateCookieName())
+	if app.cfg.StateCookieName() != stateCookie {
+		app.clearCookie(w, stateCookie)
+	}
 	app.audit(r, "auth.login.complete", "allowed", session.Subject, "")
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -945,15 +964,10 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app.audit(r, "auth.logout", "allowed", session.Subject, "")
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   app.cfg.SecureCookies(),
-		SameSite: http.SameSiteLaxMode,
-	})
+	app.clearCookie(w, app.cfg.SessionCookieName())
+	if app.cfg.SessionCookieName() != sessionCookie {
+		app.clearCookie(w, sessionCookie)
+	}
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -976,7 +990,7 @@ func (app *App) writeSession(w http.ResponseWriter, s Session) {
 	payload := base64.RawURLEncoding.EncodeToString(raw)
 	mac := sign(app.cfg.CookieKey, payload)
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
+		Name:     app.cfg.SessionCookieName(),
 		Value:    payload + "." + mac,
 		Path:     "/",
 		HttpOnly: true,
@@ -987,7 +1001,7 @@ func (app *App) writeSession(w http.ResponseWriter, s Session) {
 }
 
 func (app *App) readSession(r *http.Request) (Session, bool) {
-	cookie, err := r.Cookie(sessionCookie)
+	cookie, err := firstCookie(r, app.cfg.SessionCookieName(), sessionCookie)
 	if err != nil {
 		return Session{}, false
 	}
@@ -1010,6 +1024,40 @@ func (app *App) readSession(r *http.Request) (Session, bool) {
 		session.Roles = DeriveRoles(session.Subject, session.Email, nil, app.cfg.RolePolicy)
 	}
 	return session, true
+}
+
+func firstCookie(r *http.Request, names ...string) (*http.Cookie, error) {
+	var firstErr error
+	seen := map[string]bool{}
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		cookie, err := r.Cookie(name)
+		if err == nil {
+			return cookie, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return nil, http.ErrNoCookie
+}
+
+func (app *App) clearCookie(w http.ResponseWriter, name string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   app.cfg.SecureCookies(),
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 func (app *App) audit(r *http.Request, action, outcome, actor, reason string) {
@@ -1226,7 +1274,12 @@ func (app *App) postureBody() map[string]any {
 		"scope":              scopePosture,
 		"lifecycle":          lifecyclePosture,
 		"permits":            app.permits.Posture(),
-		"audit":              app.store.AuditPosture(),
+		"cookies": map[string]any{
+			"host_prefixed":  app.cfg.SessionCookieName() == hostSessionCookie && app.cfg.StateCookieName() == hostStateCookie,
+			"secure":         app.cfg.SecureCookies(),
+			"value_returned": false,
+		},
+		"audit": app.store.AuditPosture(),
 		"capabilities": []string{
 			"value_free_metadata_catalog",
 			"broker_principal_chain",
@@ -1238,6 +1291,7 @@ func (app *App) postureBody() map[string]any {
 			"scope_bound_metadata",
 			"lifecycle_gated_normal_use",
 			"persistent_permit_records",
+			"host_prefixed_cookies",
 		},
 		"value_returned": false,
 	}

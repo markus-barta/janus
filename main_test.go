@@ -159,8 +159,37 @@ func TestSessionCookieIsOIDCRedirectCompatible(t *testing.T) {
 	if cookies[0].SameSite != http.SameSiteLaxMode {
 		t.Fatalf("session cookie must be Lax for OIDC redirects, got %v", cookies[0].SameSite)
 	}
+	if cookies[0].Name != hostSessionCookie {
+		t.Fatalf("secure deployments should use host-prefixed session cookie, got %s", cookies[0].Name)
+	}
 	if !cookies[0].Secure || !cookies[0].HttpOnly {
 		t.Fatalf("session cookie must be secure and httponly: %#v", cookies[0])
+	}
+}
+
+func TestReadSessionAcceptsLegacyCookieDuringHostPrefixMigration(t *testing.T) {
+	app := newTestApp(t)
+
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, Session{Subject: "user-1", Expiry: time.Now().UTC().Add(time.Hour)})
+	cookie := rr.Result().Cookies()[0]
+	if cookie.Name != hostSessionCookie {
+		t.Fatalf("expected host-prefixed cookie, got %s", cookie.Name)
+	}
+	cookie.Name = sessionCookie
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(cookie)
+	if _, ok := app.readSession(req); !ok {
+		t.Fatal("legacy session cookie should be accepted during migration")
+	}
+}
+
+func TestConfigUsesHostPrefixedStateCookieForHTTPS(t *testing.T) {
+	app := newTestApp(t)
+
+	if app.cfg.StateCookieName() != hostStateCookie {
+		t.Fatalf("secure deployments should use host-prefixed state cookie, got %s", app.cfg.StateCookieName())
 	}
 }
 
@@ -266,6 +295,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"permits"`) || !strings.Contains(body, `"persistent_permit_records"`) {
 		t.Fatalf("posture response should include permit persistence: %s", body)
+	}
+	if !strings.Contains(body, `"cookies"`) || !strings.Contains(body, `"host_prefixed_cookies"`) {
+		t.Fatalf("posture response should include cookie hardening: %s", body)
 	}
 }
 
