@@ -866,6 +866,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
+	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -893,6 +894,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Lifecycle":         lifecyclePosture,
 		"ApprovedUse":       approvedUsePosture,
 		"ModePosture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"ModeGuardrails":    modeGuardrails,
 		"Enterprise":        enterpriseValidation,
 		"Privacy":           privacyPosture,
 		"AssuranceSummary":  assuranceSummary,
@@ -2089,6 +2091,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
+	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2115,6 +2118,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"approved_use":            approvedUsePosture,
 		"permits":                 permitPosture,
 		"mode_posture":            ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"mode_guardrails":         modeGuardrails,
 		"enterprise_validation":   enterpriseValidation,
 		"privacy_posture":         privacyPosture,
 		"assurance_summary":       assuranceSummary,
@@ -2162,6 +2166,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"evidence_export_boundary":  "dashboard_and_json",
 			"evidence_download":         "auditor_json_with_pack_hash",
 			"enterprise_validation":     "self_hosted_safe_enterprise_required",
+			"mode_guardrails":           "dashboard_posture_evidence",
 			"privacy_retention":         "dashboard_posture_evidence",
 			"negative_path_assurance":   "dashboard_posture_evidence",
 			"degraded_guidance":         "dashboard_posture_evidence",
@@ -2249,6 +2254,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"request_correlated_json_errors",
 			"route_value_leak_sentinel",
 			"mode_posture_evidence",
+			"mode_guardrails",
 			"evidence_export_boundary_ux",
 			"role_availability_ux",
 			"human_readable_assurance_summary",
@@ -2286,6 +2292,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
+	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2296,6 +2303,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Mode:             app.cfg.ProductMode,
 		Posture:          app.postureBody(session),
 		Operational:      operationalStatus,
+		ModeGuardrails:   modeGuardrails,
 		AssuranceGates:   assuranceGates,
 		NegativePath:     negativePath,
 		Guidance:         degradedGuidance,
@@ -2872,7 +2880,7 @@ func mustTemplates() *template.Template {
 <section class="overview" id="overview">
   <div class="intro">
     <div class="intro-copy">
-      <div class="eyebrow">{{ .Mode }} / metadata-only</div>
+      <div class="eyebrow">{{ .ModeGuardrails.Current }} / {{ .ModeGuardrails.Claim }} / metadata-only</div>
       <h1>Vault control plane</h1>
       <p>Ownership, posture, and audit-safe descriptors for secrets. Secret values stay outside Janus.</p>
     </div>
@@ -2967,6 +2975,27 @@ func mustTemplates() *template.Template {
         {{ end }}
       </div>
     </div>
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="mode-guardrails">
+	  <div class="panel-head">
+	    <h2>Mode guardrails</h2>
+	    <span class="pill {{ if .ModeGuardrails.BlockedCount }}warn{{ else if .ModeGuardrails.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .ModeGuardrails.Claim }}</span>
+	  </div>
+	  <div class="panel-body stack">
+	    <p>{{ .ModeGuardrails.Summary }}</p>
+	    <p><span class="pill info">{{ .ModeGuardrails.Current }}</span> <span class="pill warn">{{ .ModeGuardrails.Boundary }}</span> <span class="pill ok">value_returned=false</span></p>
+	    <div class="mode-grid" aria-label="Mode guardrails">
+	      {{ range .ModeGuardrails.Items }}
+	      <div class="mode-item {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Claim }}</p>
+	        <p>{{ .Limit }}</p>
+	        <p><span class="pill info">next</span> {{ .Next }}</p>
+	      </div>
+	      {{ end }}
+	    </div>
 	  </div>
 	</section>
 	<section class="panel" style="margin-bottom:16px" id="degraded-guidance">

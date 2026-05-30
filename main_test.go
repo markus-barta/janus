@@ -732,6 +732,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"mode_posture"`) || !strings.Contains(body, `"current":"Self-hosted"`) || !strings.Contains(body, `"enterprise":"not_claimed"`) || !strings.Contains(body, `"mode_posture_evidence"`) {
 		t.Fatalf("posture response should include product-mode evidence: %s", body)
 	}
+	if !strings.Contains(body, `"mode_guardrails"`) || !strings.Contains(body, `"current":"Self-hosted"`) || !strings.Contains(body, `"boundary":"enterprise_not_claimed"`) || !strings.Contains(body, `"key":"enterprise_claim"`) || !strings.Contains(body, `"mode_guardrails":"dashboard_posture_evidence"`) {
+		t.Fatalf("posture response should include mode guardrails: %s", body)
+	}
 	if !strings.Contains(body, `"enterprise_validation"`) || !strings.Contains(body, `"status":"not_claimed"`) || !strings.Contains(body, `"key":"remote_audit"`) || !strings.Contains(body, `"enterprise_validation_clarity"`) || !strings.Contains(body, `"enterprise_validation":"self_hosted_safe_enterprise_required"`) {
 		t.Fatalf("posture response should include enterprise validation clarity: %s", body)
 	}
@@ -840,6 +843,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"degraded_guidance"`) || !strings.Contains(body, `"key":"readiness"`) || !strings.Contains(body, `"key":"audit_sink"`) || !strings.Contains(body, `"key":"enterprise_controls"`) {
 		t.Fatalf("evidence response should include degraded-state guidance: %s", body)
+	}
+	if !strings.Contains(body, `"mode_guardrails"`) || !strings.Contains(body, `"key":"current_mode"`) || !strings.Contains(body, `"key":"enterprise_claim"`) || !strings.Contains(body, `"value_returned":false`) {
+		t.Fatalf("evidence response should include mode guardrails: %s", body)
 	}
 	if !strings.Contains(body, `"enterprise_validation"`) || !strings.Contains(body, `"key":"privacy_policy"`) {
 		t.Fatalf("evidence response should include enterprise validation: %s", body)
@@ -1002,12 +1008,19 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed degraded-state guidance")
 	}
+	postureModeGuardrails, ok := posture["mode_guardrails"].(ModeGuardrails)
+	if !ok {
+		t.Fatalf("posture should expose typed mode guardrails")
+	}
 	pack := app.evidencePack(session)
 	if !reflect.DeepEqual(postureProof, pack.NegativePath) {
 		t.Fatalf("posture and evidence should share the same negative-path proof: posture=%#v evidence=%#v", postureProof, pack.NegativePath)
 	}
 	if !reflect.DeepEqual(postureGuidance, pack.Guidance) {
 		t.Fatalf("posture and evidence should share the same degraded guidance: posture=%#v evidence=%#v", postureGuidance, pack.Guidance)
+	}
+	if !reflect.DeepEqual(postureModeGuardrails, pack.ModeGuardrails) {
+		t.Fatalf("posture and evidence should share the same mode guardrails: posture=%#v evidence=%#v", postureModeGuardrails, pack.ModeGuardrails)
 	}
 	if pack.NegativePath.ValueReturned || !negativePathHasKey(pack.NegativePath.Cases, "value_leak_sentinel") {
 		t.Fatalf("negative-path evidence should stay value-free and include leak sentinel: %#v", pack.NegativePath)
@@ -1208,6 +1221,59 @@ func TestProductModePostureDistinguishesClaims(t *testing.T) {
 	}
 }
 
+func TestModeGuardrailsDistinguishClaims(t *testing.T) {
+	policy := RolePolicy{
+		AdminSubjects:    map[string]bool{"markus@barta.com": true},
+		AuditorSubjects:  map[string]bool{"markus@barta.com": true},
+		OperatorSubjects: map[string]bool{"markus@barta.com": true},
+		BootstrapOwner:   false,
+	}
+	access := AccessPostureFor(policy)
+	audit := AuditPosture{ChainVerified: true, SinkWritable: true}
+
+	devEnterprise := EnterpriseValidationFor(Config{ProductMode: "dev", RolePolicy: policy}, true, access, audit, 0)
+	dev := ModeGuardrailsFor(Config{ProductMode: "dev", RolePolicy: policy}, true, nil, access, audit, 0, devEnterprise)
+	if dev.Claim != "local_only" || dev.Boundary != "no_production_or_enterprise_claim" || dev.BlockedCount == 0 || dev.ValueReturned {
+		t.Fatalf("dev guardrails should block production and enterprise claims while staying value-free: %#v", dev)
+	}
+	if !modeGuardrailHasState(dev.Items, "enterprise_claim", "blocked") || !modeGuardrailHasLimit(dev.Items, "current_mode", "No production or enterprise claim") {
+		t.Fatalf("dev guardrails should be explicit about limits: %#v", dev)
+	}
+
+	selfHostedEnterprise := EnterpriseValidationFor(Config{ProductMode: "self_hosted", RolePolicy: policy}, true, access, audit, 0)
+	selfHosted := ModeGuardrailsFor(Config{ProductMode: "self_hosted", RolePolicy: policy}, true, nil, access, audit, 0, selfHostedEnterprise)
+	if selfHosted.Claim != "ready" || selfHosted.Boundary != "enterprise_not_claimed" || selfHosted.BlockedCount != 0 || selfHosted.ValueReturned {
+		t.Fatalf("self-hosted guardrails should allow local readiness without enterprise claim: %#v", selfHosted)
+	}
+	if !modeGuardrailHasState(selfHosted.Items, "enterprise_claim", "not_claimed") || !modeGuardrailHasLimit(selfHosted.Items, "enterprise_claim", "Remote audit") {
+		t.Fatalf("self-hosted guardrails should name excluded enterprise evidence: %#v", selfHosted)
+	}
+
+	for _, spec := range enterpriseValidationSpecs() {
+		t.Setenv(spec.EnvKey, "")
+	}
+	enterpriseBlockedValidation := EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, access, audit, 0)
+	enterpriseBlocked := ModeGuardrailsFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, nil, access, audit, 0, enterpriseBlockedValidation)
+	if enterpriseBlocked.Claim != "blocked" || enterpriseBlocked.Boundary != "external_evidence_required" || enterpriseBlocked.BlockedCount == 0 {
+		t.Fatalf("enterprise guardrails should block missing external evidence: %#v", enterpriseBlocked)
+	}
+	if !modeGuardrailHasState(enterpriseBlocked.Items, "external_controls", "missing") || !modeGuardrailHasState(enterpriseBlocked.Items, "enterprise_claim", "blocked") {
+		t.Fatalf("enterprise guardrails should show missing external controls: %#v", enterpriseBlocked)
+	}
+
+	for _, spec := range enterpriseValidationSpecs() {
+		t.Setenv(spec.EnvKey, "attached")
+	}
+	enterpriseCandidateValidation := EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, access, audit, 0)
+	enterpriseCandidate := ModeGuardrailsFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, nil, access, audit, 0, enterpriseCandidateValidation)
+	if enterpriseCandidate.Claim != "candidate" || enterpriseCandidate.BlockedCount != 0 || !modeGuardrailHasState(enterpriseCandidate.Items, "enterprise_claim", "candidate") {
+		t.Fatalf("enterprise guardrails should make full evidence a candidate claim: %#v", enterpriseCandidate)
+	}
+	if !modeGuardrailHasLimit(enterpriseCandidate.Items, "enterprise_claim", "not a silent guarantee") {
+		t.Fatalf("enterprise candidate guardrails should avoid silent guarantees: %#v", enterpriseCandidate)
+	}
+}
+
 func TestEnterpriseValidationDistinguishesClaims(t *testing.T) {
 	policy := RolePolicy{
 		AdminSubjects:    map[string]bool{"markus@barta.com": true},
@@ -1369,6 +1435,24 @@ func degradedGuidanceHasAction(items []DegradedGuidanceItem, key, action string)
 	return false
 }
 
+func modeGuardrailHasState(items []ModeGuardrailItem, key, state string) bool {
+	for _, item := range items {
+		if item.Key == key && item.State == state {
+			return true
+		}
+	}
+	return false
+}
+
+func modeGuardrailHasLimit(items []ModeGuardrailItem, key, limit string) bool {
+	for _, item := range items {
+		if item.Key == key && strings.Contains(item.Limit, limit) {
+			return true
+		}
+	}
+	return false
+}
+
 func catalogGateHasCode(items []CatalogGate, code string) bool {
 	for _, item := range items {
 		if item.Code == code {
@@ -1455,7 +1539,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Download evidence", "integrity.pack_hash", "Download JSON", "Hash preview", "copy-safe metadata", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Download evidence", "integrity.pack_hash", "Download JSON", "Hash preview", "copy-safe metadata", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
@@ -1538,6 +1622,26 @@ func TestDashboardShowsEnterpriseMissingControlGuidance(t *testing.T) {
 		}
 	}
 	assertRouteResponseValueFree(t, "enterprise dashboard guidance", out)
+}
+
+func TestDashboardShowsDevModeGuardrails(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	app.cfg.ProductMode = "dev"
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Mode guardrails", "Dev mode is local proof only", "no_production_or_enterprise_claim", "No production or enterprise claim", "Never claimed in dev mode", "Switch to self-hosted before serving real users", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dev dashboard mode guardrails should render %q: %s", want, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "dev dashboard mode guardrails", out)
 }
 
 func TestSecurityHeadersAcrossCoreRoutes(t *testing.T) {

@@ -29,6 +29,7 @@ type EvidencePack struct {
 	Mode             string                `json:"mode"`
 	Posture          map[string]any        `json:"posture"`
 	Operational      OperationalStatus     `json:"operational_status"`
+	ModeGuardrails   ModeGuardrails        `json:"mode_guardrails"`
 	AssuranceGates   AssuranceGates        `json:"assurance_gates"`
 	NegativePath     NegativePathAssurance `json:"negative_path_assurance"`
 	Guidance         DegradedGuidance      `json:"degraded_guidance"`
@@ -88,6 +89,27 @@ type OperationalStatusItem struct {
 	State  string `json:"state"`
 	Detail string `json:"detail"`
 	Tone   string `json:"tone"`
+}
+
+type ModeGuardrails struct {
+	Summary       string              `json:"summary"`
+	Current       string              `json:"current"`
+	Claim         string              `json:"claim"`
+	Boundary      string              `json:"boundary"`
+	Items         []ModeGuardrailItem `json:"items"`
+	BlockedCount  int                 `json:"blocked_count"`
+	ReviewCount   int                 `json:"review_count"`
+	ValueReturned bool                `json:"value_returned"`
+}
+
+type ModeGuardrailItem struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	State string `json:"state"`
+	Claim string `json:"claim"`
+	Limit string `json:"limit"`
+	Next  string `json:"next"`
+	Tone  string `json:"tone"`
 }
 
 type AssuranceGates struct {
@@ -308,6 +330,168 @@ func (s *OperationalStatus) add(ok bool, key, label, okState, reviewState, okDet
 		return
 	}
 	s.Items = append(s.Items, OperationalStatusItem{Key: key, Label: label, State: reviewState, Detail: reviewDetail, Tone: "warn"})
+}
+
+func ModeGuardrailsFor(cfg Config, ready bool, issues []string, access AccessPosture, audit AuditPosture, catalogGateCount int, enterprise EnterpriseValidation) ModeGuardrails {
+	mode := strings.TrimSpace(cfg.ProductMode)
+	if mode == "" {
+		mode = "self_hosted"
+	}
+	posture := ProductModePostureFor(cfg, ready, issues, access, audit, catalogGateCount)
+	guardrails := ModeGuardrails{
+		Summary:       "Mode guardrails keep local, self-hosted, and enterprise promises separate.",
+		Current:       posture.Current,
+		Claim:         posture.Baseline,
+		Boundary:      "enterprise_not_claimed",
+		ValueReturned: false,
+	}
+
+	localState := "review"
+	localTone := "warn"
+	localLimit := "Do not rely on stronger claims until readiness, catalog, roles, and audit are clear."
+	if ready && len(issues) == 0 && catalogGateCount == 0 && access.ExplicitBindings && audit.ChainVerified {
+		localState = "ready"
+		localTone = "ok"
+		localLimit = "Secure local baseline only; this is not enterprise evidence."
+	}
+
+	switch mode {
+	case "dev":
+		guardrails.Claim = "local_only"
+		guardrails.Boundary = "no_production_or_enterprise_claim"
+		guardrails.Summary = "Dev mode is local proof only; it cannot claim production or enterprise readiness."
+		guardrails.BlockedCount++
+		guardrails.ReviewCount++
+		guardrails.add(ModeGuardrailItem{
+			Key:   "current_mode",
+			Label: "Current mode",
+			State: "dev_only",
+			Claim: "Local proof and UI testing.",
+			Limit: "No production or enterprise claim.",
+			Next:  "Switch to self-hosted before serving real users.",
+			Tone:  "warn",
+		})
+		guardrails.add(ModeGuardrailItem{
+			Key:   "self_hosted_baseline",
+			Label: "Self-hosted baseline",
+			State: "not_claimed",
+			Claim: "Not claimed in dev mode.",
+			Limit: "Dev mode may skip production packaging and recovery expectations.",
+			Next:  "Use self-hosted mode for a secure local deployment.",
+			Tone:  "warn",
+		})
+		guardrails.add(ModeGuardrailItem{
+			Key:   "enterprise_claim",
+			Label: "Enterprise claim",
+			State: "blocked",
+			Claim: "Never claimed in dev mode.",
+			Limit: "External controls and review evidence are required.",
+			Next:  "Attach enterprise controls and change mode explicitly.",
+			Tone:  "warn",
+		})
+		return guardrails
+	case "enterprise":
+		guardrails.Boundary = "external_evidence_required"
+		guardrails.Claim = enterprise.Status
+		if guardrails.Claim == "" {
+			guardrails.Claim = "blocked"
+		}
+		guardrails.Summary = "Enterprise mode only passes when local controls and external evidence are attached."
+		guardrails.add(ModeGuardrailItem{
+			Key:   "current_mode",
+			Label: "Current mode",
+			State: "enterprise",
+			Claim: "Enterprise review path is active.",
+			Limit: "No pass until required evidence is attached.",
+			Next:  "Keep external evidence with the release.",
+			Tone:  "info",
+		})
+		guardrails.add(ModeGuardrailItem{
+			Key:   "self_hosted_baseline",
+			Label: "Local baseline",
+			State: localState,
+			Claim: "Local readiness must pass first.",
+			Limit: localLimit,
+			Next:  "Clear local readiness, role, audit, and catalog gates.",
+			Tone:  localTone,
+		})
+		externalTone := "ok"
+		externalState := "attached"
+		externalLimit := "External controls are attached for review."
+		externalNext := "Keep review evidence current."
+		if enterprise.Status != "candidate" {
+			externalTone = "warn"
+			externalState = "missing"
+			externalLimit = fmt.Sprintf("%d enterprise controls need evidence.", enterprise.MissingCount)
+			externalNext = "Attach remote audit, restore, integration, release, privacy, and break-glass evidence."
+			guardrails.BlockedCount++
+			guardrails.ReviewCount++
+		}
+		guardrails.add(ModeGuardrailItem{
+			Key:   "external_controls",
+			Label: "External controls",
+			State: externalState,
+			Claim: "Enterprise evidence depends on external controls.",
+			Limit: externalLimit,
+			Next:  externalNext,
+			Tone:  externalTone,
+		})
+		claimTone := "ok"
+		claimState := "candidate"
+		claimLimit := "Candidate means ready for review, not a silent guarantee."
+		if enterprise.Status != "candidate" {
+			claimTone = "warn"
+			claimState = "blocked"
+			claimLimit = "Enterprise-ready claim is blocked."
+		}
+		guardrails.add(ModeGuardrailItem{
+			Key:   "enterprise_claim",
+			Label: "Enterprise claim",
+			State: claimState,
+			Claim: "Only allowed when every required control has evidence.",
+			Limit: claimLimit,
+			Next:  "Review the evidence pack before relying on the claim.",
+			Tone:  claimTone,
+		})
+		return guardrails
+	default:
+		guardrails.Summary = "Self-hosted mode can be ready with local controls while enterprise remains not claimed."
+		if localState != "ready" {
+			guardrails.ReviewCount++
+		}
+		guardrails.add(ModeGuardrailItem{
+			Key:   "current_mode",
+			Label: "Current mode",
+			State: "self_hosted",
+			Claim: "Secure local control plane.",
+			Limit: "No enterprise claim.",
+			Next:  "Keep local controls clear and visible.",
+			Tone:  "info",
+		})
+		guardrails.add(ModeGuardrailItem{
+			Key:   "self_hosted_baseline",
+			Label: "Self-hosted baseline",
+			State: localState,
+			Claim: "Redacted readiness, explicit roles, catalog gates, and local audit.",
+			Limit: localLimit,
+			Next:  "Fix open local gates before stronger claims.",
+			Tone:  localTone,
+		})
+		guardrails.add(ModeGuardrailItem{
+			Key:   "enterprise_claim",
+			Label: "Enterprise claim",
+			State: "not_claimed",
+			Claim: "Not claimed in self-hosted mode.",
+			Limit: "Remote audit, restore drills, release provenance, integrations, privacy policy, and review evidence are outside this claim.",
+			Next:  "Switch to enterprise only after external controls exist.",
+			Tone:  "warn",
+		})
+		return guardrails
+	}
+}
+
+func (g *ModeGuardrails) add(item ModeGuardrailItem) {
+	g.Items = append(g.Items, item)
 }
 
 func AssuranceGatesFor(ready bool, catalogGateCount int, access AccessPosture) AssuranceGates {
