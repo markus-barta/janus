@@ -440,7 +440,7 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   app.cfg.SecureCookies(),
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -468,7 +468,7 @@ func (app *App) writeSession(w http.ResponseWriter, s Session) {
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   app.cfg.SecureCookies(),
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(time.Until(s.Expiry).Seconds()),
 	})
 }

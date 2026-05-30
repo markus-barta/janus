@@ -79,6 +79,28 @@ func TestSessionRejectsTamper(t *testing.T) {
 	}
 }
 
+func TestSessionCookieIsOIDCRedirectCompatible(t *testing.T) {
+	tTempDir = t.TempDir()
+	store, err := NewStore(tTempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{cfg: testConfig(), store: store}
+
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, Session{Subject: "user-1", Expiry: time.Now().UTC().Add(time.Hour)})
+	cookies := rr.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("expected one session cookie, got %d", len(cookies))
+	}
+	if cookies[0].SameSite != http.SameSiteLaxMode {
+		t.Fatalf("session cookie must be Lax for OIDC redirects, got %v", cookies[0].SameSite)
+	}
+	if !cookies[0].Secure || !cookies[0].HttpOnly {
+		t.Fatalf("session cookie must be secure and httponly: %#v", cookies[0])
+	}
+}
+
 func TestReadyzLockedWhenAuthMissing(t *testing.T) {
 	tTempDir = t.TempDir()
 	store, err := NewStore(tTempDir)
