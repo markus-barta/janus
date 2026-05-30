@@ -135,6 +135,21 @@ type ActionReadinessItem struct {
 	Tone          string `json:"tone"`
 }
 
+type ActionReceipt struct {
+	Action              string `json:"action"`
+	Outcome             string `json:"outcome"`
+	RequestID           string `json:"request_id"`
+	RoleChecked         bool   `json:"role_checked"`
+	CSRFChecked         bool   `json:"csrf_checked"`
+	ReadinessChecked    bool   `json:"readiness_checked"`
+	AuditRecorded       bool   `json:"audit_recorded"`
+	Boundary            string `json:"boundary"`
+	Next                string `json:"next"`
+	SecretValueReturned bool   `json:"secret_value_returned"`
+	RequestBodyReturned bool   `json:"request_body_returned"`
+	ValueReturned       bool   `json:"value_returned"`
+}
+
 type AssuranceGates struct {
 	Summary       string              `json:"summary"`
 	Gates         []AssuranceGateItem `json:"gates"`

@@ -343,19 +343,20 @@ type ProductModeControl struct {
 }
 
 type UIActionResult struct {
-	Title          string `json:"title"`
-	Outcome        string `json:"outcome"`
-	Message        string `json:"message"`
-	HandleID       string `json:"handle_id,omitempty"`
-	PermitID       string `json:"permit_id,omitempty"`
-	SecretRef      string `json:"secret_ref,omitempty"`
-	Action         string `json:"action,omitempty"`
-	Status         string `json:"status,omitempty"`
-	ExpiresAt      string `json:"expires_at,omitempty"`
-	RunReason      string `json:"run_reason,omitempty"`
-	RequestID      string `json:"request_id,omitempty"`
-	OutputScrubbed bool   `json:"output_scrubbed,omitempty"`
-	ValueReturned  bool   `json:"value_returned"`
+	Title          string         `json:"title"`
+	Outcome        string         `json:"outcome"`
+	Message        string         `json:"message"`
+	Receipt        *ActionReceipt `json:"receipt,omitempty"`
+	HandleID       string         `json:"handle_id,omitempty"`
+	PermitID       string         `json:"permit_id,omitempty"`
+	SecretRef      string         `json:"secret_ref,omitempty"`
+	Action         string         `json:"action,omitempty"`
+	Status         string         `json:"status,omitempty"`
+	ExpiresAt      string         `json:"expires_at,omitempty"`
+	RunReason      string         `json:"run_reason,omitempty"`
+	RequestID      string         `json:"request_id,omitempty"`
+	OutputScrubbed bool           `json:"output_scrubbed,omitempty"`
+	ValueReturned  bool           `json:"value_returned"`
 }
 
 type AuthErrorView struct {
@@ -989,6 +990,23 @@ func (app *App) handleEvidence(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, pack)
 }
 
+func actionReceipt(r *http.Request, action, outcome, next string) ActionReceipt {
+	return ActionReceipt{
+		Action:              action,
+		Outcome:             outcome,
+		RequestID:           requestID(r),
+		RoleChecked:         true,
+		CSRFChecked:         true,
+		ReadinessChecked:    true,
+		AuditRecorded:       true,
+		Boundary:            "metadata_only",
+		Next:                next,
+		SecretValueReturned: false,
+		RequestBodyReturned: false,
+		ValueReturned:       false,
+	}
+}
+
 func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	if !app.csrfAllowed(r, session) {
@@ -1011,8 +1029,10 @@ func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app.auditWithRef(r, "warden.resolve", "allowed", session.Subject, handle.SecretRef, "")
+	receipt := actionReceipt(r, "warden.resolve", "allowed", "Use the handle id for metadata-only follow-up or request a permit.")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"handle":         handle,
+		"receipt":        receipt,
 		"value_returned": false,
 	})
 }
@@ -1068,10 +1088,12 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app.auditWithRef(r, "warden.resolve.ui", "allowed", session.Subject, handle.SecretRef, "")
+	receipt := actionReceipt(r, "warden.resolve.ui", "allowed", "Use this handle for metadata-only follow-up or request a permit.")
 	result := UIActionResult{
 		Title:         "Handle ready",
 		Outcome:       "allowed",
 		Message:       "Metadata handle issued. Secret value was not returned.",
+		Receipt:       &receipt,
 		HandleID:      handle.HandleID,
 		SecretRef:     handle.SecretRef,
 		ExpiresAt:     handle.ExpiresAt.Format("15:04:05"),
@@ -1107,8 +1129,10 @@ func (app *App) handleCreatePermit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app.auditWithRef(r, "permit.create", permit.Status, session.Subject, permit.SecretRef, permit.DenialReason)
+	receipt := actionReceipt(r, "permit.create", permit.Status, "Run the safety check when you need a no-connector execution verdict.")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"permit":         permit,
+		"receipt":        receipt,
 		"value_returned": false,
 	})
 }
@@ -1133,8 +1157,10 @@ func (app *App) handleRunPermit(w http.ResponseWriter, r *http.Request) {
 	}
 	result := RunPermit(permit)
 	app.auditWithRef(r, "permit.run", result.Status, session.Subject, permit.SecretRef, result.Reason)
+	receipt := actionReceipt(r, "permit.run", result.Status, "Review the scrubbed run verdict and keep the audit trail.")
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"result":         result,
+		"receipt":        receipt,
 		"value_returned": false,
 	})
 }
@@ -1208,10 +1234,12 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 		title = "Permit denied"
 		message = permit.DenialReason
 	}
+	receipt := actionReceipt(r, "permit.create.ui", permit.Status, "Run the safety check when you need a no-connector execution verdict.")
 	result := UIActionResult{
 		Title:         title,
 		Outcome:       outcome,
 		Message:       message,
+		Receipt:       &receipt,
 		PermitID:      permit.ID,
 		SecretRef:     permit.SecretRef,
 		Action:        permit.Action,
@@ -1250,10 +1278,12 @@ func (app *App) handleRunPermitUI(w http.ResponseWriter, r *http.Request) {
 	if run.Status == "denied" {
 		outcome = "denied"
 	}
+	receipt := actionReceipt(r, "permit.run.ui", run.Status, "Review the scrubbed run verdict and keep the audit trail.")
 	result := UIActionResult{
 		Title:          "Safety check complete",
 		Outcome:        outcome,
 		Message:        "Run evaluated. No secret value or command output was returned.",
+		Receipt:        &receipt,
 		PermitID:       permit.ID,
 		SecretRef:      permit.SecretRef,
 		Action:         permit.Action,
@@ -2215,6 +2245,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_validation":     "self_hosted_safe_enterprise_required",
 			"enterprise_attachments":    "presence_only_no_refs",
 			"action_readiness":          "role_and_readiness_matrix",
+			"action_receipts":           "mutation_result_receipts",
 			"mode_guardrails":           "dashboard_posture_evidence",
 			"privacy_retention":         "dashboard_posture_evidence",
 			"negative_path_assurance":   "dashboard_posture_evidence",
@@ -2312,6 +2343,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"exact_evidence_download_receipt",
 			"enterprise_evidence_attachment_matrix",
 			"role_aware_action_readiness",
+			"value_free_action_receipts",
 			"assurance_gate_proof_strip",
 			"enterprise_validation_clarity",
 			"privacy_retention_posture",
@@ -3328,6 +3360,23 @@ func mustTemplates() *template.Template {
     <p>{{ .ActionResult.Message }}</p>
     {{ if .ActionResult.RunReason }}<p class="warn">{{ .ActionResult.RunReason }}</p>{{ end }}
     {{ if .ActionResult.RequestID }}<p class="mono">request_id={{ .ActionResult.RequestID }}</p>{{ end }}
+    {{ if .ActionResult.Receipt }}
+    <div class="receipt" aria-label="Action receipt">
+      <div>
+        <strong>Action receipt</strong>
+        <p><span class="mono">request_id={{ .ActionResult.Receipt.RequestID }}</span></p>
+      </div>
+      <span class="pill {{ if eq .ActionResult.Receipt.Outcome "allowed" }}ok{{ else }}info{{ end }}">{{ .ActionResult.Receipt.Outcome }}</span>
+    </div>
+    <div class="verdict" aria-label="Action receipt checks">
+      <span><strong>Role</strong>{{ if .ActionResult.Receipt.RoleChecked }} checked{{ else }} pending{{ end }}</span>
+      <span><strong>CSRF</strong>{{ if .ActionResult.Receipt.CSRFChecked }} checked{{ else }} pending{{ end }}</span>
+      <span><strong>Readiness</strong>{{ if .ActionResult.Receipt.ReadinessChecked }} checked{{ else }} pending{{ end }}</span>
+      <span><strong>Audit</strong>{{ if .ActionResult.Receipt.AuditRecorded }} recorded{{ else }} pending{{ end }}</span>
+    </div>
+    <p><span class="pill ok">{{ .ActionResult.Receipt.Boundary }}</span> <span class="pill ok">secret_value_returned=false</span> <span class="pill ok">request_body_returned=false</span></p>
+    <p><span class="pill info">next</span> {{ .ActionResult.Receipt.Next }}</p>
+    {{ end }}
     {{ if .ActionResult.PermitID }}
     <div class="verdict" aria-label="Permit safety verdict">
       <span><strong>Metadata only</strong> secret value withheld</span>

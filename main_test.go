@@ -547,6 +547,7 @@ func TestWardenResolveReturnsHandleOnly(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://vault.barta.cm")
 	req.Header.Set("X-CSRF-Token", app.csrfToken(session))
+	req.Header.Set("X-Request-Id", "receipt-handle-1")
 	req.AddCookie(rr.Result().Cookies()[0])
 
 	out := httptest.NewRecorder()
@@ -557,6 +558,11 @@ func TestWardenResolveReturnsHandleOnly(t *testing.T) {
 	body := out.Body.String()
 	if !strings.Contains(body, `"value_returned":false`) || strings.Contains(body, `"plaintext"`) {
 		t.Fatalf("handle response is not value-free: %s", body)
+	}
+	for _, want := range []string{`"receipt"`, `"action":"warden.resolve"`, `"request_id":"receipt-handle-1"`, `"role_checked":true`, `"csrf_checked":true`, `"readiness_checked":true`, `"audit_recorded":true`, `"boundary":"metadata_only"`, `"secret_value_returned":false`, `"request_body_returned":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("handle response should include action receipt %s: %s", want, body)
+		}
 	}
 }
 
@@ -597,6 +603,49 @@ func TestWardenResolveWorksWhenAuthDisabledForLocalSmoke(t *testing.T) {
 	if strings.Contains(out.Body.String(), `"plaintext"`) {
 		t.Fatalf("response should be value-free: %s", out.Body.String())
 	}
+}
+
+func TestPermitAPIsReturnValueFreeActionReceipts(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	create := httptest.NewRequest(http.MethodPost, "/api/permits", strings.NewReader(`{"ref":"zitadel-janus-oidc","action":"metadata_use","destination":"dashboard","reason":"local smoke"}`))
+	create.Header.Set("Content-Type", "application/json")
+	create.Header.Set("X-Request-Id", "receipt-permit-create")
+	createOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(createOut, create)
+	if createOut.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", createOut.Code, createOut.Body.String())
+	}
+	createBody := createOut.Body.String()
+	for _, want := range []string{`"receipt"`, `"action":"permit.create"`, `"request_id":"receipt-permit-create"`, `"audit_recorded":true`, `"boundary":"metadata_only"`, `"secret_value_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
+		if !strings.Contains(createBody, want) {
+			t.Fatalf("permit create should include action receipt %s: %s", want, createBody)
+		}
+	}
+	assertRouteResponseValueFree(t, "permit create receipt", createOut)
+
+	var created struct {
+		Permit Permit `json:"permit"`
+	}
+	if err := json.Unmarshal(createOut.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	run := httptest.NewRequest(http.MethodPost, "/api/permits/"+created.Permit.ID+"/run", nil)
+	run.SetPathValue("permitID", created.Permit.ID)
+	run.Header.Set("X-Request-Id", "receipt-permit-run")
+	runOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(runOut, run)
+	if runOut.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d body=%s", runOut.Code, runOut.Body.String())
+	}
+	runBody := runOut.Body.String()
+	for _, want := range []string{`"receipt"`, `"action":"permit.run"`, `"request_id":"receipt-permit-run"`, `"audit_recorded":true`, `"boundary":"metadata_only"`, `"secret_value_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
+		if !strings.Contains(runBody, want) {
+			t.Fatalf("permit run should include action receipt %s: %s", want, runBody)
+		}
+	}
+	assertRouteResponseValueFree(t, "permit run receipt", runOut)
 }
 
 func TestSensitiveAPIFailsClosedWhenReadinessDegraded(t *testing.T) {
@@ -689,6 +738,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"action_readiness"`) || !strings.Contains(body, `"key":"evidence_export"`) || !strings.Contains(body, `"key":"handle_issue"`) || !strings.Contains(body, `"key":"permit_run_check"`) || !strings.Contains(body, `"action_readiness":"role_and_readiness_matrix"`) || !strings.Contains(body, `"role_aware_action_readiness"`) {
 		t.Fatalf("posture response should include action readiness matrix: %s", body)
+	}
+	if !strings.Contains(body, `"action_receipts":"mutation_result_receipts"`) || !strings.Contains(body, `"value_free_action_receipts"`) {
+		t.Fatalf("posture response should include action receipt capability: %s", body)
 	}
 	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
 		t.Fatalf("posture response should include scope policy: %s", body)
@@ -2452,7 +2504,7 @@ func TestWardenResolveUIReturnsValueFreeHandle(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Handle ready", "value_returned=false", "zitadel-janus-oidc"} {
+	for _, want := range []string{"Handle ready", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "value_returned=false", "zitadel-janus-oidc"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("UI handle response should render %q: %s", want, body)
 		}
@@ -2534,7 +2586,7 @@ func TestPermitCreateUIReturnsValueFreePermit(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Permit recorded", "Permit safety verdict", "Metadata only", "No connector", "Audited", "approved_metadata_only", "Run safety check", "value_returned=false"} {
+	for _, want := range []string{"Permit recorded", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Audited", "approved_metadata_only", "Run safety check", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("permit UI response should render %q: %s", want, body)
 		}
@@ -2583,7 +2635,7 @@ func TestPermitRunUIReturnsNoExecutionValueFreeResult(t *testing.T) {
 		t.Fatalf("expected 202, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Safety check complete", "Permit safety verdict", "Metadata only", "No connector", "Scrubbed output", "not_executed", "output_scrubbed=true", "value_returned=false"} {
+	for _, want := range []string{"Safety check complete", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Scrubbed output", "not_executed", "output_scrubbed=true", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("permit run UI response should render %q: %s", want, body)
 		}
