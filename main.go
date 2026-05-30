@@ -200,29 +200,6 @@ func (s *Store) FindDescriptor(ref string) (SecretDescriptor, bool) {
 	return SecretDescriptor{}, false
 }
 
-func (s *Store) AppendAudit(entry AuditEntry) {
-	entry.Time = time.Now().UTC()
-	raw, err := json.Marshal(entry)
-	if err != nil {
-		log.Printf("audit encode failed: %v", err)
-		return
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	f, err := os.OpenFile(s.auditFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		log.Printf("audit open failed: %v", err)
-		return
-	}
-	defer f.Close()
-
-	if _, err := f.Write(append(raw, '\n')); err != nil {
-		log.Printf("audit write failed: %v", err)
-	}
-}
-
 type AuditEntry struct {
 	Time      time.Time `json:"time"`
 	Action    string    `json:"action"`
@@ -233,6 +210,8 @@ type AuditEntry struct {
 	Path      string    `json:"path"`
 	SecretRef string    `json:"secret_ref,omitempty"`
 	Reason    string    `json:"reason,omitempty"`
+	PrevHash  string    `json:"prev_hash,omitempty"`
+	EventHash string    `json:"event_hash,omitempty"`
 }
 
 type App struct {
@@ -240,6 +219,7 @@ type App struct {
 	store     *Store
 	broker    *Broker
 	permits   *PermitStore
+	limiter   *RateLimiter
 	oauth     *oauth2.Config
 	verifier  *oidc.IDTokenVerifier
 	templates *template.Template
@@ -317,6 +297,7 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 		store:     store,
 		broker:    NewBroker(store),
 		permits:   NewPermitStore(),
+		limiter:   NewRateLimiter(180, time.Minute),
 		templates: mustTemplates(),
 	}
 
@@ -348,10 +329,12 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /logout", app.withAuth(app.handleLogout))
 	mux.HandleFunc("GET /api/warden/descriptors", app.withAuth(app.handleDescriptors))
 	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.handleResolveHandle))
+	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.handleRecentAudit))
+	mux.HandleFunc("GET /api/posture", app.withAuth(app.handlePosture))
 	mux.HandleFunc("POST /api/permits", app.withAuth(app.handleCreatePermit))
 	mux.HandleFunc("POST /api/permits/{permitID}/run", app.withAuth(app.handleRunPermit))
 	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
-	return app.securityHeaders(mux)
+	return app.securityHeaders(app.rateLimit(mux))
 }
 
 func (app *App) securityHeaders(next http.Handler) http.Handler {
@@ -359,9 +342,27 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		if app.cfg.SecureCookies() {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (app *App) rateLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/favicon.ico" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		key := clientKey(r) + "|" + r.URL.Path
+		if !app.limiter.Allow(key) {
+			writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "Too many requests")
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -427,6 +428,8 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	principal := principalFromSession(session)
 	descriptors := app.broker.Descriptors(principal)
 	issues := enterpriseChecks(app.cfg)
+	auditPosture := app.store.AuditPosture()
+	recentAudit := app.store.RecentAudit(8)
 	data := map[string]any{
 		"Title":       "Janus",
 		"Session":     session,
@@ -434,6 +437,8 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"Descriptors": descriptors,
 		"Issues":      issues,
 		"Mode":        app.cfg.ProductMode,
+		"Audit":       recentAudit,
+		"Posture":     auditPosture,
 	}
 	renderTemplate(w, app.templates, "dashboard", data)
 }
@@ -445,6 +450,22 @@ func (app *App) handleDescriptors(w http.ResponseWriter, r *http.Request) {
 		"descriptors":    app.broker.Descriptors(principal),
 		"value_returned": false,
 	})
+}
+
+func (app *App) handleRecentAudit(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	app.audit(r, "audit.recent", "allowed", session.Subject, "")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"audit":          app.store.RecentAudit(50),
+		"posture":        app.store.AuditPosture(),
+		"value_returned": false,
+	})
+}
+
+func (app *App) handlePosture(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	app.audit(r, "posture.view", "allowed", session.Subject, "")
+	writeJSON(w, http.StatusOK, app.postureBody())
 }
 
 func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
@@ -829,6 +850,30 @@ func writeJSONError(w http.ResponseWriter, status int, code, message string) {
 	})
 }
 
+func (app *App) postureBody() map[string]any {
+	descriptors := app.store.Descriptors()
+	issues := enterpriseChecks(app.cfg)
+	return map[string]any{
+		"service":          "janus",
+		"mode":             app.cfg.ProductMode,
+		"auth_required":    app.cfg.RequireAuth,
+		"oidc_configured":  app.cfg.OIDCConfigured(),
+		"descriptor_count": len(descriptors),
+		"open_gates":       len(issues),
+		"gates":            issues,
+		"audit":            app.store.AuditPosture(),
+		"capabilities": []string{
+			"value_free_metadata_catalog",
+			"broker_principal_chain",
+			"warden_handle_only",
+			"permit_noop_execution",
+			"csrf_guarded_mutations",
+			"rate_limited_runtime",
+		},
+		"value_returned": false,
+	}
+}
+
 func (app *App) handleBrokerError(w http.ResponseWriter, r *http.Request, action, actor, ref string, err error) {
 	switch {
 	case errors.Is(err, ErrNotFound):
@@ -1076,6 +1121,32 @@ func mustTemplates() *template.Template {
   </div>
 </section>
 {{ end }}
+<section class="grid" style="margin-bottom:16px">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Audit posture</h2>
+      {{ if .Posture.LegacyEntries }}<span class="pill">chain partial</span>{{ else if .Posture.ChainVerified }}<span class="pill">chain verified</span>{{ else }}<span class="pill">chain needs review</span>{{ end }}
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Action</th><th>Outcome</th><th>Method</th><th>Path</th><th>Secret ref</th><th>Reason</th></tr></thead>
+        <tbody>
+        {{ range .Audit }}
+          <tr>
+            <td>{{ .Time.Format "15:04:05" }}</td>
+            <td>{{ .Action }}</td>
+            <td>{{ .Outcome }}</td>
+            <td>{{ .Method }}</td>
+            <td>{{ .Path }}</td>
+            <td>{{ if .SecretRef }}{{ .SecretRef }}{{ else }}<span class="muted">none</span>{{ end }}</td>
+            <td>{{ if .Reason }}{{ .Reason }}{{ else }}<span class="muted">none</span>{{ end }}</td>
+          </tr>
+        {{ end }}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
 <section class="grid">
   <div class="panel">
     <div class="panel-head">

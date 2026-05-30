@@ -92,6 +92,24 @@ func TestLoadsExternalAgenixCatalog(t *testing.T) {
 	}
 }
 
+func TestAuditHashChainAndRecentAudit(t *testing.T) {
+	store, err := NewStore(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.AppendAudit(AuditEntry{Action: "one", Outcome: "allowed", Method: http.MethodGet, Path: "/"})
+	store.AppendAudit(AuditEntry{Action: "two", Outcome: "denied", Method: http.MethodPost, Path: "/api"})
+
+	posture := store.AuditPosture()
+	if posture.Entries != 2 || posture.ChainedEntries != 2 || !posture.ChainVerified || posture.LastHash == "" {
+		t.Fatalf("unexpected audit posture: %#v", posture)
+	}
+	recent := store.RecentAudit(1)
+	if len(recent) != 1 || recent[0].Action != "two" || recent[0].PrevHash == "" || recent[0].EventHash == "" {
+		t.Fatalf("unexpected recent audit: %#v", recent)
+	}
+}
+
 func TestSessionRejectsTamper(t *testing.T) {
 	app := newTestApp(t)
 
@@ -189,6 +207,53 @@ func TestWardenResolveWorksWhenAuthDisabledForLocalSmoke(t *testing.T) {
 	}
 	if strings.Contains(out.Body.String(), `"plaintext"`) {
 		t.Fatalf("response should be value-free: %s", out.Body.String())
+	}
+}
+
+func TestFailedLookupDoesNotEchoRefIntoAuditSecretRef(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodPost, "/api/warden/resolve", strings.NewReader(`{"ref":"do-not-echo-this","reason":"local smoke"}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleResolveHandle)(out, req)
+	if out.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", out.Code, out.Body.String())
+	}
+	recent := app.store.RecentAudit(1)
+	if len(recent) != 1 {
+		t.Fatalf("expected one audit event, got %d", len(recent))
+	}
+	if recent[0].SecretRef != "" {
+		t.Fatalf("failed lookup echoed ref into audit secret_ref: %#v", recent[0])
+	}
+}
+
+func TestPostureAPIIsValueFree(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/api/posture", nil)
+	out := httptest.NewRecorder()
+	app.withAuth(app.handlePosture)(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	if !strings.Contains(body, `"value_returned":false`) || strings.Contains(body, `"plaintext"`) {
+		t.Fatalf("posture response should be value-free: %s", body)
+	}
+}
+
+func TestRateLimiterBlocksBurst(t *testing.T) {
+	limiter := NewRateLimiter(2, time.Minute)
+	if !limiter.Allow("test") || !limiter.Allow("test") {
+		t.Fatal("expected first two requests to pass")
+	}
+	if limiter.Allow("test") {
+		t.Fatal("expected third request to be limited")
 	}
 }
 
