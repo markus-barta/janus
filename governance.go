@@ -35,6 +35,7 @@ type EvidencePack struct {
 	NegativePath     NegativePathAssurance `json:"negative_path_assurance"`
 	Guidance         DegradedGuidance      `json:"degraded_guidance"`
 	AuditDrill       AuditFailureDrill     `json:"audit_failure_drill"`
+	RestoreProof     RestoreDrillProof     `json:"restore_drill_proof"`
 	AssuranceSummary AssuranceSummary      `json:"assurance_summary"`
 	Enterprise       EnterpriseValidation  `json:"enterprise_validation"`
 	Privacy          PrivacyPosture        `json:"privacy_posture"`
@@ -218,6 +219,30 @@ type AuditFailureDrill struct {
 }
 
 type AuditFailureDrillItem struct {
+	Key           string `json:"key"`
+	Label         string `json:"label"`
+	State         string `json:"state"`
+	Proof         string `json:"proof"`
+	Next          string `json:"next"`
+	Tone          string `json:"tone"`
+	ValueReturned bool   `json:"value_returned"`
+}
+
+type RestoreDrillProof struct {
+	Summary             string                  `json:"summary"`
+	Mode                string                  `json:"mode"`
+	Status              string                  `json:"status"`
+	Attachment          string                  `json:"attachment"`
+	EvidenceSignal      string                  `json:"evidence_signal"`
+	EvidenceRefReturned bool                    `json:"evidence_ref_returned"`
+	Checks              []RestoreDrillProofItem `json:"checks"`
+	BlockedCount        int                     `json:"blocked_count"`
+	ReviewCount         int                     `json:"review_count"`
+	RecoveryRole        string                  `json:"recovery_role"`
+	ValueReturned       bool                    `json:"value_returned"`
+}
+
+type RestoreDrillProofItem struct {
 	Key           string `json:"key"`
 	Label         string `json:"label"`
 	State         string `json:"state"`
@@ -865,6 +890,112 @@ func (d *AuditFailureDrill) add(item AuditFailureDrillItem) {
 		d.BlockedCount++
 	}
 	d.Checks = append(d.Checks, item)
+}
+
+func RestoreDrillProofFor(enterprise EnterpriseValidation) RestoreDrillProof {
+	control := enterpriseControlByKey(enterprise.Controls, "restore_drill")
+	mode := strings.TrimSpace(enterprise.Mode)
+	if mode == "" {
+		mode = "self_hosted"
+	}
+	attachment := control.Attachment
+	if attachment == "" {
+		attachment = "not_claimed"
+	}
+	evidenceSignal := control.EvidenceSignal
+	if evidenceSignal == "" {
+		evidenceSignal = "presence_only_env_flag"
+	}
+
+	proof := RestoreDrillProof{
+		Summary:             "Restore drill proof names the recovery checks Janus expects before enterprise recovery claims.",
+		Mode:                mode,
+		Status:              "not_claimed",
+		Attachment:          attachment,
+		EvidenceSignal:      evidenceSignal,
+		EvidenceRefReturned: false,
+		RecoveryRole:        "operator",
+		ValueReturned:       false,
+	}
+
+	state := "external"
+	tone := "info"
+	next := "Run and attach a restore drill record outside Janus before claiming enterprise recovery."
+	if mode == "enterprise" {
+		state = "blocked"
+		tone = "warn"
+		proof.Status = "blocked"
+		next = "Attach a recent restore drill record outside Janus."
+		if control.State == "attached" {
+			state = "attached"
+			tone = "ok"
+			proof.Status = "candidate"
+			next = "Keep the restore drill record current and reviewed outside Janus."
+		}
+	}
+
+	proof.add(RestoreDrillProofItem{
+		Key:   "metadata_restore",
+		Label: "Metadata restore",
+		State: state,
+		Proof: "Restore evidence must show descriptors, owners, classes, scope, lifecycle, and approved-use metadata survive restore.",
+		Next:  next,
+		Tone:  tone,
+	})
+	proof.add(RestoreDrillProofItem{
+		Key:   "audit_continuity",
+		Label: "Audit continuity",
+		State: state,
+		Proof: "Restore evidence must show audit entries and hash-chain continuity after restore.",
+		Next:  next,
+		Tone:  tone,
+	})
+	proof.add(RestoreDrillProofItem{
+		Key:   "policy_scope_restore",
+		Label: "Policy and scope",
+		State: state,
+		Proof: "Restore evidence must show role bindings, scope filters, and catalog gates come back with the service.",
+		Next:  next,
+		Tone:  tone,
+	})
+	proof.add(RestoreDrillProofItem{
+		Key:   "readiness_after_restore",
+		Label: "Readiness after restore",
+		State: state,
+		Proof: "Restore evidence must show readiness returns without exposing secret values or backend paths.",
+		Next:  next,
+		Tone:  tone,
+	})
+	proof.add(RestoreDrillProofItem{
+		Key:   "evidence_boundary",
+		Label: "Evidence boundary",
+		State: "withheld",
+		Proof: "Janus records only presence and review state; external restore files and refs are not returned.",
+		Next:  "Keep the drill record outside Janus and use this presence signal for review.",
+		Tone:  "ok",
+	})
+
+	return proof
+}
+
+func enterpriseControlByKey(items []EnterpriseValidationControl, key string) EnterpriseValidationControl {
+	for _, item := range items {
+		if item.Key == key {
+			return item
+		}
+	}
+	return EnterpriseValidationControl{Key: key, State: "not_claimed", Attachment: "not_claimed", EvidenceSignal: "presence_only_env_flag"}
+}
+
+func (p *RestoreDrillProof) add(item RestoreDrillProofItem) {
+	item.ValueReturned = false
+	if item.Tone == "warn" || item.State == "blocked" {
+		p.BlockedCount++
+	}
+	if item.Tone == "info" || item.State == "external" || item.State == "not_claimed" {
+		p.ReviewCount++
+	}
+	p.Checks = append(p.Checks, item)
 }
 
 func PrivacyPostureFor(boundary EvidenceBoundary, audit AuditPosture) PrivacyPosture {

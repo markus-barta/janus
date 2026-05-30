@@ -869,6 +869,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
 	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
+	restoreProof := RestoreDrillProofFor(enterpriseValidation)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -901,6 +902,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"ModePosture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
 		"ModeGuardrails":    modeGuardrails,
 		"Enterprise":        enterpriseValidation,
+		"RestoreProof":      restoreProof,
 		"Privacy":           privacyPosture,
 		"AssuranceSummary":  assuranceSummary,
 		"AssuranceGates":    assuranceGates,
@@ -2167,6 +2169,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
 	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
+	restoreProof := RestoreDrillProofFor(enterpriseValidation)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2197,6 +2200,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"mode_posture":            ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
 		"mode_guardrails":         modeGuardrails,
 		"enterprise_validation":   enterpriseValidation,
+		"restore_drill_proof":     restoreProof,
 		"privacy_posture":         privacyPosture,
 		"evidence_receipt":        evidenceReceipt,
 		"action_readiness":        actionReadiness,
@@ -2248,6 +2252,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"evidence_receipt":          "download_header_body_match",
 			"enterprise_validation":     "self_hosted_safe_enterprise_required",
 			"enterprise_attachments":    "presence_only_no_refs",
+			"restore_drill_proof":       "dashboard_posture_evidence",
 			"action_readiness":          "role_and_readiness_matrix",
 			"action_receipts":           "mutation_result_receipts",
 			"action_receipt_integrity":  "tamper_evident_hash_proof",
@@ -2348,6 +2353,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"evidence_download_receipt",
 			"exact_evidence_download_receipt",
 			"enterprise_evidence_attachment_matrix",
+			"restore_drill_proof",
 			"role_aware_action_readiness",
 			"value_free_action_receipts",
 			"tamper_evident_action_receipts",
@@ -2385,6 +2391,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
 	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
+	restoreProof := RestoreDrillProofFor(enterpriseValidation)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2405,6 +2412,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		AuditDrill:       auditDrill,
 		AssuranceSummary: assuranceSummary,
 		Enterprise:       enterpriseValidation,
+		RestoreProof:     restoreProof,
 		Privacy:          privacyPosture,
 		Descriptors:      descriptors,
 		CatalogGates:     catalogGates,
@@ -3308,6 +3316,26 @@ func mustTemplates() *template.Template {
         <p>{{ .Detail }}</p>
         <p><span class="pill info">owner {{ .OwnerRole }}</span> <span class="pill {{ if eq .Attachment "missing" }}warn{{ else if eq .Attachment "attached_presence_only" }}ok{{ else }}info{{ end }}">{{ .Attachment }}</span></p>
         <p><span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
+        <p><span class="pill info">next</span> {{ .Next }}</p>
+      </div>
+      {{ end }}
+    </div>
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="restore-drill-proof">
+  <div class="panel-head">
+    <h2>Restore drill proof</h2>
+    <span class="pill {{ if eq .RestoreProof.Status "candidate" }}ok{{ else if eq .RestoreProof.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .RestoreProof.Status }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .RestoreProof.Summary }}</p>
+    <p><span class="pill info">{{ .RestoreProof.Mode }}</span> <span class="pill {{ if eq .RestoreProof.Attachment "attached_presence_only" }}ok{{ else if eq .RestoreProof.Attachment "missing" }}warn{{ else }}info{{ end }}">{{ .RestoreProof.Attachment }}</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <div class="mode-grid" aria-label="Restore drill proof">
+      {{ range .RestoreProof.Checks }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Proof }}</p>
         <p><span class="pill info">next</span> {{ .Next }}</p>
       </div>
       {{ end }}
