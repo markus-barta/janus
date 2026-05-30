@@ -32,6 +32,64 @@ type EvidenceReceipt struct {
 	ValueReturned   bool   `json:"value_returned"`
 }
 
+const (
+	actionReceiptSchema       = "janus-action-receipt-v1"
+	actionReceiptAlgorithm    = "sha256-json-v1"
+	actionReceiptCoverage     = "schema, action, outcome, request_id, checks, boundary, next, value flags"
+	actionReceiptVerification = "Recompute the SHA-256 hash over the covered fields; receipt_id is ar_<first 16 hash chars>."
+)
+
+type actionReceiptProofPayload struct {
+	Schema              string `json:"schema"`
+	Algorithm           string `json:"algorithm"`
+	Action              string `json:"action"`
+	Outcome             string `json:"outcome"`
+	RequestID           string `json:"request_id"`
+	RoleChecked         bool   `json:"role_checked"`
+	CSRFChecked         bool   `json:"csrf_checked"`
+	ReadinessChecked    bool   `json:"readiness_checked"`
+	AuditRecorded       bool   `json:"audit_recorded"`
+	Boundary            string `json:"boundary"`
+	Coverage            string `json:"coverage"`
+	TamperEvident       bool   `json:"tamper_evident"`
+	Next                string `json:"next"`
+	SecretValueReturned bool   `json:"secret_value_returned"`
+	RequestBodyReturned bool   `json:"request_body_returned"`
+	ValueReturned       bool   `json:"value_returned"`
+}
+
+func ActionReceiptIntegrityFor(receipt ActionReceipt) ActionReceipt {
+	receipt.Schema = actionReceiptSchema
+	receipt.Algorithm = actionReceiptAlgorithm
+	receipt.Coverage = actionReceiptCoverage
+	receipt.Verification = actionReceiptVerification
+	receipt.TamperEvident = true
+
+	payload := actionReceiptProofPayload{
+		Schema:              receipt.Schema,
+		Algorithm:           receipt.Algorithm,
+		Action:              receipt.Action,
+		Outcome:             receipt.Outcome,
+		RequestID:           receipt.RequestID,
+		RoleChecked:         receipt.RoleChecked,
+		CSRFChecked:         receipt.CSRFChecked,
+		ReadinessChecked:    receipt.ReadinessChecked,
+		AuditRecorded:       receipt.AuditRecorded,
+		Boundary:            receipt.Boundary,
+		Coverage:            receipt.Coverage,
+		TamperEvident:       receipt.TamperEvident,
+		Next:                receipt.Next,
+		SecretValueReturned: receipt.SecretValueReturned,
+		RequestBodyReturned: receipt.RequestBodyReturned,
+		ValueReturned:       receipt.ValueReturned,
+	}
+	raw, _ := json.Marshal(payload)
+	sum := sha256.Sum256(raw)
+	receipt.ReceiptHash = hex.EncodeToString(sum[:])
+	receipt.ReceiptID = "ar_" + receipt.ReceiptHash[:16]
+	return receipt
+}
+
 func EvidenceIntegrityFor(pack EvidencePack) EvidenceIntegrity {
 	unsigned := pack
 	unsigned.Integrity = nil

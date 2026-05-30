@@ -991,7 +991,7 @@ func (app *App) handleEvidence(w http.ResponseWriter, r *http.Request) {
 }
 
 func actionReceipt(r *http.Request, action, outcome, next string) ActionReceipt {
-	return ActionReceipt{
+	return ActionReceiptIntegrityFor(ActionReceipt{
 		Action:              action,
 		Outcome:             outcome,
 		RequestID:           requestID(r),
@@ -1004,7 +1004,7 @@ func actionReceipt(r *http.Request, action, outcome, next string) ActionReceipt 
 		SecretValueReturned: false,
 		RequestBodyReturned: false,
 		ValueReturned:       false,
-	}
+	})
 }
 
 func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
@@ -2246,6 +2246,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_attachments":    "presence_only_no_refs",
 			"action_readiness":          "role_and_readiness_matrix",
 			"action_receipts":           "mutation_result_receipts",
+			"action_receipt_integrity":  "tamper_evident_hash_proof",
 			"mode_guardrails":           "dashboard_posture_evidence",
 			"privacy_retention":         "dashboard_posture_evidence",
 			"negative_path_assurance":   "dashboard_posture_evidence",
@@ -2344,6 +2345,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_evidence_attachment_matrix",
 			"role_aware_action_readiness",
 			"value_free_action_receipts",
+			"tamper_evident_action_receipts",
 			"assurance_gate_proof_strip",
 			"enterprise_validation_clarity",
 			"privacy_retention_posture",
@@ -2861,6 +2863,32 @@ func mustTemplates() *template.Template {
       min-width: 0;
     }
     .receipt strong { display: block; font-size: 16px; line-height: 1.2; }
+    .receipt-proof {
+      display: grid;
+      grid-template-columns: minmax(0, .8fr) minmax(0, 1fr) minmax(0, 2fr);
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .receipt-proof span {
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--accent) 6%, var(--panel-soft));
+      display: grid;
+      align-content: center;
+      padding: 7px 9px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+    }
+    .receipt-proof strong {
+      display: block;
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.15;
+    }
+    .receipt-proof .mono { font-size: 11px; }
     .hash-copy input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 1040px; }
@@ -2903,6 +2931,7 @@ func mustTemplates() *template.Template {
       .ops-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .receipt { grid-template-columns: 1fr; }
+      .receipt-proof { grid-template-columns: 1fr; }
       .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-step:nth-child(2n) { border-right: 0; }
@@ -2917,6 +2946,7 @@ func mustTemplates() *template.Template {
       .ops-strip { grid-template-columns: 1fr; }
       .mode-grid { grid-template-columns: 1fr; }
       .receipt { grid-template-columns: 1fr; }
+      .receipt-proof { grid-template-columns: 1fr; }
       .assurance-flow { grid-template-columns: 1fr; }
       .trust-rail { grid-template-columns: 1fr; }
       .trust-step { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -3374,7 +3404,14 @@ func mustTemplates() *template.Template {
       <span><strong>Readiness</strong>{{ if .ActionResult.Receipt.ReadinessChecked }} checked{{ else }} pending{{ end }}</span>
       <span><strong>Audit</strong>{{ if .ActionResult.Receipt.AuditRecorded }} recorded{{ else }} pending{{ end }}</span>
     </div>
+    <div class="receipt-proof" aria-label="Action receipt proof">
+      <span><strong>Proof</strong>{{ if .ActionResult.Receipt.TamperEvident }}hash locked{{ else }}pending{{ end }}</span>
+      <span><strong>ID</strong><span class="mono">{{ .ActionResult.Receipt.ReceiptID }}</span></span>
+      <span><strong>Hash</strong><span class="mono">{{ .ActionResult.Receipt.ReceiptHash }}</span></span>
+    </div>
     <p><span class="pill ok">{{ .ActionResult.Receipt.Boundary }}</span> <span class="pill ok">secret_value_returned=false</span> <span class="pill ok">request_body_returned=false</span></p>
+    <p><span class="pill ok">tamper_evident=true</span> <span class="pill info">{{ .ActionResult.Receipt.Algorithm }}</span> <span class="pill info">{{ .ActionResult.Receipt.Schema }}</span></p>
+    <p><span class="pill info">covers</span> {{ .ActionResult.Receipt.Coverage }}</p>
     <p><span class="pill info">next</span> {{ .ActionResult.Receipt.Next }}</p>
     {{ end }}
     {{ if .ActionResult.PermitID }}

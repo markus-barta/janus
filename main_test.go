@@ -56,6 +56,40 @@ func newTestApp(t *testing.T) *App {
 	}
 }
 
+func assertActionReceiptProof(t *testing.T, receipt ActionReceipt, action, requestID string) {
+	t.Helper()
+	if receipt.Action != action || receipt.RequestID != requestID {
+		t.Fatalf("unexpected receipt identity: %#v", receipt)
+	}
+	if receipt.Schema != actionReceiptSchema || receipt.Algorithm != actionReceiptAlgorithm {
+		t.Fatalf("receipt should carry schema and algorithm: %#v", receipt)
+	}
+	if !receipt.TamperEvident || receipt.Coverage == "" || receipt.Verification == "" {
+		t.Fatalf("receipt should describe its proof: %#v", receipt)
+	}
+	if len(receipt.ReceiptHash) != 64 || !isLowerHex(receipt.ReceiptHash) {
+		t.Fatalf("receipt hash should be lowercase sha256 hex: %#v", receipt)
+	}
+	if receipt.ReceiptID != "ar_"+receipt.ReceiptHash[:16] {
+		t.Fatalf("receipt id should derive from hash: %#v", receipt)
+	}
+	if !receipt.RoleChecked || !receipt.CSRFChecked || !receipt.ReadinessChecked || !receipt.AuditRecorded {
+		t.Fatalf("receipt should record security checks: %#v", receipt)
+	}
+	if receipt.SecretValueReturned || receipt.RequestBodyReturned || receipt.ValueReturned {
+		t.Fatalf("receipt should stay value-free: %#v", receipt)
+	}
+}
+
+func isLowerHex(value string) bool {
+	for _, ch := range value {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func cookieByName(t *testing.T, cookies []*http.Cookie, name string) *http.Cookie {
 	t.Helper()
 	for _, cookie := range cookies {
@@ -559,11 +593,18 @@ func TestWardenResolveReturnsHandleOnly(t *testing.T) {
 	if !strings.Contains(body, `"value_returned":false`) || strings.Contains(body, `"plaintext"`) {
 		t.Fatalf("handle response is not value-free: %s", body)
 	}
-	for _, want := range []string{`"receipt"`, `"action":"warden.resolve"`, `"request_id":"receipt-handle-1"`, `"role_checked":true`, `"csrf_checked":true`, `"readiness_checked":true`, `"audit_recorded":true`, `"boundary":"metadata_only"`, `"secret_value_returned":false`, `"request_body_returned":false`} {
+	for _, want := range []string{`"receipt"`, `"schema":"janus-action-receipt-v1"`, `"algorithm":"sha256-json-v1"`, `"receipt_id":"ar_`, `"receipt_hash":"`, `"action":"warden.resolve"`, `"request_id":"receipt-handle-1"`, `"role_checked":true`, `"csrf_checked":true`, `"readiness_checked":true`, `"audit_recorded":true`, `"boundary":"metadata_only"`, `"tamper_evident":true`, `"secret_value_returned":false`, `"request_body_returned":false`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("handle response should include action receipt %s: %s", want, body)
 		}
 	}
+	var decoded struct {
+		Receipt ActionReceipt `json:"receipt"`
+	}
+	if err := json.Unmarshal(out.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	assertActionReceiptProof(t, decoded.Receipt, "warden.resolve", "receipt-handle-1")
 }
 
 func TestCrossOriginMutationDeniedWithValidCSRF(t *testing.T) {
@@ -618,7 +659,7 @@ func TestPermitAPIsReturnValueFreeActionReceipts(t *testing.T) {
 		t.Fatalf("expected 201, got %d body=%s", createOut.Code, createOut.Body.String())
 	}
 	createBody := createOut.Body.String()
-	for _, want := range []string{`"receipt"`, `"action":"permit.create"`, `"request_id":"receipt-permit-create"`, `"audit_recorded":true`, `"boundary":"metadata_only"`, `"secret_value_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
+	for _, want := range []string{`"receipt"`, `"schema":"janus-action-receipt-v1"`, `"algorithm":"sha256-json-v1"`, `"receipt_id":"ar_`, `"receipt_hash":"`, `"action":"permit.create"`, `"request_id":"receipt-permit-create"`, `"audit_recorded":true`, `"boundary":"metadata_only"`, `"tamper_evident":true`, `"secret_value_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
 		if !strings.Contains(createBody, want) {
 			t.Fatalf("permit create should include action receipt %s: %s", want, createBody)
 		}
@@ -626,11 +667,13 @@ func TestPermitAPIsReturnValueFreeActionReceipts(t *testing.T) {
 	assertRouteResponseValueFree(t, "permit create receipt", createOut)
 
 	var created struct {
-		Permit Permit `json:"permit"`
+		Permit  Permit        `json:"permit"`
+		Receipt ActionReceipt `json:"receipt"`
 	}
 	if err := json.Unmarshal(createOut.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
+	assertActionReceiptProof(t, created.Receipt, "permit.create", "receipt-permit-create")
 	run := httptest.NewRequest(http.MethodPost, "/api/permits/"+created.Permit.ID+"/run", nil)
 	run.SetPathValue("permitID", created.Permit.ID)
 	run.Header.Set("X-Request-Id", "receipt-permit-run")
@@ -640,11 +683,18 @@ func TestPermitAPIsReturnValueFreeActionReceipts(t *testing.T) {
 		t.Fatalf("expected 202, got %d body=%s", runOut.Code, runOut.Body.String())
 	}
 	runBody := runOut.Body.String()
-	for _, want := range []string{`"receipt"`, `"action":"permit.run"`, `"request_id":"receipt-permit-run"`, `"audit_recorded":true`, `"boundary":"metadata_only"`, `"secret_value_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
+	for _, want := range []string{`"receipt"`, `"schema":"janus-action-receipt-v1"`, `"algorithm":"sha256-json-v1"`, `"receipt_id":"ar_`, `"receipt_hash":"`, `"action":"permit.run"`, `"request_id":"receipt-permit-run"`, `"audit_recorded":true`, `"boundary":"metadata_only"`, `"tamper_evident":true`, `"secret_value_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
 		if !strings.Contains(runBody, want) {
 			t.Fatalf("permit run should include action receipt %s: %s", want, runBody)
 		}
 	}
+	var ran struct {
+		Receipt ActionReceipt `json:"receipt"`
+	}
+	if err := json.Unmarshal(runOut.Body.Bytes(), &ran); err != nil {
+		t.Fatal(err)
+	}
+	assertActionReceiptProof(t, ran.Receipt, "permit.run", "receipt-permit-run")
 	assertRouteResponseValueFree(t, "permit run receipt", runOut)
 }
 
@@ -739,7 +789,7 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"action_readiness"`) || !strings.Contains(body, `"key":"evidence_export"`) || !strings.Contains(body, `"key":"handle_issue"`) || !strings.Contains(body, `"key":"permit_run_check"`) || !strings.Contains(body, `"action_readiness":"role_and_readiness_matrix"`) || !strings.Contains(body, `"role_aware_action_readiness"`) {
 		t.Fatalf("posture response should include action readiness matrix: %s", body)
 	}
-	if !strings.Contains(body, `"action_receipts":"mutation_result_receipts"`) || !strings.Contains(body, `"value_free_action_receipts"`) {
+	if !strings.Contains(body, `"action_receipts":"mutation_result_receipts"`) || !strings.Contains(body, `"action_receipt_integrity":"tamper_evident_hash_proof"`) || !strings.Contains(body, `"value_free_action_receipts"`) || !strings.Contains(body, `"tamper_evident_action_receipts"`) {
 		t.Fatalf("posture response should include action receipt capability: %s", body)
 	}
 	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
@@ -2504,7 +2554,7 @@ func TestWardenResolveUIReturnsValueFreeHandle(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Handle ready", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "value_returned=false", "zitadel-janus-oidc"} {
+	for _, want := range []string{"Handle ready", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "value_returned=false", "zitadel-janus-oidc"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("UI handle response should render %q: %s", want, body)
 		}
@@ -2586,7 +2636,7 @@ func TestPermitCreateUIReturnsValueFreePermit(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Permit recorded", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Audited", "approved_metadata_only", "Run safety check", "value_returned=false"} {
+	for _, want := range []string{"Permit recorded", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Audited", "approved_metadata_only", "Run safety check", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("permit UI response should render %q: %s", want, body)
 		}
@@ -2635,7 +2685,7 @@ func TestPermitRunUIReturnsNoExecutionValueFreeResult(t *testing.T) {
 		t.Fatalf("expected 202, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Safety check complete", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Scrubbed output", "not_executed", "output_scrubbed=true", "value_returned=false"} {
+	for _, want := range []string{"Safety check complete", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Scrubbed output", "not_executed", "output_scrubbed=true", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("permit run UI response should render %q: %s", want, body)
 		}

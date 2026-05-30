@@ -136,6 +136,10 @@ type ActionReadinessItem struct {
 }
 
 type ActionReceipt struct {
+	Schema              string `json:"schema"`
+	Algorithm           string `json:"algorithm"`
+	ReceiptID           string `json:"receipt_id"`
+	ReceiptHash         string `json:"receipt_hash"`
 	Action              string `json:"action"`
 	Outcome             string `json:"outcome"`
 	RequestID           string `json:"request_id"`
@@ -144,6 +148,9 @@ type ActionReceipt struct {
 	ReadinessChecked    bool   `json:"readiness_checked"`
 	AuditRecorded       bool   `json:"audit_recorded"`
 	Boundary            string `json:"boundary"`
+	Coverage            string `json:"coverage"`
+	Verification        string `json:"verification"`
+	TamperEvident       bool   `json:"tamper_evident"`
 	Next                string `json:"next"`
 	SecretValueReturned bool   `json:"secret_value_returned"`
 	RequestBodyReturned bool   `json:"request_body_returned"`
