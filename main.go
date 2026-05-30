@@ -360,12 +360,12 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /oidc/callback", app.handleCallback)
 	mux.HandleFunc("POST /logout", app.withAuth(app.handleLogout))
 	mux.HandleFunc("GET /api/warden/descriptors", app.withAuth(app.handleDescriptors))
-	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.handleResolveHandle))
+	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle)))
 	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit)))
 	mux.HandleFunc("GET /api/posture", app.withAuth(app.handlePosture))
 	mux.HandleFunc("GET /api/evidence", app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence)))
-	mux.HandleFunc("POST /api/permits", app.withAuth(app.handleCreatePermit))
-	mux.HandleFunc("POST /api/permits/{permitID}/run", app.withAuth(app.handleRunPermit))
+	mux.HandleFunc("POST /api/permits", app.withAuth(app.requireRole(RoleOperator, "permit.create", app.handleCreatePermit)))
+	mux.HandleFunc("POST /api/permits/{permitID}/run", app.withAuth(app.requireRole(RoleOperator, "permit.run", app.handleRunPermit)))
 	mux.HandleFunc("POST /ui/warden/resolve", app.withAuth(app.handleResolveHandleUI))
 	mux.HandleFunc("POST /ui/permits", app.withAuth(app.handleCreatePermitUI))
 	mux.HandleFunc("POST /ui/permits/{permitID}/run", app.withAuth(app.handleRunPermitUI))
@@ -513,6 +513,7 @@ func (app *App) dashboardData(session Session, actionResult *UIActionResult, sel
 		"Lifecycle":         lifecyclePosture,
 		"EvidenceHash":      evidenceHash,
 		"CanExportEvidence": HasRole(session, RoleAuditor),
+		"CanOperate":        HasRole(session, RoleOperator),
 		"ActionResult":      actionResult,
 		"Permits":           app.permits.Recent(8),
 		"SelectedRef":       focus.Descriptor.ID,
@@ -618,6 +619,9 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 	req := HandleRequest{
 		Ref:    strings.TrimSpace(r.Form.Get("ref")),
 		Reason: strings.TrimSpace(r.Form.Get("reason")),
+	}
+	if !app.requireOperatorUI(w, r, session, "warden.resolve.ui", req.Ref) {
+		return
 	}
 	if req.Reason == "" {
 		app.audit(r, "warden.resolve.ui", "denied", session.Subject, "reason required")
@@ -727,6 +731,9 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 		Destination: strings.TrimSpace(r.Form.Get("destination")),
 		Reason:      strings.TrimSpace(r.Form.Get("reason")),
 	}
+	if !app.requireOperatorUI(w, r, session, "permit.create.ui", req.Ref) {
+		return
+	}
 	if req.Reason == "" {
 		app.audit(r, "permit.create.ui", "denied", session.Subject, "reason required")
 		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "Reason required.", ValueReturned: false}
@@ -785,6 +792,9 @@ func (app *App) handleRunPermitUI(w http.ResponseWriter, r *http.Request) {
 		app.audit(r, "permit.run.ui", "denied", session.Subject, "csrf failed")
 		result := UIActionResult{Title: "Run blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
 		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result, ""))
+		return
+	}
+	if !app.requireOperatorUI(w, r, session, "permit.run.ui", "") {
 		return
 	}
 	permitID := r.PathValue("permitID")
@@ -1031,6 +1041,21 @@ func (app *App) csrfAllowed(r *http.Request, session Session) bool {
 		return true
 	}
 	return app.verifyCSRF(r, session)
+}
+
+func (app *App) requireOperatorUI(w http.ResponseWriter, r *http.Request, session Session, action, selectedRef string) bool {
+	if HasRole(session, RoleOperator) {
+		return true
+	}
+	app.audit(r, action, "denied", session.Subject, "operator role required")
+	result := UIActionResult{
+		Title:         "Action blocked",
+		Outcome:       "denied",
+		Message:       "Operator role required.",
+		ValueReturned: false,
+	}
+	renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result, selectedRef))
+	return false
 }
 
 func sign(key []byte, payload string) string {
@@ -1599,10 +1624,14 @@ func mustTemplates() *template.Template {
     </div>
     {{ if .ActionResult.RunReason }}<p class="warn">{{ .ActionResult.RunReason }}</p>{{ end }}
     {{ if .ActionResult.OutputScrubbed }}<p><span class="pill ok">output_scrubbed=true</span></p>{{ end }}
+    {{ if .CanOperate }}
     <form method="post" action="/ui/permits/{{ .ActionResult.PermitID }}/run">
       <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
       <button class="button quiet" type="submit">Run safety check</button>
     </form>
+    {{ else }}
+    <p><span class="pill warn">operator role required</span></p>
+    {{ end }}
     {{ end }}
     <p><span class="pill ok">value_returned=false</span></p>
   </div>
@@ -1655,6 +1684,7 @@ func mustTemplates() *template.Template {
       <span class="pill ok">value-free</span>
     </div>
     <div class="panel-body">
+      {{ if .CanOperate }}
       <form class="flow" method="post" action="/ui/warden/resolve">
         <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
         <label>Descriptor
@@ -1667,6 +1697,12 @@ func mustTemplates() *template.Template {
         </label>
         <button class="primary" type="submit">Issue handle</button>
       </form>
+      {{ else }}
+      <div class="stack">
+        <p class="warn">Operator role required.</p>
+        <p>Viewing posture is allowed, but requesting handles is role-gated.</p>
+      </div>
+      {{ end }}
     </div>
   </div>
 </section>
@@ -1677,6 +1713,7 @@ func mustTemplates() *template.Template {
       <span class="pill warn">no execution connector</span>
     </div>
     <div class="panel-body">
+      {{ if .CanOperate }}
       <form class="flow" method="post" action="/ui/permits">
         <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
         <label>Descriptor
@@ -1698,6 +1735,12 @@ func mustTemplates() *template.Template {
         </label>
         <button class="primary" type="submit">Create permit</button>
       </form>
+      {{ else }}
+      <div class="stack">
+        <p class="warn">Operator role required.</p>
+        <p>Viewing posture is allowed, but permit requests are role-gated.</p>
+      </div>
+      {{ end }}
     </div>
   </div>
 </section>
@@ -1720,10 +1763,14 @@ func mustTemplates() *template.Template {
             <td>{{ .Status }}</td>
             <td>{{ .ExpiresAt.Format "15:04:05" }}</td>
             <td>
+              {{ if $.CanOperate }}
               <form method="post" action="/ui/permits/{{ .ID }}/run">
                 <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
                 <button class="button quiet" type="submit">Run safety check</button>
               </form>
+              {{ else }}
+              <span class="pill warn">operator role required</span>
+              {{ end }}
             </td>
           </tr>
         {{ end }}

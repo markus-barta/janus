@@ -316,6 +316,30 @@ func TestEvidenceExportRequiresAuditorRole(t *testing.T) {
 	}
 }
 
+func TestWardenAPIRequiresOperatorRole(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "viewer", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/warden/resolve", strings.NewReader(`{"ref":"zitadel-janus-oidc","reason":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle))(out, req)
+
+	if out.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", out.Code, out.Body.String())
+	}
+	if !strings.Contains(out.Body.String(), `"role_denied"`) || !strings.Contains(out.Body.String(), `"value_returned":false`) {
+		t.Fatalf("operator denial should be value-free: %s", out.Body.String())
+	}
+	recent := app.store.RecentAudit(1)
+	if len(recent) != 1 || recent[0].Outcome != "denied" || !strings.Contains(recent[0].Reason, "operator") {
+		t.Fatalf("expected denied operator audit event: %#v", recent)
+	}
+}
+
 func TestRolePolicyMapsZitadelClaims(t *testing.T) {
 	roles := DeriveRoles("user-1", "user@example.test", []string{"janus:auditor"}, RolePolicy{BootstrapOwner: false})
 	if !hasTestRole(roles, RoleViewer) || !hasTestRole(roles, RoleAuditor) {
@@ -353,6 +377,30 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 	}
 	if strings.Contains(body, "plaintext") {
 		t.Fatalf("dashboard should remain value-free: %s", body)
+	}
+}
+
+func TestDashboardHidesOperatorActionsForViewer(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "viewer", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleDashboard)(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	if !strings.Contains(body, "Operator role required") {
+		t.Fatalf("viewer dashboard should explain operator gate: %s", body)
+	}
+	for _, forbidden := range []string{"Issue handle</button>", "Create permit</button>"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("viewer dashboard rendered operator action %q: %s", forbidden, body)
+		}
 	}
 }
 
@@ -412,6 +460,26 @@ func TestWardenResolveUIRequiresReason(t *testing.T) {
 	}
 	if !strings.Contains(out.Body.String(), "Reason required") || strings.Contains(out.Body.String(), "plaintext") {
 		t.Fatalf("UI denial should be clear and value-free: %s", out.Body.String())
+	}
+}
+
+func TestWardenResolveUIRequiresOperatorRole(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "viewer", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	form := "ref=zitadel-janus-oidc&reason=local+smoke&csrf_token=" + app.csrfToken(session)
+	req := httptest.NewRequest(http.MethodPost, "/ui/warden/resolve", strings.NewReader(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleResolveHandleUI)(out, req)
+	if out.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", out.Code, out.Body.String())
+	}
+	if !strings.Contains(out.Body.String(), "Operator role required") || strings.Contains(out.Body.String(), "plaintext") {
+		t.Fatalf("operator UI denial should be clear and value-free: %s", out.Body.String())
 	}
 }
 

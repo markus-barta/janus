@@ -127,8 +127,11 @@ func AccessPostureFor(policy RolePolicy) AccessPosture {
 		BootstrapOwner:   !policy.Configured() && policy.BootstrapOwner,
 		KnownRoles:       AllRoles(),
 		RequiredRoles: map[string]string{
-			"/api/audit/recent": RoleAuditor,
-			"/api/evidence":     RoleAuditor,
+			"/api/audit/recent":          RoleAuditor,
+			"/api/evidence":              RoleAuditor,
+			"POST /api/warden/resolve":   RoleOperator,
+			"POST /api/permits":          RoleOperator,
+			"POST /api/permits/{id}/run": RoleOperator,
 		},
 		Gates:         gates,
 		GateCount:     len(gates),
