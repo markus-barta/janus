@@ -34,6 +34,7 @@ type Config struct {
 	PublicURL    string
 	ProductMode  string
 	DataDir      string
+	CatalogFile  string
 	RequireAuth  bool
 	OIDCIssuer   string
 	OIDCClientID string
@@ -56,28 +57,35 @@ type SecretDescriptor struct {
 	Provider       string    `json:"provider"`
 	Classification string    `json:"classification"`
 	Owner          string    `json:"owner"`
+	Scope          string    `json:"scope,omitempty"`
+	Source         string    `json:"source,omitempty"`
 	RotationDays   int       `json:"rotation_days"`
 	LastCheckedAt  time.Time `json:"last_checked_at"`
 	Status         string    `json:"status"`
 	RevealAllowed  bool      `json:"reveal_allowed"`
+	UseEnabled     bool      `json:"use_enabled"`
+	ConsumerCount  int       `json:"consumer_count"`
+	EgressMode     string    `json:"egress_mode,omitempty"`
 	Tags           []string  `json:"tags"`
 }
 
 type Store struct {
-	mu          sync.RWMutex
-	catalogFile string
-	auditFile   string
-	items       []SecretDescriptor
+	mu                  sync.RWMutex
+	catalogFile         string
+	externalCatalogFile string
+	auditFile           string
+	items               []SecretDescriptor
 }
 
-func NewStore(dataDir string) (*Store, error) {
+func NewStore(dataDir, externalCatalogFile string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, err
 	}
 
 	s := &Store{
-		catalogFile: filepath.Join(dataDir, "catalog.json"),
-		auditFile:   filepath.Join(dataDir, "audit.jsonl"),
+		catalogFile:         filepath.Join(dataDir, "catalog.json"),
+		externalCatalogFile: externalCatalogFile,
+		auditFile:           filepath.Join(dataDir, "audit.jsonl"),
 	}
 	if err := s.loadOrSeed(); err != nil {
 		return nil, err
@@ -88,6 +96,18 @@ func NewStore(dataDir string) (*Store, error) {
 func (s *Store) loadOrSeed() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.externalCatalogFile != "" {
+		raw, err := os.ReadFile(s.externalCatalogFile)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(raw, &s.items); err != nil {
+			return err
+		}
+		s.normalizeLocked()
+		return s.persistLocked()
+	}
 
 	raw, err := os.ReadFile(s.catalogFile)
 	if errors.Is(err, os.ErrNotExist) {
@@ -101,7 +121,48 @@ func (s *Store) loadOrSeed() error {
 		s.items = nil
 		return nil
 	}
-	return json.Unmarshal(raw, &s.items)
+	if err := json.Unmarshal(raw, &s.items); err != nil {
+		return err
+	}
+	s.normalizeLocked()
+	return nil
+}
+
+func (s *Store) normalizeLocked() {
+	now := time.Now().UTC()
+	for i := range s.items {
+		item := &s.items[i]
+		item.ID = strings.TrimSpace(item.ID)
+		item.DisplayName = strings.TrimSpace(item.DisplayName)
+		if item.DisplayName == "" {
+			item.DisplayName = item.ID
+		}
+		if item.Provider == "" {
+			item.Provider = "agenix"
+		}
+		if item.Classification == "" {
+			item.Classification = "internal"
+		}
+		if item.Owner == "" {
+			item.Owner = "platform"
+		}
+		if item.Scope == "" {
+			item.Scope = "csb1"
+		}
+		if item.RotationDays == 0 {
+			item.RotationDays = 180
+		}
+		if item.LastCheckedAt.IsZero() {
+			item.LastCheckedAt = now
+		}
+		if item.Status == "" {
+			item.Status = "managed"
+		}
+		if item.EgressMode == "" {
+			item.EgressMode = "none"
+		}
+		item.RevealAllowed = false
+	}
 }
 
 func (s *Store) persistLocked() error {
@@ -123,6 +184,20 @@ func (s *Store) Descriptors() []SecretDescriptor {
 		out[i].RevealAllowed = false
 	}
 	return out
+}
+
+func (s *Store) FindDescriptor(ref string) (SecretDescriptor, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ref = strings.TrimSpace(ref)
+	for _, item := range s.items {
+		if item.ID == ref {
+			item.RevealAllowed = false
+			return item, true
+		}
+	}
+	return SecretDescriptor{}, false
 }
 
 func (s *Store) AppendAudit(entry AuditEntry) {
@@ -154,13 +229,17 @@ type AuditEntry struct {
 	Outcome   string    `json:"outcome"`
 	ActorHash string    `json:"actor_hash,omitempty"`
 	RequestID string    `json:"request_id"`
+	Method    string    `json:"method"`
 	Path      string    `json:"path"`
+	SecretRef string    `json:"secret_ref,omitempty"`
 	Reason    string    `json:"reason,omitempty"`
 }
 
 type App struct {
 	cfg       Config
 	store     *Store
+	broker    *Broker
+	permits   *PermitStore
 	oauth     *oauth2.Config
 	verifier  *oidc.IDTokenVerifier
 	templates *template.Template
@@ -179,7 +258,7 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
-	store, err := NewStore(cfg.DataDir)
+	store, err := NewStore(cfg.DataDir, cfg.CatalogFile)
 	if err != nil {
 		log.Fatalf("store error: %v", err)
 	}
@@ -207,6 +286,7 @@ func loadConfig() (Config, error) {
 		PublicURL:   strings.TrimRight(envDefault("JANUS_PUBLIC_URL", "https://vault.barta.cm"), "/"),
 		ProductMode: envDefault("JANUS_PRODUCT_MODE", "self_hosted"),
 		DataDir:     envDefault("JANUS_DATA_DIR", "/data"),
+		CatalogFile: envDefault("JANUS_CATALOG_FILE", ""),
 		RequireAuth: envBoolDefault("JANUS_REQUIRE_AUTH", true),
 		OIDCIssuer:  strings.TrimRight(os.Getenv("OIDC_ISSUER"), "/"),
 	}
@@ -235,6 +315,8 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 	app := &App{
 		cfg:       cfg,
 		store:     store,
+		broker:    NewBroker(store),
+		permits:   NewPermitStore(),
 		templates: mustTemplates(),
 	}
 
@@ -260,10 +342,14 @@ func (app *App) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", app.handleHealth)
 	mux.HandleFunc("GET /readyz", app.handleReady)
+	mux.HandleFunc("GET /favicon.ico", app.handleFavicon)
 	mux.HandleFunc("GET /login", app.handleLogin)
 	mux.HandleFunc("GET /oidc/callback", app.handleCallback)
-	mux.HandleFunc("POST /logout", app.handleLogout)
+	mux.HandleFunc("POST /logout", app.withAuth(app.handleLogout))
 	mux.HandleFunc("GET /api/warden/descriptors", app.withAuth(app.handleDescriptors))
+	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.handleResolveHandle))
+	mux.HandleFunc("POST /api/permits", app.withAuth(app.handleCreatePermit))
+	mux.HandleFunc("POST /api/permits/{permitID}/run", app.withAuth(app.handleRunPermit))
 	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
 	return app.securityHeaders(mux)
 }
@@ -278,6 +364,10 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (app *App) handleFavicon(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -327,12 +417,19 @@ func (app *App) handleReady(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
 	app.audit(r, "dashboard.view", "allowed", actorFromContext(r.Context()), "")
-	descriptors := app.store.Descriptors()
+	session := currentSession(r.Context())
+	principal := principalFromSession(session)
+	descriptors := app.broker.Descriptors(principal)
 	issues := enterpriseChecks(app.cfg)
 	data := map[string]any{
 		"Title":       "Janus",
-		"Session":     currentSession(r.Context()),
+		"Session":     session,
+		"CSRF":        app.csrfToken(session),
 		"Descriptors": descriptors,
 		"Issues":      issues,
 		"Mode":        app.cfg.ProductMode,
@@ -342,10 +439,84 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 func (app *App) handleDescriptors(w http.ResponseWriter, r *http.Request) {
 	app.audit(r, "descriptors.list", "allowed", actorFromContext(r.Context()), "")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"descriptors": app.store.Descriptors(),
+	principal := principalFromSession(currentSession(r.Context()))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"descriptors":    app.broker.Descriptors(principal),
+		"value_returned": false,
+	})
+}
+
+func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.verifyCSRF(r, session) {
+		app.audit(r, "warden.resolve", "denied", session.Subject, "csrf failed")
+		writeJSONError(w, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		return
+	}
+
+	var req HandleRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "bad_json", "Request body must be JSON")
+		return
+	}
+	handle, err := app.broker.ResolveHandle(principalFromSession(session), req)
+	if err != nil {
+		app.handleBrokerError(w, r, "warden.resolve", session.Subject, req.Ref, err)
+		return
+	}
+	app.auditWithRef(r, "warden.resolve", "allowed", session.Subject, handle.SecretRef, "")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"handle":         handle,
+		"value_returned": false,
+	})
+}
+
+func (app *App) handleCreatePermit(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.verifyCSRF(r, session) {
+		app.audit(r, "permit.create", "denied", session.Subject, "csrf failed")
+		writeJSONError(w, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		return
+	}
+
+	var req PermitRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "bad_json", "Request body must be JSON")
+		return
+	}
+	permit, err := app.broker.CreatePermit(principalFromSession(session), req)
+	if err != nil {
+		app.handleBrokerError(w, r, "permit.create", session.Subject, req.Ref, err)
+		return
+	}
+	app.permits.Put(permit)
+	app.auditWithRef(r, "permit.create", permit.Status, session.Subject, permit.SecretRef, permit.DenialReason)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"permit":         permit,
+		"value_returned": false,
+	})
+}
+
+func (app *App) handleRunPermit(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.verifyCSRF(r, session) {
+		app.audit(r, "permit.run", "denied", session.Subject, "csrf failed")
+		writeJSONError(w, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		return
+	}
+
+	permitID := r.PathValue("permitID")
+	permit, ok := app.permits.Get(permitID)
+	if !ok {
+		app.audit(r, "permit.run", "denied", session.Subject, "permit not found")
+		writeJSONError(w, http.StatusNotFound, "permit_not_found", "Permit not found")
+		return
+	}
+	result := RunPermit(permit)
+	app.auditWithRef(r, "permit.run", result.Status, session.Subject, permit.SecretRef, result.Reason)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"result":         result,
+		"value_returned": false,
 	})
 }
 
@@ -432,7 +603,13 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
-	app.audit(r, "auth.logout", "allowed", actorFromContext(r.Context()), "")
+	session := currentSession(r.Context())
+	if !app.verifyCSRF(r, session) {
+		app.audit(r, "auth.logout", "denied", session.Subject, "csrf failed")
+		http.Error(w, "CSRF token required", http.StatusForbidden)
+		return
+	}
+	app.audit(r, "auth.logout", "allowed", session.Subject, "")
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    "",
@@ -497,12 +674,18 @@ func (app *App) readSession(r *http.Request) (Session, bool) {
 }
 
 func (app *App) audit(r *http.Request, action, outcome, actor, reason string) {
+	app.auditWithRef(r, action, outcome, actor, "", reason)
+}
+
+func (app *App) auditWithRef(r *http.Request, action, outcome, actor, secretRef, reason string) {
 	app.store.AppendAudit(AuditEntry{
 		Action:    action,
 		Outcome:   outcome,
 		ActorHash: actorHash(actor),
 		RequestID: requestID(r),
+		Method:    r.Method,
 		Path:      r.URL.Path,
+		SecretRef: secretRef,
 		Reason:    reason,
 	})
 }
@@ -516,6 +699,27 @@ func currentSession(ctx context.Context) Session {
 
 func actorFromContext(ctx context.Context) string {
 	return currentSession(ctx).Subject
+}
+
+func (app *App) csrfToken(session Session) string {
+	if session.Subject == "" || session.Expiry.IsZero() {
+		return ""
+	}
+	return sign(app.cfg.CookieKey, "csrf|"+session.Subject+"|"+session.Expiry.UTC().Format(time.RFC3339Nano))
+}
+
+func (app *App) verifyCSRF(r *http.Request, session Session) bool {
+	want := app.csrfToken(session)
+	if want == "" {
+		return false
+	}
+	got := r.Header.Get("X-CSRF-Token")
+	if got == "" {
+		if err := r.ParseForm(); err == nil {
+			got = r.Form.Get("csrf_token")
+		}
+	}
+	return hmac.Equal([]byte(want), []byte(got))
 }
 
 func sign(key []byte, payload string) string {
@@ -602,6 +806,35 @@ func enterpriseChecks(cfg Config) []string {
 	return issues
 }
 
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func writeJSONError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]any{
+		"error":          code,
+		"message":        message,
+		"value_returned": false,
+	})
+}
+
+func (app *App) handleBrokerError(w http.ResponseWriter, r *http.Request, action, actor, ref string, err error) {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		app.auditWithRef(r, action, "denied", actor, "", "not found")
+		writeJSONError(w, http.StatusNotFound, "not_found", "Descriptor not found")
+	case errors.Is(err, ErrPolicyDenied):
+		app.auditWithRef(r, action, "denied", actor, "", err.Error())
+		writeJSONError(w, http.StatusForbidden, "policy_denied", err.Error())
+	default:
+		app.auditWithRef(r, action, "denied", actor, "", "broker error")
+		writeJSONError(w, http.StatusBadRequest, "broker_error", err.Error())
+	}
+}
+
 func seedCatalog() []SecretDescriptor {
 	now := time.Now().UTC()
 	return []SecretDescriptor{
@@ -653,6 +886,7 @@ func mustTemplates() *template.Template {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{ if .CSRF }}<meta name="csrf-token" content="{{ .CSRF }}">{{ end }}
   <title>{{ .Title }}</title>
   <style>
     :root {
@@ -762,7 +996,7 @@ func mustTemplates() *template.Template {
       align-items: center;
     }
     .table-wrap { overflow-x: auto; }
-    table { width: 100%; border-collapse: collapse; min-width: 820px; }
+    table { width: 100%; border-collapse: collapse; min-width: 1120px; }
     th, td { padding: 12px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
     th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
     .pill {
@@ -795,7 +1029,7 @@ func mustTemplates() *template.Template {
   <div class="bar">
     <div class="brand"><div class="mark">J</div><div>Janus</div></div>
     {{ if .Session.Subject }}
-    <form method="post" action="/logout"><button type="submit">Sign out</button></form>
+    <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button type="submit">Sign out</button></form>
     {{ else }}
     <a class="button primary" href="/login">Sign in</a>
     {{ end }}
@@ -842,16 +1076,19 @@ func mustTemplates() *template.Template {
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Name</th><th>Provider</th><th>Owner</th><th>Class</th><th>Status</th><th>Rotation</th><th>Reveal</th></tr></thead>
+        <thead><tr><th>Name</th><th>Provider</th><th>Scope</th><th>Owner</th><th>Class</th><th>Status</th><th>Consumers</th><th>Rotation</th><th>Use</th><th>Reveal</th></tr></thead>
         <tbody>
         {{ range .Descriptors }}
           <tr>
             <td><strong>{{ .DisplayName }}</strong><br><span class="muted">{{ .ID }}</span></td>
             <td>{{ .Provider }}</td>
+            <td>{{ .Scope }}</td>
             <td>{{ .Owner }}</td>
             <td>{{ .Classification }}</td>
             <td>{{ .Status }}</td>
+            <td>{{ .ConsumerCount }}</td>
             <td>{{ .RotationDays }} days</td>
+            <td>{{ if .UseEnabled }}<span class="pill">profiled</span>{{ else }}<span class="pill">blocked</span>{{ end }}</td>
             <td><span class="pill">disabled</span></td>
           </tr>
         {{ end }}

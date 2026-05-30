@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,9 +28,25 @@ func testConfig() Config {
 
 var tTempDir = ""
 
+func newTestApp(t *testing.T) *App {
+	t.Helper()
+	tTempDir = t.TempDir()
+	store, err := NewStore(tTempDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &App{
+		cfg:       testConfig(),
+		store:     store,
+		broker:    NewBroker(store),
+		permits:   NewPermitStore(),
+		templates: mustTemplates(),
+	}
+}
+
 func TestDescriptorsNeverExposeValues(t *testing.T) {
 	tTempDir = t.TempDir()
-	store, err := NewStore(tTempDir)
+	store, err := NewStore(tTempDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,13 +62,38 @@ func TestDescriptorsNeverExposeValues(t *testing.T) {
 	}
 }
 
-func TestSessionRejectsTamper(t *testing.T) {
-	tTempDir = t.TempDir()
-	store, err := NewStore(tTempDir)
+func TestLoadsExternalAgenixCatalog(t *testing.T) {
+	dataDir := t.TempDir()
+	catalogPath := filepath.Join(t.TempDir(), "catalog.json")
+	if err := os.WriteFile(catalogPath, []byte(`[{
+		"id":"csb1-real-env",
+		"display_name":"Real env metadata",
+		"provider":"agenix",
+		"classification":"high",
+		"owner":"platform",
+		"source":"secrets/csb1-real-env.age",
+		"consumer_count":2
+	}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(dataDir, catalogPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := &App{cfg: testConfig(), store: store}
+	descriptors := store.Descriptors()
+	if len(descriptors) != 1 {
+		t.Fatalf("expected one descriptor, got %d", len(descriptors))
+	}
+	if descriptors[0].ID != "csb1-real-env" || descriptors[0].RevealAllowed {
+		t.Fatalf("unexpected descriptor: %#v", descriptors[0])
+	}
+	if descriptors[0].Scope != "csb1" || descriptors[0].EgressMode != "none" {
+		t.Fatalf("expected normalized safe metadata: %#v", descriptors[0])
+	}
+}
+
+func TestSessionRejectsTamper(t *testing.T) {
+	app := newTestApp(t)
 
 	rr := httptest.NewRecorder()
 	app.writeSession(rr, Session{Subject: "user-1", Expiry: time.Now().UTC().Add(time.Hour)})
@@ -80,12 +123,7 @@ func TestSessionRejectsTamper(t *testing.T) {
 }
 
 func TestSessionCookieIsOIDCRedirectCompatible(t *testing.T) {
-	tTempDir = t.TempDir()
-	store, err := NewStore(tTempDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	app := &App{cfg: testConfig(), store: store}
+	app := newTestApp(t)
 
 	rr := httptest.NewRecorder()
 	app.writeSession(rr, Session{Subject: "user-1", Expiry: time.Now().UTC().Add(time.Hour)})
@@ -101,9 +139,61 @@ func TestSessionCookieIsOIDCRedirectCompatible(t *testing.T) {
 	}
 }
 
+func TestLogoutRequiresCSRF(t *testing.T) {
+	app := newTestApp(t)
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, Session{Subject: "user-1", Expiry: time.Now().UTC().Add(time.Hour)})
+	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req.AddCookie(rr.Result().Cookies()[0])
+
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleLogout)(out, req)
+	if out.Code != http.StatusForbidden {
+		t.Fatalf("expected CSRF denial, got %d", out.Code)
+	}
+}
+
+func TestWardenResolveReturnsHandleOnly(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "user-1", Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/warden/resolve", strings.NewReader(`{"ref":"zitadel-janus-oidc","reason":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", app.csrfToken(session))
+	req.AddCookie(rr.Result().Cookies()[0])
+
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleResolveHandle)(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	if !strings.Contains(body, `"value_returned":false`) || strings.Contains(body, `"plaintext"`) {
+		t.Fatalf("handle response is not value-free: %s", body)
+	}
+}
+
+func TestPermitRunIsNoopAndValueFree(t *testing.T) {
+	app := newTestApp(t)
+	permit, err := app.broker.CreatePermit(principalFromSession(Session{Subject: "user-1"}), PermitRequest{
+		Ref:    "zitadel-janus-oidc",
+		Action: "metadata_use",
+		Reason: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := RunPermit(permit)
+	if result.ValueReturned || !result.OutputScrubbed || result.Status != "not_executed" {
+		t.Fatalf("unexpected permit run result: %#v", result)
+	}
+}
+
 func TestReadyzLockedWhenAuthMissing(t *testing.T) {
 	tTempDir = t.TempDir()
-	store, err := NewStore(tTempDir)
+	store, err := NewStore(tTempDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +208,7 @@ func TestReadyzLockedWhenAuthMissing(t *testing.T) {
 
 func TestSetupPageRendersWhenAuthMissing(t *testing.T) {
 	tTempDir = t.TempDir()
-	store, err := NewStore(tTempDir)
+	store, err := NewStore(tTempDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
