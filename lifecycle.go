@@ -83,6 +83,13 @@ func LifecycleBlocksNormalUse(desc SecretDescriptor) (bool, string) {
 	}
 }
 
+func DescriptorBlocksNormalUse(desc SecretDescriptor) (bool, string) {
+	if !desc.UseEnabled {
+		return true, "secret has no approved metadata-only use profile"
+	}
+	return LifecycleBlocksNormalUse(desc)
+}
+
 func LifecyclePostureFor(descriptors []SecretDescriptor, now time.Time) LifecyclePosture {
 	if now.IsZero() {
 		now = time.Now().UTC()

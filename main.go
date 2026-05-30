@@ -304,6 +304,8 @@ type DescriptorFocus struct {
 	Gates            []CatalogGate    `json:"gates"`
 	GateCount        int              `json:"gate_count"`
 	Lifecycle        string           `json:"lifecycle"`
+	LifecycleBlocked bool             `json:"lifecycle_blocked"`
+	LifecycleReason  string           `json:"lifecycle_reason,omitempty"`
 	NormalUseBlocked bool             `json:"normal_use_blocked"`
 	NormalUseReason  string           `json:"normal_use_reason,omitempty"`
 }
@@ -658,12 +660,15 @@ func focusDescriptor(descriptors []SecretDescriptor, selectedRef string) Descrip
 		}
 	}
 	gates := ValidateCatalog([]SecretDescriptor{focus})
-	blocked, reason := LifecycleBlocksNormalUse(focus)
+	lifecycleBlocked, lifecycleReason := LifecycleBlocksNormalUse(focus)
+	blocked, reason := DescriptorBlocksNormalUse(focus)
 	return DescriptorFocus{
 		Descriptor:       focus,
 		Gates:            gates,
 		GateCount:        len(gates),
 		Lifecycle:        DescriptorLifecycle(focus),
+		LifecycleBlocked: lifecycleBlocked,
+		LifecycleReason:  lifecycleReason,
 		NormalUseBlocked: blocked,
 		NormalUseReason:  reason,
 	}
@@ -1479,6 +1484,7 @@ func (app *App) postureBody() map[string]any {
 	accessPosture := app.accessPosture()
 	scopePosture := app.scopePosture(allDescriptors)
 	lifecyclePosture := LifecyclePostureFor(descriptors, time.Now().UTC())
+	approvedUsePosture := ApprovedUsePostureFor(descriptors)
 	return map[string]any{
 		"service":            "janus",
 		"mode":               app.cfg.ProductMode,
@@ -1492,6 +1498,7 @@ func (app *App) postureBody() map[string]any {
 		"access":             accessPosture,
 		"scope":              scopePosture,
 		"lifecycle":          lifecyclePosture,
+		"approved_use":       approvedUsePosture,
 		"permits":            app.permits.Posture(),
 		"auth": map[string]any{
 			"oidc_nonce":     app.cfg.OIDCConfigured(),
@@ -1543,6 +1550,7 @@ func (app *App) postureBody() map[string]any {
 			"api_json_auth_errors",
 			"value_free_readiness",
 			"signed_session_expiry",
+			"approved_metadata_use_enforced",
 		},
 		"value_returned": false,
 	}
@@ -1603,11 +1611,16 @@ func seedCatalog() []SecretDescriptor {
 			Provider:       "agenix",
 			Classification: "high",
 			Owner:          "platform",
+			Scope:          "csb1",
+			Source:         "secrets/csb1-janus-env.age",
 			RotationDays:   180,
 			LastCheckedAt:  now,
 			Lifecycle:      LifecycleActive,
 			Status:         "managed",
 			RevealAllowed:  false,
+			UseEnabled:     true,
+			ConsumerCount:  1,
+			EgressMode:     "none",
 			Tags:           []string{"identity", "oidc"},
 		},
 		{
@@ -1616,11 +1629,16 @@ func seedCatalog() []SecretDescriptor {
 			Provider:       "agenix",
 			Classification: "critical",
 			Owner:          "platform",
+			Scope:          "csb1",
+			Source:         "secrets/csb1-age-identity.age",
 			RotationDays:   365,
 			LastCheckedAt:  now,
 			Lifecycle:      LifecycleActive,
 			Status:         "external",
 			RevealAllowed:  false,
+			UseEnabled:     true,
+			ConsumerCount:  1,
+			EgressMode:     "none",
 			Tags:           []string{"host", "decrypt-only"},
 		},
 	}
@@ -2019,8 +2037,8 @@ func mustTemplates() *template.Template {
       </div>
       <p>
         <span class="pill ok">value-free metadata</span>
-        {{ if .Focus.Descriptor.UseEnabled }}<span class="pill ok">use profiled</span>{{ else }}<span class="pill warn">use blocked</span>{{ end }}
-        {{ if .Focus.NormalUseBlocked }}<span class="pill warn">lifecycle blocked</span>{{ else }}<span class="pill ok">lifecycle allowed</span>{{ end }}
+        {{ if .Focus.Descriptor.UseEnabled }}<span class="pill ok">use profiled</span>{{ else }}<span class="pill warn">approved use missing</span>{{ end }}
+        {{ if .Focus.LifecycleBlocked }}<span class="pill warn">lifecycle blocked</span>{{ else }}<span class="pill ok">lifecycle allowed</span>{{ end }}
         <span class="pill ok">reveal disabled</span>
         {{ range .Focus.Descriptor.Tags }}<span class="pill info">{{ . }}</span> {{ end }}
       </p>

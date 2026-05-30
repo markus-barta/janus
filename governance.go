@@ -12,6 +12,16 @@ type CatalogGate struct {
 	Message   string `json:"message"`
 }
 
+type ApprovedUsePosture struct {
+	Profile             string `json:"profile"`
+	Enforced            bool   `json:"enforced"`
+	DescriptorCount     int    `json:"descriptor_count"`
+	ProfiledCount       int    `json:"profiled_count"`
+	BlockedCount        int    `json:"blocked_count"`
+	SecretValuesAllowed bool   `json:"secret_values_allowed"`
+	ValueReturned       bool   `json:"value_returned"`
+}
+
 type EvidencePack struct {
 	GeneratedAt      time.Time          `json:"generated_at"`
 	Service          string             `json:"service"`
@@ -28,6 +38,24 @@ type EvidencePack struct {
 	Integrity        *EvidenceIntegrity `json:"integrity,omitempty"`
 	ValueReturned    bool               `json:"value_returned"`
 	RedactionModel   string             `json:"redaction_model"`
+}
+
+func ApprovedUsePostureFor(descriptors []SecretDescriptor) ApprovedUsePosture {
+	posture := ApprovedUsePosture{
+		Profile:             "metadata_only",
+		Enforced:            true,
+		DescriptorCount:     len(descriptors),
+		SecretValuesAllowed: false,
+		ValueReturned:       false,
+	}
+	for _, desc := range descriptors {
+		if desc.UseEnabled {
+			posture.ProfiledCount++
+		} else {
+			posture.BlockedCount++
+		}
+	}
+	return posture
 }
 
 func ValidateCatalog(descriptors []SecretDescriptor) []CatalogGate {

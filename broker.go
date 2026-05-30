@@ -96,7 +96,7 @@ func (b *Broker) ResolveHandle(principal PrincipalChain, req HandleRequest) (Sec
 	if !b.scopePolicy.Allows(desc.Scope) {
 		return SecretHandle{}, ErrPolicyDenied
 	}
-	if blocked, reason := LifecycleBlocksNormalUse(desc); blocked {
+	if blocked, reason := DescriptorBlocksNormalUse(desc); blocked {
 		return SecretHandle{}, fmt.Errorf("%w: %s", ErrPolicyDenied, reason)
 	}
 	if principal.HumanSubject == "" {
@@ -151,7 +151,7 @@ func (b *Broker) CreatePermit(principal PrincipalChain, req PermitRequest) (Perm
 	if !b.scopePolicy.Allows(desc.Scope) {
 		return Permit{}, ErrPolicyDenied
 	}
-	if blocked, reason := LifecycleBlocksNormalUse(desc); blocked {
+	if blocked, reason := DescriptorBlocksNormalUse(desc); blocked {
 		return Permit{}, fmt.Errorf("%w: %s", ErrPolicyDenied, reason)
 	}
 	if principal.HumanSubject == "" {

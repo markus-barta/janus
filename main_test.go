@@ -531,6 +531,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"session"`) || !strings.Contains(body, `"signed_session_expiry"`) {
 		t.Fatalf("posture response should include session posture: %s", body)
 	}
+	if !strings.Contains(body, `"approved_use"`) || !strings.Contains(body, `"approved_metadata_use_enforced"`) {
+		t.Fatalf("posture response should include approved-use enforcement: %s", body)
+	}
 }
 
 func TestEvidenceExportIsValueFree(t *testing.T) {
@@ -1024,7 +1027,8 @@ func TestLifecycleBlocksUnsafeDescriptorUse(t *testing.T) {
 		"scope":"csb1",
 		"source":"secrets/disabled-secret.age",
 		"lifecycle":"disabled",
-		"consumer_count":1
+		"consumer_count":1,
+		"use_enabled":true
 	}]`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1047,6 +1051,49 @@ func TestLifecycleBlocksUnsafeDescriptorUse(t *testing.T) {
 	posture := LifecyclePostureFor(store.Descriptors(), time.Now().UTC())
 	if posture.BlockedCount != 1 || posture.GateCount != 1 || posture.ValueReturned {
 		t.Fatalf("unexpected lifecycle posture: %#v", posture)
+	}
+}
+
+func TestBrokerRequiresApprovedMetadataUseProfile(t *testing.T) {
+	dataDir := t.TempDir()
+	catalogPath := filepath.Join(t.TempDir(), "catalog.json")
+	if err := os.WriteFile(catalogPath, []byte(`[{
+		"id":"unprofiled-secret",
+		"display_name":"Unprofiled secret",
+		"provider":"agenix",
+		"classification":"high",
+		"owner":"platform",
+		"scope":"csb1",
+		"source":"secrets/unprofiled-secret.age",
+		"lifecycle":"active",
+		"consumer_count":1,
+		"use_enabled":false
+	}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(dataDir, catalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := NewBroker(store)
+	principal := PrincipalChain{HumanSubject: "user-1"}
+
+	_, err = broker.ResolveHandle(principal, HandleRequest{Ref: "unprofiled-secret", Reason: "test"})
+	if !errors.Is(err, ErrPolicyDenied) || !strings.Contains(err.Error(), "approved metadata-only use profile") {
+		t.Fatalf("expected approved-use policy denial, got %v", err)
+	}
+	_, err = broker.CreatePermit(principal, PermitRequest{Ref: "unprofiled-secret", Action: "metadata_use", Reason: "test"})
+	if !errors.Is(err, ErrPolicyDenied) || !strings.Contains(err.Error(), "approved metadata-only use profile") {
+		t.Fatalf("expected approved-use permit denial, got %v", err)
+	}
+
+	focus := focusDescriptor(store.Descriptors(), "unprofiled-secret")
+	if !focus.NormalUseBlocked || focus.NormalUseReason == "" || focus.LifecycleBlocked {
+		t.Fatalf("focus should show approved-use block without lifecycle block: %#v", focus)
+	}
+	posture := ApprovedUsePostureFor(store.Descriptors())
+	if posture.Profile != "metadata_only" || !posture.Enforced || posture.ProfiledCount != 0 || posture.BlockedCount != 1 || posture.SecretValuesAllowed || posture.ValueReturned {
+		t.Fatalf("unexpected approved-use posture: %#v", posture)
 	}
 }
 
