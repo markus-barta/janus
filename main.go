@@ -911,6 +911,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	evidenceReceipt := EvidenceReceiptFor(evidenceBoundary, nil)
 	supplyChain := SupplyChainPostureFor(evidenceBoundary)
 	authFailure := AuthFailurePostureFor(app.cfg)
+	authenticatedRole := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
@@ -956,6 +957,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"OperationalStatus":   operationalStatus,
 		"SupplyChain":         supplyChain,
 		"AuthFailure":         authFailure,
+		"AuthenticatedRole":   authenticatedRole,
 		"CommandCenter":       commandCenter,
 		"Ready":               ready,
 		"Readiness":           readinessBody,
@@ -2510,6 +2512,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	evidenceReceipt := EvidenceReceiptFor(evidenceBoundary, nil)
 	supplyChain := SupplyChainPostureFor(evidenceBoundary)
 	authFailure := AuthFailurePostureFor(app.cfg)
+	authenticatedRole := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
@@ -2582,6 +2585,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"operational_status":               operationalStatus,
 		"supply_chain_posture":             supplyChain,
 		"auth_failure_posture":             authFailure,
+		"authenticated_role_evidence":      authenticatedRole,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
 			"pkce_s256":                   app.cfg.OIDCConfigured(),
@@ -2590,7 +2594,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"safe_failure_pages":          true,
 			"value_returned":              false,
 		},
-		"session": app.sessionPosture(Session{}),
+		"session": app.sessionPosture(session),
 		"csrf": map[string]any{
 			"bound":                 true,
 			"same_origin_mutations": "origin_or_referer_when_present",
@@ -2632,6 +2636,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_claim_review":          "presence_only_claim_review",
 			"enterprise_release_gate":          "single_value_free_release_decision",
 			"auth_failure_posture":             "safe_reason_codes_no_provider_values",
+			"authenticated_role_evidence":      "signed_in_role_receipt_no_identity_values",
 			"external_evidence_workflow":       "presence_only_no_refs",
 			"attachment_review":                "presence_only_owner_review",
 			"restore_drill_proof":              "dashboard_posture_evidence",
@@ -2745,6 +2750,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"mode_guardrails",
 			"evidence_export_boundary_ux",
 			"role_availability_ux",
+			"authenticated_role_receipt",
 			"human_readable_assurance_summary",
 			"operational_status_strip",
 			"supply_chain_posture_summary",
@@ -2816,6 +2822,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	evidenceBoundary := EvidenceBoundaryFor(canExportEvidence, canExportEvidence)
 	supplyChain := SupplyChainPostureFor(evidenceBoundary)
 	authFailure := AuthFailurePostureFor(app.cfg)
+	authenticatedRole := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
@@ -2846,6 +2853,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Operational:         operationalStatus,
 		SupplyChain:         supplyChain,
 		AuthFailure:         authFailure,
+		AuthenticatedRole:   authenticatedRole,
 		RolePolicyReadiness: rolePolicyReadiness,
 		ModeGuardrails:      modeGuardrails,
 		ActionReadiness:     actionReadiness,
@@ -3583,12 +3591,12 @@ func mustTemplates() *template.Template {
     </nav>
     {{ else }}
     <div></div>
-    {{ end }}
-    {{ if .Session.Subject }}
-    <div class="account" aria-label="Session identity">
-      <strong>{{ if .Session.Name }}{{ .Session.Name }}{{ else if .Session.Email }}{{ .Session.Email }}{{ else }}{{ .Session.Subject }}{{ end }}</strong>
-      <span>{{ range .Session.Roles }}{{ . }} {{ end }}</span>
-    </div>
+	    {{ end }}
+	    {{ if .Session.Subject }}
+	    <div class="account" aria-label="Session identity">
+	      <strong>{{ .AuthenticatedRole.IdentityLabel }}</strong>
+	      <span>{{ range .Session.Roles }}{{ . }} {{ end }} identity values withheld</span>
+	    </div>
     <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button type="submit">Sign out</button></form>
     {{ else }}
     <a class="button primary" href="/login">Sign in</a>
@@ -3647,11 +3655,11 @@ func mustTemplates() *template.Template {
       {{ end }}
     </div>
     <div class="assurance-flow" aria-label="Assurance flow">
-      <div class="assurance-step">
-        <b>1</b>
-        <strong>Known human</strong>
-        <span>{{ if .Session.Email }}{{ .Session.Email }}{{ else }}{{ .Session.Subject }}{{ end }}</span>
-      </div>
+	      <div class="assurance-step">
+	        <b>1</b>
+	        <strong>Signed-in role receipt</strong>
+	        <span>{{ .AuthenticatedRole.State }}; identity values withheld</span>
+	      </div>
       <div class="assurance-step">
         <b>2</b>
         <strong>Metadata only</strong>
@@ -3960,9 +3968,41 @@ func mustTemplates() *template.Template {
       </div>
       {{ end }}
     </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="action-readiness">
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="authenticated-role-evidence">
+	  <div class="panel-head">
+	    <h2>Signed-in role receipt</h2>
+	    <span class="pill {{ if eq .AuthenticatedRole.State "signed_in" }}ok{{ else if eq .AuthenticatedRole.State "local_auth_disabled" }}info{{ else }}warn{{ end }}">{{ .AuthenticatedRole.State }}</span>
+	  </div>
+	  <div class="panel-body stack">
+	    <p>{{ .AuthenticatedRole.Summary }}</p>
+	    <p><span class="pill info">{{ .AuthenticatedRole.AuthMode }}</span> <span class="pill info">{{ .AuthenticatedRole.IdentityBoundary }}</span> <span class="pill ok">{{ .AuthenticatedRole.ActiveRoleCount }} active roles</span> <span class="pill ok">{{ .AuthenticatedRole.EvidenceSignal }}</span> <span class="pill ok">identity_values_returned=false</span> <span class="pill ok">subject_returned=false</span> <span class="pill ok">email_returned=false</span> <span class="pill ok">name_returned=false</span> <span class="pill ok">claim_values_returned=false</span> <span class="pill ok">group_values_returned=false</span> <span class="pill ok">token_returned=false</span> <span class="pill ok">cookie_value_returned=false</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">env_values_returned=false</span> <span class="pill ok">backend_path_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+	    <p><span class="pill info">next</span> {{ .AuthenticatedRole.Next }}</p>
+	    <div class="mode-grid" aria-label="Signed-in role states">
+	      {{ range .AuthenticatedRole.Roles }}
+	      <div class="mode-item {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Detail }}</p>
+	        <p><span class="pill info">role {{ .Role }}</span> <span class="pill ok">value_returned=false</span></p>
+	      </div>
+	      {{ end }}
+	    </div>
+	    <div class="mode-grid" aria-label="Authenticated role gates">
+	      {{ range .AuthenticatedRole.Gates }}
+	      <div class="mode-item {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Detail }}</p>
+	        <p><span class="pill info">required {{ .RequiredRole }}</span> <span class="pill ok">value_returned=false</span></p>
+	        <p><span class="pill info">next</span> {{ .Next }}</p>
+	      </div>
+	      {{ end }}
+	    </div>
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="action-readiness">
   <div class="panel-head">
     <h2>Action readiness</h2>
     <span class="pill {{ if .ActionReadiness.Blocked }}warn{{ else if .ActionReadiness.Gated }}warn{{ else }}ok{{ end }}">{{ .ActionReadiness.Available }} available</span>

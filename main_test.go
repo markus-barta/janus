@@ -376,6 +376,38 @@ func TestSessionPostureIsValueFree(t *testing.T) {
 	}
 }
 
+func TestSessionRoleEvidenceIsValueFreeAndRoleAware(t *testing.T) {
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+
+	evidence := SessionRoleEvidenceFor(session, true, true, true)
+	if evidence.State != "signed_in" || evidence.AuthMode != "zitadel_oidc" || evidence.ActiveRoleCount != 2 || evidence.ValueReturned {
+		t.Fatalf("expected signed-in role evidence: %#v", evidence)
+	}
+	if evidence.IdentityValuesReturned || evidence.SubjectReturned || evidence.EmailReturned || evidence.NameReturned || evidence.ClaimValuesReturned || evidence.GroupValuesReturned || evidence.TokenReturned || evidence.CookieValueReturned || evidence.RequestBodyReturned || evidence.EnvValuesReturned || evidence.BackendPathReturned {
+		t.Fatalf("role evidence should not return identity or backend values: %#v", evidence)
+	}
+	if !sessionRoleEvidenceHasRole(evidence.Roles, RoleAuditor, "active") || !sessionRoleEvidenceHasRole(evidence.Roles, RoleOperator, "inactive") {
+		t.Fatalf("role evidence should distinguish active and inactive roles: %#v", evidence.Roles)
+	}
+	if !sessionRoleEvidenceHasGate(evidence.Gates, "evidence_export", "available") || !sessionRoleEvidenceHasGate(evidence.Gates, "use_actions", "role_required") || !sessionRoleEvidenceHasGate(evidence.Gates, "identity_boundary", "withheld") {
+		t.Fatalf("role evidence should show value-free gates: %#v", evidence.Gates)
+	}
+	raw, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"subject-123", "person@example.test", "Person Name"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("role evidence leaked identity value %q: %s", forbidden, raw)
+		}
+	}
+
+	local := SessionRoleEvidenceFor(session, false, false, true)
+	if local.State != "local_auth_disabled" || local.AuthMode != "local_dev" || local.IdentityProvider != "local_dev" || local.ValueReturned {
+		t.Fatalf("local role evidence should stay explicit and value-free: %#v", local)
+	}
+}
+
 func TestConfigUsesHostPrefixedStateCookieForHTTPS(t *testing.T) {
 	app := newTestApp(t)
 
@@ -952,6 +984,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"auth_failure_posture"`) || !strings.Contains(body, `"label":"Auth failure posture"`) || !strings.Contains(body, `"evidence_signal":"presence_only_auth_failure_posture"`) || !strings.Contains(body, `"identity_provider":"zitadel_oidc"`) || !strings.Contains(body, `"key":"login_loop_paused"`) || !strings.Contains(body, `"raw_callback_query_returned":false`) || !strings.Contains(body, `"provider_error_returned":false`) || !strings.Contains(body, `"redirect_url_returned":false`) || !strings.Contains(body, `"token_returned":false`) || !strings.Contains(body, `"cookie_value_returned":false`) || !strings.Contains(body, `"request_body_returned":false`) || !strings.Contains(body, `"env_returned":false`) || !strings.Contains(body, `"backend_path_returned":false`) || !strings.Contains(body, `"auth_failure_posture":"safe_reason_codes_no_provider_values"`) || !strings.Contains(body, `"oidc_redirect_loop_guard"`) {
 		t.Fatalf("posture response should include auth failure posture: %s", body)
 	}
+	if !strings.Contains(body, `"authenticated_role_evidence"`) || !strings.Contains(body, `"label":"Signed-in role receipt"`) || !strings.Contains(body, `"evidence_signal":"signed_in_role_receipt_no_identity_values"`) || !strings.Contains(body, `"identity_boundary":"identity_claim_values_withheld"`) || !strings.Contains(body, `"key":"identity_boundary"`) || !strings.Contains(body, `"identity_values_returned":false`) || !strings.Contains(body, `"subject_returned":false`) || !strings.Contains(body, `"email_returned":false`) || !strings.Contains(body, `"name_returned":false`) || !strings.Contains(body, `"claim_values_returned":false`) || !strings.Contains(body, `"group_values_returned":false`) || !strings.Contains(body, `"token_returned":false`) || !strings.Contains(body, `"cookie_value_returned":false`) || !strings.Contains(body, `"authenticated_role_receipt"`) {
+		t.Fatalf("posture response should include authenticated role evidence: %s", body)
+	}
 	if !strings.Contains(body, `"role_policy_readiness"`) || !strings.Contains(body, `"label":"Role policy readiness"`) || !strings.Contains(body, `"evidence_signal":"bootstrap_to_explicit_zitadel_lanes"`) || !strings.Contains(body, `"key":"zitadel_lanes"`) || !strings.Contains(body, `"bootstrap_owner_state"`) || !strings.Contains(body, `"subject_binding_configured"`) || !strings.Contains(body, `"group_binding_configured"`) || !strings.Contains(body, `"subject_values_returned":false`) || !strings.Contains(body, `"group_values_returned":false`) || !strings.Contains(body, `"claim_values_returned":false`) || !strings.Contains(body, `"token_returned":false`) || !strings.Contains(body, `"backend_path_returned":false`) || !strings.Contains(body, `"role_policy_readiness_workflow"`) {
 		t.Fatalf("posture response should include role policy readiness workflow: %s", body)
 	}
@@ -1128,6 +1163,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"action_readiness"`) || !strings.Contains(body, `"key":"posture_view"`) || !strings.Contains(body, `"key":"admin_policy_review"`) || !strings.Contains(body, `"value_returned":false`) {
 		t.Fatalf("evidence response should include action readiness: %s", body)
+	}
+	if !strings.Contains(body, `"authenticated_role_evidence"`) || !strings.Contains(body, `"label":"Signed-in role receipt"`) || !strings.Contains(body, `"evidence_signal":"signed_in_role_receipt_no_identity_values"`) || !strings.Contains(body, `"identity_values_returned":false`) || !strings.Contains(body, `"subject_returned":false`) || !strings.Contains(body, `"email_returned":false`) || !strings.Contains(body, `"name_returned":false`) || !strings.Contains(body, `"claim_values_returned":false`) || !strings.Contains(body, `"token_returned":false`) {
+		t.Fatalf("evidence response should include authenticated role evidence: %s", body)
 	}
 	if !strings.Contains(body, `"assurance_gates"`) || !strings.Contains(body, `"key":"value_leak_sentinel"`) {
 		t.Fatalf("evidence response should include assurance gates: %s", body)
@@ -1350,6 +1388,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed auth failure posture")
 	}
+	postureAuthenticatedRole, ok := posture["authenticated_role_evidence"].(SessionRoleEvidence)
+	if !ok {
+		t.Fatalf("posture should expose typed authenticated role evidence")
+	}
 	postureRolePolicyReadiness, ok := posture["role_policy_readiness"].(RolePolicyReadiness)
 	if !ok {
 		t.Fatalf("posture should expose typed role policy readiness")
@@ -1420,6 +1462,9 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(postureAuthFailure, pack.AuthFailure) {
 		t.Fatalf("posture and evidence should share the same auth failure posture: posture=%#v evidence=%#v", postureAuthFailure, pack.AuthFailure)
+	}
+	if !reflect.DeepEqual(postureAuthenticatedRole, pack.AuthenticatedRole) {
+		t.Fatalf("posture and evidence should share the same authenticated role evidence: posture=%#v evidence=%#v", postureAuthenticatedRole, pack.AuthenticatedRole)
 	}
 	if !reflect.DeepEqual(postureRolePolicyReadiness, pack.RolePolicyReadiness) {
 		t.Fatalf("posture and evidence should share the same role policy readiness: posture=%#v evidence=%#v", postureRolePolicyReadiness, pack.RolePolicyReadiness)
@@ -2911,6 +2956,24 @@ func rolePolicyReadinessHasLane(items []RolePolicyLane, role, state string) bool
 	return false
 }
 
+func sessionRoleEvidenceHasRole(items []SessionRoleSignal, role, state string) bool {
+	for _, item := range items {
+		if item.Role == role && item.State == state && !item.ValueReturned {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionRoleEvidenceHasGate(items []SessionRoleGateSignal, key, state string) bool {
+	for _, item := range items {
+		if item.Key == key && item.State == state && !item.ValueReturned {
+			return true
+		}
+	}
+	return false
+}
+
 func privacySurfaceHasKey(items []PrivacySurface, key string) bool {
 	for _, item := range items {
 		if item.Key == key {
@@ -2979,7 +3042,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Command center", "Skip to command center", "Current safety posture", "Service", "values withheld", "Actions", "Command center status", "Safe quick actions", "Safety state", "Role access", "Enterprise review", "Now", "metadata_only", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Enterprise dry run", "Enterprise dry-run checklist", "self_hosted now", "enterprise target", "blockers", "required=true", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Integration conformance workflow", "Mark integration conformance present", "connector_config_returned=false", "endpoint_returned=false", "payload_returned=false", "Identity mapping", "Audit shipping", "Ticketing link", "SIEM custody", "Evidence handoff", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill workflow", "Mark restore drill present", "review cadence", "Metadata inventory", "Policy and identity", "Release provenance workflow", "Mark release provenance present", "artifact_returned=false", "Build identity", "SBOM review", "Channel trust", "Privacy and retention workflow", "Mark privacy policy present", "policy_doc_returned=false", "raw_metadata_returned=false", "Data classes", "Retention window", "Access boundary", "Payload exclusions", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "claim policy", "subject bindings", "group bindings", "Role policy proof", "Implicit elevated claims", "disabled", "Claim names are not trusted by convention", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Signed in", "identity values withheld", "admin", "Live posture", "Operational status", "Command center", "Skip to command center", "Current safety posture", "Service", "values withheld", "Actions", "Command center status", "Safe quick actions", "Safety state", "Role access", "Enterprise review", "Now", "metadata_only", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Signed-in role receipt", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Enterprise dry run", "Enterprise dry-run checklist", "self_hosted now", "enterprise target", "blockers", "required=true", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Integration conformance workflow", "Mark integration conformance present", "connector_config_returned=false", "endpoint_returned=false", "payload_returned=false", "Identity mapping", "Audit shipping", "Ticketing link", "SIEM custody", "Evidence handoff", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill workflow", "Mark restore drill present", "review cadence", "Metadata inventory", "Policy and identity", "Release provenance workflow", "Mark release provenance present", "artifact_returned=false", "Build identity", "SBOM review", "Channel trust", "Privacy and retention workflow", "Mark privacy policy present", "policy_doc_returned=false", "raw_metadata_returned=false", "Data classes", "Retention window", "Access boundary", "Payload exclusions", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "claim policy", "subject bindings", "group bindings", "Role policy proof", "Implicit elevated claims", "disabled", "Claim names are not trusted by convention", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
@@ -3014,6 +3077,11 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 			t.Fatalf("dashboard should render role policy readiness %q: %s", want, body)
 		}
 	}
+	for _, want := range []string{"Signed-in role receipt", "signed_in_role_receipt_no_identity_values", "identity_claim_values_withheld", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "cookie_value_returned=false", "Authenticated role gates", "Signed-in role states", "Identity boundary"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render authenticated role evidence %q: %s", want, body)
+		}
+	}
 	for _, want := range []string{"Auth failure posture", "Redirect loop guard", "presence_only_auth_failure_posture", "login_loop_paused", "raw_callback_query_returned=false", "provider_error_returned=false", "redirect_url_returned=false", "token_returned=false", "cookie_value_returned=false", "Reset login session"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render auth failure posture %q: %s", want, body)
@@ -3024,7 +3092,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 			t.Fatalf("dashboard should render external evidence workflow %q: %s", want, body)
 		}
 	}
-	for _, forbidden := range []string{"plaintext", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+	for _, forbidden := range []string{"Local Dev", "dev-local", "plaintext", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("dashboard should remain value-free, found %q: %s", forbidden, body)
 		}
@@ -3821,7 +3889,7 @@ func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			app := newTestApp(t)
-			session := Session{Subject: tc.name, Roles: tc.roles, Expiry: time.Now().UTC().Add(time.Hour)}
+			session := Session{Subject: "subject-" + tc.name, Email: tc.name + "@example.test", Name: "Display " + tc.name, Roles: tc.roles, Expiry: time.Now().UTC().Add(time.Hour)}
 			rr := httptest.NewRecorder()
 			app.writeSession(rr, session)
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -3852,7 +3920,7 @@ func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
 					t.Fatalf("%s dashboard should hide nav %q: %s", tc.name, hidden, body)
 				}
 			}
-			for _, marker := range []string{"plaintext", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+			for _, marker := range []string{"subject-" + tc.name, tc.name + "@example.test", "Display " + tc.name, "plaintext", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
 				if strings.Contains(body, marker) {
 					t.Fatalf("%s dashboard leaked %q: %s", tc.name, marker, body)
 				}

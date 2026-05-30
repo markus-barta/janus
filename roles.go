@@ -143,6 +143,56 @@ type RolePolicyStep struct {
 	ValueReturned bool   `json:"value_returned"`
 }
 
+type SessionRoleEvidence struct {
+	Label                  string                  `json:"label"`
+	Summary                string                  `json:"summary"`
+	State                  string                  `json:"state"`
+	AuthMode               string                  `json:"auth_mode"`
+	IdentityProvider       string                  `json:"identity_provider"`
+	IdentityLabel          string                  `json:"identity_label"`
+	IdentityBoundary       string                  `json:"identity_boundary"`
+	ActiveRoleCount        int                     `json:"active_role_count"`
+	TotalRoleCount         int                     `json:"total_role_count"`
+	EvidenceSignal         string                  `json:"evidence_signal"`
+	Next                   string                  `json:"next"`
+	Roles                  []SessionRoleSignal     `json:"roles"`
+	Gates                  []SessionRoleGateSignal `json:"gates"`
+	IdentityValuesReturned bool                    `json:"identity_values_returned"`
+	SubjectReturned        bool                    `json:"subject_returned"`
+	EmailReturned          bool                    `json:"email_returned"`
+	NameReturned           bool                    `json:"name_returned"`
+	ClaimValuesReturned    bool                    `json:"claim_values_returned"`
+	GroupValuesReturned    bool                    `json:"group_values_returned"`
+	TokenReturned          bool                    `json:"token_returned"`
+	CookieValueReturned    bool                    `json:"cookie_value_returned"`
+	RequestBodyReturned    bool                    `json:"request_body_returned"`
+	EnvValuesReturned      bool                    `json:"env_values_returned"`
+	BackendPathReturned    bool                    `json:"backend_path_returned"`
+	ValueReturned          bool                    `json:"value_returned"`
+}
+
+type SessionRoleSignal struct {
+	Key           string `json:"key"`
+	Label         string `json:"label"`
+	Role          string `json:"role"`
+	State         string `json:"state"`
+	Active        bool   `json:"active"`
+	Detail        string `json:"detail"`
+	Tone          string `json:"tone"`
+	ValueReturned bool   `json:"value_returned"`
+}
+
+type SessionRoleGateSignal struct {
+	Key           string `json:"key"`
+	Label         string `json:"label"`
+	State         string `json:"state"`
+	RequiredRole  string `json:"required_role"`
+	Detail        string `json:"detail"`
+	Next          string `json:"next"`
+	Tone          string `json:"tone"`
+	ValueReturned bool   `json:"value_returned"`
+}
+
 func LoadRolePolicyFromEnv() RolePolicy {
 	return RolePolicy{
 		AdminSubjects:    splitSet(envDefault("JANUS_ADMIN_SUBJECTS", "")),
@@ -411,6 +461,135 @@ func RolePolicyReadinessFor(policy RolePolicy, access AccessPosture) RolePolicyR
 		},
 	}
 	return readiness
+}
+
+func SessionRoleEvidenceFor(session Session, requireAuth, oidcConfigured, ready bool) SessionRoleEvidence {
+	state := "signed_in"
+	authMode := "zitadel_oidc"
+	identityProvider := "zitadel_oidc"
+	summary := "Signed-in session is recognized through Zitadel; Janus returns only role and gate state, not identity claim values."
+	if !requireAuth {
+		state = "local_auth_disabled"
+		authMode = "local_dev"
+		identityProvider = "local_dev"
+		summary = "Local smoke session is active; Janus returns only role and gate state, not identity claim values."
+	} else if !oidcConfigured {
+		state = "setup_only"
+		authMode = "setup_only"
+		summary = "Auth is required but setup is incomplete; Janus keeps identity values outside the response."
+	} else if strings.TrimSpace(session.Subject) == "" {
+		state = "missing"
+		summary = "No signed-in session is active."
+	}
+
+	evidence := SessionRoleEvidence{
+		Label:                  "Signed-in role receipt",
+		Summary:                summary,
+		State:                  state,
+		AuthMode:               authMode,
+		IdentityProvider:       identityProvider,
+		IdentityLabel:          "Signed in",
+		IdentityBoundary:       "identity_claim_values_withheld",
+		TotalRoleCount:         len(AllRoles()),
+		EvidenceSignal:         "signed_in_role_receipt_no_identity_values",
+		Next:                   "Use the role gates below; keep identity, group, claim, token, cookie, env, backend path, and request-body values outside Janus evidence.",
+		IdentityValuesReturned: false,
+		SubjectReturned:        false,
+		EmailReturned:          false,
+		NameReturned:           false,
+		ClaimValuesReturned:    false,
+		GroupValuesReturned:    false,
+		TokenReturned:          false,
+		CookieValueReturned:    false,
+		RequestBodyReturned:    false,
+		EnvValuesReturned:      false,
+		BackendPathReturned:    false,
+		ValueReturned:          false,
+	}
+	for _, role := range AllRoles() {
+		signal := sessionRoleSignal(session, role)
+		if signal.Active {
+			evidence.ActiveRoleCount++
+		}
+		evidence.Roles = append(evidence.Roles, signal)
+	}
+	evidence.Gates = []SessionRoleGateSignal{
+		sessionRoleGate(session, ready, "posture_view", "Posture view", RoleViewer, false, "Safe posture and descriptor metadata are visible to signed-in viewers.", "Use posture before any sensitive action."),
+		sessionRoleGate(session, ready, "evidence_export", "Evidence export", RoleAuditor, true, "Evidence JSON is available only to auditor sessions while readiness is healthy.", "Use an auditor session to download evidence JSON."),
+		sessionRoleGate(session, ready, "use_actions", "Use actions", RoleOperator, true, "Handle and permit controls are available only to operator sessions while readiness is healthy.", "Use an operator session for metadata handles and permits."),
+		sessionRoleGate(session, true, "admin_policy", "Admin policy", RoleAdmin, false, "Admin policy review is available only to admin sessions.", "Use an admin session to review ownership and role policy."),
+		{
+			Key:           "identity_boundary",
+			Label:         "Identity boundary",
+			State:         "withheld",
+			RequiredRole:  RoleViewer,
+			Detail:        "Subject, email, display name, group, and claim values stay out of dashboard, posture, and evidence responses.",
+			Next:          "Use role names and gates for review, not raw identity claims.",
+			Tone:          "ok",
+			ValueReturned: false,
+		},
+	}
+	return evidence
+}
+
+func sessionRoleSignal(session Session, role string) SessionRoleSignal {
+	active := HasRole(session, role)
+	state := "inactive"
+	detail := "This role is not active for the current session."
+	tone := "info"
+	if active {
+		state = "active"
+		detail = "This role is active for the current session."
+		tone = "ok"
+	}
+	return SessionRoleSignal{
+		Key:           role,
+		Label:         roleTitle(role),
+		Role:          role,
+		State:         state,
+		Active:        active,
+		Detail:        detail,
+		Tone:          tone,
+		ValueReturned: false,
+	}
+}
+
+func sessionRoleGate(session Session, ready bool, key, label, role string, readinessGated bool, detail, next string) SessionRoleGateSignal {
+	state := "available"
+	tone := "ok"
+	if !HasRole(session, role) {
+		state = "role_required"
+		tone = "warn"
+	} else if readinessGated && !ready {
+		state = "readiness_blocked"
+		tone = "warn"
+		next = "Recover readiness before using this gate."
+	}
+	return SessionRoleGateSignal{
+		Key:           key,
+		Label:         label,
+		State:         state,
+		RequiredRole:  role,
+		Detail:        detail,
+		Next:          next,
+		Tone:          tone,
+		ValueReturned: false,
+	}
+}
+
+func roleTitle(role string) string {
+	switch role {
+	case RoleAdmin:
+		return "Admin"
+	case RoleAuditor:
+		return "Auditor"
+	case RoleOperator:
+		return "Operator"
+	case RoleViewer:
+		return "Viewer"
+	default:
+		return role
+	}
 }
 
 func rolePolicyLane(role, label string, subjects, groups map[string]bool) RolePolicyLane {
