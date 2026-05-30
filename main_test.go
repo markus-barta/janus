@@ -6,11 +6,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/oauth2"
 )
 
 func testConfig() Config {
@@ -49,6 +52,17 @@ func newTestApp(t *testing.T) *App {
 		permits:   permitStore,
 		templates: mustTemplates(),
 	}
+}
+
+func cookieByName(t *testing.T, cookies []*http.Cookie, name string) *http.Cookie {
+	t.Helper()
+	for _, cookie := range cookies {
+		if cookie.Name == name {
+			return cookie
+		}
+	}
+	t.Fatalf("expected cookie %s in %#v", name, cookies)
+	return nil
 }
 
 func TestDescriptorsNeverExposeValues(t *testing.T) {
@@ -193,6 +207,78 @@ func TestConfigUsesHostPrefixedStateCookieForHTTPS(t *testing.T) {
 	}
 }
 
+func TestConfigUsesHostPrefixedNonceCookieForHTTPS(t *testing.T) {
+	app := newTestApp(t)
+
+	if app.cfg.NonceCookieName() != hostNonceCookie {
+		t.Fatalf("secure deployments should use host-prefixed nonce cookie, got %s", app.cfg.NonceCookieName())
+	}
+}
+
+func TestLoginRedirectBindsOIDCStateAndNonce(t *testing.T) {
+	app := newTestApp(t)
+	app.oauth = &oauth2.Config{
+		ClientID:    "client",
+		RedirectURL: "https://vault.barta.cm/oidc/callback",
+		Scopes:      []string{"openid", "email", "profile"},
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "https://auth.example.test/oauth/v2/authorize",
+			TokenURL: "https://auth.example.test/oauth/v2/token",
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	out := httptest.NewRecorder()
+	app.handleLogin(out, req)
+	if out.Code != http.StatusFound {
+		t.Fatalf("expected redirect, got %d body=%s", out.Code, out.Body.String())
+	}
+
+	cookies := out.Result().Cookies()
+	if len(cookies) != 2 {
+		t.Fatalf("expected state and nonce cookies, got %#v", cookies)
+	}
+	state := cookieByName(t, cookies, hostStateCookie)
+	nonce := cookieByName(t, cookies, hostNonceCookie)
+	for _, cookie := range []*http.Cookie{state, nonce} {
+		if cookie.Value == "" || !cookie.Secure || !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.MaxAge != 300 {
+			t.Fatalf("OIDC cookie should be short-lived, secure, httponly, lax: %#v", cookie)
+		}
+	}
+
+	redirectURL, err := url.Parse(out.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := redirectURL.Query().Get("state"); got != state.Value {
+		t.Fatalf("redirect state should match state cookie, got %q want %q", got, state.Value)
+	}
+	if got := redirectURL.Query().Get("nonce"); got != nonce.Value {
+		t.Fatalf("redirect nonce should match nonce cookie, got %q want %q", got, nonce.Value)
+	}
+}
+
+func TestValidOIDCNonce(t *testing.T) {
+	if !validOIDCNonce("nonce-123", "nonce-123") {
+		t.Fatal("matching nonce should be valid")
+	}
+	for _, tc := range []struct {
+		name     string
+		expected string
+		got      string
+	}{
+		{name: "missing expected", expected: "", got: "nonce-123"},
+		{name: "missing claim", expected: "nonce-123", got: ""},
+		{name: "mismatch", expected: "nonce-123", got: "nonce-456"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if validOIDCNonce(tc.expected, tc.got) {
+				t.Fatal("nonce should be rejected")
+			}
+		})
+	}
+}
+
 func TestLogoutRequiresCSRF(t *testing.T) {
 	app := newTestApp(t)
 	rr := httptest.NewRecorder()
@@ -301,6 +387,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"request_correlation"`) || !strings.Contains(body, `"request_correlation_ids"`) {
 		t.Fatalf("posture response should include request correlation: %s", body)
+	}
+	if !strings.Contains(body, `"auth"`) || !strings.Contains(body, `"oidc_nonce_bound_login"`) {
+		t.Fatalf("posture response should include nonce-bound OIDC login: %s", body)
 	}
 }
 

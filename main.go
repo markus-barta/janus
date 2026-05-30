@@ -29,6 +29,8 @@ const (
 	hostSessionCookie = "__Host-janus_session"
 	stateCookie       = "janus_oidc_state"
 	hostStateCookie   = "__Host-janus_oidc_state"
+	nonceCookie       = "janus_oidc_nonce"
+	hostNonceCookie   = "__Host-janus_oidc_nonce"
 )
 
 type Config struct {
@@ -67,6 +69,13 @@ func (c Config) StateCookieName() string {
 		return hostStateCookie
 	}
 	return stateCookie
+}
+
+func (c Config) NonceCookieName() string {
+	if c.SecureCookies() {
+		return hostNonceCookie
+	}
+	return nonceCookie
 }
 
 type SecretDescriptor struct {
@@ -885,6 +894,7 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	state := randomToken(32)
+	nonce := randomToken(32)
 	http.SetCookie(w, &http.Cookie{
 		Name:     app.cfg.StateCookieName(),
 		Value:    state,
@@ -894,8 +904,17 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   300,
 	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     app.cfg.NonceCookieName(),
+		Value:    nonce,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   app.cfg.SecureCookies(),
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   300,
+	})
 	app.audit(r, "auth.login.start", "allowed", "", "")
-	http.Redirect(w, r, app.oauth.AuthCodeURL(state), http.StatusFound)
+	http.Redirect(w, r, app.oauth.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce)), http.StatusFound)
 }
 
 func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
@@ -906,13 +925,22 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	state, err := firstCookie(r, app.cfg.StateCookieName(), stateCookie)
 	if err != nil || state.Value == "" || state.Value != r.URL.Query().Get("state") {
+		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "bad state")
 		http.Error(w, "invalid login state", http.StatusBadRequest)
+		return
+	}
+	nonce, err := firstCookie(r, app.cfg.NonceCookieName(), nonceCookie)
+	if err != nil || nonce.Value == "" {
+		app.clearOIDCLoginCookies(w)
+		app.audit(r, "auth.login.callback", "denied", "", "missing nonce")
+		http.Error(w, "invalid login nonce", http.StatusBadRequest)
 		return
 	}
 
 	token, err := app.oauth.Exchange(r.Context(), r.URL.Query().Get("code"))
 	if err != nil {
+		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "code exchange failed")
 		http.Error(w, "login failed", http.StatusBadGateway)
 		return
@@ -920,6 +948,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	rawIDToken, ok := token.Extra("id_token").(string)
 	if !ok {
+		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "missing id token")
 		http.Error(w, "login failed", http.StatusBadGateway)
 		return
@@ -927,6 +956,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	idToken, err := app.verifier.Verify(r.Context(), rawIDToken)
 	if err != nil {
+		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "id token verify failed")
 		http.Error(w, "login failed", http.StatusBadGateway)
 		return
@@ -936,16 +966,25 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Subject      string         `json:"sub"`
 		Email        string         `json:"email"`
 		Name         string         `json:"name"`
+		Nonce        string         `json:"nonce"`
 		Groups       []string       `json:"groups"`
 		Roles        []string       `json:"roles"`
 		ProjectRoles map[string]any `json:"urn:zitadel:iam:org:project:roles"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
+		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "claims failed")
 		http.Error(w, "login failed", http.StatusBadGateway)
 		return
 	}
+	if !validOIDCNonce(nonce.Value, claims.Nonce) {
+		app.clearOIDCLoginCookies(w)
+		app.audit(r, "auth.login.callback", "denied", "", "bad nonce")
+		http.Error(w, "invalid login nonce", http.StatusBadRequest)
+		return
+	}
 	if claims.Subject == "" {
+		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "missing subject")
 		http.Error(w, "login failed", http.StatusBadGateway)
 		return
@@ -959,10 +998,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Expiry:  time.Now().UTC().Add(12 * time.Hour),
 	}
 	app.writeSession(w, session)
-	app.clearCookie(w, app.cfg.StateCookieName())
-	if app.cfg.StateCookieName() != stateCookie {
-		app.clearCookie(w, stateCookie)
-	}
+	app.clearOIDCLoginCookies(w)
 	app.audit(r, "auth.login.complete", "allowed", session.Subject, "")
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -1057,6 +1093,24 @@ func firstCookie(r *http.Request, names ...string) (*http.Cookie, error) {
 		return nil, firstErr
 	}
 	return nil, http.ErrNoCookie
+}
+
+func validOIDCNonce(expected, got string) bool {
+	if expected == "" || got == "" {
+		return false
+	}
+	return hmac.Equal([]byte(expected), []byte(got))
+}
+
+func (app *App) clearOIDCLoginCookies(w http.ResponseWriter) {
+	app.clearCookie(w, app.cfg.StateCookieName())
+	if app.cfg.StateCookieName() != stateCookie {
+		app.clearCookie(w, stateCookie)
+	}
+	app.clearCookie(w, app.cfg.NonceCookieName())
+	if app.cfg.NonceCookieName() != nonceCookie {
+		app.clearCookie(w, nonceCookie)
+	}
 }
 
 func (app *App) clearCookie(w http.ResponseWriter, name string) {
@@ -1316,8 +1370,12 @@ func (app *App) postureBody() map[string]any {
 		"scope":              scopePosture,
 		"lifecycle":          lifecyclePosture,
 		"permits":            app.permits.Posture(),
+		"auth": map[string]any{
+			"oidc_nonce":     app.cfg.OIDCConfigured(),
+			"value_returned": false,
+		},
 		"cookies": map[string]any{
-			"host_prefixed":  app.cfg.SessionCookieName() == hostSessionCookie && app.cfg.StateCookieName() == hostStateCookie,
+			"host_prefixed":  app.cfg.SessionCookieName() == hostSessionCookie && app.cfg.StateCookieName() == hostStateCookie && app.cfg.NonceCookieName() == hostNonceCookie,
 			"secure":         app.cfg.SecureCookies(),
 			"value_returned": false,
 		},
@@ -1341,6 +1399,7 @@ func (app *App) postureBody() map[string]any {
 			"persistent_permit_records",
 			"host_prefixed_cookies",
 			"request_correlation_ids",
+			"oidc_nonce_bound_login",
 		},
 		"value_returned": false,
 	}
