@@ -780,7 +780,7 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"access"`) || !strings.Contains(body, `"role_gated_audit_evidence"`) {
 		t.Fatalf("posture response should include access policy: %s", body)
 	}
-	if !strings.Contains(body, `"role_duty_matrix":true`) || !strings.Contains(body, `"duty_model":"separated_admin_auditor_operator_viewer"`) {
+	if !strings.Contains(body, `"role_duty_matrix":true`) || !strings.Contains(body, `"duty_model":"separated_admin_auditor_operator_viewer"`) || !strings.Contains(body, `"claim_policy":"explicit_only"`) || !strings.Contains(body, `"implicit_elevated_claims":false`) || !strings.Contains(body, `"key":"implicit_elevated_claims"`) || !strings.Contains(body, `"state":"disabled"`) {
 		t.Fatalf("posture response should include role duty matrix posture: %s", body)
 	}
 	if !strings.Contains(body, `"role_availability"`) || !strings.Contains(body, `"dashboard_strip":true`) || !strings.Contains(body, `"role_availability_ux"`) {
@@ -816,7 +816,7 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"cors"`) || !strings.Contains(body, `"policy":"deny_by_default"`) || !strings.Contains(body, `"access_control_allow_origin":"absent"`) || !strings.Contains(body, `"deny_by_default_cors"`) {
 		t.Fatalf("posture response should include deny-by-default CORS posture: %s", body)
 	}
-	if !strings.Contains(body, `"assurance"`) || !strings.Contains(body, `"route_value_leak_sentinel":true`) || !strings.Contains(body, `"json_errors_request_id":true`) || !strings.Contains(body, `"backend_source_paths":"not_returned"`) || !strings.Contains(body, `"route_value_leak_sentinel"`) || !strings.Contains(body, `"request_correlated_json_errors"`) {
+	if !strings.Contains(body, `"assurance"`) || !strings.Contains(body, `"route_value_leak_sentinel":true`) || !strings.Contains(body, `"json_errors_request_id":true`) || !strings.Contains(body, `"backend_source_paths":"not_returned"`) || !strings.Contains(body, `"role_policy_proof":"explicit_counts_no_values"`) || !strings.Contains(body, `"role_claim_policy":"explicit_only_no_ambient_grants"`) || !strings.Contains(body, `"route_value_leak_sentinel"`) || !strings.Contains(body, `"request_correlated_json_errors"`) || !strings.Contains(body, `"strict_role_claim_policy"`) {
 		t.Fatalf("posture response should include route value-leak assurance: %s", body)
 	}
 	if !strings.Contains(body, `"evidence_export_boundary":"dashboard_and_json"`) || !strings.Contains(body, `"evidence_export_boundary_ux"`) {
@@ -1169,6 +1169,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed enterprise dry-run")
 	}
+	postureAccess, ok := posture["access"].(AccessPosture)
+	if !ok {
+		t.Fatalf("posture should expose typed access posture")
+	}
 	pack := app.evidencePack(session)
 	if !reflect.DeepEqual(postureProof, pack.NegativePath) {
 		t.Fatalf("posture and evidence should share the same negative-path proof: posture=%#v evidence=%#v", postureProof, pack.NegativePath)
@@ -1193,6 +1197,9 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(postureEnterpriseDryRun, pack.EnterpriseDryRun) {
 		t.Fatalf("posture and evidence should share the same enterprise dry-run: posture=%#v evidence=%#v", postureEnterpriseDryRun, pack.EnterpriseDryRun)
+	}
+	if !reflect.DeepEqual(postureAccess, pack.AccessPosture) {
+		t.Fatalf("posture and evidence should share the same access posture: posture=%#v evidence=%#v", postureAccess, pack.AccessPosture)
 	}
 	if pack.NegativePath.ValueReturned || !negativePathHasKey(pack.NegativePath.Cases, "value_leak_sentinel") {
 		t.Fatalf("negative-path evidence should stay value-free and include leak sentinel: %#v", pack.NegativePath)
@@ -1412,12 +1419,28 @@ func TestSensitiveAPIsFailClosedWhenReadinessDegraded(t *testing.T) {
 }
 
 func TestRolePolicyMapsZitadelClaims(t *testing.T) {
-	roles := DeriveRoles("user-1", "user@example.test", []string{"janus:auditor"}, RolePolicy{BootstrapOwner: false})
+	roles := DeriveRoles("user-1", "user@example.test", []string{"janus:auditor"}, RolePolicy{
+		AuditorGroups:  map[string]bool{"janus:auditor": true},
+		BootstrapOwner: false,
+	})
 	if !hasTestRole(roles, RoleViewer) || !hasTestRole(roles, RoleAuditor) {
 		t.Fatalf("expected viewer and auditor roles, got %#v", roles)
 	}
 	if hasTestRole(roles, RoleAdmin) {
 		t.Fatalf("auditor claim should not grant admin: %#v", roles)
+	}
+}
+
+func TestRolePolicyRejectsUnconfiguredElevatedClaims(t *testing.T) {
+	for _, claim := range []string{"janus:admin", "janus_admin", "janus-admin", "janus:auditor", "janus:operator"} {
+		roles := DeriveRoles("user-1", "user@example.test", []string{claim}, RolePolicy{BootstrapOwner: false})
+		if !hasTestRole(roles, RoleViewer) || hasTestRole(roles, RoleAdmin) || hasTestRole(roles, RoleAuditor) || hasTestRole(roles, RoleOperator) {
+			t.Fatalf("unconfigured claim %q should only grant viewer, got %#v", claim, roles)
+		}
+	}
+	posture := AccessPostureFor(RolePolicy{BootstrapOwner: false})
+	if posture.ClaimPolicy != "explicit_only" || posture.ImplicitElevatedClaims || !accessSourceHasState(posture.BindingSources, "implicit_elevated_claims", "disabled") || posture.ValueReturned {
+		t.Fatalf("access posture should prove strict claim policy without values: %#v", posture)
 	}
 }
 
@@ -1446,6 +1469,12 @@ func TestRolePolicyExplicitOwnerBindingClosesBootstrapGate(t *testing.T) {
 	posture := AccessPostureFor(policy)
 	if !posture.ExplicitBindings || posture.BootstrapOwner || posture.GateCount != 0 || posture.ValueReturned {
 		t.Fatalf("explicit role policy should close bootstrap gate: %#v", posture)
+	}
+	if posture.SubjectBindingCount != 3 || posture.GroupBindingCount != 0 || posture.ElevatedBindingCount != 3 || posture.ClaimPolicy != "explicit_only" || posture.ImplicitElevatedClaims {
+		t.Fatalf("explicit role policy should expose value-free binding counts: %#v", posture)
+	}
+	if !accessSourceHasState(posture.BindingSources, "subject_bindings", "configured") || !accessSourceHasState(posture.BindingSources, "implicit_elevated_claims", "disabled") || !accessSourceHasState(posture.BindingSources, "bootstrap_owner", "off") {
+		t.Fatalf("explicit role policy should expose source states: %#v", posture)
 	}
 }
 
@@ -2000,6 +2029,15 @@ func enterpriseDryRunIsValueFree(dryRun EnterpriseDryRun) bool {
 	return true
 }
 
+func accessSourceHasState(items []RoleBindingSource, key, state string) bool {
+	for _, item := range items {
+		if item.Key == key && item.State == state && !item.ValueReturned {
+			return true
+		}
+	}
+	return false
+}
+
 func privacySurfaceHasKey(items []PrivacySurface, key string) bool {
 	for _, item := range items {
 		if item.Key == key {
@@ -2068,7 +2106,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Command center", "Command center status", "Safe quick actions", "Safety state", "Role access", "Enterprise review", "Now", "metadata_only", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Enterprise dry run", "Enterprise dry-run checklist", "self_hosted now", "enterprise target", "blockers", "required=true", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Command center", "Command center status", "Safe quick actions", "Safety state", "Role access", "Enterprise review", "Now", "metadata_only", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Enterprise dry run", "Enterprise dry-run checklist", "self_hosted now", "enterprise target", "blockers", "required=true", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "claim policy", "subject bindings", "group bindings", "Role policy proof", "Implicit elevated claims", "disabled", "Claim names are not trusted by convention", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}

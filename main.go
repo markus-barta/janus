@@ -2264,6 +2264,8 @@ func (app *App) postureBody(session Session) map[string]any {
 			"route_value_leak_sentinel":   true,
 			"json_errors_request_id":      true,
 			"backend_source_paths":        "not_returned",
+			"role_policy_proof":           "explicit_counts_no_values",
+			"role_claim_policy":           "explicit_only_no_ambient_grants",
 			"evidence_export_boundary":    "dashboard_and_json",
 			"evidence_download":           "auditor_json_with_pack_hash",
 			"evidence_receipt":            "download_header_body_match",
@@ -2356,6 +2358,8 @@ func (app *App) postureBody(session Session) map[string]any {
 			"same_origin_mutation_guard",
 			"safe_http_boundary_failures",
 			"role_duty_matrix",
+			"role_policy_proof",
+			"strict_role_claim_policy",
 			"redacted_public_readiness",
 			"redacted_public_health",
 			"minimal_public_readiness",
@@ -3915,10 +3919,23 @@ func mustTemplates() *template.Template {
       <div class="facts">
         <div class="fact"><strong>{{ .Access.GateCount }}</strong><span class="muted">role gates</span></div>
         <div class="fact"><strong>{{ if .Access.BootstrapOwner }}on{{ else }}off{{ end }}</strong><span class="muted">bootstrap owner</span></div>
+        <div class="fact"><strong>{{ .Access.ClaimPolicy }}</strong><span class="muted">claim policy</span></div>
+        <div class="fact"><strong>{{ .Access.SubjectBindingCount }}</strong><span class="muted">subject bindings</span></div>
+        <div class="fact"><strong>{{ .Access.GroupBindingCount }}</strong><span class="muted">group bindings</span></div>
         <div class="fact"><strong>auditor</strong><span class="muted">evidence role</span></div>
         <div class="fact"><strong>{{ .SessionPosture.TTLLabel }}</strong><span class="muted">session ttl</span></div>
         <div class="fact"><strong>{{ .SessionPosture.ExpiresLabel }}</strong><span class="muted">expires</span></div>
         <div class="fact"><strong>{{ .SessionPosture.CookieSameSite }}</strong><span class="muted">session cookie</span></div>
+      </div>
+      <div class="mode-grid" aria-label="Role policy proof">
+        {{ range .Access.BindingSources }}
+        <div class="mode-item {{ .Tone }}">
+          <span>{{ .Label }}</span>
+          <strong>{{ .State }}</strong>
+          <p><span class="pill info">{{ .Count }} bindings</span> <span class="pill ok">value_returned=false</span></p>
+          <p>{{ .Detail }}</p>
+        </div>
+        {{ end }}
       </div>
       {{ range .Access.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
     </div>

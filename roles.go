@@ -29,15 +29,31 @@ type AccessGate struct {
 }
 
 type AccessPosture struct {
-	ExplicitBindings bool              `json:"explicit_bindings"`
-	BootstrapOwner   bool              `json:"bootstrap_owner"`
-	KnownRoles       []string          `json:"known_roles"`
-	RequiredRoles    map[string]string `json:"required_roles"`
-	RoleDutyMatrix   bool              `json:"role_duty_matrix"`
-	DutyModel        string            `json:"duty_model"`
-	Gates            []AccessGate      `json:"gates"`
-	GateCount        int               `json:"gate_count"`
-	ValueReturned    bool              `json:"value_returned"`
+	ExplicitBindings       bool                `json:"explicit_bindings"`
+	BootstrapOwner         bool                `json:"bootstrap_owner"`
+	KnownRoles             []string            `json:"known_roles"`
+	RequiredRoles          map[string]string   `json:"required_roles"`
+	RoleDutyMatrix         bool                `json:"role_duty_matrix"`
+	DutyModel              string              `json:"duty_model"`
+	ClaimPolicy            string              `json:"claim_policy"`
+	ImplicitElevatedClaims bool                `json:"implicit_elevated_claims"`
+	SubjectBindingCount    int                 `json:"subject_binding_count"`
+	GroupBindingCount      int                 `json:"group_binding_count"`
+	ElevatedBindingCount   int                 `json:"elevated_binding_count"`
+	BindingSources         []RoleBindingSource `json:"binding_sources"`
+	Gates                  []AccessGate        `json:"gates"`
+	GateCount              int                 `json:"gate_count"`
+	ValueReturned          bool                `json:"value_returned"`
+}
+
+type RoleBindingSource struct {
+	Key           string `json:"key"`
+	Label         string `json:"label"`
+	State         string `json:"state"`
+	Count         int    `json:"count"`
+	Detail        string `json:"detail"`
+	Tone          string `json:"tone"`
+	ValueReturned bool   `json:"value_returned"`
 }
 
 type RoleBoundary struct {
@@ -110,11 +126,11 @@ func DeriveRoles(subject, email string, claimValues []string, policy RolePolicy)
 	for _, value := range claimValues {
 		key := normalizeRoleToken(value)
 		switch {
-		case policy.AdminGroups[key] || key == "janus:admin" || key == "janus_admin" || key == "janus-admin":
+		case policy.AdminGroups[key]:
 			roles[RoleAdmin] = true
-		case policy.AuditorGroups[key] || key == "janus:auditor" || key == "janus_auditor" || key == "janus-auditor":
+		case policy.AuditorGroups[key]:
 			roles[RoleAuditor] = true
-		case policy.OperatorGroups[key] || key == "janus:operator" || key == "janus_operator" || key == "janus-operator":
+		case policy.OperatorGroups[key]:
 			roles[RoleOperator] = true
 		}
 	}
@@ -143,7 +159,10 @@ func AllRoles() []string {
 
 func AccessPostureFor(policy RolePolicy) AccessPosture {
 	gates := []AccessGate{}
-	if !policy.Configured() {
+	explicit := policy.Configured()
+	subjectCount := roleSubjectBindingCount(policy)
+	groupCount := roleGroupBindingCount(policy)
+	if !explicit {
 		message := "Explicit Janus role bindings are not configured; sensitive APIs deny without matching roles."
 		if policy.BootstrapOwner {
 			message = "Explicit Janus role bindings are not configured; self-hosted bootstrap grants authenticated users all V1 roles."
@@ -156,9 +175,15 @@ func AccessPostureFor(policy RolePolicy) AccessPosture {
 	}
 
 	return AccessPosture{
-		ExplicitBindings: policy.Configured(),
-		BootstrapOwner:   !policy.Configured() && policy.BootstrapOwner,
-		KnownRoles:       AllRoles(),
+		ExplicitBindings:       explicit,
+		BootstrapOwner:         !explicit && policy.BootstrapOwner,
+		KnownRoles:             AllRoles(),
+		ClaimPolicy:            "explicit_only",
+		ImplicitElevatedClaims: false,
+		SubjectBindingCount:    subjectCount,
+		GroupBindingCount:      groupCount,
+		ElevatedBindingCount:   subjectCount + groupCount,
+		BindingSources:         RoleBindingSourcesFor(policy),
 		RequiredRoles: map[string]string{
 			"/api/audit/recent":          RoleAuditor,
 			"/api/evidence":              RoleAuditor,
@@ -172,6 +197,83 @@ func AccessPostureFor(policy RolePolicy) AccessPosture {
 		GateCount:      len(gates),
 		ValueReturned:  false,
 	}
+}
+
+func RoleBindingSourcesFor(policy RolePolicy) []RoleBindingSource {
+	explicit := policy.Configured()
+	subjectCount := roleSubjectBindingCount(policy)
+	groupCount := roleGroupBindingCount(policy)
+	sources := []RoleBindingSource{
+		{
+			Key:           "subject_bindings",
+			Label:         "Subject bindings",
+			State:         configuredState(subjectCount),
+			Count:         subjectCount,
+			Detail:        "Subject bindings may grant elevated roles; subject and email values are not returned.",
+			Tone:          configuredTone(subjectCount),
+			ValueReturned: false,
+		},
+		{
+			Key:           "group_claim_bindings",
+			Label:         "Group claim bindings",
+			State:         configuredState(groupCount),
+			Count:         groupCount,
+			Detail:        "OIDC group and role claims grant elevated roles only when they match configured policy.",
+			Tone:          configuredTone(groupCount),
+			ValueReturned: false,
+		},
+		{
+			Key:           "implicit_elevated_claims",
+			Label:         "Implicit elevated claims",
+			State:         "disabled",
+			Count:         0,
+			Detail:        "Claim names are not trusted by convention; every elevated claim needs an explicit binding.",
+			Tone:          "ok",
+			ValueReturned: false,
+		},
+	}
+	bootstrap := RoleBindingSource{
+		Key:           "bootstrap_owner",
+		Label:         "Bootstrap owner",
+		State:         "off",
+		Count:         0,
+		Detail:        "Bootstrap owner is off; elevated roles require explicit policy.",
+		Tone:          "ok",
+		ValueReturned: false,
+	}
+	if policy.BootstrapOwner {
+		bootstrap.State = "inactive"
+		bootstrap.Detail = "Bootstrap owner is ignored because explicit role policy is configured."
+		if !explicit {
+			bootstrap.State = "active"
+			bootstrap.Count = 1
+			bootstrap.Detail = "Bootstrap owner grants all V1 roles until explicit role policy is configured."
+			bootstrap.Tone = "warn"
+		}
+	}
+	return append(sources, bootstrap)
+}
+
+func roleSubjectBindingCount(policy RolePolicy) int {
+	return len(policy.AdminSubjects) + len(policy.AuditorSubjects) + len(policy.OperatorSubjects)
+}
+
+func roleGroupBindingCount(policy RolePolicy) int {
+	return len(policy.AdminGroups) + len(policy.AuditorGroups) + len(policy.OperatorGroups)
+}
+
+func configuredState(count int) string {
+	if count > 0 {
+		return "configured"
+	}
+	return "empty"
+}
+
+func configuredTone(count int) string {
+	if count > 0 {
+		return "ok"
+	}
+	return "info"
 }
 
 func RoleBoundariesFor(session Session) []RoleBoundary {
