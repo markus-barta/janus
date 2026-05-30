@@ -607,8 +607,10 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	}
 	catalogGates := ValidateCatalog(descriptors)
 	accessPosture := app.accessPosture()
+	readinessBody, ready := app.readinessBody()
 	scopePosture := app.scopePosture(app.store.Descriptors())
 	lifecyclePosture := LifecyclePostureFor(descriptors, time.Now().UTC())
+	approvedUsePosture := ApprovedUsePostureFor(descriptors)
 	evidenceHash := ""
 	if canViewAudit {
 		evidencePack := app.evidencePack()
@@ -631,9 +633,12 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Posture":           auditPosture,
 		"CatalogGates":      catalogGates,
 		"Access":            accessPosture,
+		"Ready":             ready,
+		"Readiness":         readinessBody,
 		"SessionPosture":    app.sessionPosture(session),
 		"Scope":             scopePosture,
 		"Lifecycle":         lifecyclePosture,
+		"ApprovedUse":       approvedUsePosture,
 		"EvidenceHash":      evidenceHash,
 		"CanExportEvidence": canViewAudit,
 		"CanViewAudit":      canViewAudit,
@@ -1787,6 +1792,28 @@ func mustTemplates() *template.Template {
     .intro-copy { max-width: 720px; display: grid; gap: 10px; min-width: 0; }
     .eyebrow { color: var(--accent); font-weight: 720; font-size: 13px; letter-spacing: 0; }
     .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .trust-rail {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .trust-step {
+      min-height: 68px;
+      padding: 10px 12px;
+      display: grid;
+      align-content: space-between;
+      gap: 6px;
+      border-right: 1px solid var(--line);
+      background: var(--panel-soft);
+      min-width: 0;
+    }
+    .trust-step:last-child { border-right: 0; }
+    .trust-step span { color: var(--muted); font-size: 12px; }
+    .trust-step strong { font-size: 16px; line-height: 1.15; overflow-wrap: anywhere; }
+    .trust-step.ok strong { color: var(--accent); }
+    .trust-step.warn strong { color: var(--amber); }
     .flow {
       display: grid;
       grid-template-columns: minmax(220px, 1fr) minmax(260px, 1.2fr) auto;
@@ -1871,11 +1898,17 @@ func mustTemplates() *template.Template {
       .panel.half { grid-column: span 12; }
       .flow { grid-template-columns: 1fr; }
       .facts { grid-template-columns: 1fr; gap: 10px; }
+      .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .trust-step:nth-child(2n) { border-right: 0; }
+      .trust-step:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
       h1 { font-size: 32px; }
     }
     @media (max-width: 560px) {
       .bar, main { width: calc(100% - 22px); max-width: 1180px; }
       .status-body { grid-template-columns: 1fr; }
+      .trust-rail { grid-template-columns: 1fr; }
+      .trust-step { border-right: 0; border-bottom: 1px solid var(--line); }
+      .trust-step:last-child { border-bottom: 0; }
       .signal { border-right: 0; }
       .toolbar { display: grid; grid-template-columns: 1fr; }
       .toolbar .button { width: 100%; }
@@ -1927,6 +1960,24 @@ func mustTemplates() *template.Template {
       {{ if .CanExportEvidence }}<a class="button primary" href="/api/evidence">Evidence JSON</a>{{ end }}
       <a class="button quiet" href="/api/posture">Posture JSON</a>
       <a class="button quiet" href="/api/warden/descriptors">Descriptors JSON</a>
+    </div>
+    <div class="trust-rail" aria-label="Trust posture">
+      <div class="trust-step {{ if .Ready }}ok{{ else }}warn{{ end }}">
+        <span>Readiness</span>
+        <strong>{{ if .Ready }}ready{{ else }}review{{ end }}</strong>
+      </div>
+      <div class="trust-step {{ if .CatalogGates }}warn{{ else }}ok{{ end }}">
+        <span>Catalog gates</span>
+        <strong>{{ len .CatalogGates }}</strong>
+      </div>
+      <div class="trust-step {{ if .Access.ExplicitBindings }}ok{{ else }}warn{{ end }}">
+        <span>Access</span>
+        <strong>{{ if .Access.ExplicitBindings }}explicit{{ else }}bootstrap{{ end }}</strong>
+      </div>
+      <div class="trust-step {{ if .ApprovedUse.BlockedCount }}warn{{ else }}ok{{ end }}">
+        <span>Approved use</span>
+        <strong>{{ if .ApprovedUse.BlockedCount }}{{ .ApprovedUse.BlockedCount }} blocked{{ else }}profiled{{ end }}</strong>
+      </div>
     </div>
   </div>
   <div class="status">
