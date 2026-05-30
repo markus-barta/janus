@@ -244,6 +244,7 @@ type AuditEntry struct {
 	Time      time.Time `json:"time"`
 	Action    string    `json:"action"`
 	Outcome   string    `json:"outcome"`
+	Severity  string    `json:"severity,omitempty"`
 	ActorHash string    `json:"actor_hash,omitempty"`
 	RequestID string    `json:"request_id"`
 	Method    string    `json:"method"`
@@ -1586,6 +1587,7 @@ func (app *App) postureBody() map[string]any {
 			"approved_metadata_use_enforced",
 			"no_script_csp",
 			"safe_auth_failure_pages",
+			"audit_event_severity",
 		},
 		"value_returned": false,
 	}
@@ -2294,13 +2296,21 @@ func mustTemplates() *template.Template {
       {{ end }}
     </div>
     {{ if .CanViewAudit }}
+    <div class="panel-body stack">
+      <p>
+      {{ range .Posture.SeverityCounts }}
+        <span class="pill {{ if or (eq .Severity "critical") (eq .Severity "warning") }}warn{{ else }}info{{ end }}">{{ .Severity }} {{ .Count }}</span>
+      {{ end }}
+      </p>
+    </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Time</th><th>Action</th><th>Outcome</th><th>Method</th><th>Path</th><th>Secret ref</th><th>Reason</th></tr></thead>
+        <thead><tr><th>Time</th><th>Severity</th><th>Action</th><th>Outcome</th><th>Method</th><th>Path</th><th>Secret ref</th><th>Reason</th></tr></thead>
         <tbody>
         {{ range .Audit }}
           <tr>
             <td>{{ .Time.Format "15:04:05" }}</td>
+            <td>{{ if .Severity }}<span class="pill {{ if or (eq .Severity "critical") (eq .Severity "warning") }}warn{{ else }}info{{ end }}">{{ .Severity }}</span>{{ else }}<span class="pill warn">unknown</span>{{ end }}</td>
             <td>{{ .Action }}</td>
             <td>{{ .Outcome }}</td>
             <td>{{ .Method }}</td>

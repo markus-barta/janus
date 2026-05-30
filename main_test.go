@@ -160,10 +160,64 @@ func TestAuditHashChainAndRecentAudit(t *testing.T) {
 	if posture.Entries != 2 || posture.ChainedEntries != 2 || !posture.ChainVerified || posture.LastHash == "" {
 		t.Fatalf("unexpected audit posture: %#v", posture)
 	}
+	if posture.WarningCount != 1 || auditSeverityCount(posture, "info") != 1 || auditSeverityCount(posture, "warning") != 1 {
+		t.Fatalf("unexpected audit severity posture: %#v", posture)
+	}
 	recent := store.RecentAudit(1)
-	if len(recent) != 1 || recent[0].Action != "two" || recent[0].PrevHash == "" || recent[0].EventHash == "" {
+	if len(recent) != 1 || recent[0].Action != "two" || recent[0].Severity != "warning" || recent[0].PrevHash == "" || recent[0].EventHash == "" {
 		t.Fatalf("unexpected recent audit: %#v", recent)
 	}
+}
+
+func TestAuditExplicitCriticalSeverity(t *testing.T) {
+	store, err := NewStore(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.AppendAudit(AuditEntry{Action: "audit.chain", Outcome: "failed", Severity: "critical", Method: http.MethodGet, Path: "/readyz"})
+	posture := store.AuditPosture()
+	if posture.CriticalCount != 1 || auditSeverityCount(posture, "critical") != 1 || !posture.ChainVerified {
+		t.Fatalf("unexpected critical audit posture: %#v", posture)
+	}
+	recent := store.RecentAudit(1)
+	if len(recent) != 1 || recent[0].Severity != "critical" {
+		t.Fatalf("expected critical audit event: %#v", recent)
+	}
+}
+
+func TestAuditPostureAcceptsPreSeverityHashChain(t *testing.T) {
+	store, err := NewStore(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := AuditEntry{
+		Time:    time.Now().UTC(),
+		Action:  "legacy.event",
+		Outcome: "allowed",
+		Method:  http.MethodGet,
+		Path:    "/",
+	}
+	legacy.EventHash = hashAuditEntry(legacy)
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.auditFile, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	posture := store.AuditPosture()
+	if !posture.ChainVerified || posture.UnknownSeverityCount != 1 || auditSeverityCount(posture, "unknown") != 1 {
+		t.Fatalf("pre-severity audit row should remain verified and counted unknown: %#v", posture)
+	}
+}
+
+func auditSeverityCount(posture AuditPosture, severity string) int {
+	for _, count := range posture.SeverityCounts {
+		if count.Severity == severity {
+			return count.Count
+		}
+	}
+	return 0
 }
 
 func TestSessionRejectsTamper(t *testing.T) {
@@ -586,6 +640,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"script_src":"none"`) || !strings.Contains(body, `"no_script_csp"`) {
 		t.Fatalf("posture response should include no-script CSP hardening: %s", body)
 	}
+	if !strings.Contains(body, `"audit_event_severity"`) || !strings.Contains(body, `"severity_counts"`) {
+		t.Fatalf("posture response should include audit severity: %s", body)
+	}
 	if !strings.Contains(body, `"api_errors"`) || !strings.Contains(body, `"api_json_auth_errors"`) {
 		t.Fatalf("posture response should include API error posture: %s", body)
 	}
@@ -900,8 +957,9 @@ func TestDashboardAuditRowsRequireAuditorRole(t *testing.T) {
 	if out.Code != http.StatusOK {
 		t.Fatalf("expected auditor dashboard 200, got %d body=%s", out.Code, out.Body.String())
 	}
-	if !strings.Contains(out.Body.String(), "private-ref") {
-		t.Fatalf("auditor dashboard should include audit rows: %s", out.Body.String())
+	auditorBody := out.Body.String()
+	if !strings.Contains(auditorBody, "private-ref") || !strings.Contains(auditorBody, "<th>Severity</th>") || !strings.Contains(auditorBody, ">info<") {
+		t.Fatalf("auditor dashboard should include audit rows and severity posture: %s", auditorBody)
 	}
 }
 
