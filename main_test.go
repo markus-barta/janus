@@ -575,6 +575,23 @@ func TestWardenResolveWorksWhenAuthDisabledForLocalSmoke(t *testing.T) {
 	}
 }
 
+func TestOversizedAPIRequestIsRejectedValueFree(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodPost, "/api/warden/resolve", strings.NewReader(strings.Repeat("x", int(maxRequestBody)+1)))
+	req.Header.Set("Content-Type", "application/json")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	if !strings.Contains(body, `"request_too_large"`) || !strings.Contains(body, `"value_returned":false`) || strings.Contains(body, "plaintext") {
+		t.Fatalf("oversized denial should be value-free JSON: %s", body)
+	}
+}
+
 func TestFailedLookupDoesNotEchoRefIntoAuditSecretRef(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
@@ -633,6 +650,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"response_hardening"`) || !strings.Contains(body, `"no_store_responses"`) {
 		t.Fatalf("posture response should include response hardening: %s", body)
+	}
+	if !strings.Contains(body, `"request_limits"`) || !strings.Contains(body, `"max_body_bytes":4096`) || !strings.Contains(body, `"request_body_size_limit"`) {
+		t.Fatalf("posture response should include request body limits: %s", body)
 	}
 	if !strings.Contains(body, `"safe_failure_pages":true`) || !strings.Contains(body, `"safe_auth_failure_pages"`) || !strings.Contains(body, `"auth_error_view":"safe_category_request_id"`) {
 		t.Fatalf("posture response should include safe auth failure pages: %s", body)

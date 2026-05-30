@@ -34,6 +34,7 @@ const (
 	pkceCookie        = "janus_oidc_pkce"
 	hostPKCECookie    = "__Host-janus_oidc_pkce"
 	defaultSessionTTL = 12 * time.Hour
+	maxRequestBody    = int64(4096)
 )
 
 type Config struct {
@@ -436,7 +437,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /ui/permits", app.withAuth(app.handleCreatePermitUI))
 	mux.HandleFunc("POST /ui/permits/{permitID}/run", app.withAuth(app.handleRunPermitUI))
 	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
-	return app.securityHeaders(app.requestIDs(app.rateLimit(mux)))
+	return app.securityHeaders(app.requestIDs(app.rateLimit(app.limitRequestBody(mux))))
 }
 
 func (app *App) securityHeaders(next http.Handler) http.Handler {
@@ -470,6 +471,22 @@ func (app *App) rateLimit(next http.Handler) http.Handler {
 			writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "Too many requests")
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (app *App) limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.ContentLength > maxRequestBody {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body too large")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -1561,6 +1578,11 @@ func (app *App) postureBody() map[string]any {
 			"legacy_cache_headers": true,
 			"value_returned":       false,
 		},
+		"request_limits": map[string]any{
+			"max_body_bytes": maxRequestBody,
+			"applies_to":     "mutations",
+			"value_returned": false,
+		},
 		"api_errors": map[string]any{
 			"auth_denials_json": true,
 			"value_returned":    false,
@@ -1594,6 +1616,7 @@ func (app *App) postureBody() map[string]any {
 			"safe_auth_failure_pages",
 			"audit_event_severity",
 			"strict_session_cookie",
+			"request_body_size_limit",
 		},
 		"value_returned": false,
 	}
