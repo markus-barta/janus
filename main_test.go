@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 )
 
@@ -346,6 +347,59 @@ func TestLoginRedirectUsesNoStoreHeaders(t *testing.T) {
 	}
 }
 
+func TestCallbackBadStateRendersValueFreeAuthError(t *testing.T) {
+	app := newTestApp(t)
+	app.oauth = testOAuthConfig()
+	app.verifier = &oidc.IDTokenVerifier{}
+
+	req := httptest.NewRequest(http.MethodGet, "/oidc/callback?state=bad", nil)
+	req.AddCookie(&http.Cookie{Name: hostStateCookie, Value: "state-cookie-secret"})
+	req.AddCookie(&http.Cookie{Name: hostNonceCookie, Value: "nonce-cookie-secret"})
+	req.AddCookie(&http.Cookie{Name: hostPKCECookie, Value: "pkce-cookie-secret"})
+	req.Header.Set("X-Request-Id", "auth-test-123")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Login needs a fresh start", "login_restart_required", "value_returned=false", "request_id=auth-test-123", "Try again"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("auth error page should include %q: %s", want, body)
+		}
+	}
+	if got := out.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("auth error page should be HTML, got %q", got)
+	}
+	if got := out.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("auth error page should not be cached, got %q", got)
+	}
+	if got := out.Header().Get("Content-Security-Policy"); !strings.Contains(got, "script-src 'none'") {
+		t.Fatalf("auth error page should keep no-script CSP, got %q", got)
+	}
+	for _, forbidden := range []string{"bad_state", "missing_nonce", "missing_pkce", "code_exchange_failed", "id_token_verify_failed"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("auth error page should not expose internal reason %q: %s", forbidden, body)
+		}
+	}
+	for _, forbidden := range []string{"state-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret", "plaintext"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("auth error page leaked %q: %s", forbidden, body)
+		}
+	}
+	cleared := map[string]bool{}
+	for _, cookie := range out.Result().Cookies() {
+		if cookie.MaxAge < 0 {
+			cleared[cookie.Name] = true
+		}
+	}
+	for _, name := range []string{hostStateCookie, hostNonceCookie, hostPKCECookie, stateCookie, nonceCookie, pkceCookie} {
+		if !cleared[name] {
+			t.Fatalf("expected callback failure to clear %s; cleared=%#v cookies=%#v", name, cleared, out.Result().Cookies())
+		}
+	}
+}
+
 func TestAPIRequiresAuthReturnsValueFreeJSON(t *testing.T) {
 	app := newTestApp(t)
 
@@ -413,11 +467,18 @@ func TestLogoutRequiresCSRF(t *testing.T) {
 	app.writeSession(rr, Session{Subject: "user-1", Expiry: time.Now().UTC().Add(time.Hour)})
 	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
 	req.AddCookie(rr.Result().Cookies()[0])
+	req.Header.Set("X-Request-Id", "logout-test-123")
 
 	out := httptest.NewRecorder()
-	app.withAuth(app.handleLogout)(out, req)
+	app.routes().ServeHTTP(out, req)
 	if out.Code != http.StatusForbidden {
 		t.Fatalf("expected CSRF denial, got %d", out.Code)
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Sign out needs a fresh page", "logout_integrity_check_failed", "value_returned=false", "request_id=logout-test-123"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("logout CSRF page should include %q: %s", want, body)
+		}
 	}
 }
 
@@ -518,6 +579,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"response_hardening"`) || !strings.Contains(body, `"no_store_responses"`) {
 		t.Fatalf("posture response should include response hardening: %s", body)
+	}
+	if !strings.Contains(body, `"safe_failure_pages":true`) || !strings.Contains(body, `"safe_auth_failure_pages"`) || !strings.Contains(body, `"auth_error_view":"safe_category_request_id"`) {
+		t.Fatalf("posture response should include safe auth failure pages: %s", body)
 	}
 	if !strings.Contains(body, `"script_src":"none"`) || !strings.Contains(body, `"no_script_csp"`) {
 		t.Fatalf("posture response should include no-script CSP hardening: %s", body)

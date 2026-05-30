@@ -299,6 +299,18 @@ type UIActionResult struct {
 	ValueReturned  bool   `json:"value_returned"`
 }
 
+type AuthErrorView struct {
+	Title         string
+	CSPNonce      string
+	Mode          string
+	Session       Session
+	CSRF          string
+	ReasonCode    string
+	Message       string
+	RequestID     string
+	ValueReturned bool
+}
+
 type DescriptorFocus struct {
 	Descriptor       SecretDescriptor `json:"descriptor"`
 	Gates            []CatalogGate    `json:"gates"`
@@ -1019,21 +1031,21 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil || state.Value == "" || state.Value != r.URL.Query().Get("state") {
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "bad state")
-		http.Error(w, "invalid login state", http.StatusBadRequest)
+		app.renderAuthError(w, r, http.StatusBadRequest, "login_restart_required", "Login needs a fresh start.")
 		return
 	}
 	nonce, err := firstCookie(r, app.cfg.NonceCookieName(), nonceCookie)
 	if err != nil || nonce.Value == "" {
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "missing nonce")
-		http.Error(w, "invalid login nonce", http.StatusBadRequest)
+		app.renderAuthError(w, r, http.StatusBadRequest, "login_integrity_check_failed", "Login needs a fresh start.")
 		return
 	}
 	pkce, err := firstCookie(r, app.cfg.PKCECookieName(), pkceCookie)
 	if err != nil || pkce.Value == "" {
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "missing pkce verifier")
-		http.Error(w, "invalid login verifier", http.StatusBadRequest)
+		app.renderAuthError(w, r, http.StatusBadRequest, "login_integrity_check_failed", "Login needs a fresh start.")
 		return
 	}
 
@@ -1041,7 +1053,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "code exchange failed")
-		http.Error(w, "login failed", http.StatusBadGateway)
+		app.renderAuthError(w, r, http.StatusBadGateway, "identity_response_failed", "Zitadel login could not be completed.")
 		return
 	}
 
@@ -1049,7 +1061,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "missing id token")
-		http.Error(w, "login failed", http.StatusBadGateway)
+		app.renderAuthError(w, r, http.StatusBadGateway, "identity_response_failed", "Zitadel login could not be completed.")
 		return
 	}
 
@@ -1057,7 +1069,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "id token verify failed")
-		http.Error(w, "login failed", http.StatusBadGateway)
+		app.renderAuthError(w, r, http.StatusBadGateway, "identity_response_failed", "Zitadel login could not be verified.")
 		return
 	}
 
@@ -1073,19 +1085,19 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if err := idToken.Claims(&claims); err != nil {
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "claims failed")
-		http.Error(w, "login failed", http.StatusBadGateway)
+		app.renderAuthError(w, r, http.StatusBadGateway, "identity_response_failed", "Zitadel login could not be read safely.")
 		return
 	}
 	if !validOIDCNonce(nonce.Value, claims.Nonce) {
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "bad nonce")
-		http.Error(w, "invalid login nonce", http.StatusBadRequest)
+		app.renderAuthError(w, r, http.StatusBadRequest, "login_integrity_check_failed", "Login needs a fresh start.")
 		return
 	}
 	if claims.Subject == "" {
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "missing subject")
-		http.Error(w, "login failed", http.StatusBadGateway)
+		app.renderAuthError(w, r, http.StatusBadGateway, "identity_response_failed", "Zitadel login did not include a stable user subject.")
 		return
 	}
 
@@ -1106,7 +1118,7 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "auth.logout", "denied", session.Subject, "csrf failed")
-		http.Error(w, "CSRF token required", http.StatusForbidden)
+		app.renderAuthError(w, r, http.StatusForbidden, "logout_integrity_check_failed", "Sign out needs a fresh page.")
 		return
 	}
 	app.audit(r, "auth.logout", "allowed", session.Subject, "")
@@ -1128,6 +1140,19 @@ func (app *App) renderSetup(w http.ResponseWriter, r *http.Request) {
 			"OIDC issuer, client id, client secret, and cookie key must be present before Janus exposes secret metadata.",
 			"The service is live, but locked to setup status until Zitadel credentials are configured.",
 		},
+	})
+}
+
+func (app *App) renderAuthError(w http.ResponseWriter, r *http.Request, status int, reasonCode, message string) {
+	renderTemplateStatus(w, app.templates, "auth_error", status, AuthErrorView{
+		Title:         "Janus login",
+		CSPNonce:      cspNonceFromContext(r.Context()),
+		Mode:          app.cfg.ProductMode,
+		CSRF:          "",
+		ReasonCode:    reasonCode,
+		Message:       message,
+		RequestID:     requestID(r),
+		ValueReturned: false,
 	})
 }
 
@@ -1506,9 +1531,10 @@ func (app *App) postureBody() map[string]any {
 		"approved_use":       approvedUsePosture,
 		"permits":            app.permits.Posture(),
 		"auth": map[string]any{
-			"oidc_nonce":     app.cfg.OIDCConfigured(),
-			"pkce_s256":      app.cfg.OIDCConfigured(),
-			"value_returned": false,
+			"oidc_nonce":         app.cfg.OIDCConfigured(),
+			"pkce_s256":          app.cfg.OIDCConfigured(),
+			"safe_failure_pages": true,
+			"value_returned":     false,
 		},
 		"session": app.sessionPosture(Session{}),
 		"cookies": map[string]any{
@@ -1524,6 +1550,7 @@ func (app *App) postureBody() map[string]any {
 		},
 		"response_hardening": map[string]any{
 			"cache_control":        "no-store",
+			"auth_error_view":      "safe_category_request_id",
 			"script_src":           "none",
 			"legacy_cache_headers": true,
 			"value_returned":       false,
@@ -1558,6 +1585,7 @@ func (app *App) postureBody() map[string]any {
 			"signed_session_expiry",
 			"approved_metadata_use_enforced",
 			"no_script_csp",
+			"safe_auth_failure_pages",
 		},
 		"value_returned": false,
 	}
@@ -2365,6 +2393,31 @@ func mustTemplates() *template.Template {
     <div class="status-head"><h2>Setup gates</h2><span class="pill warn">locked</span></div>
     <div class="panel-body stack">
       {{ range .Issues }}<p class="warn">{{ . }}</p>{{ end }}
+    </div>
+  </div>
+</section>
+{{ template "base_bottom" . }}
+{{- end }}
+
+{{ define "auth_error" -}}
+{{ template "base_top" . }}
+<section class="overview">
+  <div class="intro">
+    <div class="intro-copy">
+      <div class="eyebrow">{{ .Mode }} / login</div>
+      <h1>Login needs a fresh start</h1>
+      <p>{{ .Message }}</p>
+    </div>
+    <div class="toolbar">
+      <a class="button primary" href="/login">Try again</a>
+    </div>
+  </div>
+  <div class="status">
+    <div class="status-head"><h2>Safe failure</h2><span class="pill warn">{{ .ReasonCode }}</span></div>
+    <div class="panel-body stack">
+      <p>Janus cleared the temporary login cookies and did not create a session.</p>
+      <p><span class="pill ok">value_returned=false</span></p>
+      <p class="mono">request_id={{ .RequestID }}</p>
     </div>
   </div>
 </section>
