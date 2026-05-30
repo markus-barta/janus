@@ -125,6 +125,28 @@ func TestLoadsExternalAgenixCatalog(t *testing.T) {
 	}
 }
 
+func TestBundledAgenixCatalogHasNoGovernanceGates(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("catalog", "agenix-catalog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var descriptors []SecretDescriptor
+	if err := json.Unmarshal(raw, &descriptors); err != nil {
+		t.Fatal(err)
+	}
+	if len(descriptors) == 0 {
+		t.Fatal("expected bundled catalog descriptors")
+	}
+	if gates := ValidateCatalog(descriptors); len(gates) != 0 {
+		t.Fatalf("bundled catalog should have no governance gates: %#v", gates)
+	}
+	for _, desc := range descriptors {
+		if desc.RevealAllowed {
+			t.Fatalf("bundled catalog must remain no-reveal: %#v", desc)
+		}
+	}
+}
+
 func TestAuditHashChainAndRecentAudit(t *testing.T) {
 	store, err := NewStore(t.TempDir(), "")
 	if err != nil {
