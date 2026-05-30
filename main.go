@@ -866,6 +866,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
+	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	roleAvailability := RoleAvailabilityFor(session)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	data := map[string]any{
@@ -891,6 +892,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"ApprovedUse":       approvedUsePosture,
 		"ModePosture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
 		"Enterprise":        enterpriseValidation,
+		"Privacy":           privacyPosture,
 		"AssuranceSummary":  assuranceSummary,
 		"AssuranceGates":    assuranceGates,
 		"EvidenceHash":      evidenceHash,
@@ -2082,6 +2084,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
+	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	roleAvailability := RoleAvailabilityFor(session)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	return map[string]any{
@@ -2106,6 +2109,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"permits":               permitPosture,
 		"mode_posture":          ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
 		"enterprise_validation": enterpriseValidation,
+		"privacy_posture":       privacyPosture,
 		"assurance_summary":     assuranceSummary,
 		"assurance_gates":       assuranceGates,
 		"operational_status":    operationalStatus,
@@ -2149,6 +2153,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"evidence_export_boundary":  "dashboard_and_json",
 			"evidence_download":         "auditor_json_with_pack_hash",
 			"enterprise_validation":     "self_hosted_safe_enterprise_required",
+			"privacy_retention":         "dashboard_posture_evidence",
 			"human_readable_summary":    "dashboard_posture_evidence",
 			"assurance_gate_proofs":     "role_catalog_degraded_value_leak",
 			"operational_status":        "dashboard_posture_strip",
@@ -2240,6 +2245,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"evidence_download_receipt",
 			"assurance_gate_proof_strip",
 			"enterprise_validation_clarity",
+			"privacy_retention_posture",
 		},
 		"value_returned": false,
 	}
@@ -2266,6 +2272,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
+	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, RoleAvailabilityFor(session))
 	pack := EvidencePack{
 		GeneratedAt:      time.Now().UTC(),
@@ -2276,6 +2283,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		AssuranceGates:   assuranceGates,
 		AssuranceSummary: assuranceSummary,
 		Enterprise:       enterpriseValidation,
+		Privacy:          privacyPosture,
 		Descriptors:      descriptors,
 		CatalogGates:     catalogGates,
 		ScopePosture:     scopePosture,
@@ -3047,6 +3055,27 @@ func mustTemplates() *template.Template {
       </div>
       {{ end }}
     </div>
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="privacy-retention">
+  <div class="panel-head">
+    <h2>Privacy and retention</h2>
+    <span class="pill {{ if .Privacy.ReviewCount }}warn{{ else }}ok{{ end }}">{{ if .Privacy.ReviewCount }}{{ .Privacy.ReviewCount }} review{{ else }}clear{{ end }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .Privacy.Summary }}</p>
+    <p><span class="pill ok">{{ .Privacy.Redaction }}</span> <span class="pill info">{{ .Privacy.Retention }}</span> <span class="pill ok">value_returned=false</span></p>
+    <div class="mode-grid" aria-label="Privacy and retention posture">
+      {{ range .Privacy.Surfaces }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+        <p><span class="pill info">{{ .Retention }}</span></p>
+      </div>
+      {{ end }}
+    </div>
+    <p><strong>Excluded from evidence</strong><br>{{ range .Privacy.Excluded }}<span class="pill warn">{{ . }}</span> {{ end }}</p>
   </div>
 </section>
 <section class="panel" style="margin-bottom:16px" id="evidence-boundary">

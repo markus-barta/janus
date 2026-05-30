@@ -728,6 +728,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"enterprise_validation"`) || !strings.Contains(body, `"status":"not_claimed"`) || !strings.Contains(body, `"key":"remote_audit"`) || !strings.Contains(body, `"enterprise_validation_clarity"`) || !strings.Contains(body, `"enterprise_validation":"self_hosted_safe_enterprise_required"`) {
 		t.Fatalf("posture response should include enterprise validation clarity: %s", body)
 	}
+	if !strings.Contains(body, `"privacy_posture"`) || !strings.Contains(body, `"key":"request_bodies"`) || !strings.Contains(body, `"key":"prompt_command_env"`) || !strings.Contains(body, `"key":"auth_cookie_secrets"`) || !strings.Contains(body, `"privacy_retention_posture"`) || !strings.Contains(body, `"privacy_retention":"dashboard_posture_evidence"`) {
+		t.Fatalf("posture response should include privacy and retention posture: %s", body)
+	}
 	if !strings.Contains(body, `"response_hardening"`) || !strings.Contains(body, `"no_store_responses"`) {
 		t.Fatalf("posture response should include response hardening: %s", body)
 	}
@@ -827,6 +830,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"enterprise_validation"`) || !strings.Contains(body, `"key":"privacy_policy"`) {
 		t.Fatalf("evidence response should include enterprise validation: %s", body)
+	}
+	if !strings.Contains(body, `"privacy_posture"`) || !strings.Contains(body, `"key":"raw_metadata"`) || !strings.Contains(body, `"cookie_secrets"`) {
+		t.Fatalf("evidence response should include privacy posture: %s", body)
 	}
 	if !strings.Contains(body, `"scope_posture"`) {
 		t.Fatalf("evidence response should include scope posture: %s", body)
@@ -1064,6 +1070,28 @@ func TestEnterpriseValidationDistinguishesClaims(t *testing.T) {
 	})
 }
 
+func TestPrivacyPostureKeepsEvidenceUsefulAndValueFree(t *testing.T) {
+	posture := PrivacyPostureFor(EvidenceBoundaryFor(true, true), AuditPosture{ChainVerified: true, SinkWritable: true})
+	if posture.Redaction != "metadata_only" || posture.ValueReturned {
+		t.Fatalf("privacy posture should be metadata-only and value-free: %#v", posture)
+	}
+	for _, key := range []string{"audit_events", "evidence_export", "request_bodies", "prompt_command_env", "raw_metadata", "auth_cookie_secrets"} {
+		if !privacySurfaceHasKey(posture.Surfaces, key) {
+			t.Fatalf("privacy posture should cover %q: %#v", key, posture)
+		}
+	}
+	for _, excluded := range []string{"secret_values", "request_bodies", "prompt_text", "command_output", "env_dumps", "backend_source_paths", "cookie_secrets"} {
+		if !stringSliceHas(posture.Excluded, excluded) {
+			t.Fatalf("privacy posture should exclude %q: %#v", excluded, posture)
+		}
+	}
+
+	restricted := PrivacyPostureFor(EvidenceBoundaryFor(false, false), AuditPosture{})
+	if restricted.ReviewCount == 0 || !privacySurfaceHasState(restricted.Surfaces, "evidence_export", "role gated") {
+		t.Fatalf("restricted privacy posture should call out review items: %#v", restricted)
+	}
+}
+
 func TestAssuranceSummaryDistinguishesProofAndReview(t *testing.T) {
 	access := AccessPosture{ExplicitBindings: true}
 	audit := AuditPosture{ChainVerified: true}
@@ -1136,6 +1164,33 @@ func enterpriseControlHasState(items []EnterpriseValidationControl, key, state s
 	return false
 }
 
+func privacySurfaceHasKey(items []PrivacySurface, key string) bool {
+	for _, item := range items {
+		if item.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func privacySurfaceHasState(items []PrivacySurface, key, state string) bool {
+	for _, item := range items {
+		if item.Key == key && item.State == state {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSliceHas(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
 func issueContains(items []string, want string) bool {
 	for _, item := range items {
 		if strings.Contains(item, want) {
@@ -1177,7 +1232,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "not_claimed", "Evidence export", "Download evidence", "integrity.pack_hash", "Download JSON", "Hash preview", "copy-safe metadata", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Download evidence", "integrity.pack_hash", "Download JSON", "Hash preview", "copy-safe metadata", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}

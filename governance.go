@@ -32,6 +32,7 @@ type EvidencePack struct {
 	AssuranceGates   AssuranceGates       `json:"assurance_gates"`
 	AssuranceSummary AssuranceSummary     `json:"assurance_summary"`
 	Enterprise       EnterpriseValidation `json:"enterprise_validation"`
+	Privacy          PrivacyPosture       `json:"privacy_posture"`
 	EvidenceBoundary EvidenceBoundary     `json:"evidence_boundary"`
 	Descriptors      []SecretDescriptor   `json:"descriptors"`
 	CatalogGates     []CatalogGate        `json:"catalog_gates"`
@@ -118,6 +119,25 @@ type EnterpriseValidationControl struct {
 	Required bool   `json:"required"`
 	Detail   string `json:"detail"`
 	Tone     string `json:"tone"`
+}
+
+type PrivacyPosture struct {
+	Summary       string           `json:"summary"`
+	Redaction     string           `json:"redaction"`
+	Retention     string           `json:"retention"`
+	Surfaces      []PrivacySurface `json:"surfaces"`
+	Excluded      []string         `json:"excluded"`
+	ReviewCount   int              `json:"review_count"`
+	ValueReturned bool             `json:"value_returned"`
+}
+
+type PrivacySurface struct {
+	Key       string `json:"key"`
+	Label     string `json:"label"`
+	State     string `json:"state"`
+	Retention string `json:"retention"`
+	Detail    string `json:"detail"`
+	Tone      string `json:"tone"`
 }
 
 func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
@@ -295,6 +315,64 @@ func (g *AssuranceGates) add(ok bool, key, label, okState, reviewState, okDetail
 		g.ReviewCount++
 	}
 	g.Gates = append(g.Gates, AssuranceGateItem{Key: key, Label: label, State: state, Detail: detail, Tone: tone})
+}
+
+func PrivacyPostureFor(boundary EvidenceBoundary, audit AuditPosture) PrivacyPosture {
+	posture := PrivacyPosture{
+		Summary:       "Janus keeps evidence useful by recording metadata and excluding secret-bearing payloads.",
+		Redaction:     "metadata_only",
+		Retention:     "local_evidence_until_operator_cleanup",
+		ValueReturned: false,
+		Excluded:      append([]string{}, boundary.Excludes...),
+	}
+	if len(posture.Excluded) == 0 {
+		posture.Excluded = []string{
+			"secret_values",
+			"request_bodies",
+			"prompt_text",
+			"command_output",
+			"env_dumps",
+			"backend_source_paths",
+			"cookie_secrets",
+		}
+	}
+
+	auditState := "metadata only"
+	auditTone := "ok"
+	auditDetail := "Audit stores action, actor, scope, request id, severity, and hashes; values stay out."
+	if !audit.SinkWritable || !audit.ChainVerified {
+		auditState = "review"
+		auditTone = "warn"
+		auditDetail = "Audit sink or chain needs review before stronger privacy claims."
+		posture.ReviewCount++
+	}
+	posture.Surfaces = append(posture.Surfaces, PrivacySurface{
+		Key:       "audit_events",
+		Label:     "Audit events",
+		State:     auditState,
+		Retention: "local durable log",
+		Detail:    auditDetail,
+		Tone:      auditTone,
+	})
+
+	exportState := "redacted"
+	exportTone := "ok"
+	exportDetail := "Evidence export includes posture, metadata, gates, audit refs, and integrity hashes."
+	if boundary.Gate != "export_ready" {
+		exportState = "role gated"
+		exportTone = "warn"
+		exportDetail = "Evidence export is restricted to auditor sessions."
+		posture.ReviewCount++
+	}
+	posture.Surfaces = append(posture.Surfaces,
+		PrivacySurface{Key: "evidence_export", Label: "Evidence export", State: exportState, Retention: "downloaded by auditor", Detail: exportDetail, Tone: exportTone},
+		PrivacySurface{Key: "request_bodies", Label: "Request bodies", State: "excluded", Retention: "not retained", Detail: "Mutation bodies are parsed for the action and are not stored in audit or evidence.", Tone: "ok"},
+		PrivacySurface{Key: "prompt_command_env", Label: "Prompts, command output, env dumps", State: "excluded", Retention: "not retained", Detail: "Prompt text, model output, command output, and environment dumps are outside Janus evidence.", Tone: "ok"},
+		PrivacySurface{Key: "raw_metadata", Label: "Raw metadata", State: "role gated", Retention: "review before broader views", Detail: "Default views use safe labels and descriptors; broader raw metadata remains a deliberate admin/auditor path.", Tone: "warn"},
+		PrivacySurface{Key: "auth_cookie_secrets", Label: "Auth and cookie secrets", State: "excluded", Retention: "not exported", Detail: "OIDC client secrets, cookie keys, nonces, and PKCE verifiers are never returned in evidence.", Tone: "ok"},
+	)
+	posture.ReviewCount++
+	return posture
 }
 
 func ApprovedUsePostureFor(descriptors []SecretDescriptor) ApprovedUsePosture {
