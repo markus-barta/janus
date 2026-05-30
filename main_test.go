@@ -849,7 +849,7 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"mode_guardrails"`) || !strings.Contains(body, `"current":"Self-hosted"`) || !strings.Contains(body, `"boundary":"enterprise_not_claimed"`) || !strings.Contains(body, `"key":"enterprise_claim"`) || !strings.Contains(body, `"mode_guardrails":"dashboard_posture_evidence"`) {
 		t.Fatalf("posture response should include mode guardrails: %s", body)
 	}
-	if !strings.Contains(body, `"enterprise_validation"`) || !strings.Contains(body, `"status":"not_claimed"`) || !strings.Contains(body, `"key":"remote_audit"`) || !strings.Contains(body, `"enterprise_validation_clarity"`) || !strings.Contains(body, `"enterprise_validation":"self_hosted_safe_enterprise_required"`) || !strings.Contains(body, `"enterprise_attachments":"presence_only_no_refs"`) || !strings.Contains(body, `"enterprise_evidence_attachment_matrix"`) {
+	if !strings.Contains(body, `"enterprise_validation"`) || !strings.Contains(body, `"status":"not_claimed"`) || !strings.Contains(body, `"key":"remote_audit"`) || !strings.Contains(body, `"enterprise_validation_clarity"`) || !strings.Contains(body, `"enterprise_validation":"self_hosted_safe_enterprise_required"`) || !strings.Contains(body, `"enterprise_attachments":"presence_only_no_refs"`) || !strings.Contains(body, `"enterprise_evidence_attachment_matrix"`) || !strings.Contains(body, `"attachment_review"`) || !strings.Contains(body, `"attachment_review":"presence_only_owner_review"`) || !strings.Contains(body, `"enterprise_attachment_review_workflow"`) {
 		t.Fatalf("posture response should include enterprise validation clarity: %s", body)
 	}
 	if !strings.Contains(body, `"privacy_posture"`) || !strings.Contains(body, `"key":"request_bodies"`) || !strings.Contains(body, `"key":"prompt_command_env"`) || !strings.Contains(body, `"key":"auth_cookie_secrets"`) || !strings.Contains(body, `"privacy_retention_posture"`) || !strings.Contains(body, `"privacy_retention":"dashboard_posture_evidence"`) {
@@ -1158,6 +1158,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed restore drill proof")
 	}
+	postureAttachmentReview, ok := posture["attachment_review"].(AttachmentReview)
+	if !ok {
+		t.Fatalf("posture should expose typed attachment review")
+	}
 	pack := app.evidencePack(session)
 	if !reflect.DeepEqual(postureProof, pack.NegativePath) {
 		t.Fatalf("posture and evidence should share the same negative-path proof: posture=%#v evidence=%#v", postureProof, pack.NegativePath)
@@ -1176,6 +1180,9 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(postureRestoreProof, pack.RestoreProof) {
 		t.Fatalf("posture and evidence should share the same restore drill proof: posture=%#v evidence=%#v", postureRestoreProof, pack.RestoreProof)
+	}
+	if !reflect.DeepEqual(postureAttachmentReview, pack.AttachmentReview) {
+		t.Fatalf("posture and evidence should share the same attachment review: posture=%#v evidence=%#v", postureAttachmentReview, pack.AttachmentReview)
 	}
 	if pack.NegativePath.ValueReturned || !negativePathHasKey(pack.NegativePath.Cases, "value_leak_sentinel") {
 		t.Fatalf("negative-path evidence should stay value-free and include leak sentinel: %#v", pack.NegativePath)
@@ -1581,6 +1588,63 @@ func TestEnterpriseValidationDistinguishesClaims(t *testing.T) {
 	})
 }
 
+func TestAttachmentReviewDistinguishesClaims(t *testing.T) {
+	policy := RolePolicy{
+		AdminSubjects:    map[string]bool{"markus@barta.com": true},
+		AuditorSubjects:  map[string]bool{"markus@barta.com": true},
+		OperatorSubjects: map[string]bool{"markus@barta.com": true},
+		BootstrapOwner:   false,
+	}
+	access := AccessPostureFor(policy)
+	audit := AuditPosture{ChainVerified: true, SinkWritable: true}
+
+	selfHostedValidation := EnterpriseValidationFor(Config{ProductMode: "self_hosted", RolePolicy: policy}, true, access, audit, 0)
+	selfHosted := AttachmentReviewFor(selfHostedValidation)
+	if selfHosted.Status != "not_claimed" || selfHosted.Required != 0 || selfHosted.Missing != 0 || selfHosted.ValueReturned || selfHosted.ReviewCount == 0 {
+		t.Fatalf("self-hosted attachment review should list attachments without claiming them: %#v", selfHosted)
+	}
+	if !attachmentReviewHasControl(selfHosted.Owners, "auditor", "remote_audit", "not_claimed") || !attachmentReviewIsValueFree(selfHosted) {
+		t.Fatalf("self-hosted attachment review should group withheld evidence by owner and stay value-free: %#v", selfHosted)
+	}
+
+	t.Run("enterprise missing attachments are blocked", func(t *testing.T) {
+		for _, spec := range enterpriseValidationSpecs() {
+			t.Setenv(spec.EnvKey, "")
+		}
+		validation := EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, access, audit, 0)
+		review := AttachmentReviewFor(validation)
+		if review.Status != "blocked" || review.Required != len(enterpriseValidationSpecs()) || review.Missing != len(enterpriseValidationSpecs()) || review.Attached != 0 || review.ValueReturned {
+			t.Fatalf("enterprise attachment review should block missing required evidence: %#v", review)
+		}
+		for _, spec := range enterpriseValidationSpecs() {
+			if !attachmentReviewHasControl(review.Owners, spec.OwnerRole, spec.Key, "missing") {
+				t.Fatalf("enterprise attachment review should group missing %s under %s: %#v", spec.Key, spec.OwnerRole, review)
+			}
+		}
+	})
+
+	t.Run("enterprise attachments become candidate without leaking refs", func(t *testing.T) {
+		for _, spec := range enterpriseValidationSpecs() {
+			t.Setenv(spec.EnvKey, "secret-cookie-secret-/run/agenix/"+spec.Key)
+		}
+		validation := EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, access, audit, 0)
+		review := AttachmentReviewFor(validation)
+		if review.Status != "candidate" || review.Required != len(enterpriseValidationSpecs()) || review.Attached != len(enterpriseValidationSpecs()) || review.Missing != 0 || review.ReviewCount != 0 {
+			t.Fatalf("enterprise attachment review should become a complete candidate when every attachment is present: %#v", review)
+		}
+		if !attachmentReviewHasControl(review.Owners, "admin", "privacy_policy", "attached_presence_only") || !attachmentReviewIsValueFree(review) {
+			t.Fatalf("enterprise attachment review should preserve owner grouping and value-free controls: %#v", review)
+		}
+		raw, err := json.Marshal(review)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "secret-cookie-secret") || strings.Contains(string(raw), "/run/agenix") {
+			t.Fatalf("attachment review leaked env-backed evidence refs: %s", raw)
+		}
+	})
+}
+
 func TestPrivacyPostureKeepsEvidenceUsefulAndValueFree(t *testing.T) {
 	posture := PrivacyPostureFor(EvidenceBoundaryFor(true, true), AuditPosture{ChainVerified: true, SinkWritable: true})
 	if posture.Redaction != "metadata_only" || posture.ValueReturned {
@@ -1810,6 +1874,37 @@ func enterpriseControlIsValueFree(items []EnterpriseValidationControl, key strin
 	return false
 }
 
+func attachmentReviewHasControl(owners []AttachmentReviewOwner, role, key, attachment string) bool {
+	for _, owner := range owners {
+		if owner.Role != role {
+			continue
+		}
+		for _, item := range owner.Controls {
+			if item.Key == key && item.Attachment == attachment {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func attachmentReviewIsValueFree(review AttachmentReview) bool {
+	if review.ValueReturned {
+		return false
+	}
+	for _, owner := range review.Owners {
+		if owner.ValueReturned {
+			return false
+		}
+		for _, item := range owner.Controls {
+			if item.ValueReturned || item.EvidenceRefReturned {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func privacySurfaceHasKey(items []PrivacySurface, key string) bool {
 	for _, item := range items {
 		if item.Key == key {
@@ -1878,7 +1973,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}

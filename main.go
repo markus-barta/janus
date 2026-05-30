@@ -871,6 +871,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
+	attachmentReview := AttachmentReviewFor(enterpriseValidation)
 	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
 	restoreProof := RestoreDrillProofFor(enterpriseValidation)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
@@ -907,6 +908,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"ModePosture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
 		"ModeGuardrails":    modeGuardrails,
 		"Enterprise":        enterpriseValidation,
+		"AttachmentReview":  attachmentReview,
 		"RestoreProof":      restoreProof,
 		"Privacy":           privacyPosture,
 		"AssuranceSummary":  assuranceSummary,
@@ -2173,6 +2175,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
+	attachmentReview := AttachmentReviewFor(enterpriseValidation)
 	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
 	restoreProof := RestoreDrillProofFor(enterpriseValidation)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
@@ -2205,6 +2208,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"mode_posture":            ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
 		"mode_guardrails":         modeGuardrails,
 		"enterprise_validation":   enterpriseValidation,
+		"attachment_review":       attachmentReview,
 		"restore_drill_proof":     restoreProof,
 		"privacy_posture":         privacyPosture,
 		"evidence_receipt":        evidenceReceipt,
@@ -2257,6 +2261,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"evidence_receipt":          "download_header_body_match",
 			"enterprise_validation":     "self_hosted_safe_enterprise_required",
 			"enterprise_attachments":    "presence_only_no_refs",
+			"attachment_review":         "presence_only_owner_review",
 			"restore_drill_proof":       "dashboard_posture_evidence",
 			"action_readiness":          "role_and_readiness_matrix",
 			"action_receipts":           "mutation_result_receipts",
@@ -2358,6 +2363,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"evidence_download_receipt",
 			"exact_evidence_download_receipt",
 			"enterprise_evidence_attachment_matrix",
+			"enterprise_attachment_review_workflow",
 			"restore_drill_proof",
 			"role_aware_action_readiness",
 			"value_free_action_receipts",
@@ -2395,6 +2401,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
+	attachmentReview := AttachmentReviewFor(enterpriseValidation)
 	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
 	restoreProof := RestoreDrillProofFor(enterpriseValidation)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
@@ -2417,6 +2424,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		AuditDrill:       auditDrill,
 		AssuranceSummary: assuranceSummary,
 		Enterprise:       enterpriseValidation,
+		AttachmentReview: attachmentReview,
 		RestoreProof:     restoreProof,
 		Privacy:          privacyPosture,
 		Descriptors:      descriptors,
@@ -3327,6 +3335,30 @@ func mustTemplates() *template.Template {
         <p><span class="pill info">owner {{ .OwnerRole }}</span> <span class="pill {{ if eq .Attachment "missing" }}warn{{ else if eq .Attachment "attached_presence_only" }}ok{{ else }}info{{ end }}">{{ .Attachment }}</span></p>
         <p><span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
         <p><span class="pill info">next</span> {{ .Next }}</p>
+      </div>
+      {{ end }}
+    </div>
+	</div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="attachment-review">
+  <div class="panel-head">
+    <h2>Attachment review</h2>
+    <span class="pill {{ if eq .AttachmentReview.Status "candidate" }}ok{{ else if eq .AttachmentReview.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .AttachmentReview.Status }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .AttachmentReview.Summary }}</p>
+    <p><span class="pill {{ if .AttachmentReview.Required }}warn{{ else }}info{{ end }}">{{ .AttachmentReview.Required }} required</span> <span class="pill {{ if .AttachmentReview.Attached }}ok{{ else }}info{{ end }}">{{ .AttachmentReview.Attached }} attached</span> <span class="pill {{ if .AttachmentReview.Missing }}warn{{ else }}ok{{ end }}">{{ .AttachmentReview.Missing }} missing</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <div class="mode-grid" aria-label="Enterprise attachment owner review">
+      {{ range .AttachmentReview.Owners }}
+      <div class="mode-item {{ if .Missing }}warn{{ else if .Attached }}ok{{ else }}info{{ end }}">
+        <span>owner {{ .Role }}</span>
+        <strong>{{ .Attached }} / {{ len .Controls }} attached</strong>
+        <p><span class="pill {{ if .Required }}warn{{ else }}info{{ end }}">{{ .Required }} required</span> <span class="pill {{ if .Missing }}warn{{ else }}ok{{ end }}">{{ .Missing }} missing</span> <span class="pill info">{{ .ReviewCount }} review</span></p>
+        {{ range .Controls }}
+        <p><strong>{{ .Label }}</strong> <span class="pill {{ if eq .Attachment "missing" }}warn{{ else if eq .Attachment "attached_presence_only" }}ok{{ else }}info{{ end }}">{{ .Attachment }}</span> <span class="pill info">{{ .State }}</span></p>
+        <p><span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
+        <p><span class="pill info">next</span> {{ .Next }}</p>
+        {{ end }}
       </div>
       {{ end }}
     </div>

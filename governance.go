@@ -38,6 +38,7 @@ type EvidencePack struct {
 	RestoreProof     RestoreDrillProof     `json:"restore_drill_proof"`
 	AssuranceSummary AssuranceSummary      `json:"assurance_summary"`
 	Enterprise       EnterpriseValidation  `json:"enterprise_validation"`
+	AttachmentReview AttachmentReview      `json:"attachment_review"`
 	Privacy          PrivacyPosture        `json:"privacy_posture"`
 	EvidenceBoundary EvidenceBoundary      `json:"evidence_boundary"`
 	Descriptors      []SecretDescriptor    `json:"descriptors"`
@@ -274,6 +275,40 @@ type EnterpriseValidationControl struct {
 	EvidenceRefReturned bool   `json:"evidence_ref_returned"`
 	ValueReturned       bool   `json:"value_returned"`
 	Tone                string `json:"tone"`
+}
+
+type AttachmentReview struct {
+	Summary       string                  `json:"summary"`
+	Status        string                  `json:"status"`
+	Required      int                     `json:"required"`
+	Attached      int                     `json:"attached"`
+	Missing       int                     `json:"missing"`
+	ReviewCount   int                     `json:"review_count"`
+	Owners        []AttachmentReviewOwner `json:"owners"`
+	ValueReturned bool                    `json:"value_returned"`
+}
+
+type AttachmentReviewOwner struct {
+	Role          string                    `json:"role"`
+	Required      int                       `json:"required"`
+	Attached      int                       `json:"attached"`
+	Missing       int                       `json:"missing"`
+	ReviewCount   int                       `json:"review_count"`
+	Controls      []AttachmentReviewControl `json:"controls"`
+	ValueReturned bool                      `json:"value_returned"`
+}
+
+type AttachmentReviewControl struct {
+	Key                 string `json:"key"`
+	Label               string `json:"label"`
+	State               string `json:"state"`
+	Required            bool   `json:"required"`
+	Attachment          string `json:"attachment"`
+	EvidenceSignal      string `json:"evidence_signal"`
+	Next                string `json:"next"`
+	Tone                string `json:"tone"`
+	EvidenceRefReturned bool   `json:"evidence_ref_returned"`
+	ValueReturned       bool   `json:"value_returned"`
 }
 
 type PrivacyPosture struct {
@@ -976,6 +1011,88 @@ func RestoreDrillProofFor(enterprise EnterpriseValidation) RestoreDrillProof {
 	})
 
 	return proof
+}
+
+func AttachmentReviewFor(enterprise EnterpriseValidation) AttachmentReview {
+	status := strings.TrimSpace(enterprise.Status)
+	if status == "" {
+		status = "not_claimed"
+	}
+	review := AttachmentReview{
+		Summary:       "Self-hosted mode lists enterprise attachments for review without claiming them.",
+		Status:        status,
+		ValueReturned: false,
+	}
+	switch status {
+	case "blocked":
+		review.Summary = "Enterprise mode is blocked until required attachments are present and reviewed outside Janus."
+	case "candidate":
+		review.Summary = "Required attachments are present as presence-only signals; keep owner review current outside Janus."
+	}
+
+	for _, control := range enterprise.Controls {
+		if control.EvidenceSignal != "presence_only_env_flag" {
+			continue
+		}
+		attachment := control.Attachment
+		if attachment == "" {
+			attachment = "not_claimed"
+		}
+		state := control.State
+		if state == "" {
+			state = "not_claimed"
+		}
+		tone := control.Tone
+		if tone == "" {
+			tone = "info"
+		}
+		owner := review.ensureOwner(control.OwnerRole)
+		item := AttachmentReviewControl{
+			Key:                 control.Key,
+			Label:               control.Label,
+			State:               state,
+			Required:            control.Required,
+			Attachment:          attachment,
+			EvidenceSignal:      control.EvidenceSignal,
+			Next:                control.Next,
+			Tone:                tone,
+			EvidenceRefReturned: false,
+			ValueReturned:       false,
+		}
+		owner.Controls = append(owner.Controls, item)
+		if item.Required {
+			owner.Required++
+			review.Required++
+		}
+		switch item.Attachment {
+		case "attached_presence_only":
+			owner.Attached++
+			review.Attached++
+		case "missing":
+			owner.Missing++
+			review.Missing++
+			owner.ReviewCount++
+			review.ReviewCount++
+		default:
+			owner.ReviewCount++
+			review.ReviewCount++
+		}
+	}
+	return review
+}
+
+func (r *AttachmentReview) ensureOwner(role string) *AttachmentReviewOwner {
+	role = strings.TrimSpace(role)
+	if role == "" {
+		role = "admin"
+	}
+	for i := range r.Owners {
+		if r.Owners[i].Role == role {
+			return &r.Owners[i]
+		}
+	}
+	r.Owners = append(r.Owners, AttachmentReviewOwner{Role: role, ValueReturned: false})
+	return &r.Owners[len(r.Owners)-1]
 }
 
 func enterpriseControlByKey(items []EnterpriseValidationControl, key string) EnterpriseValidationControl {
