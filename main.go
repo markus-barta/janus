@@ -63,6 +63,7 @@ type SecretDescriptor struct {
 	Source         string    `json:"source,omitempty"`
 	RotationDays   int       `json:"rotation_days"`
 	LastCheckedAt  time.Time `json:"last_checked_at"`
+	Lifecycle      string    `json:"lifecycle"`
 	Status         string    `json:"status"`
 	RevealAllowed  bool      `json:"reveal_allowed"`
 	UseEnabled     bool      `json:"use_enabled"`
@@ -158,6 +159,7 @@ func (s *Store) normalizeLocked() {
 		if item.LastCheckedAt.IsZero() {
 			item.LastCheckedAt = now
 		}
+		item.Lifecycle = DescriptorLifecycle(*item)
 		if item.Status == "" {
 			item.Status = "managed"
 		}
@@ -252,9 +254,12 @@ type UIActionResult struct {
 }
 
 type DescriptorFocus struct {
-	Descriptor SecretDescriptor `json:"descriptor"`
-	Gates      []CatalogGate    `json:"gates"`
-	GateCount  int              `json:"gate_count"`
+	Descriptor       SecretDescriptor `json:"descriptor"`
+	Gates            []CatalogGate    `json:"gates"`
+	GateCount        int              `json:"gate_count"`
+	Lifecycle        string           `json:"lifecycle"`
+	NormalUseBlocked bool             `json:"normal_use_blocked"`
+	NormalUseReason  string           `json:"normal_use_reason,omitempty"`
 }
 
 func main() {
@@ -484,6 +489,7 @@ func (app *App) dashboardData(session Session, actionResult *UIActionResult, sel
 	catalogGates := ValidateCatalog(descriptors)
 	accessPosture := app.accessPosture()
 	scopePosture := app.scopePosture(app.store.Descriptors())
+	lifecyclePosture := LifecyclePostureFor(descriptors, time.Now().UTC())
 	evidencePack := app.evidencePack()
 	evidenceHash := ""
 	if evidencePack.Integrity != nil {
@@ -504,6 +510,7 @@ func (app *App) dashboardData(session Session, actionResult *UIActionResult, sel
 		"CatalogGates":      catalogGates,
 		"Access":            accessPosture,
 		"Scope":             scopePosture,
+		"Lifecycle":         lifecyclePosture,
 		"EvidenceHash":      evidenceHash,
 		"CanExportEvidence": HasRole(session, RoleAuditor),
 		"ActionResult":      actionResult,
@@ -527,10 +534,14 @@ func focusDescriptor(descriptors []SecretDescriptor, selectedRef string) Descrip
 		}
 	}
 	gates := ValidateCatalog([]SecretDescriptor{focus})
+	blocked, reason := LifecycleBlocksNormalUse(focus)
 	return DescriptorFocus{
-		Descriptor: focus,
-		Gates:      gates,
-		GateCount:  len(gates),
+		Descriptor:       focus,
+		Gates:            gates,
+		GateCount:        len(gates),
+		Lifecycle:        DescriptorLifecycle(focus),
+		NormalUseBlocked: blocked,
+		NormalUseReason:  reason,
 	}
 }
 
@@ -1135,6 +1146,7 @@ func (app *App) postureBody() map[string]any {
 	catalogGates := ValidateCatalog(descriptors)
 	accessPosture := app.accessPosture()
 	scopePosture := app.scopePosture(allDescriptors)
+	lifecyclePosture := LifecyclePostureFor(descriptors, time.Now().UTC())
 	return map[string]any{
 		"service":            "janus",
 		"mode":               app.cfg.ProductMode,
@@ -1147,6 +1159,7 @@ func (app *App) postureBody() map[string]any {
 		"catalog_gate_count": len(catalogGates),
 		"access":             accessPosture,
 		"scope":              scopePosture,
+		"lifecycle":          lifecyclePosture,
 		"audit":              app.store.AuditPosture(),
 		"capabilities": []string{
 			"value_free_metadata_catalog",
@@ -1157,6 +1170,7 @@ func (app *App) postureBody() map[string]any {
 			"rate_limited_runtime",
 			"role_gated_audit_evidence",
 			"scope_bound_metadata",
+			"lifecycle_gated_normal_use",
 		},
 		"value_returned": false,
 	}
@@ -1174,18 +1188,19 @@ func (app *App) evidencePack() EvidencePack {
 	allDescriptors := app.store.Descriptors()
 	descriptors := app.cfg.ScopePolicy.Filter(allDescriptors)
 	pack := EvidencePack{
-		GeneratedAt:    time.Now().UTC(),
-		Service:        "janus",
-		Mode:           app.cfg.ProductMode,
-		Posture:        app.postureBody(),
-		Descriptors:    descriptors,
-		CatalogGates:   ValidateCatalog(descriptors),
-		ScopePosture:   app.scopePosture(allDescriptors),
-		AccessPosture:  app.accessPosture(),
-		AuditPosture:   app.store.AuditPosture(),
-		RecentAudit:    app.store.RecentAudit(50),
-		ValueReturned:  false,
-		RedactionModel: "metadata-only; secret values are not stored, read, rendered, logged, or exported by Janus V1.x",
+		GeneratedAt:      time.Now().UTC(),
+		Service:          "janus",
+		Mode:             app.cfg.ProductMode,
+		Posture:          app.postureBody(),
+		Descriptors:      descriptors,
+		CatalogGates:     ValidateCatalog(descriptors),
+		ScopePosture:     app.scopePosture(allDescriptors),
+		LifecyclePosture: LifecyclePostureFor(descriptors, time.Now().UTC()),
+		AccessPosture:    app.accessPosture(),
+		AuditPosture:     app.store.AuditPosture(),
+		RecentAudit:      app.store.RecentAudit(50),
+		ValueReturned:    false,
+		RedactionModel:   "metadata-only; secret values are not stored, read, rendered, logged, or exported by Janus V1.x",
 	}
 	integrity := EvidenceIntegrityFor(pack)
 	pack.Integrity = &integrity
@@ -1217,6 +1232,7 @@ func seedCatalog() []SecretDescriptor {
 			Owner:          "platform",
 			RotationDays:   180,
 			LastCheckedAt:  now,
+			Lifecycle:      LifecycleActive,
 			Status:         "managed",
 			RevealAllowed:  false,
 			Tags:           []string{"identity", "oidc"},
@@ -1229,6 +1245,7 @@ func seedCatalog() []SecretDescriptor {
 			Owner:          "platform",
 			RotationDays:   365,
 			LastCheckedAt:  now,
+			Lifecycle:      LifecycleActive,
 			Status:         "external",
 			RevealAllowed:  false,
 			Tags:           []string{"host", "decrypt-only"},
@@ -1340,7 +1357,7 @@ func mustTemplates() *template.Template {
     h1 { margin: 0; font-size: 40px; line-height: 1.04; letter-spacing: 0; }
     h2 { margin: 0; font-size: 18px; letter-spacing: 0; }
     h3 { margin: 0; font-size: 14px; letter-spacing: 0; }
-    p { margin: 0; color: var(--muted); }
+    p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
     a { color: inherit; }
     button, .button {
       border: 1px solid var(--line);
@@ -1365,6 +1382,7 @@ func mustTemplates() *template.Template {
       gap: 18px;
       align-items: stretch;
       margin-bottom: 16px;
+      min-width: 0;
     }
     .intro, .status, .panel {
       border: 1px solid var(--line);
@@ -1372,8 +1390,8 @@ func mustTemplates() *template.Template {
       background: var(--panel);
       box-shadow: var(--shadow);
     }
-    .intro { padding: 22px; display: grid; gap: 16px; align-content: center; }
-    .intro-copy { max-width: 720px; display: grid; gap: 10px; }
+    .intro { padding: 22px; display: grid; gap: 16px; align-content: center; min-width: 0; }
+    .intro-copy { max-width: 720px; display: grid; gap: 10px; min-width: 0; }
     .eyebrow { color: var(--accent); font-weight: 720; font-size: 13px; letter-spacing: 0; }
     .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
     .flow {
@@ -1418,15 +1436,15 @@ func mustTemplates() *template.Template {
     }
     .signal:nth-child(2n) { border-right: 0; }
     .signal strong { display: block; font-size: 20px; line-height: 1.1; }
-    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; margin-bottom: 16px; }
-    .panel { grid-column: span 12; overflow: hidden; }
+    .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 16px; margin-bottom: 16px; min-width: 0; }
+    .panel { grid-column: span 12; overflow: hidden; min-width: 0; }
     .panel.half { grid-column: span 6; }
     .panel-body { padding: 16px; }
     .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); margin-top: 14px; }
     .fact { padding: 13px 14px 0 0; min-width: 0; }
     .fact strong { display: block; font-size: 22px; line-height: 1.1; overflow-wrap: anywhere; }
     .table-wrap { overflow-x: auto; }
-    table { width: 100%; border-collapse: collapse; min-width: 900px; }
+    table { width: 100%; border-collapse: collapse; min-width: 1040px; }
     th, td { padding: 12px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
     th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0; }
     tr:hover td { background: var(--panel-soft); }
@@ -1463,7 +1481,7 @@ func mustTemplates() *template.Template {
       h1 { font-size: 32px; }
     }
     @media (max-width: 560px) {
-      .bar, main { width: min(100% - 22px, 1180px); }
+      .bar, main { width: calc(100% - 22px); max-width: 1180px; }
       .status-body { grid-template-columns: 1fr; }
       .signal { border-right: 0; }
       .toolbar { display: grid; grid-template-columns: 1fr; }
@@ -1535,6 +1553,10 @@ func mustTemplates() *template.Template {
         {{ if .Scope.Strict }}<span class="pill ok">strict</span>{{ else }}<span class="pill warn">open</span>{{ end }}
       </div>
       <div class="signal">
+        <span class="muted">Lifecycle</span>
+        {{ if .Lifecycle.BlockedCount }}<strong>review</strong><span class="pill warn">{{ .Lifecycle.BlockedCount }} blocked</span>{{ else }}<strong>clear</strong><span class="pill ok">{{ .Lifecycle.ActiveCount }} active</span>{{ end }}
+      </div>
+      <div class="signal">
         <span class="muted">Audit chain</span>
         {{ if .Posture.ChainVerified }}<strong>verified</strong><span class="pill ok">hash chained</span>{{ else }}<strong>review</strong><span class="pill warn">needs review</span>{{ end }}
       </div>
@@ -1600,20 +1622,27 @@ func mustTemplates() *template.Template {
       </div>
       <div class="facts">
         <div class="fact"><strong>{{ .Focus.Descriptor.Classification }}</strong><span class="muted">classification</span></div>
+        <div class="fact"><strong>{{ .Focus.Lifecycle }}</strong><span class="muted">lifecycle</span></div>
         <div class="fact"><strong>{{ .Focus.Descriptor.Owner }}</strong><span class="muted">owner</span></div>
-        <div class="fact"><strong>{{ .Focus.Descriptor.Scope }}</strong><span class="muted">scope</span></div>
       </div>
       <div class="facts">
+        <div class="fact"><strong>{{ .Focus.Descriptor.Scope }}</strong><span class="muted">scope</span></div>
         <div class="fact"><strong>{{ .Focus.Descriptor.Provider }}</strong><span class="muted">provider</span></div>
+        <div class="fact"><strong>{{ .Focus.Descriptor.Status }}</strong><span class="muted">provider status</span></div>
+      </div>
+      <div class="facts">
         <div class="fact"><strong>{{ .Focus.Descriptor.ConsumerCount }}</strong><span class="muted">consumers</span></div>
         <div class="fact"><strong>{{ .Focus.Descriptor.RotationDays }} days</strong><span class="muted">rotation</span></div>
+        <div class="fact"><strong>{{ if .Focus.NormalUseBlocked }}blocked{{ else }}allowed{{ end }}</strong><span class="muted">normal use</span></div>
       </div>
       <p>
         <span class="pill ok">value-free metadata</span>
         {{ if .Focus.Descriptor.UseEnabled }}<span class="pill ok">use profiled</span>{{ else }}<span class="pill warn">use blocked</span>{{ end }}
+        {{ if .Focus.NormalUseBlocked }}<span class="pill warn">lifecycle blocked</span>{{ else }}<span class="pill ok">lifecycle allowed</span>{{ end }}
         <span class="pill ok">reveal disabled</span>
         {{ range .Focus.Descriptor.Tags }}<span class="pill info">{{ . }}</span> {{ end }}
       </p>
+      {{ if .Focus.NormalUseReason }}<p class="warn">{{ .Focus.NormalUseReason }}</p>{{ end }}
       {{ range .Focus.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
     </div>
   </div>
@@ -1737,6 +1766,21 @@ func mustTemplates() *template.Template {
       {{ range .Scope.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
     </div>
   </div>
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Lifecycle posture</h2>
+      {{ if .Lifecycle.Gates }}<span class="pill warn">{{ .Lifecycle.GateCount }} gates</span>{{ else }}<span class="pill ok">normal use clear</span>{{ end }}
+    </div>
+    <div class="panel-body stack">
+      <p>{{ range .Lifecycle.StateCounts }}<span class="pill info">{{ .State }} {{ .Count }}</span> {{ end }}</p>
+      <div class="facts">
+        <div class="fact"><strong>{{ .Lifecycle.ActiveCount }}</strong><span class="muted">active</span></div>
+        <div class="fact"><strong>{{ .Lifecycle.BlockedCount }}</strong><span class="muted">blocked</span></div>
+        <div class="fact"><strong>{{ .Lifecycle.StaleCount }}</strong><span class="muted">stale</span></div>
+      </div>
+      {{ range .Lifecycle.Gates }}<p class="warn">{{ .SecretRef }}: {{ .Message }}</p>{{ end }}
+    </div>
+  </div>
 </section>
 <section class="grid" id="audit">
   <div class="panel">
@@ -1797,7 +1841,7 @@ func mustTemplates() *template.Template {
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Name</th><th>Provider</th><th>Scope</th><th>Owner</th><th>Class</th><th>Status</th><th>Consumers</th><th>Rotation</th><th>Use</th><th>Reveal</th><th>Inspect</th></tr></thead>
+        <thead><tr><th>Name</th><th>Provider</th><th>Scope</th><th>Owner</th><th>Class</th><th>Lifecycle</th><th>Status</th><th>Consumers</th><th>Rotation</th><th>Use</th><th>Reveal</th><th>Inspect</th></tr></thead>
         <tbody>
         {{ range .Descriptors }}
           <tr {{ if eq .ID $.SelectedRef }}class="selected"{{ end }}>
@@ -1806,6 +1850,7 @@ func mustTemplates() *template.Template {
             <td>{{ .Scope }}</td>
             <td>{{ .Owner }}</td>
             <td>{{ .Classification }}</td>
+            <td>{{ .Lifecycle }}</td>
             <td>{{ .Status }}</td>
             <td>{{ .ConsumerCount }}</td>
             <td>{{ .RotationDays }} days</td>

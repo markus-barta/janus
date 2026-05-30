@@ -13,19 +13,20 @@ type CatalogGate struct {
 }
 
 type EvidencePack struct {
-	GeneratedAt    time.Time          `json:"generated_at"`
-	Service        string             `json:"service"`
-	Mode           string             `json:"mode"`
-	Posture        map[string]any     `json:"posture"`
-	Descriptors    []SecretDescriptor `json:"descriptors"`
-	CatalogGates   []CatalogGate      `json:"catalog_gates"`
-	ScopePosture   ScopePosture       `json:"scope_posture"`
-	AccessPosture  AccessPosture      `json:"access_posture"`
-	AuditPosture   AuditPosture       `json:"audit_posture"`
-	RecentAudit    []AuditEntry       `json:"recent_audit"`
-	Integrity      *EvidenceIntegrity `json:"integrity,omitempty"`
-	ValueReturned  bool               `json:"value_returned"`
-	RedactionModel string             `json:"redaction_model"`
+	GeneratedAt      time.Time          `json:"generated_at"`
+	Service          string             `json:"service"`
+	Mode             string             `json:"mode"`
+	Posture          map[string]any     `json:"posture"`
+	Descriptors      []SecretDescriptor `json:"descriptors"`
+	CatalogGates     []CatalogGate      `json:"catalog_gates"`
+	ScopePosture     ScopePosture       `json:"scope_posture"`
+	LifecyclePosture LifecyclePosture   `json:"lifecycle_posture"`
+	AccessPosture    AccessPosture      `json:"access_posture"`
+	AuditPosture     AuditPosture       `json:"audit_posture"`
+	RecentAudit      []AuditEntry       `json:"recent_audit"`
+	Integrity        *EvidenceIntegrity `json:"integrity,omitempty"`
+	ValueReturned    bool               `json:"value_returned"`
+	RedactionModel   string             `json:"redaction_model"`
 }
 
 func ValidateCatalog(descriptors []SecretDescriptor) []CatalogGate {

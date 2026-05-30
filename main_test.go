@@ -90,7 +90,7 @@ func TestLoadsExternalAgenixCatalog(t *testing.T) {
 	if descriptors[0].ID != "csb1-real-env" || descriptors[0].RevealAllowed {
 		t.Fatalf("unexpected descriptor: %#v", descriptors[0])
 	}
-	if descriptors[0].Scope != "csb1" || descriptors[0].EgressMode != "none" {
+	if descriptors[0].Scope != "csb1" || descriptors[0].EgressMode != "none" || descriptors[0].Lifecycle != LifecycleActive {
 		t.Fatalf("expected normalized safe metadata: %#v", descriptors[0])
 	}
 }
@@ -257,6 +257,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
 		t.Fatalf("posture response should include scope policy: %s", body)
 	}
+	if !strings.Contains(body, `"lifecycle"`) || !strings.Contains(body, `"lifecycle_gated_normal_use"`) {
+		t.Fatalf("posture response should include lifecycle policy: %s", body)
+	}
 }
 
 func TestEvidenceExportIsValueFree(t *testing.T) {
@@ -278,6 +281,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"scope_posture"`) {
 		t.Fatalf("evidence response should include scope posture: %s", body)
+	}
+	if !strings.Contains(body, `"lifecycle_posture"`) {
+		t.Fatalf("evidence response should include lifecycle posture: %s", body)
 	}
 	if !strings.Contains(body, `"integrity"`) || !strings.Contains(body, `"pack_hash"`) {
 		t.Fatalf("evidence response should include integrity metadata: %s", body)
@@ -340,7 +346,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Live posture", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "Scope boundary"} {
+	for _, want := range []string{"Live posture", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "Scope boundary", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
@@ -361,7 +367,7 @@ func TestDashboardRendersDescriptorFocus(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Descriptor focus", "csb1-age-identity", "classification", "value-free metadata", "Inspect"} {
+	for _, want := range []string{"Descriptor focus", "csb1-age-identity", "classification", "value-free metadata", "normal use", "Inspect"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard focus should render %q: %s", want, body)
 		}
@@ -545,6 +551,44 @@ func TestScopePolicyFiltersDescriptorsAndDeniesResolve(t *testing.T) {
 	posture := ScopePostureFor(broker.scopePolicy, store.Descriptors())
 	if posture.OutOfScopeCount != 1 || posture.GateCount != 1 || posture.ValueReturned {
 		t.Fatalf("unexpected scope posture: %#v", posture)
+	}
+}
+
+func TestLifecycleBlocksUnsafeDescriptorUse(t *testing.T) {
+	dataDir := t.TempDir()
+	catalogPath := filepath.Join(t.TempDir(), "catalog.json")
+	if err := os.WriteFile(catalogPath, []byte(`[{
+		"id":"disabled-secret",
+		"display_name":"Disabled secret",
+		"provider":"agenix",
+		"classification":"high",
+		"owner":"platform",
+		"scope":"csb1",
+		"source":"secrets/disabled-secret.age",
+		"lifecycle":"disabled",
+		"consumer_count":1
+	}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(dataDir, catalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := NewBroker(store)
+	principal := PrincipalChain{HumanSubject: "user-1"}
+
+	_, err = broker.ResolveHandle(principal, HandleRequest{Ref: "disabled-secret", Reason: "test"})
+	if !errors.Is(err, ErrPolicyDenied) || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("expected lifecycle policy denial, got %v", err)
+	}
+	_, err = broker.CreatePermit(principal, PermitRequest{Ref: "disabled-secret", Action: "metadata_use", Reason: "test"})
+	if !errors.Is(err, ErrPolicyDenied) || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("expected lifecycle permit denial, got %v", err)
+	}
+
+	posture := LifecyclePostureFor(store.Descriptors(), time.Now().UTC())
+	if posture.BlockedCount != 1 || posture.GateCount != 1 || posture.ValueReturned {
+		t.Fatalf("unexpected lifecycle posture: %#v", posture)
 	}
 }
 
