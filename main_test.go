@@ -65,6 +65,18 @@ func cookieByName(t *testing.T, cookies []*http.Cookie, name string) *http.Cooki
 	return nil
 }
 
+func testOAuthConfig() *oauth2.Config {
+	return &oauth2.Config{
+		ClientID:    "client",
+		RedirectURL: "https://vault.barta.cm/oidc/callback",
+		Scopes:      []string{"openid", "email", "profile"},
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "https://auth.example.test/oauth/v2/authorize",
+			TokenURL: "https://auth.example.test/oauth/v2/token",
+		},
+	}
+}
+
 func TestDescriptorsNeverExposeValues(t *testing.T) {
 	tTempDir = t.TempDir()
 	store, err := NewStore(tTempDir, "")
@@ -225,15 +237,7 @@ func TestConfigUsesHostPrefixedPKCECookieForHTTPS(t *testing.T) {
 
 func TestLoginRedirectBindsOIDCStateNonceAndPKCE(t *testing.T) {
 	app := newTestApp(t)
-	app.oauth = &oauth2.Config{
-		ClientID:    "client",
-		RedirectURL: "https://vault.barta.cm/oidc/callback",
-		Scopes:      []string{"openid", "email", "profile"},
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  "https://auth.example.test/oauth/v2/authorize",
-			TokenURL: "https://auth.example.test/oauth/v2/token",
-		},
-	}
+	app.oauth = testOAuthConfig()
 
 	req := httptest.NewRequest(http.MethodGet, "/login", nil)
 	out := httptest.NewRecorder()
@@ -273,6 +277,27 @@ func TestLoginRedirectBindsOIDCStateNonceAndPKCE(t *testing.T) {
 	}
 	if got := redirectURL.Query().Get("code_verifier"); got != "" {
 		t.Fatalf("redirect must not leak PKCE verifier, got %q", got)
+	}
+}
+
+func TestLoginRedirectUsesNoStoreHeaders(t *testing.T) {
+	app := newTestApp(t)
+	app.oauth = testOAuthConfig()
+
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusFound {
+		t.Fatalf("expected redirect, got %d body=%s", out.Code, out.Body.String())
+	}
+	if got := out.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("login redirect should not be cached, got Cache-Control %q", got)
+	}
+	if got := out.Header().Get("Pragma"); got != "no-cache" {
+		t.Fatalf("login redirect should include legacy no-cache pragma, got %q", got)
+	}
+	if got := out.Header().Get("Expires"); got != "0" {
+		t.Fatalf("login redirect should include legacy expires header, got %q", got)
 	}
 }
 
@@ -405,6 +430,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"request_correlation"`) || !strings.Contains(body, `"request_correlation_ids"`) {
 		t.Fatalf("posture response should include request correlation: %s", body)
+	}
+	if !strings.Contains(body, `"response_hardening"`) || !strings.Contains(body, `"no_store_responses"`) {
+		t.Fatalf("posture response should include response hardening: %s", body)
 	}
 	if !strings.Contains(body, `"auth"`) || !strings.Contains(body, `"oidc_nonce_bound_login"`) || !strings.Contains(body, `"pkce_s256_auth_code"`) {
 		t.Fatalf("posture response should include hardened OIDC login controls: %s", body)

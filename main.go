@@ -415,8 +415,11 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nonce := randomNonce(18)
 		r = r.WithContext(context.WithValue(r.Context(), cspNonceKey{}, nonce))
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'nonce-"+nonce+"'")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Expires", "0")
+		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		if app.cfg.SecureCookies() {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
@@ -1416,6 +1419,11 @@ func (app *App) postureBody() map[string]any {
 			"sanitized":       true,
 			"value_returned":  false,
 		},
+		"response_hardening": map[string]any{
+			"cache_control":        "no-store",
+			"legacy_cache_headers": true,
+			"value_returned":       false,
+		},
 		"audit": app.store.AuditPosture(),
 		"capabilities": []string{
 			"value_free_metadata_catalog",
@@ -1432,6 +1440,7 @@ func (app *App) postureBody() map[string]any {
 			"request_correlation_ids",
 			"oidc_nonce_bound_login",
 			"pkce_s256_auth_code",
+			"no_store_responses",
 		},
 		"value_returned": false,
 	}
