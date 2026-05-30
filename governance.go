@@ -36,6 +36,7 @@ type EvidencePack struct {
 	Guidance         DegradedGuidance        `json:"degraded_guidance"`
 	AuditDrill       AuditFailureDrill       `json:"audit_failure_drill"`
 	RestoreProof     RestoreDrillProof       `json:"restore_drill_proof"`
+	RestoreWorkflow  RestoreDrillWorkflow    `json:"restore_drill_workflow"`
 	AssuranceSummary AssuranceSummary        `json:"assurance_summary"`
 	Enterprise       EnterpriseValidation    `json:"enterprise_validation"`
 	EnterpriseDryRun EnterpriseDryRun        `json:"enterprise_dry_run"`
@@ -410,6 +411,7 @@ func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
 			"lifecycle_posture",
 			"permit_posture",
 			"external_evidence_presence",
+			"restore_drill_workflow",
 			"audit_posture",
 			"recent_audit_refs",
 			"integrity_hash",

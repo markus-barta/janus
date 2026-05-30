@@ -892,6 +892,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	externalEvidence := app.externalEvidencePosture(enterpriseValidation, session)
 	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
 	restoreProof := RestoreDrillProofFor(enterpriseValidation)
+	restoreWorkflow := RestoreDrillWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -932,6 +933,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"AttachmentReview":  attachmentReview,
 		"ExternalEvidence":  externalEvidence,
 		"RestoreProof":      restoreProof,
+		"RestoreWorkflow":   restoreWorkflow,
 		"Privacy":           privacyPosture,
 		"AssuranceSummary":  assuranceSummary,
 		"AssuranceGates":    assuranceGates,
@@ -2349,6 +2351,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	externalEvidence := app.externalEvidencePosture(enterpriseValidation, session)
 	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
 	restoreProof := RestoreDrillProofFor(enterpriseValidation)
+	restoreWorkflow := RestoreDrillWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2384,6 +2387,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"attachment_review":       attachmentReview,
 		"external_evidence":       externalEvidence,
 		"restore_drill_proof":     restoreProof,
+		"restore_drill_workflow":  restoreWorkflow,
 		"privacy_posture":         privacyPosture,
 		"evidence_receipt":        evidenceReceipt,
 		"action_readiness":        actionReadiness,
@@ -2442,6 +2446,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"external_evidence_workflow":  "presence_only_no_refs",
 			"attachment_review":           "presence_only_owner_review",
 			"restore_drill_proof":         "dashboard_posture_evidence",
+			"restore_drill_workflow":      "presence_only_recovery_evidence",
 			"action_readiness":            "role_and_readiness_matrix",
 			"command_center":              "dashboard_posture_api",
 			"action_receipts":             "mutation_result_receipts",
@@ -2550,6 +2555,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_dry_run_checklist",
 			"external_evidence_presence_workflow",
 			"restore_drill_proof",
+			"restore_drill_presence_workflow",
 			"role_aware_action_readiness",
 			"command_center_ux",
 			"value_free_action_receipts",
@@ -2608,6 +2614,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	externalEvidence := app.externalEvidencePosture(enterpriseValidation, session)
 	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
 	restoreProof := RestoreDrillProofFor(enterpriseValidation)
+	restoreWorkflow := RestoreDrillWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2627,6 +2634,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Guidance:         degradedGuidance,
 		AuditDrill:       auditDrill,
 		AssuranceSummary: assuranceSummary,
+		RestoreWorkflow:  restoreWorkflow,
 		Enterprise:       enterpriseValidation,
 		EnterpriseDryRun: enterpriseDryRun,
 		AttachmentReview: attachmentReview,
@@ -3732,6 +3740,40 @@ func mustTemplates() *template.Template {
         <p><span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
         <p><span class="pill info">next</span> {{ .Next }}</p>
         {{ end }}
+      </div>
+      {{ end }}
+    </div>
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="restore-drill-workflow">
+  <div class="panel-head">
+    <h2>Restore drill workflow</h2>
+    <span class="pill {{ if eq .RestoreWorkflow.Status "attached" }}ok{{ else if eq .RestoreWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .RestoreWorkflow.Status }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .RestoreWorkflow.Summary }}</p>
+    <p><span class="pill info">owner {{ .RestoreWorkflow.OwnerRole }}</span> <span class="pill {{ if .RestoreWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .RestoreWorkflow.Required }}</span> <span class="pill {{ if .RestoreWorkflow.Attached }}ok{{ else if .RestoreWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .RestoreWorkflow.Attachment }}</span> <span class="pill info">{{ .RestoreWorkflow.EvidenceSignal }}</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <p><span class="pill info">review cadence</span> {{ .RestoreWorkflow.ReviewCadence }}</p>
+    {{ if .RestoreWorkflow.Attached }}
+    <p><span class="pill ok">presence recorded</span> <span class="pill ok">recovery evidence stays external</span> {{ .RestoreWorkflow.Next }}</p>
+    {{ else if .RestoreWorkflow.CanAttach }}
+    <form method="post" action="/ui/evidence/attachments">
+      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+      <input type="hidden" name="control_key" value="{{ .RestoreWorkflow.ControlKey }}">
+      <input type="hidden" name="attestation" value="external_evidence_exists">
+      <button class="button quiet" type="submit">Mark restore drill present</button>
+    </form>
+    <p>{{ .RestoreWorkflow.Next }}</p>
+    {{ else }}
+    <p><span class="pill warn">{{ .RestoreWorkflow.OwnerRole }} role required</span> {{ .RestoreWorkflow.Next }}</p>
+    {{ end }}
+    <div class="mode-grid" aria-label="Restore drill workflow recovery checks">
+      {{ range .RestoreWorkflow.Checks }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+        <p><span class="pill info">next</span> {{ .Next }}</p>
       </div>
       {{ end }}
     </div>
