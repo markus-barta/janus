@@ -245,6 +245,45 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"value_returned":false`) || strings.Contains(body, `"plaintext"`) {
 		t.Fatalf("posture response should be value-free: %s", body)
 	}
+	if !strings.Contains(body, `"catalog_gate_count"`) {
+		t.Fatalf("posture response should include catalog gates: %s", body)
+	}
+}
+
+func TestEvidenceExportIsValueFree(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/api/evidence", nil)
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleEvidence)(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	if !strings.Contains(body, `"value_returned":false`) || strings.Contains(body, `"plaintext"`) {
+		t.Fatalf("evidence response should be value-free: %s", body)
+	}
+	if !strings.Contains(body, `"redaction_model"`) {
+		t.Fatalf("evidence response should explain redaction model: %s", body)
+	}
+}
+
+func TestCatalogGovernanceFlagsDisabledUseProfiles(t *testing.T) {
+	gates := ValidateCatalog([]SecretDescriptor{{
+		ID:             "example",
+		DisplayName:    "Example",
+		Provider:       "agenix",
+		Classification: "high",
+		Owner:          "platform",
+		Scope:          "csb1",
+		Source:         "secrets/example.age",
+		ConsumerCount:  1,
+		UseEnabled:     false,
+	}})
+	if len(gates) != 1 || gates[0].Code != "no_approved_use_profile" {
+		t.Fatalf("unexpected gates: %#v", gates)
+	}
 }
 
 func TestRateLimiterBlocksBurst(t *testing.T) {

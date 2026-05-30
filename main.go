@@ -331,6 +331,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.handleResolveHandle))
 	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.handleRecentAudit))
 	mux.HandleFunc("GET /api/posture", app.withAuth(app.handlePosture))
+	mux.HandleFunc("GET /api/evidence", app.withAuth(app.handleEvidence))
 	mux.HandleFunc("POST /api/permits", app.withAuth(app.handleCreatePermit))
 	mux.HandleFunc("POST /api/permits/{permitID}/run", app.withAuth(app.handleRunPermit))
 	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
@@ -430,15 +431,17 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	issues := enterpriseChecks(app.cfg)
 	auditPosture := app.store.AuditPosture()
 	recentAudit := app.store.RecentAudit(8)
+	catalogGates := ValidateCatalog(descriptors)
 	data := map[string]any{
-		"Title":       "Janus",
-		"Session":     session,
-		"CSRF":        app.csrfToken(session),
-		"Descriptors": descriptors,
-		"Issues":      issues,
-		"Mode":        app.cfg.ProductMode,
-		"Audit":       recentAudit,
-		"Posture":     auditPosture,
+		"Title":        "Janus",
+		"Session":      session,
+		"CSRF":         app.csrfToken(session),
+		"Descriptors":  descriptors,
+		"Issues":       issues,
+		"Mode":         app.cfg.ProductMode,
+		"Audit":        recentAudit,
+		"Posture":      auditPosture,
+		"CatalogGates": catalogGates,
 	}
 	renderTemplate(w, app.templates, "dashboard", data)
 }
@@ -466,6 +469,12 @@ func (app *App) handlePosture(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	app.audit(r, "posture.view", "allowed", session.Subject, "")
 	writeJSON(w, http.StatusOK, app.postureBody())
+}
+
+func (app *App) handleEvidence(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	app.audit(r, "evidence.export", "allowed", session.Subject, "")
+	writeJSON(w, http.StatusOK, app.evidencePack())
 }
 
 func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
@@ -853,15 +862,18 @@ func writeJSONError(w http.ResponseWriter, status int, code, message string) {
 func (app *App) postureBody() map[string]any {
 	descriptors := app.store.Descriptors()
 	issues := enterpriseChecks(app.cfg)
+	catalogGates := ValidateCatalog(descriptors)
 	return map[string]any{
-		"service":          "janus",
-		"mode":             app.cfg.ProductMode,
-		"auth_required":    app.cfg.RequireAuth,
-		"oidc_configured":  app.cfg.OIDCConfigured(),
-		"descriptor_count": len(descriptors),
-		"open_gates":       len(issues),
-		"gates":            issues,
-		"audit":            app.store.AuditPosture(),
+		"service":            "janus",
+		"mode":               app.cfg.ProductMode,
+		"auth_required":      app.cfg.RequireAuth,
+		"oidc_configured":    app.cfg.OIDCConfigured(),
+		"descriptor_count":   len(descriptors),
+		"open_gates":         len(issues),
+		"gates":              issues,
+		"catalog_gates":      catalogGates,
+		"catalog_gate_count": len(catalogGates),
+		"audit":              app.store.AuditPosture(),
 		"capabilities": []string{
 			"value_free_metadata_catalog",
 			"broker_principal_chain",
@@ -871,6 +883,22 @@ func (app *App) postureBody() map[string]any {
 			"rate_limited_runtime",
 		},
 		"value_returned": false,
+	}
+}
+
+func (app *App) evidencePack() EvidencePack {
+	descriptors := app.store.Descriptors()
+	return EvidencePack{
+		GeneratedAt:    time.Now().UTC(),
+		Service:        "janus",
+		Mode:           app.cfg.ProductMode,
+		Posture:        app.postureBody(),
+		Descriptors:    descriptors,
+		CatalogGates:   ValidateCatalog(descriptors),
+		AuditPosture:   app.store.AuditPosture(),
+		RecentAudit:    app.store.RecentAudit(50),
+		ValueReturned:  false,
+		RedactionModel: "metadata-only; secret values are not stored, read, rendered, logged, or exported by Janus V1.x",
 	}
 }
 
@@ -1147,6 +1175,31 @@ func mustTemplates() *template.Template {
     </div>
   </div>
 </section>
+{{ if .CatalogGates }}
+<section class="grid" style="margin-bottom:16px">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Catalog gates</h2>
+      <span class="pill">{{ len .CatalogGates }} open</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Secret ref</th><th>Severity</th><th>Code</th><th>Message</th></tr></thead>
+        <tbody>
+        {{ range .CatalogGates }}
+          <tr>
+            <td>{{ .SecretRef }}</td>
+            <td>{{ .Severity }}</td>
+            <td>{{ .Code }}</td>
+            <td>{{ .Message }}</td>
+          </tr>
+        {{ end }}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{{ end }}
 <section class="grid">
   <div class="panel">
     <div class="panel-head">
