@@ -3067,7 +3067,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 			t.Fatalf("dashboard should render enterprise claim review %q: %s", want, body)
 		}
 	}
-	for _, want := range []string{"Enterprise release gate", "Enterprise release gate checklist", "verdict enterprise_blocked", "presence_only_enterprise_release_gate", "release cadence", "scanner_output_returned=false", "artifact_returned=false", "payload_returned=false", "Supply chain", "Audit health", "Role policy"} {
+	for _, want := range []string{"Enterprise release gate", "Release witness", "Enterprise release witness", "Release decision", "Evidence boundary", "Enterprise release evidence flags", "Enterprise release gate checklist", "verdict enterprise_blocked", "presence_only_enterprise_release_gate", "release cadence", "scanner_output_returned=false", "artifact_returned=false", "payload_returned=false", "Supply chain", "Audit health", "Role policy"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render enterprise release gate %q: %s", want, body)
 		}

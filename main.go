@@ -4128,9 +4128,51 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .EnterpriseRelease.Summary }}</p>
-    <p><span class="pill info">current mode {{ .EnterpriseRelease.CurrentMode }}</span> <span class="pill warn">target mode {{ .EnterpriseRelease.TargetMode }}</span> <span class="pill {{ if eq .EnterpriseRelease.Claim "enterprise_candidate" }}ok{{ else }}warn{{ end }}">claim {{ .EnterpriseRelease.Claim }}</span> <span class="pill info">verdict {{ .EnterpriseRelease.Verdict }}</span> <span class="pill info">{{ .EnterpriseRelease.Required }} required</span> <span class="pill ok">{{ .EnterpriseRelease.Passed }} passed</span> <span class="pill {{ if .EnterpriseRelease.Blocked }}warn{{ else }}ok{{ end }}">{{ .EnterpriseRelease.Blocked }} blocked</span> <span class="pill info">{{ .EnterpriseRelease.ReviewCount }} review</span> <span class="pill info">{{ .EnterpriseRelease.EvidenceSignal }}</span> <span class="pill info">gate {{ .EnterpriseRelease.EvidenceGate }}</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">procedure_returned=false</span> <span class="pill ok">ticket_url_returned=false</span> <span class="pill ok">backend_path_returned=false</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">env_returned=false</span> <span class="pill ok">scanner_output_returned=false</span> <span class="pill ok">artifact_returned=false</span> <span class="pill ok">payload_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <p><span class="pill info">Release witness</span> decision visible, external evidence values private</p>
+    <div class="witness-grid" aria-label="Enterprise release witness">
+      <div class="witness-card {{ if eq .EnterpriseRelease.Claim "enterprise_candidate" }}ok{{ else }}warn{{ end }}">
+        <span>Claim</span>
+        <strong>{{ .EnterpriseRelease.Claim }}</strong>
+        <p>{{ .EnterpriseRelease.CurrentMode }} now; {{ .EnterpriseRelease.TargetMode }} target.</p>
+      </div>
+      <div class="witness-card {{ if .EnterpriseRelease.Blocked }}warn{{ else }}ok{{ end }}">
+        <span>Release decision</span>
+        <strong>{{ .EnterpriseRelease.Verdict }}</strong>
+        <p>{{ .EnterpriseRelease.Blocked }} blocked, {{ .EnterpriseRelease.Passed }} passed, {{ .EnterpriseRelease.ReviewCount }} review.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Evidence boundary</span>
+        <strong>values withheld</strong>
+        <p>No evidence ref, procedure, ticket URL, backend path, request body, env, scanner output, artifact, or payload is shown.</p>
+      </div>
+    </div>
     <p><span class="pill info">release cadence</span> {{ .EnterpriseRelease.ReleaseCadence }}</p>
     <p><span class="pill info">next</span> {{ .EnterpriseRelease.Next }}</p>
+    <details class="evidence-flags">
+      <summary>Enterprise release evidence flags</summary>
+      <div class="flag-cloud" aria-label="Enterprise release value-free evidence flags">
+        <span class="pill info">current mode {{ .EnterpriseRelease.CurrentMode }}</span>
+        <span class="pill warn">target mode {{ .EnterpriseRelease.TargetMode }}</span>
+        <span class="pill {{ if eq .EnterpriseRelease.Claim "enterprise_candidate" }}ok{{ else }}warn{{ end }}">claim {{ .EnterpriseRelease.Claim }}</span>
+        <span class="pill info">verdict {{ .EnterpriseRelease.Verdict }}</span>
+        <span class="pill info">{{ .EnterpriseRelease.Required }} required</span>
+        <span class="pill ok">{{ .EnterpriseRelease.Passed }} passed</span>
+        <span class="pill {{ if .EnterpriseRelease.Blocked }}warn{{ else }}ok{{ end }}">{{ .EnterpriseRelease.Blocked }} blocked</span>
+        <span class="pill info">{{ .EnterpriseRelease.ReviewCount }} review</span>
+        <span class="pill info">{{ .EnterpriseRelease.EvidenceSignal }}</span>
+        <span class="pill info">gate {{ .EnterpriseRelease.EvidenceGate }}</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill ok">procedure_returned=false</span>
+        <span class="pill ok">ticket_url_returned=false</span>
+        <span class="pill ok">backend_path_returned=false</span>
+        <span class="pill ok">request_body_returned=false</span>
+        <span class="pill ok">env_returned=false</span>
+        <span class="pill ok">scanner_output_returned=false</span>
+        <span class="pill ok">artifact_returned=false</span>
+        <span class="pill ok">payload_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     <div class="mode-grid" aria-label="Enterprise release gate checklist">
       {{ range .EnterpriseRelease.Checks }}
       <div class="mode-item {{ .Tone }}">
