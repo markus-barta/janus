@@ -704,6 +704,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"assurance"`) || !strings.Contains(body, `"route_value_leak_sentinel":true`) || !strings.Contains(body, `"json_errors_request_id":true`) || !strings.Contains(body, `"backend_source_paths":"not_returned"`) || !strings.Contains(body, `"route_value_leak_sentinel"`) || !strings.Contains(body, `"request_correlated_json_errors"`) {
 		t.Fatalf("posture response should include route value-leak assurance: %s", body)
 	}
+	if !strings.Contains(body, `"evidence_export_boundary":"dashboard_and_json"`) || !strings.Contains(body, `"evidence_export_boundary_ux"`) {
+		t.Fatalf("posture response should include evidence export boundary posture: %s", body)
+	}
 	if !strings.Contains(body, `"mode_posture"`) || !strings.Contains(body, `"current":"Self-hosted"`) || !strings.Contains(body, `"enterprise":"not_claimed"`) || !strings.Contains(body, `"mode_posture_evidence"`) {
 		t.Fatalf("posture response should include product-mode evidence: %s", body)
 	}
@@ -788,6 +791,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"redaction_model"`) {
 		t.Fatalf("evidence response should explain redaction model: %s", body)
+	}
+	if !strings.Contains(body, `"evidence_boundary"`) || !strings.Contains(body, `"gate":"export_ready"`) || !strings.Contains(body, `"secret_values"`) || !strings.Contains(body, `"backend_source_paths"`) || !strings.Contains(body, `"hash_available":true`) {
+		t.Fatalf("evidence response should include export boundary: %s", body)
 	}
 	if !strings.Contains(body, `"scope_posture"`) {
 		t.Fatalf("evidence response should include scope posture: %s", body)
@@ -954,7 +960,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "not_claimed", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Scope boundary", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "not_claimed", "Evidence export", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Scope boundary", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
@@ -1480,7 +1486,7 @@ func TestDashboardAuditRowsRequireAuditorRole(t *testing.T) {
 		t.Fatalf("expected viewer dashboard 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	viewerBody := out.Body.String()
-	if !strings.Contains(viewerBody, "Auditor role required") || !strings.Contains(viewerBody, "restricted") {
+	if !strings.Contains(viewerBody, "Auditor role required") || !strings.Contains(viewerBody, "restricted") || !strings.Contains(viewerBody, "auditor_required") || !strings.Contains(viewerBody, "Evidence JSON is gated") {
 		t.Fatalf("viewer dashboard should gate audit rows: %s", viewerBody)
 	}
 	if strings.Contains(viewerBody, "private-ref") {
@@ -1498,7 +1504,7 @@ func TestDashboardAuditRowsRequireAuditorRole(t *testing.T) {
 		t.Fatalf("expected auditor dashboard 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	auditorBody := out.Body.String()
-	if !strings.Contains(auditorBody, "private-ref") || !strings.Contains(auditorBody, "<th>Severity</th>") || !strings.Contains(auditorBody, ">info<") {
+	if !strings.Contains(auditorBody, "private-ref") || !strings.Contains(auditorBody, "<th>Severity</th>") || !strings.Contains(auditorBody, ">info<") || !strings.Contains(auditorBody, "export_ready") || !strings.Contains(auditorBody, "hash ready") {
 		t.Fatalf("auditor dashboard should include audit rows and severity posture: %s", auditorBody)
 	}
 }

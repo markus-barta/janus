@@ -860,6 +860,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 			}
 		}
 	}
+	evidenceBoundary := EvidenceBoundaryFor(canViewAudit, evidenceHash != "")
 	data := map[string]any{
 		"Title":             "Janus",
 		"CSPNonce":          cspNonceFromContext(r.Context()),
@@ -881,6 +882,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"ApprovedUse":       approvedUsePosture,
 		"ModePosture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
 		"EvidenceHash":      evidenceHash,
+		"EvidenceBoundary":  evidenceBoundary,
 		"CanExportEvidence": canViewAudit,
 		"CanViewAudit":      canViewAudit,
 		"CanOperate":        HasRole(session, RoleOperator),
@@ -1987,6 +1989,7 @@ func (app *App) postureBody() map[string]any {
 			"route_value_leak_sentinel": true,
 			"json_errors_request_id":    true,
 			"backend_source_paths":      "not_returned",
+			"evidence_export_boundary":  "dashboard_and_json",
 			"value_returned":            false,
 		},
 		"response_hardening": map[string]any{
@@ -2068,6 +2071,7 @@ func (app *App) postureBody() map[string]any {
 			"request_correlated_json_errors",
 			"route_value_leak_sentinel",
 			"mode_posture_evidence",
+			"evidence_export_boundary_ux",
 		},
 		"value_returned": false,
 	}
@@ -2103,6 +2107,7 @@ func (app *App) evidencePack() EvidencePack {
 	if app.permits != nil {
 		pack.PermitPosture = app.permits.Posture()
 	}
+	pack.EvidenceBoundary = EvidenceBoundaryFor(true, true)
 	integrity := EvidenceIntegrityFor(pack)
 	pack.Integrity = &integrity
 	return pack
@@ -2723,6 +2728,34 @@ func mustTemplates() *template.Template {
       </div>
       {{ end }}
     </div>
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="evidence-boundary">
+  <div class="panel-head">
+    <h2>Evidence export</h2>
+    <span class="pill {{ if .CanExportEvidence }}ok{{ else }}warn{{ end }}">{{ .EvidenceBoundary.Gate }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p><span class="pill ok">{{ .EvidenceBoundary.RedactionModel }}</span> <span class="pill ok">value_returned=false</span> <span class="pill info">audience {{ .EvidenceBoundary.Audience }}</span></p>
+    <div class="mode-grid" aria-label="Evidence export boundary">
+      <div class="mode-item {{ if .CanExportEvidence }}ok{{ else }}warn{{ end }}">
+        <span>Export role</span>
+        <strong>{{ .EvidenceBoundary.Audience }}</strong>
+        <p>{{ if .CanExportEvidence }}Evidence JSON is available to this session.{{ else }}Evidence JSON is gated from this session.{{ end }}</p>
+      </div>
+      <div class="mode-item {{ if .EvidenceBoundary.HashAvailable }}ok{{ else }}warn{{ end }}">
+        <span>Integrity</span>
+        <strong>{{ if .EvidenceBoundary.HashAvailable }}hash ready{{ else }}restricted{{ end }}</strong>
+        <p>{{ .EvidenceBoundary.Integrity }}</p>
+      </div>
+      <div class="mode-item ok">
+        <span>Boundary</span>
+        <strong>metadata only</strong>
+        <p>No secret-bearing payloads are exported.</p>
+      </div>
+    </div>
+    <p><strong>Included evidence</strong><br>{{ range .EvidenceBoundary.Includes }}<span class="pill info">{{ . }}</span> {{ end }}</p>
+    <p><strong>Never exported</strong><br>{{ range .EvidenceBoundary.Excludes }}<span class="pill warn">{{ . }}</span> {{ end }}</p>
   </div>
 </section>
 {{ if not .Ready }}

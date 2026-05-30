@@ -27,6 +27,7 @@ type EvidencePack struct {
 	Service          string             `json:"service"`
 	Mode             string             `json:"mode"`
 	Posture          map[string]any     `json:"posture"`
+	EvidenceBoundary EvidenceBoundary   `json:"evidence_boundary"`
 	Descriptors      []SecretDescriptor `json:"descriptors"`
 	CatalogGates     []CatalogGate      `json:"catalog_gates"`
 	ScopePosture     ScopePosture       `json:"scope_posture"`
@@ -38,6 +39,52 @@ type EvidencePack struct {
 	Integrity        *EvidenceIntegrity `json:"integrity,omitempty"`
 	ValueReturned    bool               `json:"value_returned"`
 	RedactionModel   string             `json:"redaction_model"`
+}
+
+type EvidenceBoundary struct {
+	Audience       string   `json:"audience"`
+	Gate           string   `json:"gate"`
+	Integrity      string   `json:"integrity"`
+	HashAvailable  bool     `json:"hash_available"`
+	Includes       []string `json:"includes"`
+	Excludes       []string `json:"excludes"`
+	RedactionModel string   `json:"redaction_model"`
+	ValueReturned  bool     `json:"value_returned"`
+}
+
+func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
+	gate := "auditor_required"
+	if canExport {
+		gate = "export_ready"
+	}
+	return EvidenceBoundary{
+		Audience:      "auditor",
+		Gate:          gate,
+		Integrity:     "sha256-json-v1",
+		HashAvailable: hashAvailable,
+		Includes: []string{
+			"posture",
+			"descriptor_metadata",
+			"catalog_gates",
+			"scope_posture",
+			"lifecycle_posture",
+			"permit_posture",
+			"audit_posture",
+			"recent_audit_refs",
+			"integrity_hash",
+		},
+		Excludes: []string{
+			"secret_values",
+			"request_bodies",
+			"prompt_text",
+			"command_output",
+			"env_dumps",
+			"backend_source_paths",
+			"cookie_secrets",
+		},
+		RedactionModel: "metadata_only",
+		ValueReturned:  false,
+	}
 }
 
 func ApprovedUsePostureFor(descriptors []SecretDescriptor) ApprovedUsePosture {
