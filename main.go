@@ -4353,7 +4353,53 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .ModePosture.Summary }}</p>
-    <p><span class="pill ok">value_returned=false</span> <span class="pill {{ if eq .ModePosture.Enterprise "candidate" }}ok{{ else }}warn{{ end }}">enterprise {{ .ModePosture.Enterprise }}</span></p>
+    <div class="witness-grid" aria-label="Deployment mode witness">
+      <div class="witness-card info">
+        <span>Current mode</span>
+        <strong>{{ .ModePosture.Current }}</strong>
+        <p>Runtime claim is shown in UI, health, and evidence.</p>
+      </div>
+      <div class="witness-card {{ if eq .ModePosture.Baseline "ready" }}ok{{ else if eq .ModePosture.Baseline "dev_only" }}warn{{ else }}warn{{ end }}">
+        <span>Baseline claim</span>
+        <strong>{{ .ModePosture.Baseline }}</strong>
+        <p>Local readiness stays separate from enterprise evidence.</p>
+      </div>
+      <div class="witness-card {{ if eq .ModePosture.Enterprise "candidate" }}ok{{ else }}warn{{ end }}">
+        <span>Enterprise claim</span>
+        <strong>{{ .ModePosture.Enterprise }}</strong>
+        <p>Enterprise is not trusted unless external evidence is complete.</p>
+      </div>
+    </div>
+    <div class="witness-grid" aria-label="Deployment mode boundary witness">
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>values withheld</strong>
+        <p>Mode posture returns claim state only, not secret values or backend evidence.</p>
+      </div>
+      <div class="witness-card info">
+        <span>Claim separation</span>
+        <strong>explicit</strong>
+        <p>Dev, self-hosted, and enterprise promises stay visibly different.</p>
+      </div>
+      <div class="witness-card {{ if eq .ModePosture.Enterprise "candidate" }}ok{{ else }}warn{{ end }}">
+        <span>Next claim</span>
+        <strong>enterprise {{ .ModePosture.Enterprise }}</strong>
+        <p>Stronger claims wait for release, restore, integration, privacy, and audit evidence.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Deployment mode evidence flags</summary>
+      <div class="flag-cloud" aria-label="Deployment mode value-free evidence flags">
+        <span class="pill info">current mode {{ .ModePosture.Current }}</span>
+        <span class="pill {{ if eq .ModePosture.Baseline "ready" }}ok{{ else }}warn{{ end }}">baseline {{ .ModePosture.Baseline }}</span>
+        <span class="pill {{ if eq .ModePosture.Enterprise "candidate" }}ok{{ else }}warn{{ end }}">enterprise {{ .ModePosture.Enterprise }}</span>
+        <span class="pill info">claim separation explicit</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill ok">backend_path_returned=false</span>
+        <span class="pill ok">env_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     <div class="mode-grid" aria-label="Deployment mode posture">
       {{ range .ModePosture.Controls }}
       <div class="mode-item {{ .Tone }}">
