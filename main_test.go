@@ -23,6 +23,7 @@ func testConfig() Config {
 		OIDCClientID: "client",
 		OIDCSecret:   "secret",
 		CookieKey:    []byte("0123456789abcdef0123456789abcdef"),
+		RolePolicy:   RolePolicy{BootstrapOwner: true},
 	}
 }
 
@@ -248,6 +249,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"catalog_gate_count"`) {
 		t.Fatalf("posture response should include catalog gates: %s", body)
 	}
+	if !strings.Contains(body, `"access"`) || !strings.Contains(body, `"role_gated_audit_evidence"`) {
+		t.Fatalf("posture response should include access policy: %s", body)
+	}
 }
 
 func TestEvidenceExportIsValueFree(t *testing.T) {
@@ -269,6 +273,67 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 }
 
+func TestEvidenceExportRequiresAuditorRole(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RolePolicy = RolePolicy{
+		AuditorSubjects: map[string]bool{"auditor": true},
+		BootstrapOwner:  false,
+	}
+	session := Session{Subject: "viewer", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/evidence", nil)
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence))(out, req)
+	if out.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", out.Code, out.Body.String())
+	}
+	if !strings.Contains(out.Body.String(), `"value_returned":false`) {
+		t.Fatalf("denial must be value-free: %s", out.Body.String())
+	}
+	recent := app.store.RecentAudit(1)
+	if len(recent) != 1 || recent[0].Outcome != "denied" || !strings.Contains(recent[0].Reason, "auditor") {
+		t.Fatalf("expected denied role audit event: %#v", recent)
+	}
+}
+
+func TestRolePolicyMapsZitadelClaims(t *testing.T) {
+	roles := DeriveRoles("user-1", "user@example.test", []string{"janus:auditor"}, RolePolicy{BootstrapOwner: false})
+	if !hasTestRole(roles, RoleViewer) || !hasTestRole(roles, RoleAuditor) {
+		t.Fatalf("expected viewer and auditor roles, got %#v", roles)
+	}
+	if hasTestRole(roles, RoleAdmin) {
+		t.Fatalf("auditor claim should not grant admin: %#v", roles)
+	}
+}
+
+func TestRolePolicyBootstrapOwnerGrantsV1Roles(t *testing.T) {
+	roles := DeriveRoles("owner", "", nil, RolePolicy{BootstrapOwner: true})
+	for _, role := range []string{RoleViewer, RoleAdmin, RoleAuditor, RoleOperator} {
+		if !hasTestRole(roles, role) {
+			t.Fatalf("expected bootstrap role %s in %#v", role, roles)
+		}
+	}
+}
+
+func TestDashboardRendersAccessPolicy(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleDashboard)(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	if !strings.Contains(body, "Access policy") || !strings.Contains(body, "bootstrap owner") {
+		t.Fatalf("dashboard should render access posture: %s", body)
+	}
+}
+
 func TestCatalogGovernanceFlagsDisabledUseProfiles(t *testing.T) {
 	gates := ValidateCatalog([]SecretDescriptor{{
 		ID:             "example",
@@ -284,6 +349,15 @@ func TestCatalogGovernanceFlagsDisabledUseProfiles(t *testing.T) {
 	if len(gates) != 1 || gates[0].Code != "no_approved_use_profile" {
 		t.Fatalf("unexpected gates: %#v", gates)
 	}
+}
+
+func hasTestRole(roles []string, want string) bool {
+	for _, role := range roles {
+		if role == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRateLimiterBlocksBurst(t *testing.T) {
@@ -358,7 +432,7 @@ func TestEnterpriseChecksRequireAuditControls(t *testing.T) {
 		OIDCSecret:   "secret",
 		CookieKey:    []byte("0123456789abcdef0123456789abcdef"),
 	})
-	if len(issues) != 2 {
-		t.Fatalf("expected two enterprise gates, got %d: %#v", len(issues), issues)
+	if len(issues) != 3 {
+		t.Fatalf("expected three enterprise gates, got %d: %#v", len(issues), issues)
 	}
 }

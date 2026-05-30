@@ -40,6 +40,7 @@ type Config struct {
 	OIDCClientID string
 	OIDCSecret   string
 	CookieKey    []byte
+	RolePolicy   RolePolicy
 }
 
 func (c Config) OIDCConfigured() bool {
@@ -229,6 +230,7 @@ type Session struct {
 	Subject string    `json:"sub"`
 	Email   string    `json:"email,omitempty"`
 	Name    string    `json:"name,omitempty"`
+	Roles   []string  `json:"roles,omitempty"`
 	Expiry  time.Time `json:"exp"`
 }
 
@@ -281,6 +283,7 @@ func loadConfig() (Config, error) {
 		}
 		cfg.CookieKey = key
 	}
+	cfg.RolePolicy = LoadRolePolicyFromEnv()
 
 	if _, err := url.ParseRequestURI(cfg.PublicURL); err != nil {
 		return cfg, fmt.Errorf("JANUS_PUBLIC_URL is invalid: %w", err)
@@ -329,9 +332,9 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /logout", app.withAuth(app.handleLogout))
 	mux.HandleFunc("GET /api/warden/descriptors", app.withAuth(app.handleDescriptors))
 	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.handleResolveHandle))
-	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.handleRecentAudit))
+	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit)))
 	mux.HandleFunc("GET /api/posture", app.withAuth(app.handlePosture))
-	mux.HandleFunc("GET /api/evidence", app.withAuth(app.handleEvidence))
+	mux.HandleFunc("GET /api/evidence", app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence)))
 	mux.HandleFunc("POST /api/permits", app.withAuth(app.handleCreatePermit))
 	mux.HandleFunc("POST /api/permits/{permitID}/run", app.withAuth(app.handleRunPermit))
 	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
@@ -375,7 +378,7 @@ func (app *App) handleFavicon(w http.ResponseWriter, _ *http.Request) {
 func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !app.cfg.RequireAuth {
-			session := Session{Subject: "dev-local", Name: "Local Dev", Expiry: time.Now().UTC().Add(time.Hour)}
+			session := Session{Subject: "dev-local", Name: "Local Dev", Roles: AllRoles(), Expiry: time.Now().UTC().Add(time.Hour)}
 			next(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, session)))
 			return
 		}
@@ -392,6 +395,18 @@ func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, session)))
+	}
+}
+
+func (app *App) requireRole(role, action string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		session := currentSession(r.Context())
+		if !HasRole(session, role) {
+			app.audit(r, action, "denied", session.Subject, "role "+role+" required")
+			writeJSONError(w, http.StatusForbidden, "role_denied", role+" role required")
+			return
+		}
+		next(w, r)
 	}
 }
 
@@ -432,6 +447,7 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	auditPosture := app.store.AuditPosture()
 	recentAudit := app.store.RecentAudit(8)
 	catalogGates := ValidateCatalog(descriptors)
+	accessPosture := app.accessPosture()
 	data := map[string]any{
 		"Title":        "Janus",
 		"Session":      session,
@@ -442,6 +458,7 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"Audit":        recentAudit,
 		"Posture":      auditPosture,
 		"CatalogGates": catalogGates,
+		"Access":       accessPosture,
 	}
 	renderTemplate(w, app.templates, "dashboard", data)
 }
@@ -606,9 +623,12 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var claims struct {
-		Subject string `json:"sub"`
-		Email   string `json:"email"`
-		Name    string `json:"name"`
+		Subject      string         `json:"sub"`
+		Email        string         `json:"email"`
+		Name         string         `json:"name"`
+		Groups       []string       `json:"groups"`
+		Roles        []string       `json:"roles"`
+		ProjectRoles map[string]any `json:"urn:zitadel:iam:org:project:roles"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		app.audit(r, "auth.login.callback", "denied", "", "claims failed")
@@ -625,6 +645,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Subject: claims.Subject,
 		Email:   claims.Email,
 		Name:    claims.Name,
+		Roles:   DeriveRoles(claims.Subject, claims.Email, ClaimRoleInputs(claims.Groups, claims.Roles, claims.ProjectRoles), app.cfg.RolePolicy),
 		Expiry:  time.Now().UTC().Add(12 * time.Hour),
 	}
 	app.writeSession(w, session)
@@ -700,6 +721,9 @@ func (app *App) readSession(r *http.Request) (Session, bool) {
 	}
 	if session.Subject == "" || time.Now().UTC().After(session.Expiry) {
 		return Session{}, false
+	}
+	if len(session.Roles) == 0 {
+		session.Roles = DeriveRoles(session.Subject, session.Email, nil, app.cfg.RolePolicy)
 	}
 	return session, true
 }
@@ -841,6 +865,13 @@ func enterpriseChecks(cfg Config) []string {
 	if cfg.ProductMode == "enterprise" && os.Getenv("JANUS_BREAK_GLASS_REVIEW") == "" {
 		issues = append(issues, "Enterprise mode needs a documented break-glass review owner.")
 	}
+	if !cfg.RolePolicy.Configured() {
+		message := "Explicit Janus role bindings are not configured."
+		if cfg.RolePolicy.BootstrapOwner {
+			message = "Explicit Janus role bindings are not configured; self-hosted bootstrap role policy is active."
+		}
+		issues = append(issues, message)
+	}
 	return issues
 }
 
@@ -863,6 +894,7 @@ func (app *App) postureBody() map[string]any {
 	descriptors := app.store.Descriptors()
 	issues := enterpriseChecks(app.cfg)
 	catalogGates := ValidateCatalog(descriptors)
+	accessPosture := app.accessPosture()
 	return map[string]any{
 		"service":            "janus",
 		"mode":               app.cfg.ProductMode,
@@ -873,6 +905,7 @@ func (app *App) postureBody() map[string]any {
 		"gates":              issues,
 		"catalog_gates":      catalogGates,
 		"catalog_gate_count": len(catalogGates),
+		"access":             accessPosture,
 		"audit":              app.store.AuditPosture(),
 		"capabilities": []string{
 			"value_free_metadata_catalog",
@@ -881,9 +914,14 @@ func (app *App) postureBody() map[string]any {
 			"permit_noop_execution",
 			"csrf_guarded_mutations",
 			"rate_limited_runtime",
+			"role_gated_audit_evidence",
 		},
 		"value_returned": false,
 	}
+}
+
+func (app *App) accessPosture() AccessPosture {
+	return AccessPostureFor(app.cfg.RolePolicy)
 }
 
 func (app *App) evidencePack() EvidencePack {
@@ -895,6 +933,7 @@ func (app *App) evidencePack() EvidencePack {
 		Posture:        app.postureBody(),
 		Descriptors:    descriptors,
 		CatalogGates:   ValidateCatalog(descriptors),
+		AccessPosture:  app.accessPosture(),
 		AuditPosture:   app.store.AuditPosture(),
 		RecentAudit:    app.store.RecentAudit(50),
 		ValueReturned:  false,
@@ -1149,6 +1188,25 @@ func mustTemplates() *template.Template {
   </div>
 </section>
 {{ end }}
+<section class="grid" style="margin-bottom:16px">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Access policy</h2>
+      {{ if .Access.ExplicitBindings }}<span class="pill">explicit bindings</span>{{ else }}<span class="pill">bootstrap</span>{{ end }}
+    </div>
+    <div style="padding:16px" class="stack">
+      <p>
+        {{ range .Session.Roles }}<span class="pill">{{ . }}</span> {{ end }}
+      </p>
+      <div class="kpis">
+        <div class="kpi"><strong>{{ .Access.GateCount }}</strong><span class="muted">role gates</span></div>
+        <div class="kpi"><strong>{{ if .Access.BootstrapOwner }}on{{ else }}off{{ end }}</strong><span class="muted">bootstrap owner</span></div>
+        <div class="kpi"><strong>auditor</strong><span class="muted">evidence role</span></div>
+      </div>
+      {{ range .Access.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
+    </div>
+  </div>
+</section>
 <section class="grid" style="margin-bottom:16px">
   <div class="panel">
     <div class="panel-head">
