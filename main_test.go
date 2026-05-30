@@ -818,6 +818,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"remote_audit_workflow"`) || !strings.Contains(body, `"label":"Remote audit workflow"`) || !strings.Contains(body, `"control_key":"remote_audit"`) || !strings.Contains(body, `"endpoint_returned":false`) || !strings.Contains(body, `"payload_returned":false`) || !strings.Contains(body, `"audit_token_returned":false`) || !strings.Contains(body, `"key":"shipping_path"`) || !strings.Contains(body, `"remote_audit_workflow":"presence_only_audit_shipping_evidence"`) || !strings.Contains(body, `"remote_audit_presence_workflow"`) {
 		t.Fatalf("posture response should include remote audit workflow: %s", body)
 	}
+	if !strings.Contains(body, `"break_glass_review_workflow"`) || !strings.Contains(body, `"label":"Break-glass review workflow"`) || !strings.Contains(body, `"control_key":"break_glass_review"`) || !strings.Contains(body, `"procedure_returned":false`) || !strings.Contains(body, `"contact_path_returned":false`) || !strings.Contains(body, `"access_target_returned":false`) || !strings.Contains(body, `"credential_returned":false`) || !strings.Contains(body, `"key":"owner_review"`) || !strings.Contains(body, `"break_glass_review_workflow":"presence_only_emergency_access_evidence"`) || !strings.Contains(body, `"break_glass_review_presence_workflow"`) {
+		t.Fatalf("posture response should include break-glass review workflow: %s", body)
+	}
 	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
 		t.Fatalf("posture response should include scope policy: %s", body)
 	}
@@ -1201,6 +1204,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed remote audit workflow")
 	}
+	postureBreakGlassWorkflow, ok := posture["break_glass_review_workflow"].(BreakGlassReviewWorkflow)
+	if !ok {
+		t.Fatalf("posture should expose typed break-glass review workflow")
+	}
 	postureAttachmentReview, ok := posture["attachment_review"].(AttachmentReview)
 	if !ok {
 		t.Fatalf("posture should expose typed attachment review")
@@ -1250,6 +1257,9 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(postureRemoteAuditWorkflow, pack.RemoteAuditWorkflow) {
 		t.Fatalf("posture and evidence should share the same remote audit workflow: posture=%#v evidence=%#v", postureRemoteAuditWorkflow, pack.RemoteAuditWorkflow)
+	}
+	if !reflect.DeepEqual(postureBreakGlassWorkflow, pack.BreakGlassWorkflow) {
+		t.Fatalf("posture and evidence should share the same break-glass review workflow: posture=%#v evidence=%#v", postureBreakGlassWorkflow, pack.BreakGlassWorkflow)
 	}
 	if !reflect.DeepEqual(postureAttachmentReview, pack.AttachmentReview) {
 		t.Fatalf("posture and evidence should share the same attachment review: posture=%#v evidence=%#v", postureAttachmentReview, pack.AttachmentReview)
@@ -1667,6 +1677,71 @@ func TestRemoteAuditWorkflowTracksPresenceOnlyAttachment(t *testing.T) {
 				}
 			}
 			assertRouteResponseValueFree(t, route.name+" remote audit workflow", out)
+		})
+	}
+}
+
+func TestBreakGlassReviewWorkflowTracksPresenceOnlyAttachment(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	body := `{"control_key":"break_glass_review","attestation":"external_evidence_exists","external_ref":"https://evidence.example/secret-cookie-secret-/run/agenix/break-glass-review"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/evidence/attachments", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-Id", "break-glass-review-workflow-1")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", out.Code, out.Body.String())
+	}
+	attachBody := out.Body.String()
+	for _, want := range []string{`"control_key":"break_glass_review"`, `"attachment":"attached_presence_only"`, `"evidence_signal":"presence_only_workflow"`, `"request_body_returned":false`, `"request_id":"break-glass-review-workflow-1"`, `"value_returned":false`} {
+		if !strings.Contains(attachBody, want) {
+			t.Fatalf("break-glass review attach response should include %s: %s", want, attachBody)
+		}
+	}
+
+	routes := []struct {
+		name string
+		path string
+	}{
+		{name: "dashboard", path: "/"},
+		{name: "posture", path: "/api/posture"},
+		{name: "evidence", path: "/api/evidence"},
+	}
+	for _, route := range routes {
+		t.Run(route.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, route.path, nil)
+			out := httptest.NewRecorder()
+			app.routes().ServeHTTP(out, req)
+			if out.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+			}
+			got := out.Body.String()
+			for _, want := range []string{"Break-glass review workflow", "break_glass_review", "attached_presence_only", "presence_only_workflow", "evidence_ref_returned", "value_returned"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("%s should include break-glass review workflow marker %q: %s", route.name, want, got)
+				}
+			}
+			if route.name == "dashboard" {
+				for _, want := range []string{"review cadence", "procedure_returned=false", "contact_path_returned=false", "access_target_returned=false", "credential_returned=false", "presence recorded", "emergency evidence stays external", "Owner review", "Emergency scope", "Step-up review", "Time-boxing", "Post-use audit"} {
+					if !strings.Contains(got, want) {
+						t.Fatalf("dashboard should include break-glass review workflow cue %q: %s", want, got)
+					}
+				}
+			} else {
+				for _, want := range []string{"review_cadence", `"procedure_returned":false`, `"contact_path_returned":false`, `"access_target_returned":false`, `"credential_returned":false`} {
+					if !strings.Contains(got, want) {
+						t.Fatalf("%s should include break-glass review workflow JSON marker %q: %s", route.name, want, got)
+					}
+				}
+			}
+			for _, forbidden := range []string{"external_ref", "https://evidence.example", "secret-cookie-secret", "/run/agenix"} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("%s leaked request-only break-glass review evidence ref %q: %s", route.name, forbidden, got)
+				}
+			}
+			assertRouteResponseValueFree(t, route.name+" break-glass review workflow", out)
 		})
 	}
 }
@@ -2498,6 +2573,11 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 	for _, want := range []string{"Remote audit workflow", "Mark remote audit present", "audit_token_returned=false", "Shipping path", "Chain continuity", "Request correlation", "Custody review", "Alert review"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render remote audit workflow %q: %s", want, body)
+		}
+	}
+	for _, want := range []string{"Break-glass review workflow", "Mark break-glass review present", "procedure_returned=false", "contact_path_returned=false", "access_target_returned=false", "credential_returned=false", "Owner review", "Emergency scope", "Step-up review", "Time-boxing", "Post-use audit"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render break-glass review workflow %q: %s", want, body)
 		}
 	}
 	for _, want := range []string{"External evidence workflow", "Presence-only external evidence workflow", "records presence only", "no refs stored", "Mark present"} {

@@ -897,6 +897,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	remoteAuditWorkflow := RemoteAuditWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	breakGlassWorkflow := BreakGlassReviewWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -942,6 +943,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"PrivacyWorkflow":     privacyWorkflow,
 		"IntegrationWorkflow": integrationWorkflow,
 		"RemoteAuditWorkflow": remoteAuditWorkflow,
+		"BreakGlassWorkflow":  breakGlassWorkflow,
 		"Privacy":             privacyPosture,
 		"AssuranceSummary":    assuranceSummary,
 		"AssuranceGates":      assuranceGates,
@@ -2364,6 +2366,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	remoteAuditWorkflow := RemoteAuditWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	breakGlassWorkflow := BreakGlassReviewWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2404,6 +2407,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"privacy_retention_workflow":       privacyWorkflow,
 		"integration_conformance_workflow": integrationWorkflow,
 		"remote_audit_workflow":            remoteAuditWorkflow,
+		"break_glass_review_workflow":      breakGlassWorkflow,
 		"privacy_posture":                  privacyPosture,
 		"evidence_receipt":                 evidenceReceipt,
 		"action_readiness":                 actionReadiness,
@@ -2467,6 +2471,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"privacy_retention_workflow":       "presence_only_policy_evidence",
 			"integration_conformance_workflow": "presence_only_integration_evidence",
 			"remote_audit_workflow":            "presence_only_audit_shipping_evidence",
+			"break_glass_review_workflow":      "presence_only_emergency_access_evidence",
 			"action_readiness":                 "role_and_readiness_matrix",
 			"command_center":                   "dashboard_posture_api",
 			"action_receipts":                  "mutation_result_receipts",
@@ -2580,6 +2585,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"privacy_retention_presence_workflow",
 			"integration_conformance_presence_workflow",
 			"remote_audit_presence_workflow",
+			"break_glass_review_presence_workflow",
 			"role_aware_action_readiness",
 			"command_center_ux",
 			"value_free_action_receipts",
@@ -2643,6 +2649,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	remoteAuditWorkflow := RemoteAuditWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	breakGlassWorkflow := BreakGlassReviewWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2667,6 +2674,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		PrivacyWorkflow:     privacyWorkflow,
 		IntegrationWorkflow: integrationWorkflow,
 		RemoteAuditWorkflow: remoteAuditWorkflow,
+		BreakGlassWorkflow:  breakGlassWorkflow,
 		Enterprise:          enterpriseValidation,
 		EnterpriseDryRun:    enterpriseDryRun,
 		AttachmentReview:    attachmentReview,
@@ -3772,6 +3780,40 @@ func mustTemplates() *template.Template {
         <p><span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
         <p><span class="pill info">next</span> {{ .Next }}</p>
         {{ end }}
+      </div>
+      {{ end }}
+    </div>
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="break-glass-review-workflow">
+  <div class="panel-head">
+    <h2>Break-glass review workflow</h2>
+    <span class="pill {{ if eq .BreakGlassWorkflow.Status "attached" }}ok{{ else if eq .BreakGlassWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .BreakGlassWorkflow.Status }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .BreakGlassWorkflow.Summary }}</p>
+    <p><span class="pill info">owner {{ .BreakGlassWorkflow.OwnerRole }}</span> <span class="pill {{ if .BreakGlassWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .BreakGlassWorkflow.Required }}</span> <span class="pill {{ if .BreakGlassWorkflow.Attached }}ok{{ else if .BreakGlassWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .BreakGlassWorkflow.Attachment }}</span> <span class="pill info">{{ .BreakGlassWorkflow.EvidenceSignal }}</span> <span class="pill ok">procedure_returned=false</span> <span class="pill ok">contact_path_returned=false</span> <span class="pill ok">access_target_returned=false</span> <span class="pill ok">credential_returned=false</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <p><span class="pill info">review cadence</span> {{ .BreakGlassWorkflow.ReviewCadence }}</p>
+    {{ if .BreakGlassWorkflow.Attached }}
+    <p><span class="pill ok">presence recorded</span> <span class="pill ok">emergency evidence stays external</span> {{ .BreakGlassWorkflow.Next }}</p>
+    {{ else if .BreakGlassWorkflow.CanAttach }}
+    <form method="post" action="/ui/evidence/attachments">
+      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+      <input type="hidden" name="control_key" value="{{ .BreakGlassWorkflow.ControlKey }}">
+      <input type="hidden" name="attestation" value="external_evidence_exists">
+      <button class="button quiet" type="submit">Mark break-glass review present</button>
+    </form>
+    <p>{{ .BreakGlassWorkflow.Next }}</p>
+    {{ else }}
+    <p><span class="pill warn">{{ .BreakGlassWorkflow.OwnerRole }} role required</span> {{ .BreakGlassWorkflow.Next }}</p>
+    {{ end }}
+    <div class="mode-grid" aria-label="Break-glass review workflow checks">
+      {{ range .BreakGlassWorkflow.Checks }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+        <p><span class="pill info">next</span> {{ .Next }}</p>
       </div>
       {{ end }}
     </div>
