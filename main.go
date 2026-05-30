@@ -4473,8 +4473,40 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .BreakGlassWorkflow.Summary }}</p>
-    <p><span class="pill info">owner {{ .BreakGlassWorkflow.OwnerRole }}</span> <span class="pill {{ if .BreakGlassWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .BreakGlassWorkflow.Required }}</span> <span class="pill {{ if .BreakGlassWorkflow.Attached }}ok{{ else if .BreakGlassWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .BreakGlassWorkflow.Attachment }}</span> <span class="pill info">{{ .BreakGlassWorkflow.EvidenceSignal }}</span> <span class="pill ok">procedure_returned=false</span> <span class="pill ok">contact_path_returned=false</span> <span class="pill ok">access_target_returned=false</span> <span class="pill ok">credential_returned=false</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
-    <p><span class="pill info">review cadence</span> {{ .BreakGlassWorkflow.ReviewCadence }}</p>
+    <div class="witness-grid" aria-label="Break-glass review workflow witness">
+      <div class="witness-card {{ if eq .BreakGlassWorkflow.Status "attached" }}ok{{ else if eq .BreakGlassWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">
+        <span>Workflow state</span>
+        <strong>{{ .BreakGlassWorkflow.Status }}</strong>
+        <p>Owner: {{ .BreakGlassWorkflow.OwnerRole }}. Review cadence: {{ .BreakGlassWorkflow.ReviewCadence }}.</p>
+      </div>
+      <div class="witness-card {{ if .BreakGlassWorkflow.Attached }}ok{{ else if .BreakGlassWorkflow.Missing }}warn{{ else }}info{{ end }}">
+        <span>Evidence handoff</span>
+        <strong>{{ .BreakGlassWorkflow.Attachment }}</strong>
+        <p>{{ if .BreakGlassWorkflow.Attached }}Presence recorded; emergency evidence stays external.{{ else if .BreakGlassWorkflow.CanAttach }}Ready for presence-only attachment after external review.{{ else }}Role-gated until the owner can attest external evidence.{{ end }}</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>values withheld</strong>
+        <p>Procedures, contacts, targets, credentials, and evidence refs are not returned.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Break-glass review evidence flags</summary>
+      <div class="flag-cloud" aria-label="Break-glass review value-free evidence flags">
+        <span class="pill info">owner {{ .BreakGlassWorkflow.OwnerRole }}</span>
+        <span class="pill {{ if .BreakGlassWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .BreakGlassWorkflow.Required }}</span>
+        <span class="pill {{ if .BreakGlassWorkflow.Attached }}ok{{ else if .BreakGlassWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .BreakGlassWorkflow.Attachment }}</span>
+        <span class="pill info">{{ .BreakGlassWorkflow.EvidenceSignal }}</span>
+        <span class="pill info">review cadence</span>
+        <span class="pill info">{{ .BreakGlassWorkflow.ReviewCadence }}</span>
+        <span class="pill ok">procedure_returned=false</span>
+        <span class="pill ok">contact_path_returned=false</span>
+        <span class="pill ok">access_target_returned=false</span>
+        <span class="pill ok">credential_returned=false</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     {{ if .BreakGlassWorkflow.Attached }}
     <p><span class="pill ok">presence recorded</span> <span class="pill ok">emergency evidence stays external</span> {{ .BreakGlassWorkflow.Next }}</p>
     {{ else if .BreakGlassWorkflow.CanAttach }}
@@ -4507,8 +4539,39 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .RemoteAuditWorkflow.Summary }}</p>
-    <p><span class="pill info">owner {{ .RemoteAuditWorkflow.OwnerRole }}</span> <span class="pill {{ if .RemoteAuditWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .RemoteAuditWorkflow.Required }}</span> <span class="pill {{ if .RemoteAuditWorkflow.Attached }}ok{{ else if .RemoteAuditWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .RemoteAuditWorkflow.Attachment }}</span> <span class="pill info">{{ .RemoteAuditWorkflow.EvidenceSignal }}</span> <span class="pill ok">endpoint_returned=false</span> <span class="pill ok">payload_returned=false</span> <span class="pill ok">audit_token_returned=false</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
-    <p><span class="pill info">review cadence</span> {{ .RemoteAuditWorkflow.ReviewCadence }}</p>
+    <div class="witness-grid" aria-label="Remote audit workflow witness">
+      <div class="witness-card {{ if eq .RemoteAuditWorkflow.Status "attached" }}ok{{ else if eq .RemoteAuditWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">
+        <span>Workflow state</span>
+        <strong>{{ .RemoteAuditWorkflow.Status }}</strong>
+        <p>Owner: {{ .RemoteAuditWorkflow.OwnerRole }}. Review cadence: {{ .RemoteAuditWorkflow.ReviewCadence }}.</p>
+      </div>
+      <div class="witness-card {{ if .RemoteAuditWorkflow.Attached }}ok{{ else if .RemoteAuditWorkflow.Missing }}warn{{ else }}info{{ end }}">
+        <span>Evidence handoff</span>
+        <strong>{{ .RemoteAuditWorkflow.Attachment }}</strong>
+        <p>{{ if .RemoteAuditWorkflow.Attached }}Presence recorded; audit shipping evidence stays external.{{ else if .RemoteAuditWorkflow.CanAttach }}Ready for presence-only attachment after external review.{{ else }}Role-gated until the owner can attest external evidence.{{ end }}</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>values withheld</strong>
+        <p>Endpoints, payloads, audit tokens, and evidence refs are not returned.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Remote audit evidence flags</summary>
+      <div class="flag-cloud" aria-label="Remote audit value-free evidence flags">
+        <span class="pill info">owner {{ .RemoteAuditWorkflow.OwnerRole }}</span>
+        <span class="pill {{ if .RemoteAuditWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .RemoteAuditWorkflow.Required }}</span>
+        <span class="pill {{ if .RemoteAuditWorkflow.Attached }}ok{{ else if .RemoteAuditWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .RemoteAuditWorkflow.Attachment }}</span>
+        <span class="pill info">{{ .RemoteAuditWorkflow.EvidenceSignal }}</span>
+        <span class="pill info">review cadence</span>
+        <span class="pill info">{{ .RemoteAuditWorkflow.ReviewCadence }}</span>
+        <span class="pill ok">endpoint_returned=false</span>
+        <span class="pill ok">payload_returned=false</span>
+        <span class="pill ok">audit_token_returned=false</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     {{ if .RemoteAuditWorkflow.Attached }}
     <p><span class="pill ok">presence recorded</span> <span class="pill ok">audit shipping evidence stays external</span> {{ .RemoteAuditWorkflow.Next }}</p>
     {{ else if .RemoteAuditWorkflow.CanAttach }}
@@ -4541,8 +4604,39 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .IntegrationWorkflow.Summary }}</p>
-    <p><span class="pill info">owner {{ .IntegrationWorkflow.OwnerRole }}</span> <span class="pill {{ if .IntegrationWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .IntegrationWorkflow.Required }}</span> <span class="pill {{ if .IntegrationWorkflow.Attached }}ok{{ else if .IntegrationWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .IntegrationWorkflow.Attachment }}</span> <span class="pill info">{{ .IntegrationWorkflow.EvidenceSignal }}</span> <span class="pill ok">connector_config_returned=false</span> <span class="pill ok">endpoint_returned=false</span> <span class="pill ok">payload_returned=false</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
-    <p><span class="pill info">review cadence</span> {{ .IntegrationWorkflow.ReviewCadence }}</p>
+    <div class="witness-grid" aria-label="Integration conformance workflow witness">
+      <div class="witness-card {{ if eq .IntegrationWorkflow.Status "attached" }}ok{{ else if eq .IntegrationWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">
+        <span>Workflow state</span>
+        <strong>{{ .IntegrationWorkflow.Status }}</strong>
+        <p>Owner: {{ .IntegrationWorkflow.OwnerRole }}. Review cadence: {{ .IntegrationWorkflow.ReviewCadence }}.</p>
+      </div>
+      <div class="witness-card {{ if .IntegrationWorkflow.Attached }}ok{{ else if .IntegrationWorkflow.Missing }}warn{{ else }}info{{ end }}">
+        <span>Evidence handoff</span>
+        <strong>{{ .IntegrationWorkflow.Attachment }}</strong>
+        <p>{{ if .IntegrationWorkflow.Attached }}Presence recorded; connector evidence stays external.{{ else if .IntegrationWorkflow.CanAttach }}Ready for presence-only attachment after external review.{{ else }}Role-gated until the owner can attest external evidence.{{ end }}</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>values withheld</strong>
+        <p>Connector config, endpoints, payloads, and evidence refs are not returned.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Integration conformance evidence flags</summary>
+      <div class="flag-cloud" aria-label="Integration conformance value-free evidence flags">
+        <span class="pill info">owner {{ .IntegrationWorkflow.OwnerRole }}</span>
+        <span class="pill {{ if .IntegrationWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .IntegrationWorkflow.Required }}</span>
+        <span class="pill {{ if .IntegrationWorkflow.Attached }}ok{{ else if .IntegrationWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .IntegrationWorkflow.Attachment }}</span>
+        <span class="pill info">{{ .IntegrationWorkflow.EvidenceSignal }}</span>
+        <span class="pill info">review cadence</span>
+        <span class="pill info">{{ .IntegrationWorkflow.ReviewCadence }}</span>
+        <span class="pill ok">connector_config_returned=false</span>
+        <span class="pill ok">endpoint_returned=false</span>
+        <span class="pill ok">payload_returned=false</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     {{ if .IntegrationWorkflow.Attached }}
     <p><span class="pill ok">presence recorded</span> <span class="pill ok">connector evidence stays external</span> {{ .IntegrationWorkflow.Next }}</p>
     {{ else if .IntegrationWorkflow.CanAttach }}
@@ -4575,8 +4669,36 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .RestoreWorkflow.Summary }}</p>
-    <p><span class="pill info">owner {{ .RestoreWorkflow.OwnerRole }}</span> <span class="pill {{ if .RestoreWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .RestoreWorkflow.Required }}</span> <span class="pill {{ if .RestoreWorkflow.Attached }}ok{{ else if .RestoreWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .RestoreWorkflow.Attachment }}</span> <span class="pill info">{{ .RestoreWorkflow.EvidenceSignal }}</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
-    <p><span class="pill info">review cadence</span> {{ .RestoreWorkflow.ReviewCadence }}</p>
+    <div class="witness-grid" aria-label="Restore drill workflow witness">
+      <div class="witness-card {{ if eq .RestoreWorkflow.Status "attached" }}ok{{ else if eq .RestoreWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">
+        <span>Workflow state</span>
+        <strong>{{ .RestoreWorkflow.Status }}</strong>
+        <p>Owner: {{ .RestoreWorkflow.OwnerRole }}. Review cadence: {{ .RestoreWorkflow.ReviewCadence }}.</p>
+      </div>
+      <div class="witness-card {{ if .RestoreWorkflow.Attached }}ok{{ else if .RestoreWorkflow.Missing }}warn{{ else }}info{{ end }}">
+        <span>Evidence handoff</span>
+        <strong>{{ .RestoreWorkflow.Attachment }}</strong>
+        <p>{{ if .RestoreWorkflow.Attached }}Presence recorded; recovery evidence stays external.{{ else if .RestoreWorkflow.CanAttach }}Ready for presence-only attachment after external review.{{ else }}Role-gated until the owner can attest external evidence.{{ end }}</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>values withheld</strong>
+        <p>Restore evidence refs and recovery material are not returned.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Restore drill evidence flags</summary>
+      <div class="flag-cloud" aria-label="Restore drill value-free evidence flags">
+        <span class="pill info">owner {{ .RestoreWorkflow.OwnerRole }}</span>
+        <span class="pill {{ if .RestoreWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .RestoreWorkflow.Required }}</span>
+        <span class="pill {{ if .RestoreWorkflow.Attached }}ok{{ else if .RestoreWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .RestoreWorkflow.Attachment }}</span>
+        <span class="pill info">{{ .RestoreWorkflow.EvidenceSignal }}</span>
+        <span class="pill info">review cadence</span>
+        <span class="pill info">{{ .RestoreWorkflow.ReviewCadence }}</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     {{ if .RestoreWorkflow.Attached }}
     <p><span class="pill ok">presence recorded</span> <span class="pill ok">recovery evidence stays external</span> {{ .RestoreWorkflow.Next }}</p>
     {{ else if .RestoreWorkflow.CanAttach }}
@@ -4609,8 +4731,37 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .ReleaseWorkflow.Summary }}</p>
-    <p><span class="pill info">owner {{ .ReleaseWorkflow.OwnerRole }}</span> <span class="pill {{ if .ReleaseWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .ReleaseWorkflow.Required }}</span> <span class="pill {{ if .ReleaseWorkflow.Attached }}ok{{ else if .ReleaseWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .ReleaseWorkflow.Attachment }}</span> <span class="pill info">{{ .ReleaseWorkflow.EvidenceSignal }}</span> <span class="pill ok">artifact_returned=false</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
-    <p><span class="pill info">review cadence</span> {{ .ReleaseWorkflow.ReviewCadence }}</p>
+    <div class="witness-grid" aria-label="Release provenance workflow witness">
+      <div class="witness-card {{ if eq .ReleaseWorkflow.Status "attached" }}ok{{ else if eq .ReleaseWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">
+        <span>Workflow state</span>
+        <strong>{{ .ReleaseWorkflow.Status }}</strong>
+        <p>Owner: {{ .ReleaseWorkflow.OwnerRole }}. Review cadence: {{ .ReleaseWorkflow.ReviewCadence }}.</p>
+      </div>
+      <div class="witness-card {{ if .ReleaseWorkflow.Attached }}ok{{ else if .ReleaseWorkflow.Missing }}warn{{ else }}info{{ end }}">
+        <span>Evidence handoff</span>
+        <strong>{{ .ReleaseWorkflow.Attachment }}</strong>
+        <p>{{ if .ReleaseWorkflow.Attached }}Presence recorded; release evidence stays external.{{ else if .ReleaseWorkflow.CanAttach }}Ready for presence-only attachment after external review.{{ else }}Role-gated until the owner can attest external evidence.{{ end }}</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>values withheld</strong>
+        <p>Build artifacts, release material, and evidence refs are not returned.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Release provenance evidence flags</summary>
+      <div class="flag-cloud" aria-label="Release provenance value-free evidence flags">
+        <span class="pill info">owner {{ .ReleaseWorkflow.OwnerRole }}</span>
+        <span class="pill {{ if .ReleaseWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .ReleaseWorkflow.Required }}</span>
+        <span class="pill {{ if .ReleaseWorkflow.Attached }}ok{{ else if .ReleaseWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .ReleaseWorkflow.Attachment }}</span>
+        <span class="pill info">{{ .ReleaseWorkflow.EvidenceSignal }}</span>
+        <span class="pill info">review cadence</span>
+        <span class="pill info">{{ .ReleaseWorkflow.ReviewCadence }}</span>
+        <span class="pill ok">artifact_returned=false</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     {{ if .ReleaseWorkflow.Attached }}
     <p><span class="pill ok">presence recorded</span> <span class="pill ok">release evidence stays external</span> {{ .ReleaseWorkflow.Next }}</p>
     {{ else if .ReleaseWorkflow.CanAttach }}
@@ -4643,8 +4794,38 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .PrivacyWorkflow.Summary }}</p>
-    <p><span class="pill info">owner {{ .PrivacyWorkflow.OwnerRole }}</span> <span class="pill {{ if .PrivacyWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .PrivacyWorkflow.Required }}</span> <span class="pill {{ if .PrivacyWorkflow.Attached }}ok{{ else if .PrivacyWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .PrivacyWorkflow.Attachment }}</span> <span class="pill info">{{ .PrivacyWorkflow.EvidenceSignal }}</span> <span class="pill ok">policy_doc_returned=false</span> <span class="pill ok">raw_metadata_returned=false</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
-    <p><span class="pill info">review cadence</span> {{ .PrivacyWorkflow.ReviewCadence }}</p>
+    <div class="witness-grid" aria-label="Privacy and retention workflow witness">
+      <div class="witness-card {{ if eq .PrivacyWorkflow.Status "attached" }}ok{{ else if eq .PrivacyWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">
+        <span>Workflow state</span>
+        <strong>{{ .PrivacyWorkflow.Status }}</strong>
+        <p>Owner: {{ .PrivacyWorkflow.OwnerRole }}. Review cadence: {{ .PrivacyWorkflow.ReviewCadence }}.</p>
+      </div>
+      <div class="witness-card {{ if .PrivacyWorkflow.Attached }}ok{{ else if .PrivacyWorkflow.Missing }}warn{{ else }}info{{ end }}">
+        <span>Evidence handoff</span>
+        <strong>{{ .PrivacyWorkflow.Attachment }}</strong>
+        <p>{{ if .PrivacyWorkflow.Attached }}Presence recorded; policy evidence stays external.{{ else if .PrivacyWorkflow.CanAttach }}Ready for presence-only attachment after external review.{{ else }}Role-gated until the owner can attest external evidence.{{ end }}</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>values withheld</strong>
+        <p>Policy docs, raw metadata, evidence refs, and secret values are not returned.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Privacy and retention evidence flags</summary>
+      <div class="flag-cloud" aria-label="Privacy and retention value-free evidence flags">
+        <span class="pill info">owner {{ .PrivacyWorkflow.OwnerRole }}</span>
+        <span class="pill {{ if .PrivacyWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .PrivacyWorkflow.Required }}</span>
+        <span class="pill {{ if .PrivacyWorkflow.Attached }}ok{{ else if .PrivacyWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .PrivacyWorkflow.Attachment }}</span>
+        <span class="pill info">{{ .PrivacyWorkflow.EvidenceSignal }}</span>
+        <span class="pill info">review cadence</span>
+        <span class="pill info">{{ .PrivacyWorkflow.ReviewCadence }}</span>
+        <span class="pill ok">policy_doc_returned=false</span>
+        <span class="pill ok">raw_metadata_returned=false</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     {{ if .PrivacyWorkflow.Attached }}
     <p><span class="pill ok">presence recorded</span> <span class="pill ok">policy evidence stays external</span> {{ .PrivacyWorkflow.Next }}</p>
     {{ else if .PrivacyWorkflow.CanAttach }}
@@ -4677,7 +4858,32 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .RestoreProof.Summary }}</p>
-    <p><span class="pill info">{{ .RestoreProof.Mode }}</span> <span class="pill {{ if eq .RestoreProof.Attachment "attached_presence_only" }}ok{{ else if eq .RestoreProof.Attachment "missing" }}warn{{ else }}info{{ end }}">{{ .RestoreProof.Attachment }}</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <div class="witness-grid" aria-label="Restore drill proof witness">
+      <div class="witness-card {{ if eq .RestoreProof.Status "candidate" }}ok{{ else if eq .RestoreProof.Status "blocked" }}warn{{ else }}info{{ end }}">
+        <span>Recovery claim</span>
+        <strong>{{ .RestoreProof.Status }}</strong>
+        <p>{{ .RestoreProof.Mode }} recovery proof is evaluated from safe metadata only.</p>
+      </div>
+      <div class="witness-card {{ if eq .RestoreProof.Attachment "attached_presence_only" }}ok{{ else if eq .RestoreProof.Attachment "missing" }}warn{{ else }}info{{ end }}">
+        <span>Drill record</span>
+        <strong>{{ .RestoreProof.Attachment }}</strong>
+        <p>Janus records whether the external drill exists, not the drill contents.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>values withheld</strong>
+        <p>Restore evidence refs, raw recovery notes, and secret values are not returned.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Restore drill proof evidence flags</summary>
+      <div class="flag-cloud" aria-label="Restore drill proof value-free evidence flags">
+        <span class="pill info">{{ .RestoreProof.Mode }}</span>
+        <span class="pill {{ if eq .RestoreProof.Attachment "attached_presence_only" }}ok{{ else if eq .RestoreProof.Attachment "missing" }}warn{{ else }}info{{ end }}">{{ .RestoreProof.Attachment }}</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     <div class="mode-grid" aria-label="Restore drill proof">
       {{ range .RestoreProof.Checks }}
       <div class="mode-item {{ .Tone }}">
