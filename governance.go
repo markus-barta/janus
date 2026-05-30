@@ -38,6 +38,7 @@ type EvidencePack struct {
 	RestoreProof     RestoreDrillProof     `json:"restore_drill_proof"`
 	AssuranceSummary AssuranceSummary      `json:"assurance_summary"`
 	Enterprise       EnterpriseValidation  `json:"enterprise_validation"`
+	EnterpriseDryRun EnterpriseDryRun      `json:"enterprise_dry_run"`
 	AttachmentReview AttachmentReview      `json:"attachment_review"`
 	Privacy          PrivacyPosture        `json:"privacy_posture"`
 	EvidenceBoundary EvidenceBoundary      `json:"evidence_boundary"`
@@ -307,6 +308,34 @@ type EnterpriseValidationControl struct {
 	EvidenceRefReturned bool   `json:"evidence_ref_returned"`
 	ValueReturned       bool   `json:"value_returned"`
 	Tone                string `json:"tone"`
+}
+
+type EnterpriseDryRun struct {
+	Summary       string                 `json:"summary"`
+	CurrentMode   string                 `json:"current_mode"`
+	TargetMode    string                 `json:"target_mode"`
+	Status        string                 `json:"status"`
+	Required      int                    `json:"required"`
+	Ready         int                    `json:"ready"`
+	Attached      int                    `json:"attached"`
+	Missing       int                    `json:"missing"`
+	Checks        []EnterpriseDryRunItem `json:"checks"`
+	ValueReturned bool                   `json:"value_returned"`
+}
+
+type EnterpriseDryRunItem struct {
+	Key                 string `json:"key"`
+	Label               string `json:"label"`
+	State               string `json:"state"`
+	Required            bool   `json:"required"`
+	Detail              string `json:"detail"`
+	OwnerRole           string `json:"owner_role"`
+	Attachment          string `json:"attachment"`
+	EvidenceSignal      string `json:"evidence_signal"`
+	Next                string `json:"next"`
+	Tone                string `json:"tone"`
+	EvidenceRefReturned bool   `json:"evidence_ref_returned"`
+	ValueReturned       bool   `json:"value_returned"`
 }
 
 type AttachmentReview struct {
@@ -1180,6 +1209,74 @@ func RestoreDrillProofFor(enterprise EnterpriseValidation) RestoreDrillProof {
 	})
 
 	return proof
+}
+
+func EnterpriseDryRunFor(currentMode string, enterprise EnterpriseValidation) EnterpriseDryRun {
+	currentMode = strings.TrimSpace(currentMode)
+	if currentMode == "" {
+		currentMode = "self_hosted"
+	}
+	targetMode := strings.TrimSpace(enterprise.Mode)
+	if targetMode == "" {
+		targetMode = "enterprise"
+	}
+
+	dryRun := EnterpriseDryRun{
+		Summary:       "Enterprise dry-run shows what would block an enterprise claim today without changing modes.",
+		CurrentMode:   currentMode,
+		TargetMode:    targetMode,
+		Status:        "candidate",
+		ValueReturned: false,
+	}
+	for _, control := range enterprise.Controls {
+		attachment := control.Attachment
+		if attachment == "" {
+			attachment = "not_claimed"
+		}
+		state := control.State
+		if state == "" {
+			state = "not_claimed"
+		}
+		tone := control.Tone
+		if tone == "" {
+			tone = "info"
+		}
+		item := EnterpriseDryRunItem{
+			Key:                 control.Key,
+			Label:               control.Label,
+			State:               state,
+			Required:            control.Required,
+			Detail:              control.Detail,
+			OwnerRole:           control.OwnerRole,
+			Attachment:          attachment,
+			EvidenceSignal:      control.EvidenceSignal,
+			Next:                control.Next,
+			Tone:                tone,
+			EvidenceRefReturned: false,
+			ValueReturned:       false,
+		}
+		if item.Required {
+			dryRun.Required++
+		}
+		if item.State == "ready" || item.State == "attached" {
+			dryRun.Ready++
+		}
+		if item.Attachment == "attached_presence_only" {
+			dryRun.Attached++
+		}
+		if item.State == "missing" || item.State == "review" || item.Attachment == "missing" {
+			dryRun.Missing++
+			item.Tone = "warn"
+		}
+		dryRun.Checks = append(dryRun.Checks, item)
+	}
+	if dryRun.Missing > 0 {
+		dryRun.Status = "blocked"
+		dryRun.Summary = fmt.Sprintf("Enterprise dry-run is blocked by %d required checks.", dryRun.Missing)
+	} else {
+		dryRun.Summary = "Enterprise dry-run is a candidate; keep external evidence reviewed outside Janus."
+	}
+	return dryRun
 }
 
 func AttachmentReviewFor(enterprise EnterpriseValidation) AttachmentReview {
