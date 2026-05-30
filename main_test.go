@@ -636,6 +636,46 @@ func TestRolePolicyBootstrapOwnerGrantsV1Roles(t *testing.T) {
 	}
 }
 
+func TestRolePolicyExplicitOwnerBindingClosesBootstrapGate(t *testing.T) {
+	policy := RolePolicy{
+		AdminSubjects:    map[string]bool{"markus@barta.com": true},
+		AuditorSubjects:  map[string]bool{"markus@barta.com": true},
+		OperatorSubjects: map[string]bool{"markus@barta.com": true},
+		BootstrapOwner:   false,
+	}
+	roles := DeriveRoles("zitadel-subject", "markus@barta.com", nil, policy)
+	for _, role := range []string{RoleViewer, RoleAdmin, RoleAuditor, RoleOperator} {
+		if !hasTestRole(roles, role) {
+			t.Fatalf("expected explicit owner role %s in %#v", role, roles)
+		}
+	}
+	posture := AccessPostureFor(policy)
+	if !posture.ExplicitBindings || posture.BootstrapOwner || posture.GateCount != 0 || posture.ValueReturned {
+		t.Fatalf("explicit role policy should close bootstrap gate: %#v", posture)
+	}
+}
+
+func TestDockerComposePinsExplicitJanusRoleBindings(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	for _, want := range []string{
+		"JANUS_BOOTSTRAP_OWNER=false",
+		"JANUS_ADMIN_SUBJECTS=markus@barta.com",
+		"JANUS_AUDITOR_SUBJECTS=markus@barta.com",
+		"JANUS_OPERATOR_SUBJECTS=markus@barta.com",
+		"JANUS_ADMIN_GROUPS=janus:admin",
+		"JANUS_AUDITOR_GROUPS=janus:auditor",
+		"JANUS_OPERATOR_GROUPS=janus:operator",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("compose should pin explicit Janus role binding %q", want)
+		}
+	}
+}
+
 func TestDashboardRendersAccessPolicy(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
