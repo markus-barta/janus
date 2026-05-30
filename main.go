@@ -379,7 +379,9 @@ func (app *App) routes() http.Handler {
 
 func (app *App) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'")
+		nonce := randomNonce(18)
+		r = r.WithContext(context.WithValue(r.Context(), cspNonceKey{}, nonce))
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'nonce-"+nonce+"'")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		if app.cfg.SecureCookies() {
@@ -477,10 +479,10 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	app.audit(r, "dashboard.view", "allowed", actorFromContext(r.Context()), "")
 	session := currentSession(r.Context())
-	renderTemplate(w, app.templates, "dashboard", app.dashboardData(session, nil, r.URL.Query().Get("ref")))
+	renderTemplate(w, app.templates, "dashboard", app.dashboardData(r, session, nil, r.URL.Query().Get("ref")))
 }
 
-func (app *App) dashboardData(session Session, actionResult *UIActionResult, selectedRef string) map[string]any {
+func (app *App) dashboardData(r *http.Request, session Session, actionResult *UIActionResult, selectedRef string) map[string]any {
 	principal := principalFromSession(session)
 	descriptors := app.broker.Descriptors(principal)
 	if selectedRef == "" && actionResult != nil {
@@ -510,6 +512,7 @@ func (app *App) dashboardData(session Session, actionResult *UIActionResult, sel
 	}
 	data := map[string]any{
 		"Title":             "Janus",
+		"CSPNonce":          cspNonceFromContext(r.Context()),
 		"Session":           session,
 		"CSRF":              app.csrfToken(session),
 		"Descriptors":       descriptors,
@@ -619,13 +622,13 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "warden.resolve.ui", "denied", session.Subject, "csrf failed")
 		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result, ""))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(r, session, &result, ""))
 		return
 	}
 	if err := r.ParseForm(); err != nil {
 		app.audit(r, "warden.resolve.ui", "denied", session.Subject, "bad form")
 		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: "Request form could not be read.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result, ""))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(r, session, &result, ""))
 		return
 	}
 	req := HandleRequest{
@@ -638,7 +641,7 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 	if req.Reason == "" {
 		app.audit(r, "warden.resolve.ui", "denied", session.Subject, "reason required")
 		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: "Reason required.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result, req.Ref))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(r, session, &result, req.Ref))
 		return
 	}
 	handle, err := app.broker.ResolveHandle(principalFromSession(session), req)
@@ -658,7 +661,7 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 			app.auditWithRef(r, "warden.resolve.ui", "denied", session.Subject, "", "broker error")
 		}
 		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: message, ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(session, &result, req.Ref))
+		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(r, session, &result, req.Ref))
 		return
 	}
 	app.auditWithRef(r, "warden.resolve.ui", "allowed", session.Subject, handle.SecretRef, "")
@@ -671,7 +674,7 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:     handle.ExpiresAt.Format("15:04:05"),
 		ValueReturned: false,
 	}
-	renderTemplate(w, app.templates, "dashboard", app.dashboardData(session, &result, handle.SecretRef))
+	renderTemplate(w, app.templates, "dashboard", app.dashboardData(r, session, &result, handle.SecretRef))
 }
 
 func (app *App) handleCreatePermit(w http.ResponseWriter, r *http.Request) {
@@ -732,13 +735,13 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "permit.create.ui", "denied", session.Subject, "csrf failed")
 		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result, ""))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(r, session, &result, ""))
 		return
 	}
 	if err := r.ParseForm(); err != nil {
 		app.audit(r, "permit.create.ui", "denied", session.Subject, "bad form")
 		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "Request form could not be read.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result, ""))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(r, session, &result, ""))
 		return
 	}
 	req := PermitRequest{
@@ -753,7 +756,7 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 	if req.Reason == "" {
 		app.audit(r, "permit.create.ui", "denied", session.Subject, "reason required")
 		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "Reason required.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result, req.Ref))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(r, session, &result, req.Ref))
 		return
 	}
 
@@ -774,14 +777,14 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 			app.auditWithRef(r, "permit.create.ui", "denied", session.Subject, "", "broker error")
 		}
 		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: message, ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(session, &result, req.Ref))
+		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(r, session, &result, req.Ref))
 		return
 	}
 
 	if err := app.permits.Put(permit); err != nil {
 		app.auditWithRef(r, "permit.create.ui", "denied", session.Subject, permit.SecretRef, "permit persistence failed")
 		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "Permit could not be recorded.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusInternalServerError, app.dashboardData(session, &result, permit.SecretRef))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusInternalServerError, app.dashboardData(r, session, &result, permit.SecretRef))
 		return
 	}
 	app.auditWithRef(r, "permit.create.ui", permit.Status, session.Subject, permit.SecretRef, permit.DenialReason)
@@ -804,7 +807,7 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:     permit.ExpiresAt.Format("15:04:05"),
 		ValueReturned: false,
 	}
-	renderTemplate(w, app.templates, "dashboard", app.dashboardData(session, &result, permit.SecretRef))
+	renderTemplate(w, app.templates, "dashboard", app.dashboardData(r, session, &result, permit.SecretRef))
 }
 
 func (app *App) handleRunPermitUI(w http.ResponseWriter, r *http.Request) {
@@ -812,7 +815,7 @@ func (app *App) handleRunPermitUI(w http.ResponseWriter, r *http.Request) {
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "permit.run.ui", "denied", session.Subject, "csrf failed")
 		result := UIActionResult{Title: "Run blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result, ""))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(r, session, &result, ""))
 		return
 	}
 	if !app.requireOperatorUI(w, r, session, "permit.run.ui", "") {
@@ -823,7 +826,7 @@ func (app *App) handleRunPermitUI(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		app.audit(r, "permit.run.ui", "denied", session.Subject, "permit not found")
 		result := UIActionResult{Title: "Run blocked", Outcome: "denied", Message: "Permit not found.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusNotFound, app.dashboardData(session, &result, ""))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusNotFound, app.dashboardData(r, session, &result, ""))
 		return
 	}
 	run := RunPermit(permit)
@@ -845,7 +848,7 @@ func (app *App) handleRunPermitUI(w http.ResponseWriter, r *http.Request) {
 		OutputScrubbed: run.OutputScrubbed,
 		ValueReturned:  run.ValueReturned,
 	}
-	renderTemplateStatus(w, app.templates, "dashboard", http.StatusAccepted, app.dashboardData(session, &result, permit.SecretRef))
+	renderTemplateStatus(w, app.templates, "dashboard", http.StatusAccepted, app.dashboardData(r, session, &result, permit.SecretRef))
 }
 
 func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -957,9 +960,10 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (app *App) renderSetup(w http.ResponseWriter, r *http.Request) {
 	app.audit(r, "setup.view", "allowed", "", "auth incomplete")
 	renderTemplateStatus(w, app.templates, "setup", http.StatusServiceUnavailable, map[string]any{
-		"Title":   "Janus setup",
-		"Mode":    app.cfg.ProductMode,
-		"Session": Session{},
+		"Title":    "Janus setup",
+		"CSPNonce": cspNonceFromContext(r.Context()),
+		"Mode":     app.cfg.ProductMode,
+		"Session":  Session{},
 		"Issues": []string{
 			"OIDC issuer, client id, client secret, and cookie key must be present before Janus exposes secret metadata.",
 			"The service is live, but locked to setup status until Zitadel credentials are configured.",
@@ -1027,9 +1031,16 @@ func (app *App) auditWithRef(r *http.Request, action, outcome, actor, secretRef,
 
 type sessionKey struct{}
 
+type cspNonceKey struct{}
+
 func currentSession(ctx context.Context) Session {
 	session, _ := ctx.Value(sessionKey{}).(Session)
 	return session
+}
+
+func cspNonceFromContext(ctx context.Context) string {
+	nonce, _ := ctx.Value(cspNonceKey{}).(string)
+	return nonce
 }
 
 func actorFromContext(ctx context.Context) string {
@@ -1075,7 +1086,7 @@ func (app *App) requireOperatorUI(w http.ResponseWriter, r *http.Request, sessio
 		Message:       "Operator role required.",
 		ValueReturned: false,
 	}
-	renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result, selectedRef))
+	renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(r, session, &result, selectedRef))
 	return false
 }
 
@@ -1113,6 +1124,14 @@ func randomToken(n int) string {
 		panic(err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func randomNonce(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 func decodeKey(value string) ([]byte, error) {
@@ -1325,7 +1344,7 @@ func mustTemplates() *template.Template {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {{ if .CSRF }}<meta name="csrf-token" content="{{ .CSRF }}">{{ end }}
   <title>{{ .Title }}</title>
-  <style>
+  <style nonce="{{ .CSPNonce }}">
     :root {
       color-scheme: light dark;
       --bg: #f3f5f7;

@@ -390,6 +390,30 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 	}
 }
 
+func TestSecurityHeadersUseStyleNonce(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	csp := out.Header().Get("Content-Security-Policy")
+	if strings.Contains(csp, "unsafe-inline") || !strings.Contains(csp, "style-src 'self' 'nonce-") {
+		t.Fatalf("CSP should use style nonce without unsafe-inline: %s", csp)
+	}
+	parts := strings.SplitN(out.Body.String(), `<style nonce="`, 2)
+	if len(parts) != 2 {
+		t.Fatalf("dashboard style tag should include nonce: %s", out.Body.String())
+	}
+	nonce := strings.SplitN(parts[1], `"`, 2)[0]
+	if nonce == "" || !strings.Contains(csp, "'nonce-"+nonce+"'") {
+		t.Fatalf("CSP nonce should match style nonce: csp=%s nonce=%q", csp, nonce)
+	}
+}
+
 func TestDashboardHidesOperatorActionsForViewer(t *testing.T) {
 	app := newTestApp(t)
 	session := Session{Subject: "viewer", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
