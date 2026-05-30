@@ -3077,7 +3077,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 			t.Fatalf("dashboard should render role policy readiness %q: %s", want, body)
 		}
 	}
-	for _, want := range []string{"Signed-in role receipt", "signed_in_role_receipt_no_identity_values", "identity_claim_values_withheld", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "cookie_value_returned=false", "Authenticated role gates", "Signed-in role states", "Identity boundary"} {
+	for _, want := range []string{"Signed-in role receipt", "Human validation witness", "Roles Janus sees", "Privacy boundary", "Evidence flags", "signed_in_role_receipt_no_identity_values", "identity_claim_values_withheld", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "cookie_value_returned=false", "Authenticated role gates", "Signed-in role states", "Identity boundary"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render authenticated role evidence %q: %s", want, body)
 		}

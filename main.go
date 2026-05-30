@@ -3280,6 +3280,45 @@ func mustTemplates() *template.Template {
     .mode-item.warn strong { color: var(--amber); }
     .mode-item.info strong { color: var(--blue); }
     .mode-item p, .command-card p, .ops-item p { font-size: 13px; line-height: 1.35; }
+    .witness-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .witness-card {
+      min-height: 126px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      padding: 12px;
+      display: grid;
+      align-content: space-between;
+      gap: 9px;
+      min-width: 0;
+    }
+    .witness-card span { color: var(--muted); font-size: 12px; }
+    .witness-card strong { font-size: 20px; line-height: 1.1; overflow-wrap: anywhere; }
+    .witness-card.ok strong { color: var(--accent); }
+    .witness-card.warn strong { color: var(--amber); }
+    .witness-card.info strong { color: var(--blue); }
+    .witness-card p { font-size: 13px; line-height: 1.35; }
+    .evidence-flags {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      padding: 10px 12px;
+    }
+    .evidence-flags summary {
+      cursor: pointer;
+      font-weight: 700;
+      line-height: 1.25;
+    }
+    .flag-cloud {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding-top: 10px;
+    }
     .assurance-flow {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -3526,6 +3565,7 @@ func mustTemplates() *template.Template {
       .command-top { grid-template-columns: 1fr; }
       .command-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .witness-grid { grid-template-columns: 1fr; }
       .receipt { grid-template-columns: 1fr; }
       .receipt-proof { grid-template-columns: 1fr; }
       .receipt-copy { grid-template-columns: 1fr; }
@@ -3552,6 +3592,7 @@ func mustTemplates() *template.Template {
       .command-actions { display: grid; grid-template-columns: 1fr; }
       .command-actions .button { width: 100%; }
       .mode-grid { grid-template-columns: 1fr; }
+      .witness-grid { grid-template-columns: 1fr; }
       .receipt { grid-template-columns: 1fr; }
       .receipt-proof { grid-template-columns: 1fr; }
       .receipt-copy { grid-template-columns: 1fr; }
@@ -3977,8 +4018,45 @@ func mustTemplates() *template.Template {
 	  </div>
 	  <div class="panel-body stack">
 	    <p>{{ .AuthenticatedRole.Summary }}</p>
-	    <p><span class="pill info">{{ .AuthenticatedRole.AuthMode }}</span> <span class="pill info">{{ .AuthenticatedRole.IdentityBoundary }}</span> <span class="pill ok">{{ .AuthenticatedRole.ActiveRoleCount }} active roles</span> <span class="pill ok">{{ .AuthenticatedRole.EvidenceSignal }}</span> <span class="pill ok">identity_values_returned=false</span> <span class="pill ok">subject_returned=false</span> <span class="pill ok">email_returned=false</span> <span class="pill ok">name_returned=false</span> <span class="pill ok">claim_values_returned=false</span> <span class="pill ok">group_values_returned=false</span> <span class="pill ok">token_returned=false</span> <span class="pill ok">cookie_value_returned=false</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">env_values_returned=false</span> <span class="pill ok">backend_path_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+	    <p><span class="pill info">Human validation witness</span> role gates visible, identity values private</p>
+	    <div class="witness-grid" aria-label="Human validation witness">
+	      <div class="witness-card {{ if eq .AuthenticatedRole.State "signed_in" }}ok{{ else if eq .AuthenticatedRole.State "local_auth_disabled" }}info{{ else }}warn{{ end }}">
+	        <span>Session</span>
+	        <strong>{{ if eq .AuthenticatedRole.State "signed_in" }}Signed in{{ else if eq .AuthenticatedRole.State "local_auth_disabled" }}Local smoke{{ else }}Needs login{{ end }}</strong>
+	        <p>Role receipt is present; identity values stay private.</p>
+	      </div>
+	      <div class="witness-card ok">
+	        <span>Roles Janus sees</span>
+	        <strong>{{ .AuthenticatedRole.ActiveRoleCount }} active</strong>
+	        <p>{{ range .AuthenticatedRole.Roles }}{{ if .Active }}<span class="pill info">{{ .Label }}</span> {{ end }}{{ end }}</p>
+	      </div>
+	      <div class="witness-card ok">
+	        <span>Privacy boundary</span>
+	        <strong>values withheld</strong>
+	        <p>No subject, email, name, group, claim, token, cookie, env, request body, or backend value is shown.</p>
+	      </div>
+	    </div>
 	    <p><span class="pill info">next</span> {{ .AuthenticatedRole.Next }}</p>
+	    <details class="evidence-flags">
+	      <summary>Evidence flags</summary>
+	      <div class="flag-cloud" aria-label="Signed-in role value-free evidence flags">
+	        <span class="pill info">{{ .AuthenticatedRole.AuthMode }}</span>
+	        <span class="pill info">{{ .AuthenticatedRole.IdentityBoundary }}</span>
+	        <span class="pill ok">{{ .AuthenticatedRole.EvidenceSignal }}</span>
+	        <span class="pill ok">identity_values_returned=false</span>
+	        <span class="pill ok">subject_returned=false</span>
+	        <span class="pill ok">email_returned=false</span>
+	        <span class="pill ok">name_returned=false</span>
+	        <span class="pill ok">claim_values_returned=false</span>
+	        <span class="pill ok">group_values_returned=false</span>
+	        <span class="pill ok">token_returned=false</span>
+	        <span class="pill ok">cookie_value_returned=false</span>
+	        <span class="pill ok">request_body_returned=false</span>
+	        <span class="pill ok">env_values_returned=false</span>
+	        <span class="pill ok">backend_path_returned=false</span>
+	        <span class="pill ok">value_returned=false</span>
+	      </div>
+	    </details>
 	    <div class="mode-grid" aria-label="Signed-in role states">
 	      {{ range .AuthenticatedRole.Roles }}
 	      <div class="mode-item {{ .Tone }}">
