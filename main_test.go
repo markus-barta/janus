@@ -250,7 +250,7 @@ func TestSessionRejectsTamper(t *testing.T) {
 	}
 }
 
-func TestSessionCookieIsOIDCRedirectCompatible(t *testing.T) {
+func TestSessionCookieIsStrictAndHostPrefixed(t *testing.T) {
 	app := newTestApp(t)
 
 	rr := httptest.NewRecorder()
@@ -259,8 +259,8 @@ func TestSessionCookieIsOIDCRedirectCompatible(t *testing.T) {
 	if len(cookies) != 1 {
 		t.Fatalf("expected one session cookie, got %d", len(cookies))
 	}
-	if cookies[0].SameSite != http.SameSiteLaxMode {
-		t.Fatalf("session cookie must be Lax for OIDC redirects, got %v", cookies[0].SameSite)
+	if cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("session cookie must be Strict; OIDC redirect cookies carry Lax separately, got %v", cookies[0].SameSite)
 	}
 	if cookies[0].Name != hostSessionCookie {
 		t.Fatalf("secure deployments should use host-prefixed session cookie, got %s", cookies[0].Name)
@@ -655,6 +655,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"session"`) || !strings.Contains(body, `"signed_session_expiry"`) {
 		t.Fatalf("posture response should include session posture: %s", body)
 	}
+	if !strings.Contains(body, `"cookie_same_site":"Strict"`) || !strings.Contains(body, `"session_same_site":"Strict"`) || !strings.Contains(body, `"oidc_login_same_site":"Lax"`) || !strings.Contains(body, `"strict_session_cookie"`) {
+		t.Fatalf("posture response should include strict session cookie split: %s", body)
+	}
 	if !strings.Contains(body, `"approved_use"`) || !strings.Contains(body, `"approved_metadata_use_enforced"`) {
 		t.Fatalf("posture response should include approved-use enforcement: %s", body)
 	}
@@ -811,7 +814,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Live posture", "Trust posture", "Catalog gates", "Approved use", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "Scope boundary", "Lifecycle posture"} {
+	for _, want := range []string{"Live posture", "Trust posture", "Catalog gates", "Approved use", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Scope boundary", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}

@@ -280,6 +280,7 @@ type SessionPosture struct {
 	ExpiresAt          string `json:"expires_at,omitempty"`
 	ExpiresLabel       string `json:"expires_label,omitempty"`
 	SecondsRemaining   int    `json:"seconds_remaining,omitempty"`
+	CookieSameSite     string `json:"cookie_same_site"`
 	CSRFBound          bool   `json:"csrf_bound"`
 	CookieSigned       bool   `json:"cookie_signed"`
 	ValueReturned      bool   `json:"value_returned"`
@@ -1167,7 +1168,7 @@ func (app *App) writeSession(w http.ResponseWriter, s Session) {
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   app.cfg.SecureCookies(),
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(time.Until(s.Expiry).Seconds()),
 	})
 }
@@ -1202,6 +1203,7 @@ func (app *App) sessionPosture(session Session) SessionPosture {
 	posture := SessionPosture{
 		AbsoluteTTLSeconds: int(defaultSessionTTL.Seconds()),
 		TTLLabel:           durationLabel(defaultSessionTTL),
+		CookieSameSite:     "Strict",
 		CSRFBound:          true,
 		CookieSigned:       len(app.cfg.CookieKey) >= 32,
 		ValueReturned:      false,
@@ -1532,16 +1534,19 @@ func (app *App) postureBody() map[string]any {
 		"approved_use":       approvedUsePosture,
 		"permits":            app.permits.Posture(),
 		"auth": map[string]any{
-			"oidc_nonce":         app.cfg.OIDCConfigured(),
-			"pkce_s256":          app.cfg.OIDCConfigured(),
-			"safe_failure_pages": true,
-			"value_returned":     false,
+			"oidc_nonce":                  app.cfg.OIDCConfigured(),
+			"pkce_s256":                   app.cfg.OIDCConfigured(),
+			"oidc_login_cookie_same_site": "Lax",
+			"safe_failure_pages":          true,
+			"value_returned":              false,
 		},
 		"session": app.sessionPosture(Session{}),
 		"cookies": map[string]any{
-			"host_prefixed":  app.cfg.SessionCookieName() == hostSessionCookie && app.cfg.StateCookieName() == hostStateCookie && app.cfg.NonceCookieName() == hostNonceCookie && app.cfg.PKCECookieName() == hostPKCECookie,
-			"secure":         app.cfg.SecureCookies(),
-			"value_returned": false,
+			"host_prefixed":        app.cfg.SessionCookieName() == hostSessionCookie && app.cfg.StateCookieName() == hostStateCookie && app.cfg.NonceCookieName() == hostNonceCookie && app.cfg.PKCECookieName() == hostPKCECookie,
+			"secure":               app.cfg.SecureCookies(),
+			"session_same_site":    "Strict",
+			"oidc_login_same_site": "Lax",
+			"value_returned":       false,
 		},
 		"request_correlation": map[string]any{
 			"response_header": "X-Request-Id",
@@ -1588,6 +1593,7 @@ func (app *App) postureBody() map[string]any {
 			"no_script_csp",
 			"safe_auth_failure_pages",
 			"audit_event_severity",
+			"strict_session_cookie",
 		},
 		"value_returned": false,
 	}
@@ -2250,6 +2256,7 @@ func mustTemplates() *template.Template {
         <div class="fact"><strong>auditor</strong><span class="muted">evidence role</span></div>
         <div class="fact"><strong>{{ .SessionPosture.TTLLabel }}</strong><span class="muted">session ttl</span></div>
         <div class="fact"><strong>{{ .SessionPosture.ExpiresLabel }}</strong><span class="muted">expires</span></div>
+        <div class="fact"><strong>{{ .SessionPosture.CookieSameSite }}</strong><span class="muted">session cookie</span></div>
       </div>
       {{ range .Access.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
     </div>
