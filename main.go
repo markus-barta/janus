@@ -5297,11 +5297,48 @@ func mustTemplates() *template.Template {
 <section class="panel" style="margin-bottom:16px" id="role-workbench">
   <div class="panel-head">
     <h2>Role workbench</h2>
-    <span class="pill info">role pruned</span>
+    <span class="pill info">least privilege</span>
   </div>
   <div class="panel-body stack">
     <p>{{ .RoleWorkbench.Summary }}</p>
     <p><span class="pill ok">value_returned=false</span> <span class="pill ok">hidden controls not rendered</span></p>
+    <div class="witness-grid" aria-label="Role workbench witness">
+      <div class="witness-card ok">
+        <span>Available controls</span>
+        <strong>{{ len .RoleWorkbench.Available }} rendered</strong>
+        <p>This session only sees controls allowed by its active roles and current readiness.</p>
+      </div>
+      <div class="witness-card {{ if .RoleWorkbench.Hidden }}warn{{ else }}ok{{ end }}">
+        <span>Hidden controls</span>
+        <strong>{{ len .RoleWorkbench.Hidden }} hidden</strong>
+        <p>Controls outside this role boundary are withheld instead of shown as tempting dead ends.</p>
+      </div>
+      <div class="witness-card info">
+        <span>Least privilege</span>
+        <strong>role boundary</strong>
+        <p>Viewer, operator, auditor, and admin duties stay separated before any action is offered.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>values withheld</strong>
+        <p>Role checks use labels and counts; identity, claim, token, cookie, and secret values stay private.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Role workbench evidence flags</summary>
+      <div class="flag-cloud" aria-label="Role workbench value-free evidence flags">
+        <span class="pill ok">available_controls={{ len .RoleWorkbench.Available }}</span>
+        <span class="pill ok">hidden_controls={{ len .RoleWorkbench.Hidden }}</span>
+        <span class="pill ok">hidden_controls_not_rendered=true</span>
+        <span class="pill ok">role_boundary_enforced=true</span>
+        <span class="pill ok">identity_values_returned=false</span>
+        <span class="pill ok">claim_values_returned=false</span>
+        <span class="pill ok">token_returned=false</span>
+        <span class="pill ok">cookie_value_returned=false</span>
+        <span class="pill ok">secret_value_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     <p><strong>Rendered now</strong></p>
     <div class="mode-grid" aria-label="Rendered role controls">
       {{ range .RoleWorkbench.Available }}
