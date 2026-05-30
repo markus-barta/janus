@@ -236,6 +236,16 @@ type Session struct {
 	Expiry  time.Time `json:"exp"`
 }
 
+type UIActionResult struct {
+	Title         string `json:"title"`
+	Outcome       string `json:"outcome"`
+	Message       string `json:"message"`
+	HandleID      string `json:"handle_id,omitempty"`
+	SecretRef     string `json:"secret_ref,omitempty"`
+	ExpiresAt     string `json:"expires_at,omitempty"`
+	ValueReturned bool   `json:"value_returned"`
+}
+
 func main() {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -340,6 +350,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /api/evidence", app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence)))
 	mux.HandleFunc("POST /api/permits", app.withAuth(app.handleCreatePermit))
 	mux.HandleFunc("POST /api/permits/{permitID}/run", app.withAuth(app.handleRunPermit))
+	mux.HandleFunc("POST /ui/warden/resolve", app.withAuth(app.handleResolveHandleUI))
 	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
 	return app.securityHeaders(app.rateLimit(mux))
 }
@@ -444,6 +455,10 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	app.audit(r, "dashboard.view", "allowed", actorFromContext(r.Context()), "")
 	session := currentSession(r.Context())
+	renderTemplate(w, app.templates, "dashboard", app.dashboardData(session, nil))
+}
+
+func (app *App) dashboardData(session Session, actionResult *UIActionResult) map[string]any {
 	principal := principalFromSession(session)
 	descriptors := app.broker.Descriptors(principal)
 	issues := enterpriseChecks(app.cfg)
@@ -474,8 +489,9 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"Scope":             scopePosture,
 		"EvidenceHash":      evidenceHash,
 		"CanExportEvidence": HasRole(session, RoleAuditor),
+		"ActionResult":      actionResult,
 	}
-	renderTemplate(w, app.templates, "dashboard", data)
+	return data
 }
 
 func (app *App) handleDescriptors(w http.ResponseWriter, r *http.Request) {
@@ -532,6 +548,63 @@ func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
 		"handle":         handle,
 		"value_returned": false,
 	})
+}
+
+func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "warden.resolve.ui", "denied", session.Subject, "csrf failed")
+		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result))
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		app.audit(r, "warden.resolve.ui", "denied", session.Subject, "bad form")
+		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: "Request form could not be read.", ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result))
+		return
+	}
+	req := HandleRequest{
+		Ref:    strings.TrimSpace(r.Form.Get("ref")),
+		Reason: strings.TrimSpace(r.Form.Get("reason")),
+	}
+	if req.Reason == "" {
+		app.audit(r, "warden.resolve.ui", "denied", session.Subject, "reason required")
+		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: "Reason required.", ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result))
+		return
+	}
+	handle, err := app.broker.ResolveHandle(principalFromSession(session), req)
+	if err != nil {
+		status := http.StatusBadRequest
+		message := "Handle request was denied."
+		switch {
+		case errors.Is(err, ErrNotFound):
+			status = http.StatusNotFound
+			message = "Descriptor not found."
+			app.auditWithRef(r, "warden.resolve.ui", "denied", session.Subject, "", "not found")
+		case errors.Is(err, ErrPolicyDenied):
+			status = http.StatusForbidden
+			message = "Policy denied."
+			app.auditWithRef(r, "warden.resolve.ui", "denied", session.Subject, "", err.Error())
+		default:
+			app.auditWithRef(r, "warden.resolve.ui", "denied", session.Subject, "", "broker error")
+		}
+		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: message, ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(session, &result))
+		return
+	}
+	app.auditWithRef(r, "warden.resolve.ui", "allowed", session.Subject, handle.SecretRef, "")
+	result := UIActionResult{
+		Title:         "Handle ready",
+		Outcome:       "allowed",
+		Message:       "Metadata handle issued. Secret value was not returned.",
+		HandleID:      handle.HandleID,
+		SecretRef:     handle.SecretRef,
+		ExpiresAt:     handle.ExpiresAt.Format("15:04:05"),
+		ValueReturned: false,
+	}
+	renderTemplate(w, app.templates, "dashboard", app.dashboardData(session, &result))
 }
 
 func (app *App) handleCreatePermit(w http.ResponseWriter, r *http.Request) {
@@ -1153,6 +1226,27 @@ func mustTemplates() *template.Template {
     .intro-copy { max-width: 720px; display: grid; gap: 10px; }
     .eyebrow { color: var(--accent); font-weight: 720; font-size: 13px; letter-spacing: 0; }
     .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .flow {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) minmax(260px, 1.2fr) auto;
+      gap: 12px;
+      align-items: end;
+    }
+    label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
+    select, input {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--ink);
+      font: inherit;
+      padding: 8px 10px;
+    }
+    select:focus, input:focus, button:focus, .button:focus, .nav a:focus {
+      outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+      outline-offset: 2px;
+    }
     .status { padding: 0; overflow: hidden; }
     .status-head, .panel-head {
       padding: 15px 16px;
@@ -1213,6 +1307,7 @@ func mustTemplates() *template.Template {
       .nav { grid-column: 1 / -1; justify-content: flex-start; overflow-x: auto; padding-bottom: 2px; }
       .overview { grid-template-columns: 1fr; }
       .panel.half { grid-column: span 12; }
+      .flow { grid-template-columns: 1fr; }
       .facts { grid-template-columns: 1fr; gap: 10px; }
       h1 { font-size: 32px; }
     }
@@ -1232,6 +1327,7 @@ func mustTemplates() *template.Template {
     {{ if .Session.Subject }}
     <nav class="nav" aria-label="Primary">
       <a href="#overview">Overview</a>
+      <a href="#warden">Warden</a>
       <a href="#posture">Posture</a>
       <a href="#audit">Audit</a>
       <a href="#catalog">Catalog</a>
@@ -1306,6 +1402,47 @@ func mustTemplates() *template.Template {
   </div>
 </section>
 {{ end }}
+{{ if .ActionResult }}
+<section class="panel" style="margin-bottom:16px" id="result">
+  <div class="panel-head">
+    <h2>{{ .ActionResult.Title }}</h2>
+    {{ if eq .ActionResult.Outcome "allowed" }}<span class="pill ok">allowed</span>{{ else }}<span class="pill warn">denied</span>{{ end }}
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .ActionResult.Message }}</p>
+    {{ if .ActionResult.HandleID }}
+    <div class="facts">
+      <div class="fact"><strong class="mono">{{ .ActionResult.HandleID }}</strong><span class="muted">handle id</span></div>
+      <div class="fact"><strong>{{ .ActionResult.SecretRef }}</strong><span class="muted">secret ref</span></div>
+      <div class="fact"><strong>{{ .ActionResult.ExpiresAt }}</strong><span class="muted">expires</span></div>
+    </div>
+    {{ end }}
+    <p><span class="pill ok">value_returned=false</span></p>
+  </div>
+</section>
+{{ end }}
+<section class="grid" id="warden">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Request metadata handle</h2>
+      <span class="pill ok">value-free</span>
+    </div>
+    <div class="panel-body">
+      <form class="flow" method="post" action="/ui/warden/resolve">
+        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+        <label>Descriptor
+          <select name="ref" required>
+            {{ range .Descriptors }}<option value="{{ .ID }}">{{ .DisplayName }}</option>{{ end }}
+          </select>
+        </label>
+        <label>Reason
+          <input name="reason" maxlength="160" required placeholder="maintenance, audit, rotation">
+        </label>
+        <button class="primary" type="submit">Issue handle</button>
+      </form>
+    </div>
+  </div>
+</section>
 <section class="grid" id="posture">
   <div class="panel half">
     <div class="panel-head">

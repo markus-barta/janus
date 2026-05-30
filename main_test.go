@@ -350,6 +350,44 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 	}
 }
 
+func TestWardenResolveUIReturnsValueFreeHandle(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodPost, "/ui/warden/resolve", strings.NewReader("ref=zitadel-janus-oidc&reason=local+smoke"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleResolveHandleUI)(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Handle ready", "value_returned=false", "zitadel-janus-oidc"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("UI handle response should render %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "plaintext") {
+		t.Fatalf("UI handle response should remain value-free: %s", body)
+	}
+}
+
+func TestWardenResolveUIRequiresReason(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodPost, "/ui/warden/resolve", strings.NewReader("ref=zitadel-janus-oidc"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleResolveHandleUI)(out, req)
+	if out.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", out.Code, out.Body.String())
+	}
+	if !strings.Contains(out.Body.String(), "Reason required") || strings.Contains(out.Body.String(), "plaintext") {
+		t.Fatalf("UI denial should be clear and value-free: %s", out.Body.String())
+	}
+}
+
 func TestScopePolicyFiltersDescriptorsAndDeniesResolve(t *testing.T) {
 	dataDir := t.TempDir()
 	catalogPath := filepath.Join(t.TempDir(), "catalog.json")
