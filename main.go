@@ -852,7 +852,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	}
 	evidenceHash := ""
 	if canViewAudit && app.permits != nil {
-		evidencePack := app.evidencePack()
+		evidencePack := app.evidencePack(session)
 		if evidencePack.Integrity != nil {
 			evidenceHash = evidencePack.Integrity.PackHash
 			if len(evidenceHash) > 12 {
@@ -862,6 +862,8 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	}
 	evidenceBoundary := EvidenceBoundaryFor(canViewAudit, evidenceHash != "")
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
+	roleAvailability := RoleAvailabilityFor(session)
+	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	data := map[string]any{
 		"Title":             "Janus",
 		"CSPNonce":          cspNonceFromContext(r.Context()),
@@ -875,7 +877,8 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"CatalogGates":      catalogGates,
 		"Access":            accessPosture,
 		"RoleBoundaries":    RoleBoundariesFor(session),
-		"RoleAvailability":  RoleAvailabilityFor(session),
+		"RoleAvailability":  roleAvailability,
+		"OperationalStatus": operationalStatus,
 		"Ready":             ready,
 		"Readiness":         readinessBody,
 		"SessionPosture":    app.sessionPosture(session),
@@ -947,7 +950,7 @@ func (app *App) handleRecentAudit(w http.ResponseWriter, r *http.Request) {
 func (app *App) handlePosture(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	app.audit(r, "posture.view", "allowed", session.Subject, "")
-	writeJSON(w, http.StatusOK, app.postureBody())
+	writeJSON(w, http.StatusOK, app.postureBody(session))
 }
 
 func (app *App) handleEvidence(w http.ResponseWriter, r *http.Request) {
@@ -956,7 +959,7 @@ func (app *App) handleEvidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app.audit(r, "evidence.export", "allowed", session.Subject, "")
-	writeJSON(w, http.StatusOK, app.evidencePack())
+	writeJSON(w, http.StatusOK, app.evidencePack(session))
 }
 
 func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
@@ -1924,7 +1927,7 @@ func (app *App) renderSafeFailure(w http.ResponseWriter, r *http.Request, status
 	})
 }
 
-func (app *App) postureBody() map[string]any {
+func (app *App) postureBody(session Session) map[string]any {
 	allDescriptors := app.store.Descriptors()
 	descriptors := app.cfg.ScopePolicy.Filter(allDescriptors)
 	issues := enterpriseChecks(app.cfg)
@@ -1941,6 +1944,8 @@ func (app *App) postureBody() map[string]any {
 	}
 	evidenceBoundary := EvidenceBoundaryFor(true, true)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
+	roleAvailability := RoleAvailabilityFor(session)
+	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	return map[string]any{
 		"service":            "janus",
 		"mode":               app.cfg.ProductMode,
@@ -1957,12 +1962,13 @@ func (app *App) postureBody() map[string]any {
 			"duties":          []string{"posture", "use_actions", "audit_export", "admin_policy"},
 			"value_returned":  false,
 		},
-		"scope":             scopePosture,
-		"lifecycle":         lifecyclePosture,
-		"approved_use":      approvedUsePosture,
-		"permits":           permitPosture,
-		"mode_posture":      ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
-		"assurance_summary": assuranceSummary,
+		"scope":              scopePosture,
+		"lifecycle":          lifecyclePosture,
+		"approved_use":       approvedUsePosture,
+		"permits":            permitPosture,
+		"mode_posture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"assurance_summary":  assuranceSummary,
+		"operational_status": operationalStatus,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
 			"pkce_s256":                   app.cfg.OIDCConfigured(),
@@ -2002,6 +2008,7 @@ func (app *App) postureBody() map[string]any {
 			"backend_source_paths":      "not_returned",
 			"evidence_export_boundary":  "dashboard_and_json",
 			"human_readable_summary":    "dashboard_posture_evidence",
+			"operational_status":        "dashboard_posture_strip",
 			"value_returned":            false,
 		},
 		"response_hardening": map[string]any{
@@ -2086,6 +2093,7 @@ func (app *App) postureBody() map[string]any {
 			"evidence_export_boundary_ux",
 			"role_availability_ux",
 			"human_readable_assurance_summary",
+			"operational_status_strip",
 		},
 		"value_returned": false,
 	}
@@ -2099,24 +2107,28 @@ func (app *App) scopePosture(descriptors []SecretDescriptor) ScopePosture {
 	return ScopePostureFor(app.cfg.ScopePolicy, descriptors)
 }
 
-func (app *App) evidencePack() EvidencePack {
+func (app *App) evidencePack(session Session) EvidencePack {
 	allDescriptors := app.store.Descriptors()
 	descriptors := app.cfg.ScopePolicy.Filter(allDescriptors)
 	issues := enterpriseChecks(app.cfg)
 	catalogGates := ValidateCatalog(descriptors)
 	_, ready := app.readinessBody()
 	accessPosture := app.accessPosture()
+	scopePosture := app.scopePosture(allDescriptors)
 	auditPosture := app.store.AuditPosture()
 	evidenceBoundary := EvidenceBoundaryFor(true, true)
+	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
+	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, RoleAvailabilityFor(session))
 	pack := EvidencePack{
 		GeneratedAt:      time.Now().UTC(),
 		Service:          "janus",
 		Mode:             app.cfg.ProductMode,
-		Posture:          app.postureBody(),
-		AssuranceSummary: AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary),
+		Posture:          app.postureBody(session),
+		Operational:      operationalStatus,
+		AssuranceSummary: assuranceSummary,
 		Descriptors:      descriptors,
 		CatalogGates:     catalogGates,
-		ScopePosture:     app.scopePosture(allDescriptors),
+		ScopePosture:     scopePosture,
 		LifecyclePosture: LifecyclePostureFor(descriptors, time.Now().UTC()),
 		PermitPosture:    PermitPosture{ValueReturned: false},
 		AccessPosture:    accessPosture,
@@ -2361,6 +2373,28 @@ func mustTemplates() *template.Template {
     .intro-copy { max-width: 720px; display: grid; gap: 10px; min-width: 0; }
     .eyebrow { color: var(--accent); font-weight: 720; font-size: 13px; letter-spacing: 0; }
     .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .ops-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .ops-item {
+      min-height: 76px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      padding: 10px 11px;
+      display: grid;
+      align-content: space-between;
+      gap: 6px;
+      min-width: 0;
+    }
+    .ops-item span { color: var(--muted); font-size: 12px; line-height: 1.15; }
+    .ops-item strong { font-size: 16px; line-height: 1.15; overflow-wrap: anywhere; }
+    .ops-item p { font-size: 12px; line-height: 1.25; }
+    .ops-item.ok strong { color: var(--accent); }
+    .ops-item.warn strong { color: var(--amber); }
+    .ops-item.info strong { color: var(--blue); }
     .trust-rail {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2581,6 +2615,7 @@ func mustTemplates() *template.Template {
       .facts { grid-template-columns: 1fr; gap: 10px; }
       .verdict { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .role-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .ops-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2593,6 +2628,7 @@ func mustTemplates() *template.Template {
       .status-body { grid-template-columns: 1fr; }
       .verdict { grid-template-columns: 1fr; }
       .role-matrix { grid-template-columns: 1fr; }
+      .ops-strip { grid-template-columns: 1fr; }
       .mode-grid { grid-template-columns: 1fr; }
       .assurance-flow { grid-template-columns: 1fr; }
       .trust-rail { grid-template-columns: 1fr; }
@@ -2653,6 +2689,16 @@ func mustTemplates() *template.Template {
       {{ if .CanExportEvidence }}<a class="button primary" href="/api/evidence">Evidence JSON</a>{{ end }}
       <a class="button quiet" href="/api/posture">Posture JSON</a>
       <a class="button quiet" href="/api/warden/descriptors">Descriptors JSON</a>
+    </div>
+    <p><span class="pill {{ if eq .OperationalStatus.Verdict "operational" }}ok{{ else }}warn{{ end }}">{{ .OperationalStatus.Verdict }}</span> {{ .OperationalStatus.Summary }}</p>
+    <div class="ops-strip" aria-label="Operational status">
+      {{ range .OperationalStatus.Items }}
+      <div class="ops-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+      </div>
+      {{ end }}
     </div>
     <div class="assurance-flow" aria-label="Assurance flow">
       <div class="assurance-step">

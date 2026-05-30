@@ -713,6 +713,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"assurance_summary"`) || !strings.Contains(body, `"verdict"`) || !strings.Contains(body, `"Value boundary"`) || !strings.Contains(body, `"human_readable_assurance_summary"`) || !strings.Contains(body, `"human_readable_summary":"dashboard_posture_evidence"`) {
 		t.Fatalf("posture response should include human-readable assurance summary: %s", body)
 	}
+	if !strings.Contains(body, `"operational_status"`) || !strings.Contains(body, `"key":"role_duties"`) || !strings.Contains(body, `"key":"value_boundary"`) || !strings.Contains(body, `"operational_status_strip"`) || !strings.Contains(body, `"operational_status":"dashboard_posture_strip"`) {
+		t.Fatalf("posture response should include operational status strip: %s", body)
+	}
 	if !strings.Contains(body, `"mode_posture"`) || !strings.Contains(body, `"current":"Self-hosted"`) || !strings.Contains(body, `"enterprise":"not_claimed"`) || !strings.Contains(body, `"mode_posture_evidence"`) {
 		t.Fatalf("posture response should include product-mode evidence: %s", body)
 	}
@@ -803,6 +806,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"assurance_summary"`) || !strings.Contains(body, `"proven"`) || !strings.Contains(body, `"review"`) || !strings.Contains(body, `"Browser and API boundary"`) {
 		t.Fatalf("evidence response should include assurance summary: %s", body)
+	}
+	if !strings.Contains(body, `"operational_status"`) || !strings.Contains(body, `"key":"evidence_export"`) || !strings.Contains(body, `"key":"scope_boundary"`) {
+		t.Fatalf("evidence response should include operational status: %s", body)
 	}
 	if !strings.Contains(body, `"scope_posture"`) {
 		t.Fatalf("evidence response should include scope posture: %s", body)
@@ -1014,7 +1020,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Assurance summary", "Proven controls", "Review items", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "not_claimed", "Evidence export", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Scope boundary", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Assurance summary", "Proven controls", "Review items", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "not_claimed", "Evidence export", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
@@ -1990,7 +1996,7 @@ func TestBrokerRequiresApprovedMetadataUseProfile(t *testing.T) {
 func TestEvidenceIntegrityIsValueFreeAndStableShape(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
-	pack := app.evidencePack()
+	pack := app.evidencePack(Session{Roles: AllRoles()})
 	if pack.Integrity == nil {
 		t.Fatal("expected evidence integrity metadata")
 	}

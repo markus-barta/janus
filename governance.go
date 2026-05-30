@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -27,6 +28,7 @@ type EvidencePack struct {
 	Service          string             `json:"service"`
 	Mode             string             `json:"mode"`
 	Posture          map[string]any     `json:"posture"`
+	Operational      OperationalStatus  `json:"operational_status"`
 	AssuranceSummary AssuranceSummary   `json:"assurance_summary"`
 	EvidenceBoundary EvidenceBoundary   `json:"evidence_boundary"`
 	Descriptors      []SecretDescriptor `json:"descriptors"`
@@ -62,6 +64,21 @@ type AssuranceSummary struct {
 }
 
 type AssuranceItem struct {
+	Label  string `json:"label"`
+	State  string `json:"state"`
+	Detail string `json:"detail"`
+	Tone   string `json:"tone"`
+}
+
+type OperationalStatus struct {
+	Verdict       string                  `json:"verdict"`
+	Summary       string                  `json:"summary"`
+	Items         []OperationalStatusItem `json:"items"`
+	ValueReturned bool                    `json:"value_returned"`
+}
+
+type OperationalStatusItem struct {
+	Key    string `json:"key"`
 	Label  string `json:"label"`
 	State  string `json:"state"`
 	Detail string `json:"detail"`
@@ -139,6 +156,67 @@ func (s *AssuranceSummary) add(ok bool, label, okState, reviewState, okDetail, r
 		return
 	}
 	s.Review = append(s.Review, AssuranceItem{Label: label, State: reviewState, Detail: reviewDetail, Tone: "warn"})
+}
+
+func OperationalStatusFor(ready bool, scope ScopePosture, assurance AssuranceSummary, boundary EvidenceBoundary, roles []RoleAvailability) OperationalStatus {
+	status := OperationalStatus{
+		Verdict:       "review",
+		Summary:       "Janus is serving value-free posture; review items stay visible.",
+		ValueReturned: false,
+	}
+
+	availableRoles := 0
+	for _, role := range roles {
+		if role.State == "available" {
+			availableRoles++
+		}
+	}
+	roleTotal := len(roles)
+	roleClear := roleTotal > 0 && availableRoles == roleTotal
+	scopeClear := scope.Strict && scope.GateCount == 0
+	assuranceClear := len(assurance.Review) == 0 && !assurance.ValueReturned
+	evidenceClear := boundary.Gate == "export_ready" && !boundary.ValueReturned
+	valueClear := !boundary.ValueReturned
+
+	if ready && scopeClear && assuranceClear && evidenceClear && roleClear && valueClear {
+		status.Verdict = "operational"
+		status.Summary = "Current session is ready, scoped, role-complete, and value-free."
+	}
+
+	status.add(ready, "readiness", "Readiness", "ready", "review", "Redacted public checks are healthy.", "Readiness needs review before sensitive actions.")
+	status.add(assuranceClear, "assurance_verdict", "Assurance verdict", assurance.Verdict, assurance.Verdict, "No assurance review items are open.", fmt.Sprintf("%d assurance review items are visible.", len(assurance.Review)))
+	status.add(evidenceClear, "evidence_export", "Evidence export", "export ready", boundary.Gate, "Auditor evidence export is available with integrity metadata.", "Evidence export is role-gated or waiting for integrity metadata.")
+
+	roleState := fmt.Sprintf("%d of %d", availableRoles, roleTotal)
+	roleTone := "warn"
+	roleDetail := "Unavailable duties stay hidden or blocked for this session."
+	if roleClear {
+		roleTone = "ok"
+		roleDetail = "Posture, use, audit export, and admin duties are available."
+	}
+	status.Items = append(status.Items, OperationalStatusItem{
+		Key:    "role_duties",
+		Label:  "Role duties",
+		State:  roleState,
+		Detail: roleDetail,
+		Tone:   roleTone,
+	})
+
+	scopeDetail := "Strict scope allowlist is active."
+	if len(scope.AllowedScopes) > 0 {
+		scopeDetail = "Strict scope allowlist: " + strings.Join(scope.AllowedScopes, ", ") + "."
+	}
+	status.add(scopeClear, "scope_boundary", "Scope boundary", "strict", "review", scopeDetail, "Scope allowlist needs review.")
+	status.add(valueClear, "value_boundary", "Value boundary", "withheld", "blocked", "Secret values, backend paths, request bodies, and command output stay out.", "Evidence must not return secret values.")
+	return status
+}
+
+func (s *OperationalStatus) add(ok bool, key, label, okState, reviewState, okDetail, reviewDetail string) {
+	if ok {
+		s.Items = append(s.Items, OperationalStatusItem{Key: key, Label: label, State: okState, Detail: okDetail, Tone: "ok"})
+		return
+	}
+	s.Items = append(s.Items, OperationalStatusItem{Key: key, Label: label, State: reviewState, Detail: reviewDetail, Tone: "warn"})
 }
 
 func ApprovedUsePostureFor(descriptors []SecretDescriptor) ApprovedUsePosture {
