@@ -175,6 +175,23 @@ func TestWardenResolveReturnsHandleOnly(t *testing.T) {
 	}
 }
 
+func TestWardenResolveWorksWhenAuthDisabledForLocalSmoke(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodPost, "/api/warden/resolve", strings.NewReader(`{"ref":"zitadel-janus-oidc","reason":"local smoke"}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleResolveHandle)(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	if strings.Contains(out.Body.String(), `"plaintext"`) {
+		t.Fatalf("response should be value-free: %s", out.Body.String())
+	}
+}
+
 func TestPermitRunIsNoopAndValueFree(t *testing.T) {
 	app := newTestApp(t)
 	permit, err := app.broker.CreatePermit(principalFromSession(Session{Subject: "user-1"}), PermitRequest{

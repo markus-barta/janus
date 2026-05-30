@@ -373,7 +373,8 @@ func (app *App) handleFavicon(w http.ResponseWriter, _ *http.Request) {
 func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !app.cfg.RequireAuth {
-			next(w, r)
+			session := Session{Subject: "dev-local", Name: "Local Dev", Expiry: time.Now().UTC().Add(time.Hour)}
+			next(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, session)))
 			return
 		}
 
@@ -448,7 +449,7 @@ func (app *App) handleDescriptors(w http.ResponseWriter, r *http.Request) {
 
 func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
-	if !app.verifyCSRF(r, session) {
+	if !app.csrfAllowed(r, session) {
 		app.audit(r, "warden.resolve", "denied", session.Subject, "csrf failed")
 		writeJSONError(w, http.StatusForbidden, "csrf_failed", "CSRF token required")
 		return
@@ -473,7 +474,7 @@ func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
 
 func (app *App) handleCreatePermit(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
-	if !app.verifyCSRF(r, session) {
+	if !app.csrfAllowed(r, session) {
 		app.audit(r, "permit.create", "denied", session.Subject, "csrf failed")
 		writeJSONError(w, http.StatusForbidden, "csrf_failed", "CSRF token required")
 		return
@@ -499,7 +500,7 @@ func (app *App) handleCreatePermit(w http.ResponseWriter, r *http.Request) {
 
 func (app *App) handleRunPermit(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
-	if !app.verifyCSRF(r, session) {
+	if !app.csrfAllowed(r, session) {
 		app.audit(r, "permit.run", "denied", session.Subject, "csrf failed")
 		writeJSONError(w, http.StatusForbidden, "csrf_failed", "CSRF token required")
 		return
@@ -604,7 +605,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
-	if !app.verifyCSRF(r, session) {
+	if !app.csrfAllowed(r, session) {
 		app.audit(r, "auth.logout", "denied", session.Subject, "csrf failed")
 		http.Error(w, "CSRF token required", http.StatusForbidden)
 		return
@@ -720,6 +721,13 @@ func (app *App) verifyCSRF(r *http.Request, session Session) bool {
 		}
 	}
 	return hmac.Equal([]byte(want), []byte(got))
+}
+
+func (app *App) csrfAllowed(r *http.Request, session Session) bool {
+	if !app.cfg.RequireAuth {
+		return true
+	}
+	return app.verifyCSRF(r, session)
 }
 
 func sign(key []byte, payload string) string {
