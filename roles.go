@@ -87,6 +87,62 @@ type RoleWorkbenchItem struct {
 	Tone   string
 }
 
+type RolePolicyReadiness struct {
+	Label                 string           `json:"label"`
+	Summary               string           `json:"summary"`
+	Status                string           `json:"status"`
+	Ready                 bool             `json:"ready"`
+	BootstrapOwnerState   string           `json:"bootstrap_owner_state"`
+	BootstrapOwnerBlocked bool             `json:"bootstrap_owner_blocked"`
+	ExplicitBindings      bool             `json:"explicit_bindings"`
+	ReadyLanes            int              `json:"ready_lanes"`
+	MissingLanes          int              `json:"missing_lanes"`
+	TotalLanes            int              `json:"total_lanes"`
+	EvidenceSignal        string           `json:"evidence_signal"`
+	Next                  string           `json:"next"`
+	Lanes                 []RolePolicyLane `json:"lanes"`
+	Steps                 []RolePolicyStep `json:"steps"`
+	SubjectValuesReturned bool             `json:"subject_values_returned"`
+	GroupValuesReturned   bool             `json:"group_values_returned"`
+	ClaimValuesReturned   bool             `json:"claim_values_returned"`
+	EnvValuesReturned     bool             `json:"env_values_returned"`
+	BackendPathReturned   bool             `json:"backend_path_returned"`
+	TokenReturned         bool             `json:"token_returned"`
+	ValueReturned         bool             `json:"value_returned"`
+}
+
+type RolePolicyLane struct {
+	Key                      string `json:"key"`
+	Label                    string `json:"label"`
+	Role                     string `json:"role"`
+	State                    string `json:"state"`
+	Ready                    bool   `json:"ready"`
+	Required                 bool   `json:"required"`
+	SubjectBindingConfigured bool   `json:"subject_binding_configured"`
+	GroupBindingConfigured   bool   `json:"group_binding_configured"`
+	SubjectBindingCount      int    `json:"subject_binding_count"`
+	GroupBindingCount        int    `json:"group_binding_count"`
+	BindingCount             int    `json:"binding_count"`
+	Detail                   string `json:"detail"`
+	Next                     string `json:"next"`
+	Tone                     string `json:"tone"`
+	SubjectValuesReturned    bool   `json:"subject_values_returned"`
+	GroupValuesReturned      bool   `json:"group_values_returned"`
+	ClaimValuesReturned      bool   `json:"claim_values_returned"`
+	ValueReturned            bool   `json:"value_returned"`
+}
+
+type RolePolicyStep struct {
+	Key           string `json:"key"`
+	Label         string `json:"label"`
+	State         string `json:"state"`
+	OwnerRole     string `json:"owner_role"`
+	Detail        string `json:"detail"`
+	Next          string `json:"next"`
+	Tone          string `json:"tone"`
+	ValueReturned bool   `json:"value_returned"`
+}
+
 func LoadRolePolicyFromEnv() RolePolicy {
 	return RolePolicy{
 		AdminSubjects:    splitSet(envDefault("JANUS_ADMIN_SUBJECTS", "")),
@@ -252,6 +308,167 @@ func RoleBindingSourcesFor(policy RolePolicy) []RoleBindingSource {
 		}
 	}
 	return append(sources, bootstrap)
+}
+
+func RolePolicyReadinessFor(policy RolePolicy, access AccessPosture) RolePolicyReadiness {
+	lanes := []RolePolicyLane{
+		rolePolicyLane(RoleAdmin, "Admin lane", policy.AdminSubjects, policy.AdminGroups),
+		rolePolicyLane(RoleAuditor, "Auditor lane", policy.AuditorSubjects, policy.AuditorGroups),
+		rolePolicyLane(RoleOperator, "Operator lane", policy.OperatorSubjects, policy.OperatorGroups),
+	}
+	readyLanes := 0
+	for _, lane := range lanes {
+		if lane.Ready {
+			readyLanes++
+		}
+	}
+	missingLanes := len(lanes) - readyLanes
+
+	bootstrapState := "off"
+	bootstrapBlocked := false
+	bootstrapDetail := "Bootstrap owner is off; elevated roles require explicit Zitadel policy."
+	bootstrapNext := "Keep bootstrap owner off and maintain explicit role owner review."
+	bootstrapTone := "ok"
+	if policy.BootstrapOwner {
+		bootstrapState = "inactive"
+		bootstrapDetail = "Bootstrap owner is ignored because explicit role policy exists."
+		bootstrapNext = "Turn bootstrap owner off after explicit role lanes are reviewed."
+		bootstrapTone = "info"
+		if access.BootstrapOwner {
+			bootstrapState = "active"
+			bootstrapBlocked = true
+			bootstrapDetail = "Bootstrap owner is granting all V1 elevated roles because explicit policy is not ready."
+			bootstrapNext = "Add explicit Zitadel subject or group bindings for every elevated role lane."
+			bootstrapTone = "warn"
+		}
+	}
+
+	ready := missingLanes == 0 && !bootstrapBlocked && !access.ValueReturned
+	status := "ready"
+	summary := "Role policy has explicit Zitadel admin, auditor, and operator lanes; bootstrap owner is not active."
+	next := "Keep owner review current and leave evidence value-free."
+	if !ready {
+		status = "blocked"
+		summary = "Role policy is not ready for enterprise release because bootstrap is active or a role lane is missing."
+		next = "Bind each missing elevated role lane to a Zitadel subject or group, then close bootstrap."
+	} else if policy.BootstrapOwner {
+		summary = "Role policy lanes are explicit; bootstrap owner is inactive and should be turned off after review."
+		next = "Turn bootstrap owner off to make the explicit policy visible in configuration too."
+	}
+
+	readiness := RolePolicyReadiness{
+		Label:                 "Role policy readiness",
+		Summary:               summary,
+		Status:                status,
+		Ready:                 ready,
+		BootstrapOwnerState:   bootstrapState,
+		BootstrapOwnerBlocked: bootstrapBlocked,
+		ExplicitBindings:      access.ExplicitBindings,
+		ReadyLanes:            readyLanes,
+		MissingLanes:          missingLanes,
+		TotalLanes:            len(lanes),
+		EvidenceSignal:        "bootstrap_to_explicit_zitadel_lanes",
+		Next:                  next,
+		Lanes:                 lanes,
+		SubjectValuesReturned: false,
+		GroupValuesReturned:   false,
+		ClaimValuesReturned:   false,
+		EnvValuesReturned:     false,
+		BackendPathReturned:   false,
+		TokenReturned:         false,
+		ValueReturned:         false,
+	}
+	readiness.Steps = []RolePolicyStep{
+		{
+			Key:           "bootstrap_owner",
+			Label:         "Bootstrap owner",
+			State:         bootstrapState,
+			OwnerRole:     RoleAdmin,
+			Detail:        bootstrapDetail,
+			Next:          bootstrapNext,
+			Tone:          bootstrapTone,
+			ValueReturned: false,
+		},
+		{
+			Key:           "zitadel_lanes",
+			Label:         "Zitadel role lanes",
+			State:         laneSetupState(missingLanes),
+			OwnerRole:     RoleAdmin,
+			Detail:        "Admin, auditor, and operator each need at least one configured subject or group binding.",
+			Next:          laneSetupNext(missingLanes),
+			Tone:          laneSetupTone(missingLanes),
+			ValueReturned: false,
+		},
+		{
+			Key:           "value_boundary",
+			Label:         "Value boundary",
+			State:         "enforced",
+			OwnerRole:     RoleAuditor,
+			Detail:        "Readiness returns counts and yes/no states only; no subject, group, claim, token, env, or backend values.",
+			Next:          "Use posture and evidence for review without copying identity or secret values.",
+			Tone:          "ok",
+			ValueReturned: false,
+		},
+	}
+	return readiness
+}
+
+func rolePolicyLane(role, label string, subjects, groups map[string]bool) RolePolicyLane {
+	subjectCount := len(subjects)
+	groupCount := len(groups)
+	bindingCount := subjectCount + groupCount
+	ready := bindingCount > 0
+	state := "ready"
+	detail := "This role lane has explicit policy; only binding counts are returned."
+	next := "Keep the binding owner review current."
+	tone := "ok"
+	if !ready {
+		state = "missing"
+		detail = "This role lane has no explicit subject or group binding."
+		next = "Add a Zitadel subject or group binding for this role before enterprise release."
+		tone = "warn"
+	}
+	return RolePolicyLane{
+		Key:                      role,
+		Label:                    label,
+		Role:                     role,
+		State:                    state,
+		Ready:                    ready,
+		Required:                 true,
+		SubjectBindingConfigured: subjectCount > 0,
+		GroupBindingConfigured:   groupCount > 0,
+		SubjectBindingCount:      subjectCount,
+		GroupBindingCount:        groupCount,
+		BindingCount:             bindingCount,
+		Detail:                   detail,
+		Next:                     next,
+		Tone:                     tone,
+		SubjectValuesReturned:    false,
+		GroupValuesReturned:      false,
+		ClaimValuesReturned:      false,
+		ValueReturned:            false,
+	}
+}
+
+func laneSetupState(missing int) string {
+	if missing == 0 {
+		return "ready"
+	}
+	return "missing_lanes"
+}
+
+func laneSetupNext(missing int) string {
+	if missing == 0 {
+		return "Keep Zitadel role bindings reviewed before release promotion."
+	}
+	return "Add explicit Zitadel bindings for every missing elevated role lane."
+}
+
+func laneSetupTone(missing int) string {
+	if missing == 0 {
+		return "ok"
+	}
+	return "warn"
 }
 
 func roleSubjectBindingCount(policy RolePolicy) int {

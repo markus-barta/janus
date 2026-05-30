@@ -952,6 +952,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"auth_failure_posture"`) || !strings.Contains(body, `"label":"Auth failure posture"`) || !strings.Contains(body, `"evidence_signal":"presence_only_auth_failure_posture"`) || !strings.Contains(body, `"identity_provider":"zitadel_oidc"`) || !strings.Contains(body, `"key":"login_loop_paused"`) || !strings.Contains(body, `"raw_callback_query_returned":false`) || !strings.Contains(body, `"provider_error_returned":false`) || !strings.Contains(body, `"redirect_url_returned":false`) || !strings.Contains(body, `"token_returned":false`) || !strings.Contains(body, `"cookie_value_returned":false`) || !strings.Contains(body, `"request_body_returned":false`) || !strings.Contains(body, `"env_returned":false`) || !strings.Contains(body, `"backend_path_returned":false`) || !strings.Contains(body, `"auth_failure_posture":"safe_reason_codes_no_provider_values"`) || !strings.Contains(body, `"oidc_redirect_loop_guard"`) {
 		t.Fatalf("posture response should include auth failure posture: %s", body)
 	}
+	if !strings.Contains(body, `"role_policy_readiness"`) || !strings.Contains(body, `"label":"Role policy readiness"`) || !strings.Contains(body, `"evidence_signal":"bootstrap_to_explicit_zitadel_lanes"`) || !strings.Contains(body, `"key":"zitadel_lanes"`) || !strings.Contains(body, `"bootstrap_owner_state"`) || !strings.Contains(body, `"subject_binding_configured"`) || !strings.Contains(body, `"group_binding_configured"`) || !strings.Contains(body, `"subject_values_returned":false`) || !strings.Contains(body, `"group_values_returned":false`) || !strings.Contains(body, `"claim_values_returned":false`) || !strings.Contains(body, `"token_returned":false`) || !strings.Contains(body, `"backend_path_returned":false`) || !strings.Contains(body, `"role_policy_readiness_workflow"`) {
+		t.Fatalf("posture response should include role policy readiness workflow: %s", body)
+	}
 	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
 		t.Fatalf("posture response should include scope policy: %s", body)
 	}
@@ -1347,6 +1350,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed auth failure posture")
 	}
+	postureRolePolicyReadiness, ok := posture["role_policy_readiness"].(RolePolicyReadiness)
+	if !ok {
+		t.Fatalf("posture should expose typed role policy readiness")
+	}
 	postureAttachmentReview, ok := posture["attachment_review"].(AttachmentReview)
 	if !ok {
 		t.Fatalf("posture should expose typed attachment review")
@@ -1413,6 +1420,9 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(postureAuthFailure, pack.AuthFailure) {
 		t.Fatalf("posture and evidence should share the same auth failure posture: posture=%#v evidence=%#v", postureAuthFailure, pack.AuthFailure)
+	}
+	if !reflect.DeepEqual(postureRolePolicyReadiness, pack.RolePolicyReadiness) {
+		t.Fatalf("posture and evidence should share the same role policy readiness: posture=%#v evidence=%#v", postureRolePolicyReadiness, pack.RolePolicyReadiness)
 	}
 	if !reflect.DeepEqual(postureAttachmentReview, pack.AttachmentReview) {
 		t.Fatalf("posture and evidence should share the same attachment review: posture=%#v evidence=%#v", postureAttachmentReview, pack.AttachmentReview)
@@ -2093,6 +2103,43 @@ func TestRolePolicyExplicitOwnerBindingClosesBootstrapGate(t *testing.T) {
 	}
 	if !accessSourceHasState(posture.BindingSources, "subject_bindings", "configured") || !accessSourceHasState(posture.BindingSources, "implicit_elevated_claims", "disabled") || !accessSourceHasState(posture.BindingSources, "bootstrap_owner", "off") {
 		t.Fatalf("explicit role policy should expose source states: %#v", posture)
+	}
+}
+
+func TestRolePolicyReadinessDistinguishesBootstrapAndExplicitLanes(t *testing.T) {
+	bootstrap := RolePolicyReadinessFor(RolePolicy{BootstrapOwner: true}, AccessPostureFor(RolePolicy{BootstrapOwner: true}))
+	if bootstrap.Ready || bootstrap.Status != "blocked" || bootstrap.BootstrapOwnerState != "active" || !bootstrap.BootstrapOwnerBlocked || bootstrap.ReadyLanes != 0 || bootstrap.MissingLanes != 3 || bootstrap.ValueReturned {
+		t.Fatalf("bootstrap policy should be visibly blocked without values: %#v", bootstrap)
+	}
+	if !rolePolicyReadinessHasLane(bootstrap.Lanes, RoleAdmin, "missing") || !rolePolicyReadinessHasLane(bootstrap.Lanes, RoleAuditor, "missing") || !rolePolicyReadinessHasLane(bootstrap.Lanes, RoleOperator, "missing") {
+		t.Fatalf("bootstrap policy should show all elevated lanes missing: %#v", bootstrap.Lanes)
+	}
+
+	partialPolicy := RolePolicy{
+		AdminSubjects:  map[string]bool{"subject-placeholder": true},
+		AuditorGroups:  map[string]bool{"group-placeholder": true},
+		BootstrapOwner: true,
+	}
+	partial := RolePolicyReadinessFor(partialPolicy, AccessPostureFor(partialPolicy))
+	if partial.Ready || partial.Status != "blocked" || partial.BootstrapOwnerState != "inactive" || partial.BootstrapOwnerBlocked || partial.ReadyLanes != 2 || partial.MissingLanes != 1 {
+		t.Fatalf("partial explicit policy should show missing lane and inactive bootstrap: %#v", partial)
+	}
+	if !rolePolicyReadinessHasLane(partial.Lanes, RoleAdmin, "ready") || !rolePolicyReadinessHasLane(partial.Lanes, RoleAuditor, "ready") || !rolePolicyReadinessHasLane(partial.Lanes, RoleOperator, "missing") {
+		t.Fatalf("partial policy should distinguish ready and missing lanes: %#v", partial.Lanes)
+	}
+
+	explicitPolicy := RolePolicy{
+		AdminSubjects:    map[string]bool{"subject-placeholder": true},
+		AuditorGroups:    map[string]bool{"group-placeholder": true},
+		OperatorSubjects: map[string]bool{"operator-placeholder": true},
+		BootstrapOwner:   false,
+	}
+	explicit := RolePolicyReadinessFor(explicitPolicy, AccessPostureFor(explicitPolicy))
+	if !explicit.Ready || explicit.Status != "ready" || explicit.BootstrapOwnerState != "off" || explicit.ReadyLanes != 3 || explicit.MissingLanes != 0 || explicit.SubjectValuesReturned || explicit.GroupValuesReturned || explicit.ClaimValuesReturned || explicit.TokenReturned || explicit.EnvValuesReturned || explicit.BackendPathReturned || explicit.ValueReturned {
+		t.Fatalf("explicit policy should be ready and value-free: %#v", explicit)
+	}
+	if !rolePolicyReadinessHasLane(explicit.Lanes, RoleAdmin, "ready") || !rolePolicyReadinessHasLane(explicit.Lanes, RoleAuditor, "ready") || !rolePolicyReadinessHasLane(explicit.Lanes, RoleOperator, "ready") {
+		t.Fatalf("explicit policy should show all elevated lanes ready: %#v", explicit.Lanes)
 	}
 }
 
@@ -2855,6 +2902,15 @@ func accessSourceHasState(items []RoleBindingSource, key, state string) bool {
 	return false
 }
 
+func rolePolicyReadinessHasLane(items []RolePolicyLane, role, state string) bool {
+	for _, item := range items {
+		if item.Role == role && item.State == state && !item.ValueReturned && !item.SubjectValuesReturned && !item.GroupValuesReturned && !item.ClaimValuesReturned {
+			return true
+		}
+	}
+	return false
+}
+
 func privacySurfaceHasKey(items []PrivacySurface, key string) bool {
 	for _, item := range items {
 		if item.Key == key {
@@ -2951,6 +3007,11 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 	for _, want := range []string{"Enterprise release gate", "Enterprise release gate checklist", "verdict enterprise_blocked", "presence_only_enterprise_release_gate", "release cadence", "scanner_output_returned=false", "artifact_returned=false", "payload_returned=false", "Supply chain", "Audit health", "Role policy"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render enterprise release gate %q: %s", want, body)
+		}
+	}
+	for _, want := range []string{"Role policy readiness", "bootstrap_to_explicit_zitadel_lanes", "ready lanes", "missing lanes", "subject_values_returned=false", "group_values_returned=false", "claim_values_returned=false", "backend_path_returned=false", "token_returned=false", "Role policy readiness lanes", "Bootstrap to explicit role setup path", "Admin lane", "Auditor lane", "Operator lane", "Zitadel role lanes", "subject_binding_configured=false", "group_binding_configured=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render role policy readiness %q: %s", want, body)
 		}
 	}
 	for _, want := range []string{"Auth failure posture", "Redirect loop guard", "presence_only_auth_failure_posture", "login_loop_paused", "raw_callback_query_returned=false", "provider_error_returned=false", "redirect_url_returned=false", "token_returned=false", "cookie_value_returned=false", "Reset login session"} {

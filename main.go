@@ -881,6 +881,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	}
 	catalogGates := ValidateCatalog(descriptors)
 	accessPosture := app.accessPosture()
+	rolePolicyReadiness := RolePolicyReadinessFor(app.cfg.RolePolicy, accessPosture)
 	readinessBody, ready := app.readinessBody()
 	scopePosture := app.scopePosture(app.store.Descriptors())
 	lifecyclePosture := LifecyclePostureFor(descriptors, time.Now().UTC())
@@ -947,6 +948,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Posture":             auditPosture,
 		"CatalogGates":        catalogGates,
 		"Access":              accessPosture,
+		"RolePolicyReadiness": rolePolicyReadiness,
 		"RoleBoundaries":      RoleBoundariesFor(session),
 		"RoleAvailability":    roleAvailability,
 		"RoleWorkbench":       roleWorkbench,
@@ -2493,6 +2495,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	issues := enterpriseChecksWithAttachments(app.cfg, evidenceAttachments)
 	catalogGates := ValidateCatalog(descriptors)
 	accessPosture := app.accessPosture()
+	rolePolicyReadiness := RolePolicyReadinessFor(app.cfg.RolePolicy, accessPosture)
 	scopePosture := app.scopePosture(allDescriptors)
 	lifecyclePosture := LifecyclePostureFor(descriptors, time.Now().UTC())
 	approvedUsePosture := ApprovedUsePostureFor(descriptors)
@@ -2532,16 +2535,17 @@ func (app *App) postureBody(session Session) map[string]any {
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	commandCenter := CommandCenterFor(ready, operationalStatus, actionReadiness, modeGuardrails, attachmentReview, evidenceBoundary)
 	return map[string]any{
-		"service":            "janus",
-		"mode":               app.cfg.ProductMode,
-		"auth_required":      app.cfg.RequireAuth,
-		"oidc_configured":    app.cfg.OIDCConfigured(),
-		"descriptor_count":   len(descriptors),
-		"open_gates":         len(issues),
-		"gates":              issues,
-		"catalog_gates":      catalogGates,
-		"catalog_gate_count": len(catalogGates),
-		"access":             accessPosture,
+		"service":               "janus",
+		"mode":                  app.cfg.ProductMode,
+		"auth_required":         app.cfg.RequireAuth,
+		"oidc_configured":       app.cfg.OIDCConfigured(),
+		"descriptor_count":      len(descriptors),
+		"open_gates":            len(issues),
+		"gates":                 issues,
+		"catalog_gates":         catalogGates,
+		"catalog_gate_count":    len(catalogGates),
+		"access":                accessPosture,
+		"role_policy_readiness": rolePolicyReadiness,
 		"role_availability": map[string]any{
 			"dashboard_strip": true,
 			"duties":          []string{"posture", "use_actions", "audit_export", "admin_policy"},
@@ -2617,6 +2621,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"json_errors_request_id":           true,
 			"backend_source_paths":             "not_returned",
 			"role_policy_proof":                "explicit_counts_no_values",
+			"role_policy_readiness":            "bootstrap_to_explicit_zitadel_lanes",
 			"role_claim_policy":                "explicit_only_no_ambient_grants",
 			"evidence_export_boundary":         "dashboard_and_json",
 			"evidence_download":                "auditor_json_with_pack_hash",
@@ -2725,6 +2730,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"safe_http_boundary_failures",
 			"role_duty_matrix",
 			"role_policy_proof",
+			"role_policy_readiness_workflow",
 			"strict_role_claim_policy",
 			"redacted_public_readiness",
 			"redacted_public_health",
@@ -2803,6 +2809,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	catalogGates := ValidateCatalog(descriptors)
 	_, ready := app.readinessBody()
 	accessPosture := app.accessPosture()
+	rolePolicyReadiness := RolePolicyReadinessFor(app.cfg.RolePolicy, accessPosture)
 	scopePosture := app.scopePosture(allDescriptors)
 	auditPosture := app.store.AuditPosture()
 	canExportEvidence := HasRole(session, RoleAuditor)
@@ -2839,6 +2846,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Operational:         operationalStatus,
 		SupplyChain:         supplyChain,
 		AuthFailure:         authFailure,
+		RolePolicyReadiness: rolePolicyReadiness,
 		ModeGuardrails:      modeGuardrails,
 		ActionReadiness:     actionReadiness,
 		AssuranceGates:      assuranceGates,
@@ -4796,6 +4804,39 @@ func mustTemplates() *template.Template {
         <div class="fact"><strong>{{ if .Scope.Strict }}on{{ else }}off{{ end }}</strong><span class="muted">strict mode</span></div>
       </div>
       {{ range .Scope.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
+    </div>
+  </div>
+  <div class="panel" id="role-policy-readiness">
+    <div class="panel-head">
+      <h2>Role policy readiness</h2>
+      <span class="pill {{ if eq .RolePolicyReadiness.Status "ready" }}ok{{ else }}warn{{ end }}">{{ .RolePolicyReadiness.Status }}</span>
+    </div>
+    <div class="panel-body stack">
+      <p>{{ .RolePolicyReadiness.Summary }}</p>
+      <p><span class="pill {{ if .RolePolicyReadiness.Ready }}ok{{ else }}warn{{ end }}">{{ .RolePolicyReadiness.ReadyLanes }} ready lanes</span> <span class="pill {{ if .RolePolicyReadiness.MissingLanes }}warn{{ else }}ok{{ end }}">{{ .RolePolicyReadiness.MissingLanes }} missing lanes</span> <span class="pill info">bootstrap {{ .RolePolicyReadiness.BootstrapOwnerState }}</span> <span class="pill info">{{ .RolePolicyReadiness.EvidenceSignal }}</span> <span class="pill ok">subject_values_returned=false</span> <span class="pill ok">group_values_returned=false</span> <span class="pill ok">claim_values_returned=false</span> <span class="pill ok">env_values_returned=false</span> <span class="pill ok">backend_path_returned=false</span> <span class="pill ok">token_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+      <p><span class="pill info">next</span> {{ .RolePolicyReadiness.Next }}</p>
+      <div class="mode-grid" aria-label="Role policy readiness lanes">
+        {{ range .RolePolicyReadiness.Lanes }}
+        <div class="mode-item {{ .Tone }}">
+          <span>{{ .Label }}</span>
+          <strong>{{ .State }}</strong>
+          <p>{{ .Detail }}</p>
+          <p><span class="pill info">role {{ .Role }}</span> <span class="pill {{ if .Ready }}ok{{ else }}warn{{ end }}">{{ .BindingCount }} bindings</span> <span class="pill info">subject_binding_configured={{ .SubjectBindingConfigured }}</span> <span class="pill info">group_binding_configured={{ .GroupBindingConfigured }}</span></p>
+          <p><span class="pill info">next</span> {{ .Next }}</p>
+        </div>
+        {{ end }}
+      </div>
+      <div class="mode-grid" aria-label="Bootstrap to explicit role setup path">
+        {{ range .RolePolicyReadiness.Steps }}
+        <div class="mode-item {{ .Tone }}">
+          <span>{{ .Label }}</span>
+          <strong>{{ .State }}</strong>
+          <p>{{ .Detail }}</p>
+          <p><span class="pill info">owner {{ .OwnerRole }}</span> <span class="pill ok">value_returned=false</span></p>
+          <p><span class="pill info">next</span> {{ .Next }}</p>
+        </div>
+        {{ end }}
+      </div>
     </div>
   </div>
   <div class="panel">
