@@ -544,6 +544,7 @@ func TestWardenResolveReturnsHandleOnly(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/warden/resolve", strings.NewReader(`{"ref":"zitadel-janus-oidc","reason":"test"}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://vault.barta.cm")
 	req.Header.Set("X-CSRF-Token", app.csrfToken(session))
 	req.AddCookie(rr.Result().Cookies()[0])
 
@@ -555,6 +556,28 @@ func TestWardenResolveReturnsHandleOnly(t *testing.T) {
 	body := out.Body.String()
 	if !strings.Contains(body, `"value_returned":false`) || strings.Contains(body, `"plaintext"`) {
 		t.Fatalf("handle response is not value-free: %s", body)
+	}
+}
+
+func TestCrossOriginMutationDeniedWithValidCSRF(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "operator", Roles: []string{RoleOperator, RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/warden/resolve", strings.NewReader(`{"ref":"zitadel-janus-oidc","reason":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://evil.example")
+	req.Header.Set("X-CSRF-Token", app.csrfToken(session))
+	req.AddCookie(rr.Result().Cookies()[0])
+
+	out := httptest.NewRecorder()
+	app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle))(out, req)
+	if out.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", out.Code, out.Body.String())
+	}
+	if !strings.Contains(out.Body.String(), `"csrf_failed"`) || !strings.Contains(out.Body.String(), `"value_returned":false`) {
+		t.Fatalf("cross-origin denial should be value-free CSRF JSON: %s", out.Body.String())
 	}
 }
 
@@ -680,6 +703,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"cookie_same_site":"Strict"`) || !strings.Contains(body, `"session_same_site":"Strict"`) || !strings.Contains(body, `"oidc_login_same_site":"Lax"`) || !strings.Contains(body, `"strict_session_cookie"`) {
 		t.Fatalf("posture response should include strict session cookie split: %s", body)
+	}
+	if !strings.Contains(body, `"same_origin_mutations":"origin_or_referer_when_present"`) || !strings.Contains(body, `"same_origin_mutation_guard"`) {
+		t.Fatalf("posture response should include same-origin mutation guard: %s", body)
 	}
 	if !strings.Contains(body, `"approved_use"`) || !strings.Contains(body, `"approved_metadata_use_enforced"`) {
 		t.Fatalf("posture response should include approved-use enforcement: %s", body)

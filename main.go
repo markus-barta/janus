@@ -1354,6 +1354,9 @@ func (app *App) verifyCSRF(r *http.Request, session Session) bool {
 	if want == "" {
 		return false
 	}
+	if !app.sameOriginMutation(r) {
+		return false
+	}
 	got := r.Header.Get("X-CSRF-Token")
 	if got == "" {
 		if err := r.ParseForm(); err == nil {
@@ -1361,6 +1364,29 @@ func (app *App) verifyCSRF(r *http.Request, session Session) bool {
 		}
 	}
 	return hmac.Equal([]byte(want), []byte(got))
+}
+
+func (app *App) sameOriginMutation(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	expected, err := url.Parse(app.cfg.PublicURL)
+	if err != nil || expected.Scheme == "" || expected.Host == "" {
+		return false
+	}
+	for _, header := range []string{"Origin", "Referer"} {
+		value := strings.TrimSpace(r.Header.Get(header))
+		if value == "" {
+			continue
+		}
+		got, err := url.Parse(value)
+		if err != nil || got.Scheme == "" || got.Host == "" {
+			return false
+		}
+		return strings.EqualFold(got.Scheme, expected.Scheme) && strings.EqualFold(got.Host, expected.Host)
+	}
+	return true
 }
 
 func (app *App) csrfAllowed(r *http.Request, session Session) bool {
@@ -1560,6 +1586,11 @@ func (app *App) postureBody() map[string]any {
 			"value_returned":              false,
 		},
 		"session": app.sessionPosture(Session{}),
+		"csrf": map[string]any{
+			"bound":                 true,
+			"same_origin_mutations": "origin_or_referer_when_present",
+			"value_returned":        false,
+		},
 		"cookies": map[string]any{
 			"host_prefixed":        app.cfg.SessionCookieName() == hostSessionCookie && app.cfg.StateCookieName() == hostStateCookie && app.cfg.NonceCookieName() == hostNonceCookie && app.cfg.PKCECookieName() == hostPKCECookie,
 			"secure":               app.cfg.SecureCookies(),
@@ -1622,6 +1653,7 @@ func (app *App) postureBody() map[string]any {
 			"strict_session_cookie",
 			"request_body_size_limit",
 			"browser_isolation_headers",
+			"same_origin_mutation_guard",
 		},
 		"value_returned": false,
 	}
