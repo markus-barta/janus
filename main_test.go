@@ -686,6 +686,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"safe_http_boundary_failures":true`) || !strings.Contains(body, `"safe_http_boundary_failures"`) || !strings.Contains(body, `"http_boundary_error_view":"safe_category_request_id"`) {
 		t.Fatalf("posture response should include safe HTTP boundary failures: %s", body)
 	}
+	if !strings.Contains(body, `"public_readiness_redacted":true`) || !strings.Contains(body, `"redacted_public_readiness"`) {
+		t.Fatalf("posture response should include redacted public readiness: %s", body)
+	}
 	if !strings.Contains(body, `"script_src":"none"`) || !strings.Contains(body, `"no_script_csp"`) {
 		t.Fatalf("posture response should include no-script CSP hardening: %s", body)
 	}
@@ -1552,6 +1555,9 @@ func TestReadyzLockedWhenAuthMissing(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), `"auth":false`) || !strings.Contains(rr.Body.String(), `"value_returned":false`) {
 		t.Fatalf("readyz should explain value-free failed checks: %s", rr.Body.String())
 	}
+	if !strings.Contains(rr.Body.String(), `"redacted":true`) || strings.Contains(rr.Body.String(), "descriptor_count") {
+		t.Fatalf("readyz should stay public-redacted: %s", rr.Body.String())
+	}
 }
 
 func TestReadyzReportsValueFreeChecks(t *testing.T) {
@@ -1563,9 +1569,14 @@ func TestReadyzReportsValueFreeChecks(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
 	body := rr.Body.String()
-	for _, want := range []string{`"ready":true`, `"auth":true`, `"descriptor_store":true`, `"audit_sink":true`, `"audit_chain":true`, `"permit_store":true`, `"value_returned":false`} {
+	for _, want := range []string{`"ready":true`, `"mode":"self_hosted"`, `"auth":true`, `"descriptor_store":true`, `"audit_sink":true`, `"audit_chain":true`, `"permit_store":true`, `"redacted":true`, `"value_returned":false`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("readyz should include %s: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"descriptor_count", "audit_entries", "secret_count"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("readyz should not expose inventory count %q: %s", forbidden, body)
 		}
 	}
 }

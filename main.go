@@ -648,7 +648,7 @@ func (app *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (app *App) handleReady(w http.ResponseWriter, _ *http.Request) {
-	body, ready := app.readinessBody()
+	body, ready := app.publicReadinessBody()
 	status := http.StatusOK
 	if !ready {
 		status = http.StatusServiceUnavailable
@@ -656,6 +656,20 @@ func (app *App) handleReady(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+func (app *App) publicReadinessBody() (map[string]any, bool) {
+	body, ready := app.readinessBody()
+	return map[string]any{
+		"ready":           ready,
+		"service":         body["service"],
+		"mode":            body["mode"],
+		"checks":          body["checks"],
+		"auth_required":   body["auth_required"],
+		"oidc_configured": body["oidc_configured"],
+		"redacted":        true,
+		"value_returned":  false,
+	}, ready
 }
 
 func (app *App) readinessBody() (map[string]any, bool) {
@@ -688,10 +702,12 @@ func (app *App) readinessBody() (map[string]any, bool) {
 	return map[string]any{
 		"ready":            ready,
 		"service":          "janus",
+		"mode":             app.cfg.ProductMode,
 		"checks":           checks,
 		"auth_required":    app.cfg.RequireAuth,
 		"oidc_configured":  app.cfg.OIDCConfigured(),
 		"descriptor_count": descriptorCount,
+		"redacted":         false,
 		"value_returned":   false,
 	}, ready
 }
@@ -1722,6 +1738,7 @@ func (app *App) postureBody() map[string]any {
 			"cache_control":                "no-store",
 			"auth_error_view":              "safe_category_request_id",
 			"http_boundary_error_view":     "safe_category_request_id",
+			"public_readiness_redacted":    true,
 			"safe_http_boundary_failures":  true,
 			"script_src":                   "none",
 			"cross_origin_resource_policy": "same-origin",
@@ -1772,6 +1789,7 @@ func (app *App) postureBody() map[string]any {
 			"same_origin_mutation_guard",
 			"safe_http_boundary_failures",
 			"role_duty_matrix",
+			"redacted_public_readiness",
 		},
 		"value_returned": false,
 	}
