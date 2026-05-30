@@ -884,6 +884,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	}
 	evidenceBoundary := EvidenceBoundaryFor(canViewAudit, evidenceHash != "")
 	evidenceReceipt := EvidenceReceiptFor(evidenceBoundary, nil)
+	supplyChain := SupplyChainPostureFor(evidenceBoundary)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
@@ -924,6 +925,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"RoleWorkbench":       roleWorkbench,
 		"ActionReadiness":     actionReadiness,
 		"OperationalStatus":   operationalStatus,
+		"SupplyChain":         supplyChain,
 		"CommandCenter":       commandCenter,
 		"Ready":               ready,
 		"Readiness":           readinessBody,
@@ -2353,6 +2355,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	canExportEvidence := HasRole(session, RoleAuditor)
 	evidenceBoundary := EvidenceBoundaryFor(canExportEvidence, canExportEvidence)
 	evidenceReceipt := EvidenceReceiptFor(evidenceBoundary, nil)
+	supplyChain := SupplyChainPostureFor(evidenceBoundary)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
@@ -2418,6 +2421,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"degraded_guidance":                degradedGuidance,
 		"audit_failure_drill":              auditDrill,
 		"operational_status":               operationalStatus,
+		"supply_chain_posture":             supplyChain,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
 			"pkce_s256":                   app.cfg.OIDCConfigured(),
@@ -2485,6 +2489,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"human_readable_summary":           "dashboard_posture_evidence",
 			"assurance_gate_proofs":            "role_catalog_degraded_value_leak",
 			"operational_status":               "dashboard_posture_strip",
+			"supply_chain_posture":             "summary_only_dependency_security_evidence",
 			"value_returned":                   false,
 		},
 		"response_hardening": map[string]any{
@@ -2573,6 +2578,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"role_availability_ux",
 			"human_readable_assurance_summary",
 			"operational_status_strip",
+			"supply_chain_posture_summary",
 			"evidence_download_receipt",
 			"exact_evidence_download_receipt",
 			"enterprise_evidence_attachment_matrix",
@@ -2636,6 +2642,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	auditPosture := app.store.AuditPosture()
 	canExportEvidence := HasRole(session, RoleAuditor)
 	evidenceBoundary := EvidenceBoundaryFor(canExportEvidence, canExportEvidence)
+	supplyChain := SupplyChainPostureFor(evidenceBoundary)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
@@ -2662,6 +2669,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Mode:                app.cfg.ProductMode,
 		Posture:             app.postureBody(session),
 		Operational:         operationalStatus,
+		SupplyChain:         supplyChain,
 		ModeGuardrails:      modeGuardrails,
 		ActionReadiness:     actionReadiness,
 		AssuranceGates:      assuranceGates,
@@ -3569,12 +3577,33 @@ func mustTemplates() *template.Template {
 		      <a class="button {{ if eq .Key "evidence_export" }}primary{{ else }}quiet{{ end }}" href="{{ .Href }}">{{ .Label }}</a>
 		      {{ end }}
 		    </div>
-		    {{ end }}
-		  </div>
-		</section>
-		<section class="panel" style="margin-bottom:16px" id="mode-guardrails">
-		  <div class="panel-head">
-		    <h2>Mode guardrails</h2>
+		{{ end }}
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="supply-chain-posture">
+	  <div class="panel-head">
+	    <h2>Supply-chain posture</h2>
+	    <span class="pill {{ if eq .SupplyChain.Status "clean" }}ok{{ else }}warn{{ end }}">{{ .SupplyChain.Status }}</span>
+	  </div>
+	  <div class="panel-body stack">
+	    <p>{{ .SupplyChain.Summary }}</p>
+	    <p><span class="pill ok">{{ .SupplyChain.DependencyState }}</span> <span class="pill info">builder {{ .SupplyChain.Builder }}</span> <span class="pill ok">{{ .SupplyChain.OpenAlerts }} open alerts</span> <span class="pill info">{{ .SupplyChain.FixedAlerts }} fixed alerts</span> <span class="pill ok">scanner_output_returned=false</span> <span class="pill ok">package_lock_returned=false</span> <span class="pill ok">backend_path_returned=false</span> <span class="pill ok">env_returned=false</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+	    <p><span class="pill info">review cadence</span> {{ .SupplyChain.ReviewCadence }}</p>
+	    <div class="mode-grid" aria-label="Supply-chain posture checks">
+	      {{ range .SupplyChain.Checks }}
+	      <div class="mode-item {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Detail }}</p>
+	        <p><span class="pill info">next</span> {{ .Next }}</p>
+	      </div>
+	      {{ end }}
+	    </div>
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="mode-guardrails">
+	  <div class="panel-head">
+	    <h2>Mode guardrails</h2>
 	    <span class="pill {{ if .ModeGuardrails.BlockedCount }}warn{{ else if .ModeGuardrails.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .ModeGuardrails.Claim }}</span>
 	  </div>
 	  <div class="panel-body stack">

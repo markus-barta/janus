@@ -29,6 +29,7 @@ type EvidencePack struct {
 	Mode                string                         `json:"mode"`
 	Posture             map[string]any                 `json:"posture"`
 	Operational         OperationalStatus              `json:"operational_status"`
+	SupplyChain         SupplyChainPosture             `json:"supply_chain_posture"`
 	ModeGuardrails      ModeGuardrails                 `json:"mode_guardrails"`
 	ActionReadiness     ActionReadiness                `json:"action_readiness"`
 	AssuranceGates      AssuranceGates                 `json:"assurance_gates"`
@@ -422,6 +423,7 @@ func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
 			"integration_conformance_workflow",
 			"remote_audit_workflow",
 			"break_glass_review_workflow",
+			"supply_chain_posture",
 			"audit_posture",
 			"recent_audit_refs",
 			"integrity_hash",

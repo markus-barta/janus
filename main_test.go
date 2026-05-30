@@ -821,6 +821,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"break_glass_review_workflow"`) || !strings.Contains(body, `"label":"Break-glass review workflow"`) || !strings.Contains(body, `"control_key":"break_glass_review"`) || !strings.Contains(body, `"procedure_returned":false`) || !strings.Contains(body, `"contact_path_returned":false`) || !strings.Contains(body, `"access_target_returned":false`) || !strings.Contains(body, `"credential_returned":false`) || !strings.Contains(body, `"key":"owner_review"`) || !strings.Contains(body, `"break_glass_review_workflow":"presence_only_emergency_access_evidence"`) || !strings.Contains(body, `"break_glass_review_presence_workflow"`) {
 		t.Fatalf("posture response should include break-glass review workflow: %s", body)
 	}
+	if !strings.Contains(body, `"supply_chain_posture"`) || !strings.Contains(body, `"label":"Supply-chain posture"`) || !strings.Contains(body, `"builder":"golang:1.26.3-alpine"`) || !strings.Contains(body, `"dependency_state":"no_open_alerts_at_release_review"`) || !strings.Contains(body, `"scanner_output_returned":false`) || !strings.Contains(body, `"package_lock_returned":false`) || !strings.Contains(body, `"backend_path_returned":false`) || !strings.Contains(body, `"env_returned":false`) || !strings.Contains(body, `"key":"dependency_alerts"`) || !strings.Contains(body, `"supply_chain_posture":"summary_only_dependency_security_evidence"`) || !strings.Contains(body, `"supply_chain_posture_summary"`) {
+		t.Fatalf("posture response should include supply-chain posture: %s", body)
+	}
 	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
 		t.Fatalf("posture response should include scope policy: %s", body)
 	}
@@ -1208,6 +1211,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed break-glass review workflow")
 	}
+	postureSupplyChain, ok := posture["supply_chain_posture"].(SupplyChainPosture)
+	if !ok {
+		t.Fatalf("posture should expose typed supply-chain posture")
+	}
 	postureAttachmentReview, ok := posture["attachment_review"].(AttachmentReview)
 	if !ok {
 		t.Fatalf("posture should expose typed attachment review")
@@ -1260,6 +1267,9 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(postureBreakGlassWorkflow, pack.BreakGlassWorkflow) {
 		t.Fatalf("posture and evidence should share the same break-glass review workflow: posture=%#v evidence=%#v", postureBreakGlassWorkflow, pack.BreakGlassWorkflow)
+	}
+	if !reflect.DeepEqual(postureSupplyChain, pack.SupplyChain) {
+		t.Fatalf("posture and evidence should share the same supply-chain posture: posture=%#v evidence=%#v", postureSupplyChain, pack.SupplyChain)
 	}
 	if !reflect.DeepEqual(postureAttachmentReview, pack.AttachmentReview) {
 		t.Fatalf("posture and evidence should share the same attachment review: posture=%#v evidence=%#v", postureAttachmentReview, pack.AttachmentReview)
@@ -2578,6 +2588,11 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 	for _, want := range []string{"Break-glass review workflow", "Mark break-glass review present", "procedure_returned=false", "contact_path_returned=false", "access_target_returned=false", "credential_returned=false", "Owner review", "Emergency scope", "Step-up review", "Time-boxing", "Post-use audit"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render break-glass review workflow %q: %s", want, body)
+		}
+	}
+	for _, want := range []string{"Supply-chain posture", "Dependency alerts", "Patched builder", "Module integrity", "Vulnerability scan", "Evidence boundary", "golang:1.26.3-alpine", "no_open_alerts_at_release_review", "scanner_output_returned=false", "package_lock_returned=false", "backend_path_returned=false", "env_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render supply-chain posture %q: %s", want, body)
 		}
 	}
 	for _, want := range []string{"External evidence workflow", "Presence-only external evidence workflow", "records presence only", "no refs stored", "Mark present"} {
