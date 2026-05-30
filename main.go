@@ -872,6 +872,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
 	roleAvailability := RoleAvailabilityFor(session)
+	actionReadiness := ActionReadinessFor(session, ready)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	data := map[string]any{
 		"Title":             "Janus",
@@ -887,6 +888,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Access":            accessPosture,
 		"RoleBoundaries":    RoleBoundariesFor(session),
 		"RoleAvailability":  roleAvailability,
+		"ActionReadiness":   actionReadiness,
 		"OperationalStatus": operationalStatus,
 		"Ready":             ready,
 		"Readiness":         readinessBody,
@@ -2137,6 +2139,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
 	roleAvailability := RoleAvailabilityFor(session)
+	actionReadiness := ActionReadinessFor(session, ready)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	return map[string]any{
 		"service":            "janus",
@@ -2163,6 +2166,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"enterprise_validation":   enterpriseValidation,
 		"privacy_posture":         privacyPosture,
 		"evidence_receipt":        evidenceReceipt,
+		"action_readiness":        actionReadiness,
 		"assurance_summary":       assuranceSummary,
 		"assurance_gates":         assuranceGates,
 		"negative_path_assurance": negativePath,
@@ -2210,6 +2214,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"evidence_receipt":          "download_header_body_match",
 			"enterprise_validation":     "self_hosted_safe_enterprise_required",
 			"enterprise_attachments":    "presence_only_no_refs",
+			"action_readiness":          "role_and_readiness_matrix",
 			"mode_guardrails":           "dashboard_posture_evidence",
 			"privacy_retention":         "dashboard_posture_evidence",
 			"negative_path_assurance":   "dashboard_posture_evidence",
@@ -2306,6 +2311,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"evidence_download_receipt",
 			"exact_evidence_download_receipt",
 			"enterprise_evidence_attachment_matrix",
+			"role_aware_action_readiness",
 			"assurance_gate_proof_strip",
 			"enterprise_validation_clarity",
 			"privacy_retention_posture",
@@ -2342,6 +2348,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
+	actionReadiness := ActionReadinessFor(session, ready)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, RoleAvailabilityFor(session))
 	pack := EvidencePack{
 		GeneratedAt:      time.Now().UTC(),
@@ -2350,6 +2357,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Posture:          app.postureBody(session),
 		Operational:      operationalStatus,
 		ModeGuardrails:   modeGuardrails,
+		ActionReadiness:  actionReadiness,
 		AssuranceGates:   assuranceGates,
 		NegativePath:     negativePath,
 		Guidance:         degradedGuidance,
@@ -3148,6 +3156,28 @@ func mustTemplates() *template.Template {
         <span>{{ .Label }}</span>
         <strong>{{ .State }}</strong>
         <p>{{ .Detail }}</p>
+      </div>
+      {{ end }}
+    </div>
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="action-readiness">
+  <div class="panel-head">
+    <h2>Action readiness</h2>
+    <span class="pill {{ if .ActionReadiness.Blocked }}warn{{ else if .ActionReadiness.Gated }}warn{{ else }}ok{{ end }}">{{ .ActionReadiness.Available }} available</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .ActionReadiness.Summary }}</p>
+    <p><span class="pill ok">value_returned=false</span> <span class="pill info">{{ .ActionReadiness.Gated }} role gated</span> <span class="pill {{ if .ActionReadiness.Blocked }}warn{{ else }}ok{{ end }}">{{ .ActionReadiness.Blocked }} readiness blocked</span></p>
+    <div class="mode-grid" aria-label="Action readiness">
+      {{ range .ActionReadiness.Actions }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Reason }}</p>
+        <p><span class="pill info">role {{ .RequiredRole }}</span> <span class="pill ok">value_returned=false</span></p>
+        <p><span class="pill info">safety</span> {{ .Safety }}</p>
+        <p><span class="pill info">next</span> {{ .Next }}</p>
       </div>
       {{ end }}
     </div>

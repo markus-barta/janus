@@ -30,6 +30,7 @@ type EvidencePack struct {
 	Posture          map[string]any        `json:"posture"`
 	Operational      OperationalStatus     `json:"operational_status"`
 	ModeGuardrails   ModeGuardrails        `json:"mode_guardrails"`
+	ActionReadiness  ActionReadiness       `json:"action_readiness"`
 	AssuranceGates   AssuranceGates        `json:"assurance_gates"`
 	NegativePath     NegativePathAssurance `json:"negative_path_assurance"`
 	Guidance         DegradedGuidance      `json:"degraded_guidance"`
@@ -111,6 +112,27 @@ type ModeGuardrailItem struct {
 	Limit string `json:"limit"`
 	Next  string `json:"next"`
 	Tone  string `json:"tone"`
+}
+
+type ActionReadiness struct {
+	Summary       string                `json:"summary"`
+	Actions       []ActionReadinessItem `json:"actions"`
+	Available     int                   `json:"available"`
+	Gated         int                   `json:"gated"`
+	Blocked       int                   `json:"blocked"`
+	ValueReturned bool                  `json:"value_returned"`
+}
+
+type ActionReadinessItem struct {
+	Key           string `json:"key"`
+	Label         string `json:"label"`
+	State         string `json:"state"`
+	RequiredRole  string `json:"required_role"`
+	Reason        string `json:"reason"`
+	Next          string `json:"next"`
+	Safety        string `json:"safety"`
+	ValueReturned bool   `json:"value_returned"`
+	Tone          string `json:"tone"`
 }
 
 type AssuranceGates struct {

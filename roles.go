@@ -223,6 +223,71 @@ func RoleAvailabilityFor(session Session) []RoleAvailability {
 	}
 }
 
+func ActionReadinessFor(session Session, ready bool) ActionReadiness {
+	matrix := ActionReadiness{
+		Summary:       "Action readiness shows what this session can safely do, what is role-gated, and what waits for readiness.",
+		ValueReturned: false,
+	}
+	matrix.add(ActionReadinessItem{
+		Key:           "posture_view",
+		Label:         "Posture view",
+		State:         "available",
+		RequiredRole:  RoleViewer,
+		Reason:        "Safe metadata posture is available to every signed-in viewer.",
+		Next:          "Use posture to understand health, gates, and value boundaries.",
+		Safety:        "Read-only and value-free.",
+		ValueReturned: false,
+		Tone:          "ok",
+	})
+	matrix.add(actionReadinessItem(session, ready, "evidence_export", "Evidence export", RoleAuditor, true, "Auditor role can download value-free evidence JSON.", "Use an auditor session to export evidence.", "Role-gated, readiness-gated, and value-free."))
+	matrix.add(actionReadinessItem(session, ready, "handle_issue", "Issue metadata handle", RoleOperator, true, "Operator role can issue metadata-only handles.", "Use an operator session after readiness is healthy.", "Never reveals a secret value."))
+	matrix.add(actionReadinessItem(session, ready, "permit_create", "Create permit", RoleOperator, true, "Operator role can create metadata-only permits.", "Use an operator session after readiness is healthy.", "Permit records are durable and value-free."))
+	matrix.add(actionReadinessItem(session, ready, "permit_run_check", "Run permit check", RoleOperator, true, "Operator role can run a no-connector safety check.", "Use an operator session after readiness is healthy.", "No connector executes and output is scrubbed."))
+	matrix.add(actionReadinessItem(session, true, "admin_policy_review", "Admin policy review", RoleAdmin, false, "Admin role can review ownership and role policy posture.", "Use an admin session to review policy posture.", "Does not bypass audit, approval, or value-return rules."))
+	return matrix
+}
+
+func actionReadinessItem(session Session, ready bool, key, label, role string, readinessGated bool, availableReason, roleNext, safety string) ActionReadinessItem {
+	item := ActionReadinessItem{
+		Key:           key,
+		Label:         label,
+		State:         "available",
+		RequiredRole:  role,
+		Reason:        availableReason,
+		Next:          "Use the available dashboard or API action.",
+		Safety:        safety,
+		ValueReturned: false,
+		Tone:          "ok",
+	}
+	if !HasRole(session, role) {
+		item.State = "role_gated"
+		item.Reason = role + " role required."
+		item.Next = roleNext
+		item.Tone = "warn"
+		return item
+	}
+	if readinessGated && !ready {
+		item.State = "readiness_blocked"
+		item.Reason = "Readiness is degraded, so sensitive actions fail closed."
+		item.Next = "Recover readiness before using this action."
+		item.Tone = "warn"
+		return item
+	}
+	return item
+}
+
+func (r *ActionReadiness) add(item ActionReadinessItem) {
+	switch item.State {
+	case "available":
+		r.Available++
+	case "readiness_blocked":
+		r.Blocked++
+	default:
+		r.Gated++
+	}
+	r.Actions = append(r.Actions, item)
+}
+
 func availabilityState(allowed bool) string {
 	if allowed {
 		return "available"
