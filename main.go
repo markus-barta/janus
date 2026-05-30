@@ -3849,8 +3849,40 @@ func mustTemplates() *template.Template {
 	  </div>
 	  <div class="panel-body stack">
 	    <p>{{ .SupplyChain.Summary }}</p>
-	    <p><span class="pill ok">{{ .SupplyChain.DependencyState }}</span> <span class="pill info">builder {{ .SupplyChain.Builder }}</span> <span class="pill ok">{{ .SupplyChain.OpenAlerts }} open alerts</span> <span class="pill info">{{ .SupplyChain.FixedAlerts }} fixed alerts</span> <span class="pill ok">scanner_output_returned=false</span> <span class="pill ok">package_lock_returned=false</span> <span class="pill ok">backend_path_returned=false</span> <span class="pill ok">env_returned=false</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
-	    <p><span class="pill info">review cadence</span> {{ .SupplyChain.ReviewCadence }}</p>
+	    <div class="witness-grid" aria-label="Supply-chain posture witness">
+	      <div class="witness-card {{ if eq .SupplyChain.Status "clean" }}ok{{ else }}warn{{ end }}">
+	        <span>Dependency state</span>
+	        <strong>{{ .SupplyChain.DependencyState }}</strong>
+	        <p>Builder {{ .SupplyChain.Builder }}. Review cadence: {{ .SupplyChain.ReviewCadence }}.</p>
+	      </div>
+	      <div class="witness-card {{ if .SupplyChain.OpenAlerts }}warn{{ else }}ok{{ end }}">
+	        <span>Alert posture</span>
+	        <strong>{{ .SupplyChain.OpenAlerts }} open</strong>
+	        <p>{{ .SupplyChain.FixedAlerts }} fixed alerts retained as safe release evidence.</p>
+	      </div>
+	      <div class="witness-card ok">
+	        <span>Evidence boundary</span>
+	        <strong>values withheld</strong>
+	        <p>Scanner output, package files, backend paths, env, evidence refs, and values are not returned.</p>
+	      </div>
+	    </div>
+	    <details class="evidence-flags">
+	      <summary>Supply-chain evidence flags</summary>
+	      <div class="flag-cloud" aria-label="Supply-chain value-free evidence flags">
+	        <span class="pill ok">{{ .SupplyChain.DependencyState }}</span>
+	        <span class="pill info">builder {{ .SupplyChain.Builder }}</span>
+	        <span class="pill ok">{{ .SupplyChain.OpenAlerts }} open alerts</span>
+	        <span class="pill info">{{ .SupplyChain.FixedAlerts }} fixed alerts</span>
+	        <span class="pill info">review cadence</span>
+	        <span class="pill info">{{ .SupplyChain.ReviewCadence }}</span>
+	        <span class="pill ok">scanner_output_returned=false</span>
+	        <span class="pill ok">package_lock_returned=false</span>
+	        <span class="pill ok">backend_path_returned=false</span>
+	        <span class="pill ok">env_returned=false</span>
+	        <span class="pill ok">evidence_ref_returned=false</span>
+	        <span class="pill ok">value_returned=false</span>
+	      </div>
+	    </details>
 	    <div class="mode-grid" aria-label="Supply-chain posture checks">
 	      {{ range .SupplyChain.Checks }}
 	      <div class="mode-item {{ .Tone }}">
@@ -3870,7 +3902,33 @@ func mustTemplates() *template.Template {
 	  </div>
 	  <div class="panel-body stack">
 	    <p>{{ .ModeGuardrails.Summary }}</p>
-	    <p><span class="pill info">{{ .ModeGuardrails.Current }}</span> <span class="pill warn">{{ .ModeGuardrails.Boundary }}</span> <span class="pill ok">value_returned=false</span></p>
+	    <div class="witness-grid" aria-label="Mode guardrails witness">
+	      <div class="witness-card {{ if eq .ModeGuardrails.Current "enterprise" }}ok{{ else }}info{{ end }}">
+	        <span>Current mode</span>
+	        <strong>{{ .ModeGuardrails.Current }}</strong>
+	        <p>Mode is explicit before any stronger claim is made.</p>
+	      </div>
+	      <div class="witness-card {{ if .ModeGuardrails.BlockedCount }}warn{{ else if .ModeGuardrails.ReviewCount }}warn{{ else }}ok{{ end }}">
+	        <span>Claim boundary</span>
+	        <strong>{{ .ModeGuardrails.Claim }}</strong>
+	        <p>{{ .ModeGuardrails.BlockedCount }} blocked, {{ .ModeGuardrails.ReviewCount }} review.</p>
+	      </div>
+	      <div class="witness-card ok">
+	        <span>Value boundary</span>
+	        <strong>values withheld</strong>
+	        <p>{{ .ModeGuardrails.Boundary }}; no secret values are returned.</p>
+	      </div>
+	    </div>
+	    <details class="evidence-flags">
+	      <summary>Mode guardrail evidence flags</summary>
+	      <div class="flag-cloud" aria-label="Mode guardrail value-free evidence flags">
+	        <span class="pill info">{{ .ModeGuardrails.Current }}</span>
+	        <span class="pill warn">{{ .ModeGuardrails.Boundary }}</span>
+	        <span class="pill {{ if .ModeGuardrails.BlockedCount }}warn{{ else }}ok{{ end }}">{{ .ModeGuardrails.BlockedCount }} blocked</span>
+	        <span class="pill {{ if .ModeGuardrails.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .ModeGuardrails.ReviewCount }} review</span>
+	        <span class="pill ok">value_returned=false</span>
+	      </div>
+	    </details>
 	    <div class="mode-grid" aria-label="Mode guardrails">
 	      {{ range .ModeGuardrails.Items }}
 	      <div class="mode-item {{ .Tone }}">
@@ -3891,7 +3949,32 @@ func mustTemplates() *template.Template {
 	  </div>
 	  <div class="panel-body stack">
 	    <p>{{ .Guidance.Summary }}</p>
-	    <p><span class="pill ok">value_returned=false</span> <span class="pill info">safe actions only</span></p>
+	    <div class="witness-grid" aria-label="Next safe steps witness">
+	      <div class="witness-card {{ if .Guidance.BlockedCount }}warn{{ else if .Guidance.ReviewCount }}warn{{ else }}ok{{ end }}">
+	        <span>Action state</span>
+	        <strong>{{ if .Guidance.BlockedCount }}{{ .Guidance.BlockedCount }} blocked{{ else if .Guidance.ReviewCount }}{{ .Guidance.ReviewCount }} review{{ else }}clear{{ end }}</strong>
+	        <p>Only safe recovery and review actions are shown.</p>
+	      </div>
+	      <div class="witness-card info">
+	        <span>Role boundary</span>
+	        <strong>role gated</strong>
+	        <p>Recovery actions stay tied to their required role and next step.</p>
+	      </div>
+	      <div class="witness-card ok">
+	        <span>Value boundary</span>
+	        <strong>values withheld</strong>
+	        <p>Guidance explains what to do next without returning secret material.</p>
+	      </div>
+	    </div>
+	    <details class="evidence-flags">
+	      <summary>Next safe steps evidence flags</summary>
+	      <div class="flag-cloud" aria-label="Next safe steps value-free evidence flags">
+	        <span class="pill ok">value_returned=false</span>
+	        <span class="pill info">safe actions only</span>
+	        <span class="pill {{ if .Guidance.BlockedCount }}warn{{ else }}ok{{ end }}">{{ .Guidance.BlockedCount }} blocked</span>
+	        <span class="pill {{ if .Guidance.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .Guidance.ReviewCount }} review</span>
+	      </div>
+	    </details>
 	    <div class="mode-grid" aria-label="Degraded-state guidance">
 	      {{ range .Guidance.Items }}
 	      <div class="mode-item {{ .Tone }}">
@@ -3911,7 +3994,32 @@ func mustTemplates() *template.Template {
 	  </div>
 	  <div class="panel-body stack">
 	    <p>{{ .AuditDrill.Summary }}</p>
-	    <p><span class="pill info">{{ .AuditDrill.Scenario }}</span> <span class="pill info">role {{ .AuditDrill.RecoveryRole }}</span> <span class="pill ok">value_returned=false</span></p>
+	    <div class="witness-grid" aria-label="Audit failure drill witness">
+	      <div class="witness-card {{ if .AuditDrill.BlockedCount }}warn{{ else }}ok{{ end }}">
+	        <span>Drill state</span>
+	        <strong>{{ .AuditDrill.Status }}</strong>
+	        <p>{{ .AuditDrill.Scenario }} is visible as a security state.</p>
+	      </div>
+	      <div class="witness-card info">
+	        <span>Recovery role</span>
+	        <strong>{{ .AuditDrill.RecoveryRole }}</strong>
+	        <p>Recovery stays role-separated before sensitive action resumes.</p>
+	      </div>
+	      <div class="witness-card ok">
+	        <span>Value boundary</span>
+	        <strong>values withheld</strong>
+	        <p>Audit failure guidance returns status and next step only.</p>
+	      </div>
+	    </div>
+	    <details class="evidence-flags">
+	      <summary>Audit failure drill evidence flags</summary>
+	      <div class="flag-cloud" aria-label="Audit failure drill value-free evidence flags">
+	        <span class="pill info">{{ .AuditDrill.Scenario }}</span>
+	        <span class="pill info">role {{ .AuditDrill.RecoveryRole }}</span>
+	        <span class="pill {{ if .AuditDrill.BlockedCount }}warn{{ else }}ok{{ end }}">{{ .AuditDrill.BlockedCount }} blocked</span>
+	        <span class="pill ok">value_returned=false</span>
+	      </div>
+	    </details>
 	    <div class="mode-grid" aria-label="Audit failure drill">
 	      {{ range .AuditDrill.Checks }}
 	      <div class="mode-item {{ .Tone }}">

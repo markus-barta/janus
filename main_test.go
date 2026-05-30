@@ -3062,6 +3062,11 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 			t.Fatalf("dashboard should render workflow witness cue %q: %s", want, body)
 		}
 	}
+	for _, want := range []string{"Supply-chain posture witness", "Supply-chain evidence flags", "Dependency state", "Alert posture", "Mode guardrails witness", "Mode guardrail evidence flags", "Current mode", "Claim boundary", "Next safe steps witness", "Next safe steps evidence flags", "Action state", "Audit failure drill witness", "Audit failure drill evidence flags", "Drill state", "Recovery role"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render operational assurance witness cue %q: %s", want, body)
+		}
+	}
 	for _, want := range []string{"Supply-chain posture", "Dependency alerts", "Patched builder", "Module integrity", "Vulnerability scan", "Evidence boundary", "golang:1.26.3-alpine", "no_open_alerts_at_release_review", "scanner_output_returned=false", "package_lock_returned=false", "backend_path_returned=false", "env_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render supply-chain posture %q: %s", want, body)
