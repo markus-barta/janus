@@ -27,6 +27,7 @@ type EvidencePack struct {
 	Service          string             `json:"service"`
 	Mode             string             `json:"mode"`
 	Posture          map[string]any     `json:"posture"`
+	AssuranceSummary AssuranceSummary   `json:"assurance_summary"`
 	EvidenceBoundary EvidenceBoundary   `json:"evidence_boundary"`
 	Descriptors      []SecretDescriptor `json:"descriptors"`
 	CatalogGates     []CatalogGate      `json:"catalog_gates"`
@@ -50,6 +51,21 @@ type EvidenceBoundary struct {
 	Excludes       []string `json:"excludes"`
 	RedactionModel string   `json:"redaction_model"`
 	ValueReturned  bool     `json:"value_returned"`
+}
+
+type AssuranceSummary struct {
+	Verdict       string          `json:"verdict"`
+	Summary       string          `json:"summary"`
+	Proven        []AssuranceItem `json:"proven"`
+	Review        []AssuranceItem `json:"review"`
+	ValueReturned bool            `json:"value_returned"`
+}
+
+type AssuranceItem struct {
+	Label  string `json:"label"`
+	State  string `json:"state"`
+	Detail string `json:"detail"`
+	Tone   string `json:"tone"`
 }
 
 func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
@@ -85,6 +101,44 @@ func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
 		RedactionModel: "metadata_only",
 		ValueReturned:  false,
 	}
+}
+
+func AssuranceSummaryFor(mode string, ready bool, openGateCount, catalogGateCount int, access AccessPosture, audit AuditPosture, boundary EvidenceBoundary) AssuranceSummary {
+	summary := AssuranceSummary{
+		Verdict:       "review_needed",
+		Summary:       "Janus keeps proven controls visible and calls out review items without exposing values.",
+		ValueReturned: false,
+	}
+	clearSelfHosted := ready && openGateCount == 0 && catalogGateCount == 0 && access.ExplicitBindings && audit.ChainVerified && boundary.Gate == "export_ready" && !boundary.ValueReturned
+	if clearSelfHosted && mode == "enterprise" {
+		summary.Verdict = "enterprise_review_needed"
+		summary.Summary = "Self-hosted controls are present, but enterprise evidence still needs review."
+	} else if clearSelfHosted {
+		summary.Verdict = "self_hosted_ready"
+		summary.Summary = "Self-hosted readiness is proven without claiming enterprise evidence."
+	}
+
+	summary.add(ready, "Readiness", "ready", "blocked", "Public readiness is redacted and dependency checks are healthy.", "Readiness is degraded; sensitive actions stay blocked.")
+	summary.add(openGateCount+catalogGateCount == 0, "Open gates", "clear", "review", "No readiness or catalog gates are open.", "Readiness or catalog gates need review.")
+	summary.add(!boundary.ValueReturned, "Value boundary", "withheld", "blocked", "Secret values, backend source paths, request bodies, and command output are excluded.", "Evidence must not return secret values.")
+	summary.add(true, "Browser and API boundary", "hardened", "", "No-script CSP, security headers, request IDs, deny-by-default CORS, and safe errors are covered.", "")
+	summary.add(access.ExplicitBindings, "Role gates", "explicit", "bootstrap", "Explicit admin, auditor, and operator bindings are configured.", "Bootstrap role policy is still a review item.")
+	summary.add(audit.ChainVerified, "Audit evidence", "verified", "review", "Local tamper-evident audit chain verifies.", "Audit chain needs review before stronger claims.")
+	summary.add(boundary.Gate == "export_ready", "Evidence export", "ready", "auditor_required", "Auditor evidence export has integrity metadata and a value-free boundary.", "Evidence export is role-gated from this session.")
+	if mode == "enterprise" {
+		summary.add(false, "Enterprise claim", "candidate", "blocked", "", "Enterprise evidence still requires external controls and review.")
+	} else {
+		summary.add(true, "Enterprise claim", "not_claimed", "", "Current mode does not claim enterprise evidence.", "")
+	}
+	return summary
+}
+
+func (s *AssuranceSummary) add(ok bool, label, okState, reviewState, okDetail, reviewDetail string) {
+	if ok {
+		s.Proven = append(s.Proven, AssuranceItem{Label: label, State: okState, Detail: okDetail, Tone: "ok"})
+		return
+	}
+	s.Review = append(s.Review, AssuranceItem{Label: label, State: reviewState, Detail: reviewDetail, Tone: "warn"})
 }
 
 func ApprovedUsePostureFor(descriptors []SecretDescriptor) ApprovedUsePosture {

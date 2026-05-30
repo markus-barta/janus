@@ -861,6 +861,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		}
 	}
 	evidenceBoundary := EvidenceBoundaryFor(canViewAudit, evidenceHash != "")
+	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	data := map[string]any{
 		"Title":             "Janus",
 		"CSPNonce":          cspNonceFromContext(r.Context()),
@@ -882,6 +883,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Lifecycle":         lifecyclePosture,
 		"ApprovedUse":       approvedUsePosture,
 		"ModePosture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"AssuranceSummary":  assuranceSummary,
 		"EvidenceHash":      evidenceHash,
 		"EvidenceBoundary":  evidenceBoundary,
 		"CanExportEvidence": canViewAudit,
@@ -1937,6 +1939,8 @@ func (app *App) postureBody() map[string]any {
 	if app.permits != nil {
 		permitPosture = app.permits.Posture()
 	}
+	evidenceBoundary := EvidenceBoundaryFor(true, true)
+	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	return map[string]any{
 		"service":            "janus",
 		"mode":               app.cfg.ProductMode,
@@ -1953,11 +1957,12 @@ func (app *App) postureBody() map[string]any {
 			"duties":          []string{"posture", "use_actions", "audit_export", "admin_policy"},
 			"value_returned":  false,
 		},
-		"scope":        scopePosture,
-		"lifecycle":    lifecyclePosture,
-		"approved_use": approvedUsePosture,
-		"permits":      permitPosture,
-		"mode_posture": ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"scope":             scopePosture,
+		"lifecycle":         lifecyclePosture,
+		"approved_use":      approvedUsePosture,
+		"permits":           permitPosture,
+		"mode_posture":      ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"assurance_summary": assuranceSummary,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
 			"pkce_s256":                   app.cfg.OIDCConfigured(),
@@ -1996,6 +2001,7 @@ func (app *App) postureBody() map[string]any {
 			"json_errors_request_id":    true,
 			"backend_source_paths":      "not_returned",
 			"evidence_export_boundary":  "dashboard_and_json",
+			"human_readable_summary":    "dashboard_posture_evidence",
 			"value_returned":            false,
 		},
 		"response_hardening": map[string]any{
@@ -2079,6 +2085,7 @@ func (app *App) postureBody() map[string]any {
 			"mode_posture_evidence",
 			"evidence_export_boundary_ux",
 			"role_availability_ux",
+			"human_readable_assurance_summary",
 		},
 		"value_returned": false,
 	}
@@ -2095,18 +2102,25 @@ func (app *App) scopePosture(descriptors []SecretDescriptor) ScopePosture {
 func (app *App) evidencePack() EvidencePack {
 	allDescriptors := app.store.Descriptors()
 	descriptors := app.cfg.ScopePolicy.Filter(allDescriptors)
+	issues := enterpriseChecks(app.cfg)
+	catalogGates := ValidateCatalog(descriptors)
+	_, ready := app.readinessBody()
+	accessPosture := app.accessPosture()
+	auditPosture := app.store.AuditPosture()
+	evidenceBoundary := EvidenceBoundaryFor(true, true)
 	pack := EvidencePack{
 		GeneratedAt:      time.Now().UTC(),
 		Service:          "janus",
 		Mode:             app.cfg.ProductMode,
 		Posture:          app.postureBody(),
+		AssuranceSummary: AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary),
 		Descriptors:      descriptors,
-		CatalogGates:     ValidateCatalog(descriptors),
+		CatalogGates:     catalogGates,
 		ScopePosture:     app.scopePosture(allDescriptors),
 		LifecyclePosture: LifecyclePostureFor(descriptors, time.Now().UTC()),
 		PermitPosture:    PermitPosture{ValueReturned: false},
-		AccessPosture:    app.accessPosture(),
-		AuditPosture:     app.store.AuditPosture(),
+		AccessPosture:    accessPosture,
+		AuditPosture:     auditPosture,
 		RecentAudit:      app.store.RecentAudit(50),
 		ValueReturned:    false,
 		RedactionModel:   "metadata-only; secret values are not stored, read, rendered, logged, or exported by Janus V1.x",
@@ -2114,7 +2128,7 @@ func (app *App) evidencePack() EvidencePack {
 	if app.permits != nil {
 		pack.PermitPosture = app.permits.Posture()
 	}
-	pack.EvidenceBoundary = EvidenceBoundaryFor(true, true)
+	pack.EvidenceBoundary = evidenceBoundary
 	integrity := EvidenceIntegrityFor(pack)
 	pack.Integrity = &integrity
 	return pack
@@ -2716,6 +2730,38 @@ func mustTemplates() *template.Template {
         {{ end }}
       </div>
     </div>
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="assurance-summary">
+  <div class="panel-head">
+    <h2>Assurance summary</h2>
+    <span class="pill {{ if .AssuranceSummary.Review }}warn{{ else }}ok{{ end }}">{{ .AssuranceSummary.Verdict }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .AssuranceSummary.Summary }}</p>
+    <p><span class="pill ok">value_returned=false</span> <span class="pill info">human readable evidence</span></p>
+    <p><strong>Proven controls</strong></p>
+    <div class="mode-grid" aria-label="Proven assurance controls">
+      {{ range .AssuranceSummary.Proven }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+      </div>
+      {{ end }}
+    </div>
+    {{ if .AssuranceSummary.Review }}
+    <p><strong>Review items</strong></p>
+    <div class="mode-grid" aria-label="Assurance review items">
+      {{ range .AssuranceSummary.Review }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+      </div>
+      {{ end }}
+    </div>
+    {{ end }}
   </div>
 </section>
 <section class="panel" style="margin-bottom:16px" id="available-to-you">

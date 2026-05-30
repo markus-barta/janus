@@ -710,6 +710,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"evidence_export_boundary":"dashboard_and_json"`) || !strings.Contains(body, `"evidence_export_boundary_ux"`) {
 		t.Fatalf("posture response should include evidence export boundary posture: %s", body)
 	}
+	if !strings.Contains(body, `"assurance_summary"`) || !strings.Contains(body, `"verdict"`) || !strings.Contains(body, `"Value boundary"`) || !strings.Contains(body, `"human_readable_assurance_summary"`) || !strings.Contains(body, `"human_readable_summary":"dashboard_posture_evidence"`) {
+		t.Fatalf("posture response should include human-readable assurance summary: %s", body)
+	}
 	if !strings.Contains(body, `"mode_posture"`) || !strings.Contains(body, `"current":"Self-hosted"`) || !strings.Contains(body, `"enterprise":"not_claimed"`) || !strings.Contains(body, `"mode_posture_evidence"`) {
 		t.Fatalf("posture response should include product-mode evidence: %s", body)
 	}
@@ -797,6 +800,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"evidence_boundary"`) || !strings.Contains(body, `"gate":"export_ready"`) || !strings.Contains(body, `"secret_values"`) || !strings.Contains(body, `"backend_source_paths"`) || !strings.Contains(body, `"hash_available":true`) {
 		t.Fatalf("evidence response should include export boundary: %s", body)
+	}
+	if !strings.Contains(body, `"assurance_summary"`) || !strings.Contains(body, `"proven"`) || !strings.Contains(body, `"review"`) || !strings.Contains(body, `"Browser and API boundary"`) {
+		t.Fatalf("evidence response should include assurance summary: %s", body)
 	}
 	if !strings.Contains(body, `"scope_posture"`) {
 		t.Fatalf("evidence response should include scope posture: %s", body)
@@ -931,6 +937,51 @@ func TestProductModePostureDistinguishesClaims(t *testing.T) {
 	}
 }
 
+func TestAssuranceSummaryDistinguishesProofAndReview(t *testing.T) {
+	access := AccessPosture{ExplicitBindings: true}
+	audit := AuditPosture{ChainVerified: true}
+	boundary := EvidenceBoundaryFor(true, true)
+
+	ready := AssuranceSummaryFor("self_hosted", true, 0, 0, access, audit, boundary)
+	if ready.Verdict != "self_hosted_ready" || ready.ValueReturned || len(ready.Review) != 0 {
+		t.Fatalf("expected ready self-hosted summary without review: %#v", ready)
+	}
+	for _, want := range []string{"Readiness", "Open gates", "Value boundary", "Browser and API boundary", "Role gates", "Audit evidence", "Evidence export", "Enterprise claim"} {
+		if !assuranceHasLabel(ready.Proven, want) {
+			t.Fatalf("ready summary should prove %q: %#v", want, ready)
+		}
+	}
+
+	review := AssuranceSummaryFor("self_hosted", false, 1, 0, AccessPosture{}, AuditPosture{}, EvidenceBoundaryFor(false, false))
+	if review.Verdict != "review_needed" || len(review.Review) == 0 {
+		t.Fatalf("expected review summary: %#v", review)
+	}
+	for _, want := range []string{"Readiness", "Open gates", "Role gates", "Audit evidence", "Evidence export"} {
+		if !assuranceHasLabel(review.Review, want) {
+			t.Fatalf("review summary should call out %q: %#v", want, review)
+		}
+	}
+
+	roleGated := AssuranceSummaryFor("self_hosted", true, 0, 0, access, audit, EvidenceBoundaryFor(false, false))
+	if roleGated.Verdict != "review_needed" || !assuranceHasLabel(roleGated.Review, "Evidence export") {
+		t.Fatalf("role-gated evidence export should stay in review: %#v", roleGated)
+	}
+
+	enterprise := AssuranceSummaryFor("enterprise", true, 0, 0, access, audit, boundary)
+	if enterprise.Verdict != "enterprise_review_needed" || !assuranceHasLabel(enterprise.Review, "Enterprise claim") {
+		t.Fatalf("enterprise mode should require review before stronger claims: %#v", enterprise)
+	}
+}
+
+func assuranceHasLabel(items []AssuranceItem, label string) bool {
+	for _, item := range items {
+		if item.Label == label {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDockerComposePinsExplicitJanusRoleBindings(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "docker-compose.yml"))
 	if err != nil {
@@ -963,7 +1014,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "not_claimed", "Evidence export", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Scope boundary", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Assurance summary", "Proven controls", "Review items", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "not_claimed", "Evidence export", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Scope boundary", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
