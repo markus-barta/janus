@@ -457,6 +457,33 @@ func TestPermitRunUIReturnsNoExecutionValueFreeResult(t *testing.T) {
 	}
 }
 
+func TestDashboardRendersRecentPermits(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	permit, err := app.broker.CreatePermit(principalFromSession(Session{Subject: "user-1"}), PermitRequest{
+		Ref:    "zitadel-janus-oidc",
+		Action: "metadata_use",
+		Reason: "local smoke",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.permits.Put(permit)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleDashboard)(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Recent permits", permit.ID, "Run safety check", "approved_metadata_only"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render recent permit %q: %s", want, body)
+		}
+	}
+}
+
 func TestScopePolicyFiltersDescriptorsAndDeniesResolve(t *testing.T) {
 	dataDir := t.TempDir()
 	catalogPath := filepath.Join(t.TempDir(), "catalog.json")

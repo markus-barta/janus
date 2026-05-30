@@ -497,6 +497,7 @@ func (app *App) dashboardData(session Session, actionResult *UIActionResult) map
 		"EvidenceHash":      evidenceHash,
 		"CanExportEvidence": HasRole(session, RoleAuditor),
 		"ActionResult":      actionResult,
+		"Permits":           app.permits.Recent(8),
 	}
 	return data
 }
@@ -1605,6 +1606,38 @@ func mustTemplates() *template.Template {
     </div>
   </div>
 </section>
+{{ if .Permits }}
+<section class="grid" id="permits">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Recent permits</h2>
+      <span class="pill ok">{{ len .Permits }} tracked</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Permit</th><th>Secret ref</th><th>Action</th><th>Status</th><th>Expires</th><th>Check</th></tr></thead>
+        <tbody>
+        {{ range .Permits }}
+          <tr>
+            <td class="mono">{{ .ID }}</td>
+            <td>{{ .SecretRef }}</td>
+            <td>{{ .Action }}</td>
+            <td>{{ .Status }}</td>
+            <td>{{ .ExpiresAt.Format "15:04:05" }}</td>
+            <td>
+              <form method="post" action="/ui/permits/{{ .ID }}/run">
+                <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+                <button class="button quiet" type="submit">Run safety check</button>
+              </form>
+            </td>
+          </tr>
+        {{ end }}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{{ end }}
 <section class="grid" id="posture">
   <div class="panel half">
     <div class="panel-head">

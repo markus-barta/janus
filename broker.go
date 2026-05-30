@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -232,6 +233,22 @@ func (s *PermitStore) Get(id string) (Permit, bool) {
 	defer s.mu.RUnlock()
 	permit, ok := s.permits[id]
 	return permit, ok
+}
+
+func (s *PermitStore) Recent(limit int) []Permit {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	permits := make([]Permit, 0, len(s.permits))
+	for _, permit := range s.permits {
+		permits = append(permits, permit)
+	}
+	sort.Slice(permits, func(i, j int) bool {
+		return permits[i].CreatedAt.After(permits[j].CreatedAt)
+	})
+	if limit > 0 && len(permits) > limit {
+		permits = permits[:limit]
+	}
+	return permits
 }
 
 func stringsTrim(value string) string {
