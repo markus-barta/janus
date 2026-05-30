@@ -470,6 +470,11 @@ func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		if !app.cfg.OIDCConfigured() {
+			if isAPIRequest(r) {
+				app.audit(r, "auth.setup", "denied", "", "auth incomplete")
+				writeJSONError(w, http.StatusServiceUnavailable, "auth_not_configured", "OIDC is not configured")
+				return
+			}
 			app.renderSetup(w, r)
 			return
 		}
@@ -477,11 +482,19 @@ func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		session, ok := app.readSession(r)
 		if !ok {
 			app.audit(r, "auth.required", "denied", "", "missing session")
+			if isAPIRequest(r) {
+				writeJSONError(w, http.StatusUnauthorized, "auth_required", "Authentication required")
+				return
+			}
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, session)))
 	}
+}
+
+func isAPIRequest(r *http.Request) bool {
+	return strings.HasPrefix(r.URL.Path, "/api/")
 }
 
 func (app *App) requireRole(role, action string, next http.HandlerFunc) http.HandlerFunc {
@@ -1308,7 +1321,7 @@ func randomNonce(n int) string {
 	if _, err := rand.Read(b); err != nil {
 		panic(err)
 	}
-	return base64.StdEncoding.EncodeToString(b)
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func decodeKey(value string) ([]byte, error) {
@@ -1424,6 +1437,10 @@ func (app *App) postureBody() map[string]any {
 			"legacy_cache_headers": true,
 			"value_returned":       false,
 		},
+		"api_errors": map[string]any{
+			"auth_denials_json": true,
+			"value_returned":    false,
+		},
 		"audit": app.store.AuditPosture(),
 		"capabilities": []string{
 			"value_free_metadata_catalog",
@@ -1441,6 +1458,7 @@ func (app *App) postureBody() map[string]any {
 			"oidc_nonce_bound_login",
 			"pkce_s256_auth_code",
 			"no_store_responses",
+			"api_json_auth_errors",
 		},
 		"value_returned": false,
 	}

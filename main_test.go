@@ -301,6 +301,46 @@ func TestLoginRedirectUsesNoStoreHeaders(t *testing.T) {
 	}
 }
 
+func TestAPIRequiresAuthReturnsValueFreeJSON(t *testing.T) {
+	app := newTestApp(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/posture", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%s", out.Code, out.Body.String())
+	}
+	if got := out.Header().Get("Location"); got != "" {
+		t.Fatalf("API auth denial should not redirect, got Location %q", got)
+	}
+	if got := out.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Fatalf("API auth denial should be JSON, got %q", got)
+	}
+	body := out.Body.String()
+	if !strings.Contains(body, `"error":"auth_required"`) || !strings.Contains(body, `"value_returned":false`) {
+		t.Fatalf("API auth denial should be value-free JSON: %s", body)
+	}
+}
+
+func TestAPISetupIncompleteReturnsValueFreeJSON(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.OIDCSecret = ""
+
+	req := httptest.NewRequest(http.MethodGet, "/api/posture", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", out.Code, out.Body.String())
+	}
+	if got := out.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Fatalf("API setup denial should be JSON, got %q", got)
+	}
+	body := out.Body.String()
+	if !strings.Contains(body, `"error":"auth_not_configured"`) || !strings.Contains(body, `"value_returned":false`) {
+		t.Fatalf("API setup denial should be value-free JSON: %s", body)
+	}
+}
+
 func TestValidOIDCNonce(t *testing.T) {
 	if !validOIDCNonce("nonce-123", "nonce-123") {
 		t.Fatal("matching nonce should be valid")
@@ -433,6 +473,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"response_hardening"`) || !strings.Contains(body, `"no_store_responses"`) {
 		t.Fatalf("posture response should include response hardening: %s", body)
+	}
+	if !strings.Contains(body, `"api_errors"`) || !strings.Contains(body, `"api_json_auth_errors"`) {
+		t.Fatalf("posture response should include API error posture: %s", body)
 	}
 	if !strings.Contains(body, `"auth"`) || !strings.Contains(body, `"oidc_nonce_bound_login"`) || !strings.Contains(body, `"pkce_s256_auth_code"`) {
 		t.Fatalf("posture response should include hardened OIDC login controls: %s", body)
@@ -581,6 +624,13 @@ func TestSecurityHeadersUseStyleNonce(t *testing.T) {
 	nonce := strings.SplitN(parts[1], `"`, 2)[0]
 	if nonce == "" || !strings.Contains(csp, "'nonce-"+nonce+"'") {
 		t.Fatalf("CSP nonce should match style nonce: csp=%s nonce=%q", csp, nonce)
+	}
+}
+
+func TestRandomNonceIsTemplateSafe(t *testing.T) {
+	nonce := randomNonce(64)
+	if nonce == "" || strings.ContainsAny(nonce, "+/=") {
+		t.Fatalf("CSP nonce should be URL-safe and unpadded, got %q", nonce)
 	}
 }
 
