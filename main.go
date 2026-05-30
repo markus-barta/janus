@@ -940,7 +940,7 @@ func (app *App) scopePosture(descriptors []SecretDescriptor) ScopePosture {
 func (app *App) evidencePack() EvidencePack {
 	allDescriptors := app.store.Descriptors()
 	descriptors := app.cfg.ScopePolicy.Filter(allDescriptors)
-	return EvidencePack{
+	pack := EvidencePack{
 		GeneratedAt:    time.Now().UTC(),
 		Service:        "janus",
 		Mode:           app.cfg.ProductMode,
@@ -954,6 +954,9 @@ func (app *App) evidencePack() EvidencePack {
 		ValueReturned:  false,
 		RedactionModel: "metadata-only; secret values are not stored, read, rendered, logged, or exported by Janus V1.x",
 	}
+	integrity := EvidenceIntegrityFor(pack)
+	pack.Integrity = &integrity
+	return pack
 }
 
 func (app *App) handleBrokerError(w http.ResponseWriter, r *http.Request, action, actor, ref string, err error) {

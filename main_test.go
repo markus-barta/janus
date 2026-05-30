@@ -279,6 +279,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"scope_posture"`) {
 		t.Fatalf("evidence response should include scope posture: %s", body)
 	}
+	if !strings.Contains(body, `"integrity"`) || !strings.Contains(body, `"pack_hash"`) {
+		t.Fatalf("evidence response should include integrity metadata: %s", body)
+	}
 }
 
 func TestEvidenceExportRequiresAuditorRole(t *testing.T) {
@@ -382,6 +385,21 @@ func TestScopePolicyFiltersDescriptorsAndDeniesResolve(t *testing.T) {
 	posture := ScopePostureFor(broker.scopePolicy, store.Descriptors())
 	if posture.OutOfScopeCount != 1 || posture.GateCount != 1 || posture.ValueReturned {
 		t.Fatalf("unexpected scope posture: %#v", posture)
+	}
+}
+
+func TestEvidenceIntegrityIsValueFreeAndStableShape(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	pack := app.evidencePack()
+	if pack.Integrity == nil {
+		t.Fatal("expected evidence integrity metadata")
+	}
+	if pack.Integrity.Algorithm != "sha256-json-v1" || len(pack.Integrity.PackHash) != 64 {
+		t.Fatalf("unexpected integrity metadata: %#v", pack.Integrity)
+	}
+	if pack.Integrity.ValueReturned || pack.Integrity.GeneratedAt.IsZero() {
+		t.Fatalf("integrity metadata should be value-free and timestamped: %#v", pack.Integrity)
 	}
 }
 

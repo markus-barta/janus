@@ -23,6 +23,7 @@ type EvidencePack struct {
 	AccessPosture  AccessPosture      `json:"access_posture"`
 	AuditPosture   AuditPosture       `json:"audit_posture"`
 	RecentAudit    []AuditEntry       `json:"recent_audit"`
+	Integrity      *EvidenceIntegrity `json:"integrity,omitempty"`
 	ValueReturned  bool               `json:"value_returned"`
 	RedactionModel string             `json:"redaction_model"`
 }
