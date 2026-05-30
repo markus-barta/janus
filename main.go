@@ -894,6 +894,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	restoreProof := RestoreDrillProofFor(enterpriseValidation)
 	restoreWorkflow := RestoreDrillWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	releaseWorkflow := ReleaseProvenanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -936,6 +937,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"RestoreProof":      restoreProof,
 		"RestoreWorkflow":   restoreWorkflow,
 		"ReleaseWorkflow":   releaseWorkflow,
+		"PrivacyWorkflow":   privacyWorkflow,
 		"Privacy":           privacyPosture,
 		"AssuranceSummary":  assuranceSummary,
 		"AssuranceGates":    assuranceGates,
@@ -2355,6 +2357,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	restoreProof := RestoreDrillProofFor(enterpriseValidation)
 	restoreWorkflow := RestoreDrillWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	releaseWorkflow := ReleaseProvenanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2392,6 +2395,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"restore_drill_proof":         restoreProof,
 		"restore_drill_workflow":      restoreWorkflow,
 		"release_provenance_workflow": releaseWorkflow,
+		"privacy_retention_workflow":  privacyWorkflow,
 		"privacy_posture":             privacyPosture,
 		"evidence_receipt":            evidenceReceipt,
 		"action_readiness":            actionReadiness,
@@ -2452,6 +2456,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"restore_drill_proof":         "dashboard_posture_evidence",
 			"restore_drill_workflow":      "presence_only_recovery_evidence",
 			"release_provenance_workflow": "presence_only_release_evidence",
+			"privacy_retention_workflow":  "presence_only_policy_evidence",
 			"action_readiness":            "role_and_readiness_matrix",
 			"command_center":              "dashboard_posture_api",
 			"action_receipts":             "mutation_result_receipts",
@@ -2562,6 +2567,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"restore_drill_proof",
 			"restore_drill_presence_workflow",
 			"release_provenance_presence_workflow",
+			"privacy_retention_presence_workflow",
 			"role_aware_action_readiness",
 			"command_center_ux",
 			"value_free_action_receipts",
@@ -2622,6 +2628,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	restoreProof := RestoreDrillProofFor(enterpriseValidation)
 	restoreWorkflow := RestoreDrillWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	releaseWorkflow := ReleaseProvenanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2643,6 +2650,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		AssuranceSummary: assuranceSummary,
 		RestoreWorkflow:  restoreWorkflow,
 		ReleaseWorkflow:  releaseWorkflow,
+		PrivacyWorkflow:  privacyWorkflow,
 		Enterprise:       enterpriseValidation,
 		EnterpriseDryRun: enterpriseDryRun,
 		AttachmentReview: attachmentReview,
@@ -3811,6 +3819,40 @@ func mustTemplates() *template.Template {
     {{ end }}
     <div class="mode-grid" aria-label="Release provenance workflow checks">
       {{ range .ReleaseWorkflow.Checks }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+        <p><span class="pill info">next</span> {{ .Next }}</p>
+      </div>
+      {{ end }}
+    </div>
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="privacy-retention-workflow">
+  <div class="panel-head">
+    <h2>Privacy and retention workflow</h2>
+    <span class="pill {{ if eq .PrivacyWorkflow.Status "attached" }}ok{{ else if eq .PrivacyWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .PrivacyWorkflow.Status }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .PrivacyWorkflow.Summary }}</p>
+    <p><span class="pill info">owner {{ .PrivacyWorkflow.OwnerRole }}</span> <span class="pill {{ if .PrivacyWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .PrivacyWorkflow.Required }}</span> <span class="pill {{ if .PrivacyWorkflow.Attached }}ok{{ else if .PrivacyWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .PrivacyWorkflow.Attachment }}</span> <span class="pill info">{{ .PrivacyWorkflow.EvidenceSignal }}</span> <span class="pill ok">policy_doc_returned=false</span> <span class="pill ok">raw_metadata_returned=false</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <p><span class="pill info">review cadence</span> {{ .PrivacyWorkflow.ReviewCadence }}</p>
+    {{ if .PrivacyWorkflow.Attached }}
+    <p><span class="pill ok">presence recorded</span> <span class="pill ok">policy evidence stays external</span> {{ .PrivacyWorkflow.Next }}</p>
+    {{ else if .PrivacyWorkflow.CanAttach }}
+    <form method="post" action="/ui/evidence/attachments">
+      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+      <input type="hidden" name="control_key" value="{{ .PrivacyWorkflow.ControlKey }}">
+      <input type="hidden" name="attestation" value="external_evidence_exists">
+      <button class="button quiet" type="submit">Mark privacy policy present</button>
+    </form>
+    <p>{{ .PrivacyWorkflow.Next }}</p>
+    {{ else }}
+    <p><span class="pill warn">{{ .PrivacyWorkflow.OwnerRole }} role required</span> {{ .PrivacyWorkflow.Next }}</p>
+    {{ end }}
+    <div class="mode-grid" aria-label="Privacy and retention workflow checks">
+      {{ range .PrivacyWorkflow.Checks }}
       <div class="mode-item {{ .Tone }}">
         <span>{{ .Label }}</span>
         <strong>{{ .State }}</strong>
