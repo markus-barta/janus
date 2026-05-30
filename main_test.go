@@ -519,6 +519,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"response_hardening"`) || !strings.Contains(body, `"no_store_responses"`) {
 		t.Fatalf("posture response should include response hardening: %s", body)
 	}
+	if !strings.Contains(body, `"script_src":"none"`) || !strings.Contains(body, `"no_script_csp"`) {
+		t.Fatalf("posture response should include no-script CSP hardening: %s", body)
+	}
 	if !strings.Contains(body, `"api_errors"`) || !strings.Contains(body, `"api_json_auth_errors"`) {
 		t.Fatalf("posture response should include API error posture: %s", body)
 	}
@@ -710,6 +713,11 @@ func TestSecurityHeadersUseStyleNonce(t *testing.T) {
 	csp := out.Header().Get("Content-Security-Policy")
 	if strings.Contains(csp, "unsafe-inline") || !strings.Contains(csp, "style-src 'self' 'nonce-") {
 		t.Fatalf("CSP should use style nonce without unsafe-inline: %s", csp)
+	}
+	for _, want := range []string{"script-src 'none'", "object-src 'none'", "worker-src 'none'", "connect-src 'self'", "upgrade-insecure-requests"} {
+		if !strings.Contains(csp, want) {
+			t.Fatalf("CSP should include %q: %s", want, csp)
+		}
 	}
 	parts := strings.SplitN(out.Body.String(), `<style nonce="`, 2)
 	if len(parts) != 2 {

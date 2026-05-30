@@ -430,7 +430,7 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 		nonce := randomNonce(18)
 		r = r.WithContext(context.WithValue(r.Context(), cspNonceKey{}, nonce))
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'nonce-"+nonce+"'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'none'; object-src 'none'; worker-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; font-src 'self'; img-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-"+nonce+"'; upgrade-insecure-requests")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Expires", "0")
 		w.Header().Set("Pragma", "no-cache")
@@ -1519,6 +1519,7 @@ func (app *App) postureBody() map[string]any {
 		},
 		"response_hardening": map[string]any{
 			"cache_control":        "no-store",
+			"script_src":           "none",
 			"legacy_cache_headers": true,
 			"value_returned":       false,
 		},
@@ -1551,6 +1552,7 @@ func (app *App) postureBody() map[string]any {
 			"value_free_readiness",
 			"signed_session_expiry",
 			"approved_metadata_use_enforced",
+			"no_script_csp",
 		},
 		"value_returned": false,
 	}
