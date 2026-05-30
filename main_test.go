@@ -47,11 +47,16 @@ func newTestApp(t *testing.T) *App {
 	if err != nil {
 		t.Fatal(err)
 	}
+	evidenceStore, err := NewEvidenceAttachmentStore(tTempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &App{
 		cfg:       testConfig(),
 		store:     store,
 		broker:    NewBroker(store),
 		permits:   permitStore,
+		evidence:  evidenceStore,
 		templates: mustTemplates(),
 	}
 }
@@ -852,7 +857,7 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"mode_guardrails"`) || !strings.Contains(body, `"current":"Self-hosted"`) || !strings.Contains(body, `"boundary":"enterprise_not_claimed"`) || !strings.Contains(body, `"key":"enterprise_claim"`) || !strings.Contains(body, `"mode_guardrails":"dashboard_posture_evidence"`) {
 		t.Fatalf("posture response should include mode guardrails: %s", body)
 	}
-	if !strings.Contains(body, `"enterprise_validation"`) || !strings.Contains(body, `"status":"not_claimed"`) || !strings.Contains(body, `"key":"remote_audit"`) || !strings.Contains(body, `"enterprise_validation_clarity"`) || !strings.Contains(body, `"enterprise_validation":"self_hosted_safe_enterprise_required"`) || !strings.Contains(body, `"enterprise_attachments":"presence_only_no_refs"`) || !strings.Contains(body, `"enterprise_evidence_attachment_matrix"`) || !strings.Contains(body, `"attachment_review"`) || !strings.Contains(body, `"attachment_review":"presence_only_owner_review"`) || !strings.Contains(body, `"enterprise_attachment_review_workflow"`) || !strings.Contains(body, `"enterprise_dry_run"`) || !strings.Contains(body, `"enterprise_dry_run":"self_hosted_to_enterprise_checklist"`) || !strings.Contains(body, `"enterprise_dry_run_checklist"`) {
+	if !strings.Contains(body, `"enterprise_validation"`) || !strings.Contains(body, `"status":"not_claimed"`) || !strings.Contains(body, `"key":"remote_audit"`) || !strings.Contains(body, `"enterprise_validation_clarity"`) || !strings.Contains(body, `"enterprise_validation":"self_hosted_safe_enterprise_required"`) || !strings.Contains(body, `"enterprise_attachments":"presence_only_no_refs"`) || !strings.Contains(body, `"enterprise_evidence_attachment_matrix"`) || !strings.Contains(body, `"attachment_review"`) || !strings.Contains(body, `"attachment_review":"presence_only_owner_review"`) || !strings.Contains(body, `"enterprise_attachment_review_workflow"`) || !strings.Contains(body, `"enterprise_dry_run"`) || !strings.Contains(body, `"enterprise_dry_run":"self_hosted_to_enterprise_checklist"`) || !strings.Contains(body, `"enterprise_dry_run_checklist"`) || !strings.Contains(body, `"external_evidence"`) || !strings.Contains(body, `"external_evidence_workflow":"presence_only_no_refs"`) || !strings.Contains(body, `"external_evidence_presence_workflow"`) {
 		t.Fatalf("posture response should include enterprise validation clarity: %s", body)
 	}
 	if !strings.Contains(body, `"privacy_posture"`) || !strings.Contains(body, `"key":"request_bodies"`) || !strings.Contains(body, `"key":"prompt_command_env"`) || !strings.Contains(body, `"key":"auth_cookie_secrets"`) || !strings.Contains(body, `"privacy_retention_posture"`) || !strings.Contains(body, `"privacy_retention":"dashboard_posture_evidence"`) {
@@ -1169,6 +1174,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed enterprise dry-run")
 	}
+	postureExternalEvidence, ok := posture["external_evidence"].(ExternalEvidencePosture)
+	if !ok {
+		t.Fatalf("posture should expose typed external evidence")
+	}
 	postureAccess, ok := posture["access"].(AccessPosture)
 	if !ok {
 		t.Fatalf("posture should expose typed access posture")
@@ -1197,6 +1206,9 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(postureEnterpriseDryRun, pack.EnterpriseDryRun) {
 		t.Fatalf("posture and evidence should share the same enterprise dry-run: posture=%#v evidence=%#v", postureEnterpriseDryRun, pack.EnterpriseDryRun)
+	}
+	if !reflect.DeepEqual(postureExternalEvidence, pack.ExternalEvidence) {
+		t.Fatalf("posture and evidence should share the same external evidence posture: posture=%#v evidence=%#v", postureExternalEvidence, pack.ExternalEvidence)
 	}
 	if !reflect.DeepEqual(postureAccess, pack.AccessPosture) {
 		t.Fatalf("posture and evidence should share the same access posture: posture=%#v evidence=%#v", postureAccess, pack.AccessPosture)
@@ -1385,6 +1397,7 @@ func TestSensitiveAPIsFailClosedWhenReadinessDegraded(t *testing.T) {
 		contentType string
 	}{
 		{name: "evidence export", method: http.MethodGet, path: "/api/evidence"},
+		{name: "evidence attach", method: http.MethodPost, path: "/api/evidence/attachments", body: `{"control_key":"remote_audit","attestation":"external_evidence_exists","external_ref":"raw-secret-value"}`, contentType: "application/json"},
 		{name: "resolve handle", method: http.MethodPost, path: "/api/warden/resolve", body: `{"ref":"raw-secret-value","reason":"plaintext body should not echo"}`, contentType: "application/json"},
 		{name: "create permit", method: http.MethodPost, path: "/api/permits", body: `{"ref":"raw-secret-value","action":"metadata_use","destination":"secrets/backend","reason":"plaintext body should not echo"}`, contentType: "application/json"},
 		{name: "run permit", method: http.MethodPost, path: "/api/permits/raw-secret-value/run"},
@@ -2111,6 +2124,11 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
 	}
+	for _, want := range []string{"External evidence workflow", "Presence-only external evidence workflow", "records presence only", "no refs stored", "Mark present"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render external evidence workflow %q: %s", want, body)
+		}
+	}
 	for _, forbidden := range []string{"plaintext", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("dashboard should remain value-free, found %q: %s", forbidden, body)
@@ -2234,6 +2252,95 @@ func TestEnterpriseEvidenceAttachmentsArePresenceOnlyAcrossRoutes(t *testing.T) 
 			}
 			assertRouteResponseValueFree(t, route.name+" enterprise attachments", out)
 		})
+	}
+}
+
+func TestEvidenceAttachmentWorkflowIsPresenceOnly(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "auditor", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	body := `{"control_key":"remote_audit","attestation":"external_evidence_exists","external_ref":"https://evidence.example/secret-cookie-secret-/run/agenix/remote_audit"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/evidence/attachments", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://vault.barta.cm")
+	req.Header.Set("X-CSRF-Token", app.csrfToken(session))
+	req.Header.Set("X-Request-Id", "evidence-attach-1")
+	req.AddCookie(rr.Result().Cookies()[0])
+
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", out.Code, out.Body.String())
+	}
+	attachBody := out.Body.String()
+	for _, want := range []string{`"control_key":"remote_audit"`, `"attachment":"attached_presence_only"`, `"evidence_signal":"presence_only_workflow"`, `"evidence_ref_returned":false`, `"value_returned":false`, `"receipt"`, `"request_body_returned":false`, `"request_id":"evidence-attach-1"`} {
+		if !strings.Contains(attachBody, want) {
+			t.Fatalf("attachment response should include %s: %s", want, attachBody)
+		}
+	}
+	for _, forbidden := range []string{"external_ref", "https://evidence.example", "secret-cookie-secret", "/run/agenix"} {
+		if strings.Contains(attachBody, forbidden) {
+			t.Fatalf("attachment response leaked request-only evidence ref %q: %s", forbidden, attachBody)
+		}
+	}
+
+	routes := []struct {
+		name string
+		path string
+	}{
+		{name: "dashboard", path: "/"},
+		{name: "posture", path: "/api/posture"},
+		{name: "evidence", path: "/api/evidence"},
+	}
+	for _, route := range routes {
+		t.Run(route.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, route.path, nil)
+			req.AddCookie(rr.Result().Cookies()[0])
+			out := httptest.NewRecorder()
+			app.routes().ServeHTTP(out, req)
+			if out.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+			}
+			got := out.Body.String()
+			for _, want := range []string{"External evidence workflow", "attached_presence_only", "presence_only_workflow", "evidence_ref_returned", "value_returned"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("%s should include workflow marker %q: %s", route.name, want, got)
+				}
+			}
+			for _, forbidden := range []string{"external_ref", "https://evidence.example", "secret-cookie-secret", "/run/agenix"} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("%s leaked request-only evidence ref %q: %s", route.name, forbidden, got)
+				}
+			}
+			assertRouteResponseValueFree(t, route.name+" evidence workflow", out)
+		})
+	}
+}
+
+func TestEvidenceAttachmentRequiresOwningRole(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "viewer", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/evidence/attachments", strings.NewReader(`{"control_key":"remote_audit","attestation":"external_evidence_exists"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://vault.barta.cm")
+	req.Header.Set("X-CSRF-Token", app.csrfToken(session))
+	req.AddCookie(rr.Result().Cookies()[0])
+
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", out.Code, out.Body.String())
+	}
+	if !strings.Contains(out.Body.String(), `"role_denied"`) || strings.Contains(out.Body.String(), "remote_audit") {
+		t.Fatalf("role denial should stay generic and value-free: %s", out.Body.String())
+	}
+	if len(app.evidence.Map()) != 0 {
+		t.Fatalf("role-denied evidence attach should not persist: %#v", app.evidence.Map())
 	}
 }
 
@@ -2537,12 +2644,14 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "descriptors", method: http.MethodGet, path: "/api/warden/descriptors", status: http.StatusOK},
 		{name: "audit", method: http.MethodGet, path: "/api/audit/recent", status: http.StatusOK},
 		{name: "evidence", method: http.MethodGet, path: "/api/evidence", status: http.StatusOK},
+		{name: "evidence attach", method: http.MethodPost, path: "/api/evidence/attachments", body: `{"control_key":"remote_audit","attestation":"external_evidence_exists","external_ref":"raw-secret-value"}`, contentType: "application/json", status: http.StatusCreated},
 		{name: "resolve", method: http.MethodPost, path: "/api/warden/resolve", body: `{"ref":"zitadel-janus-oidc","reason":"local smoke"}`, contentType: "application/json", status: http.StatusOK},
 		{name: "resolve bad json", method: http.MethodPost, path: "/api/warden/resolve", body: `{"ref":"raw-secret-value"`, contentType: "application/json", status: http.StatusBadRequest},
 		{name: "permit", method: http.MethodPost, path: "/api/permits", body: `{"ref":"zitadel-janus-oidc","action":"metadata_use","destination":"dashboard","reason":"local smoke"}`, contentType: "application/json", status: http.StatusCreated},
 		{name: "permit missing run", method: http.MethodPost, path: "/api/permits/missing/run", status: http.StatusNotFound},
 		{name: "dashboard", method: http.MethodGet, path: "/", status: http.StatusOK},
 		{name: "ui resolve", method: http.MethodPost, path: "/ui/warden/resolve", body: "ref=zitadel-janus-oidc&reason=local+smoke", contentType: "application/x-www-form-urlencoded", status: http.StatusOK},
+		{name: "ui evidence attach", method: http.MethodPost, path: "/ui/evidence/attachments", body: "control_key=remote_audit&attestation=external_evidence_exists", contentType: "application/x-www-form-urlencoded", status: http.StatusCreated},
 		{name: "ui permit", method: http.MethodPost, path: "/ui/permits", body: "ref=zitadel-janus-oidc&action=metadata_use&destination=dashboard&reason=local+smoke", contentType: "application/x-www-form-urlencoded", status: http.StatusOK},
 		{name: "ui permit missing run", method: http.MethodPost, path: "/ui/permits/missing/run", status: http.StatusNotFound},
 	}
@@ -2581,6 +2690,7 @@ func TestJSONErrorResponsesAreRequestCorrelated(t *testing.T) {
 		{name: "auth required posture", method: http.MethodGet, path: "/api/posture", status: http.StatusUnauthorized},
 		{name: "auth required resolve", method: http.MethodPost, path: "/api/warden/resolve", status: http.StatusUnauthorized},
 		{name: "auth required evidence", method: http.MethodGet, path: "/api/evidence", status: http.StatusUnauthorized},
+		{name: "auth required evidence attach", method: http.MethodPost, path: "/api/evidence/attachments", status: http.StatusUnauthorized},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reqID := "json-error-" + strings.NewReplacer(" ", "-", "/", "-").Replace(tc.name)
@@ -3473,6 +3583,55 @@ func TestPermitStoreRejectsCorruptPersistenceFile(t *testing.T) {
 	}
 }
 
+func TestEvidenceAttachmentStorePersistsPresenceOnlyRecords(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := NewEvidenceAttachmentStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, ok := enterpriseValidationSpecByKey("remote_audit")
+	if !ok {
+		t.Fatal("missing remote_audit spec")
+	}
+	record := NewEvidenceAttachmentRecord(spec, "auditor@example.test")
+	if err := store.Put(record); err != nil {
+		t.Fatal(err)
+	}
+	attachmentFile := filepath.Join(dataDir, "enterprise-evidence.json")
+	info, err := os.Stat(attachmentFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("attachment file mode should be 0600, got %o", info.Mode().Perm())
+	}
+	raw, err := os.ReadFile(attachmentFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	for _, want := range []string{`"control_key": "remote_audit"`, `"attachment": "attached_presence_only"`, `"evidence_signal": "presence_only_workflow"`, `"evidence_ref_returned": false`, `"value_returned": false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("evidence attachment persistence should include %s: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"auditor@example.test", "secret-cookie-secret", "/run/agenix", "http://", "https://", `"source"`} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("evidence attachment persistence leaked %q: %s", forbidden, body)
+		}
+	}
+
+	reloaded, err := NewEvidenceAttachmentStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := reloaded.Map()
+	got, ok := records["remote_audit"]
+	if !ok || got.Attachment != "attached_presence_only" || got.EvidenceRefReturned || got.ValueReturned {
+		t.Fatalf("reloaded evidence attachment should stay presence-only: %#v", records)
+	}
+}
+
 func TestHealthzIsRedactedLivenessOnly(t *testing.T) {
 	app := newTestApp(t)
 
@@ -3530,7 +3689,7 @@ func TestReadyzReportsValueFreeChecks(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
 	body := rr.Body.String()
-	for _, want := range []string{`"ready":true`, `"mode":"self_hosted"`, `"auth":true`, `"descriptor_store":true`, `"audit_sink":true`, `"audit_chain":true`, `"permit_store":true`, `"redacted":true`, `"value_returned":false`} {
+	for _, want := range []string{`"ready":true`, `"mode":"self_hosted"`, `"auth":true`, `"descriptor_store":true`, `"audit_sink":true`, `"audit_chain":true`, `"permit_store":true`, `"evidence_attachment_store":true`, `"redacted":true`, `"value_returned":false`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("readyz should include %s: %s", want, body)
 		}
@@ -3553,6 +3712,20 @@ func TestReadyzRequiresPermitStore(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), `"permit_store":false`) {
 		t.Fatalf("readyz should fail when permit store is unavailable: %s", rr.Body.String())
+	}
+}
+
+func TestReadyzRequiresEvidenceAttachmentStore(t *testing.T) {
+	app := newTestApp(t)
+	app.evidence = nil
+
+	rr := httptest.NewRecorder()
+	app.handleReady(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"evidence_attachment_store":false`) {
+		t.Fatalf("readyz should fail when evidence attachment store is unavailable: %s", rr.Body.String())
 	}
 }
 

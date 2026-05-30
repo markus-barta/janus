@@ -299,6 +299,7 @@ type App struct {
 	store     *Store
 	broker    *Broker
 	permits   *PermitStore
+	evidence  *EvidenceAttachmentStore
 	limiter   *RateLimiter
 	oauth     *oauth2.Config
 	verifier  *oidc.IDTokenVerifier
@@ -349,9 +350,11 @@ type UIActionResult struct {
 	Receipt        *ActionReceipt `json:"receipt,omitempty"`
 	HandleID       string         `json:"handle_id,omitempty"`
 	PermitID       string         `json:"permit_id,omitempty"`
+	ControlKey     string         `json:"control_key,omitempty"`
 	SecretRef      string         `json:"secret_ref,omitempty"`
 	Action         string         `json:"action,omitempty"`
 	Status         string         `json:"status,omitempty"`
+	EvidenceState  string         `json:"evidence_state,omitempty"`
 	ExpiresAt      string         `json:"expires_at,omitempty"`
 	RunReason      string         `json:"run_reason,omitempty"`
 	RequestID      string         `json:"request_id,omitempty"`
@@ -462,11 +465,16 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("permit store: %w", err)
 	}
+	evidenceStore, err := NewEvidenceAttachmentStore(cfg.DataDir)
+	if err != nil {
+		return nil, fmt.Errorf("evidence attachment store: %w", err)
+	}
 	app := &App{
 		cfg:       cfg,
 		store:     store,
 		broker:    NewBroker(store).WithScopePolicy(cfg.ScopePolicy),
 		permits:   permitStore,
+		evidence:  evidenceStore,
 		limiter:   NewRateLimiter(180, time.Minute),
 		templates: mustTemplates(),
 	}
@@ -502,9 +510,11 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit)))
 	mux.HandleFunc("GET /api/posture", app.withAuth(app.handlePosture))
 	mux.HandleFunc("GET /api/evidence", app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence)))
+	mux.HandleFunc("POST /api/evidence/attachments", app.withAuth(app.handleAttachEvidence))
 	mux.HandleFunc("POST /api/permits", app.withAuth(app.requireRole(RoleOperator, "permit.create", app.handleCreatePermit)))
 	mux.HandleFunc("POST /api/permits/{permitID}/run", app.withAuth(app.requireRole(RoleOperator, "permit.run", app.handleRunPermit)))
 	mux.HandleFunc("POST /ui/warden/resolve", app.withAuth(app.handleResolveHandleUI))
+	mux.HandleFunc("POST /ui/evidence/attachments", app.withAuth(app.handleAttachEvidenceUI))
 	mux.HandleFunc("POST /ui/permits", app.withAuth(app.handleCreatePermitUI))
 	mux.HandleFunc("POST /ui/permits/{permitID}/run", app.withAuth(app.handleRunPermitUI))
 	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
@@ -531,7 +541,7 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
 	case "/", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
-	case "/logout", "/api/warden/resolve", "/api/permits", "/ui/warden/resolve", "/ui/permits":
+	case "/logout", "/api/warden/resolve", "/api/evidence/attachments", "/api/permits", "/ui/warden/resolve", "/ui/evidence/attachments", "/ui/permits":
 		return []string{http.MethodPost}, true
 	}
 	switch {
@@ -782,6 +792,7 @@ func (app *App) readinessBody() (map[string]any, bool) {
 	auditSinkReady := false
 	auditChainReady := false
 	permitStoreReady := false
+	evidenceStoreReady := false
 
 	if app.store != nil {
 		descriptorCount = len(app.store.Descriptors())
@@ -792,16 +803,20 @@ func (app *App) readinessBody() (map[string]any, bool) {
 	if app.permits != nil {
 		permitStoreReady = app.permits.Posture().Persisted
 	}
+	if app.evidence != nil {
+		evidenceStoreReady = app.evidence.file != ""
+	}
 
 	checks := map[string]bool{
-		"auth":             authReady,
-		"descriptor_store": descriptorReady,
-		"audit_sink":       auditSinkReady,
-		"audit_chain":      auditChainReady,
-		"permit_store":     permitStoreReady,
-		"value_returned":   false,
+		"auth":                      authReady,
+		"descriptor_store":          descriptorReady,
+		"audit_sink":                auditSinkReady,
+		"audit_chain":               auditChainReady,
+		"permit_store":              permitStoreReady,
+		"evidence_attachment_store": evidenceStoreReady,
+		"value_returned":            false,
 	}
-	ready := authReady && descriptorReady && auditSinkReady && auditChainReady && permitStoreReady
+	ready := authReady && descriptorReady && auditSinkReady && auditChainReady && permitStoreReady && evidenceStoreReady
 	return map[string]any{
 		"ready":            ready,
 		"service":          "janus",
@@ -832,7 +847,8 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		selectedRef = actionResult.SecretRef
 	}
 	focus := focusDescriptor(descriptors, selectedRef)
-	issues := enterpriseChecks(app.cfg)
+	evidenceAttachments := app.evidenceAttachmentMap()
+	issues := enterpriseChecksWithAttachments(app.cfg, evidenceAttachments)
 	canViewAudit := HasRole(session, RoleAuditor)
 	auditPosture := app.store.AuditPosture()
 	var recentAudit []AuditEntry
@@ -870,9 +886,10 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	evidenceReceipt := EvidenceReceiptFor(evidenceBoundary, nil)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
-	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
-	enterpriseDryRun := EnterpriseDryRunFor(app.cfg.ProductMode, EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: app.cfg.RolePolicy}, ready, accessPosture, auditPosture, len(catalogGates)))
+	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
+	enterpriseDryRun := EnterpriseDryRunFor(app.cfg.ProductMode, EnterpriseValidationWithAttachmentsFor(Config{ProductMode: "enterprise", RolePolicy: app.cfg.RolePolicy}, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments))
 	attachmentReview := AttachmentReviewFor(enterpriseValidation)
+	externalEvidence := app.externalEvidencePosture(enterpriseValidation, session)
 	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
 	restoreProof := RestoreDrillProofFor(enterpriseValidation)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
@@ -913,6 +930,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Enterprise":        enterpriseValidation,
 		"EnterpriseDryRun":  enterpriseDryRun,
 		"AttachmentReview":  attachmentReview,
+		"ExternalEvidence":  externalEvidence,
 		"RestoreProof":      restoreProof,
 		"Privacy":           privacyPosture,
 		"AssuranceSummary":  assuranceSummary,
@@ -1019,6 +1037,83 @@ func actionReceipt(r *http.Request, action, outcome, next string) ActionReceipt 
 		SecretValueReturned: false,
 		RequestBodyReturned: false,
 		ValueReturned:       false,
+	})
+}
+
+func (app *App) attachEvidencePresence(r *http.Request, session Session, req EvidenceAttachmentRequest, action string) (EvidenceAttachmentRecord, int, error) {
+	spec, ok := enterpriseValidationSpecByKey(req.ControlKey)
+	if !ok {
+		app.audit(r, action, "denied", session.Subject, "unknown evidence control")
+		return EvidenceAttachmentRecord{}, http.StatusBadRequest, errors.New("Unknown enterprise evidence control.")
+	}
+	if req.Attestation != externalEvidenceAttestation {
+		app.audit(r, action, "denied", session.Subject, "attestation required")
+		return EvidenceAttachmentRecord{}, http.StatusBadRequest, errors.New("External evidence attestation required.")
+	}
+	if !HasRole(session, spec.OwnerRole) {
+		app.audit(r, action, "denied", session.Subject, "role "+spec.OwnerRole+" required")
+		return EvidenceAttachmentRecord{}, http.StatusForbidden, errors.New(spec.OwnerRole + " role required.")
+	}
+	if !app.requireReadyAPIForAttach(r, session, action) {
+		return EvidenceAttachmentRecord{}, http.StatusServiceUnavailable, errors.New("Janus readiness is degraded; evidence presence was not recorded.")
+	}
+	if app.evidence == nil {
+		app.audit(r, action, "denied", session.Subject, "evidence store unavailable")
+		return EvidenceAttachmentRecord{}, http.StatusServiceUnavailable, errors.New("Evidence attachment store is unavailable.")
+	}
+	record := NewEvidenceAttachmentRecord(spec, session.Subject)
+	if err := app.evidence.Put(record); err != nil {
+		app.audit(r, action, "denied", session.Subject, "evidence persistence failed")
+		return EvidenceAttachmentRecord{}, http.StatusInternalServerError, errors.New("Evidence presence could not be recorded.")
+	}
+	app.audit(r, action, "allowed", session.Subject, spec.Key)
+	return record, http.StatusCreated, nil
+}
+
+func (app *App) requireReadyAPIForAttach(r *http.Request, session Session, action string) bool {
+	if _, ready := app.readinessBody(); ready {
+		return true
+	}
+	app.audit(r, action, "denied", session.Subject, "system degraded")
+	return false
+}
+
+func evidenceAttachErrorCode(status int) string {
+	switch status {
+	case http.StatusForbidden:
+		return "role_denied"
+	case http.StatusServiceUnavailable:
+		return "system_degraded"
+	case http.StatusInternalServerError:
+		return "evidence_store_failed"
+	default:
+		return "evidence_attestation_invalid"
+	}
+}
+
+func (app *App) handleAttachEvidence(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "evidence.attach", "denied", session.Subject, "csrf failed")
+		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		return
+	}
+
+	var req EvidenceAttachmentRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		writeJSONError(w, r, http.StatusBadRequest, "bad_json", "Request body must be JSON")
+		return
+	}
+	record, status, err := app.attachEvidencePresence(r, session, req, "evidence.attach")
+	if err != nil {
+		writeJSONError(w, r, status, evidenceAttachErrorCode(status), err.Error())
+		return
+	}
+	receipt := actionReceipt(r, "evidence.attach", "allowed", "Keep the reviewed evidence outside Janus; only presence metadata was recorded.")
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"attachment":     record,
+		"receipt":        receipt,
+		"value_returned": false,
 	})
 }
 
@@ -1178,6 +1273,44 @@ func (app *App) handleRunPermit(w http.ResponseWriter, r *http.Request) {
 		"receipt":        receipt,
 		"value_returned": false,
 	})
+}
+
+func (app *App) handleAttachEvidenceUI(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "evidence.attach.ui", "denied", session.Subject, "csrf failed")
+		result := UIActionResult{Title: "Evidence blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(r, session, &result, ""))
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		app.audit(r, "evidence.attach.ui", "denied", session.Subject, "bad form")
+		result := UIActionResult{Title: "Evidence blocked", Outcome: "denied", Message: "Request form could not be read.", ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(r, session, &result, ""))
+		return
+	}
+	req := EvidenceAttachmentRequest{
+		ControlKey:  strings.TrimSpace(r.Form.Get("control_key")),
+		Attestation: strings.TrimSpace(r.Form.Get("attestation")),
+	}
+	record, status, err := app.attachEvidencePresence(r, session, req, "evidence.attach.ui")
+	if err != nil {
+		result := UIActionResult{Title: "Evidence blocked", Outcome: "denied", Message: err.Error(), ValueReturned: false}
+		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(r, session, &result, ""))
+		return
+	}
+	receipt := actionReceipt(r, "evidence.attach.ui", "allowed", "Keep the reviewed evidence outside Janus; only presence metadata was recorded.")
+	result := UIActionResult{
+		Title:         "Evidence presence attached",
+		Outcome:       "allowed",
+		Message:       "Presence recorded. Evidence files, URLs, refs, notes, and values stayed outside Janus.",
+		Receipt:       &receipt,
+		ControlKey:    record.ControlKey,
+		Status:        record.Attachment,
+		EvidenceState: record.State,
+		ValueReturned: false,
+	}
+	renderTemplateStatus(w, app.templates, "dashboard", http.StatusCreated, app.dashboardData(r, session, &result, ""))
 }
 
 func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
@@ -1831,22 +1964,17 @@ func envBoolDefault(key string, fallback bool) bool {
 }
 
 func enterpriseChecks(cfg Config) []string {
+	return enterpriseChecksWithAttachments(cfg, nil)
+}
+
+func enterpriseChecksWithAttachments(cfg Config, attachments map[string]EvidenceAttachmentRecord) []string {
 	var issues []string
 	if cfg.RequireAuth && !cfg.OIDCConfigured() {
 		issues = append(issues, "Zitadel OIDC is not configured.")
 	}
-	if cfg.ProductMode == "enterprise" && os.Getenv("JANUS_REMOTE_AUDIT") == "" {
-		issues = append(issues, "Enterprise mode needs remote audit shipping before production use.")
-	}
-	if cfg.ProductMode == "enterprise" && os.Getenv("JANUS_BREAK_GLASS_REVIEW") == "" {
-		issues = append(issues, "Enterprise mode needs a documented break-glass review owner.")
-	}
 	if cfg.ProductMode == "enterprise" {
 		for _, spec := range enterpriseValidationSpecs() {
-			if spec.EnvKey == "JANUS_REMOTE_AUDIT" || spec.EnvKey == "JANUS_BREAK_GLASS_REVIEW" {
-				continue
-			}
-			if os.Getenv(spec.EnvKey) == "" {
+			if os.Getenv(spec.EnvKey) == "" && !evidenceAttachmentPresent(attachments, spec.Key) {
 				issues = append(issues, spec.Missing)
 			}
 		}
@@ -1930,7 +2058,21 @@ func enterpriseValidationSpecs() []enterpriseValidationSpec {
 	}
 }
 
+func enterpriseValidationSpecByKey(key string) (enterpriseValidationSpec, bool) {
+	key = strings.TrimSpace(key)
+	for _, spec := range enterpriseValidationSpecs() {
+		if spec.Key == key {
+			return spec, true
+		}
+	}
+	return enterpriseValidationSpec{}, false
+}
+
 func EnterpriseValidationFor(cfg Config, ready bool, access AccessPosture, audit AuditPosture, catalogGateCount int) EnterpriseValidation {
+	return EnterpriseValidationWithAttachmentsFor(cfg, ready, access, audit, catalogGateCount, nil)
+}
+
+func EnterpriseValidationWithAttachmentsFor(cfg Config, ready bool, access AccessPosture, audit AuditPosture, catalogGateCount int, attachments map[string]EvidenceAttachmentRecord) EnterpriseValidation {
 	mode := strings.TrimSpace(cfg.ProductMode)
 	if mode == "" {
 		mode = "self_hosted"
@@ -1972,6 +2114,7 @@ func EnterpriseValidationFor(cfg Config, ready bool, access AccessPosture, audit
 	}
 
 	for _, spec := range enterpriseValidationSpecs() {
+		attachedByWorkflow := evidenceAttachmentPresent(attachments, spec.Key)
 		control := EnterpriseValidationControl{
 			Key:                 spec.Key,
 			Label:               spec.Label,
@@ -1986,17 +2129,29 @@ func EnterpriseValidationFor(cfg Config, ready bool, access AccessPosture, audit
 			ValueReturned:       false,
 			Tone:                "info",
 		}
+		if attachedByWorkflow {
+			control.State = "attached"
+			control.Attachment = "attached_presence_only"
+			control.EvidenceSignal = "presence_only_workflow"
+			control.Next = "Keep the external evidence reviewed outside Janus; only presence is recorded here."
+			control.Tone = "ok"
+		}
 		if enterpriseMode {
-			control.State = "missing"
-			control.Attachment = "missing"
-			control.Next = spec.Next
-			control.Tone = "warn"
-			if os.Getenv(spec.EnvKey) != "" {
+			if os.Getenv(spec.EnvKey) != "" || attachedByWorkflow {
 				control.State = "attached"
 				control.Attachment = "attached_presence_only"
-				control.Next = "Keep external evidence current and reviewed outside Janus."
+				if attachedByWorkflow {
+					control.EvidenceSignal = "presence_only_workflow"
+					control.Next = "Keep the external evidence reviewed outside Janus; only presence is recorded here."
+				} else {
+					control.Next = "Keep external evidence current and reviewed outside Janus."
+				}
 				control.Tone = "ok"
 			} else {
+				control.State = "missing"
+				control.Attachment = "missing"
+				control.Next = spec.Next
+				control.Tone = "warn"
 				validation.MissingCount++
 			}
 		}
@@ -2008,6 +2163,14 @@ func EnterpriseValidationFor(cfg Config, ready bool, access AccessPosture, audit
 		validation.Summary = "Enterprise controls are attached; keep external review evidence before relying on this claim."
 	}
 	return validation
+}
+
+func evidenceAttachmentPresent(attachments map[string]EvidenceAttachmentRecord, key string) bool {
+	if len(attachments) == 0 {
+		return false
+	}
+	record, ok := attachments[key]
+	return ok && record.Attachment == "attached_presence_only" && !record.ValueReturned && !record.EvidenceRefReturned
 }
 
 func ProductModePostureFor(cfg Config, ready bool, issues []string, access AccessPosture, audit AuditPosture, catalogGateCount int) ProductModePosture {
@@ -2123,6 +2286,7 @@ func writeJSONError(w http.ResponseWriter, r *http.Request, status int, code, me
 		"error":          code,
 		"message":        message,
 		"request_id":     requestID(r),
+		"redacted":       true,
 		"value_returned": false,
 	})
 }
@@ -2161,7 +2325,8 @@ func (app *App) renderSafeFailure(w http.ResponseWriter, r *http.Request, status
 func (app *App) postureBody(session Session) map[string]any {
 	allDescriptors := app.store.Descriptors()
 	descriptors := app.cfg.ScopePolicy.Filter(allDescriptors)
-	issues := enterpriseChecks(app.cfg)
+	evidenceAttachments := app.evidenceAttachmentMap()
+	issues := enterpriseChecksWithAttachments(app.cfg, evidenceAttachments)
 	catalogGates := ValidateCatalog(descriptors)
 	accessPosture := app.accessPosture()
 	scopePosture := app.scopePosture(allDescriptors)
@@ -2178,9 +2343,10 @@ func (app *App) postureBody(session Session) map[string]any {
 	evidenceReceipt := EvidenceReceiptFor(evidenceBoundary, nil)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
-	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
-	enterpriseDryRun := EnterpriseDryRunFor(app.cfg.ProductMode, EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: app.cfg.RolePolicy}, ready, accessPosture, auditPosture, len(catalogGates)))
+	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
+	enterpriseDryRun := EnterpriseDryRunFor(app.cfg.ProductMode, EnterpriseValidationWithAttachmentsFor(Config{ProductMode: "enterprise", RolePolicy: app.cfg.RolePolicy}, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments))
 	attachmentReview := AttachmentReviewFor(enterpriseValidation)
+	externalEvidence := app.externalEvidencePosture(enterpriseValidation, session)
 	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
 	restoreProof := RestoreDrillProofFor(enterpriseValidation)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
@@ -2216,6 +2382,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"enterprise_validation":   enterpriseValidation,
 		"enterprise_dry_run":      enterpriseDryRun,
 		"attachment_review":       attachmentReview,
+		"external_evidence":       externalEvidence,
 		"restore_drill_proof":     restoreProof,
 		"privacy_posture":         privacyPosture,
 		"evidence_receipt":        evidenceReceipt,
@@ -2272,6 +2439,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_validation":       "self_hosted_safe_enterprise_required",
 			"enterprise_attachments":      "presence_only_no_refs",
 			"enterprise_dry_run":          "self_hosted_to_enterprise_checklist",
+			"external_evidence_workflow":  "presence_only_no_refs",
 			"attachment_review":           "presence_only_owner_review",
 			"restore_drill_proof":         "dashboard_posture_evidence",
 			"action_readiness":            "role_and_readiness_matrix",
@@ -2380,6 +2548,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_evidence_attachment_matrix",
 			"enterprise_attachment_review_workflow",
 			"enterprise_dry_run_checklist",
+			"external_evidence_presence_workflow",
 			"restore_drill_proof",
 			"role_aware_action_readiness",
 			"command_center_ux",
@@ -2401,6 +2570,20 @@ func (app *App) accessPosture() AccessPosture {
 	return AccessPostureFor(app.cfg.RolePolicy)
 }
 
+func (app *App) evidenceAttachmentMap() map[string]EvidenceAttachmentRecord {
+	if app.evidence == nil {
+		return nil
+	}
+	return app.evidence.Map()
+}
+
+func (app *App) externalEvidencePosture(enterprise EnterpriseValidation, session Session) ExternalEvidencePosture {
+	if app.evidence == nil {
+		return ExternalEvidencePostureFor(enterprise, nil, false, session)
+	}
+	return app.evidence.Posture(enterprise, session)
+}
+
 func (app *App) scopePosture(descriptors []SecretDescriptor) ScopePosture {
 	return ScopePostureFor(app.cfg.ScopePolicy, descriptors)
 }
@@ -2408,7 +2591,8 @@ func (app *App) scopePosture(descriptors []SecretDescriptor) ScopePosture {
 func (app *App) evidencePack(session Session) EvidencePack {
 	allDescriptors := app.store.Descriptors()
 	descriptors := app.cfg.ScopePolicy.Filter(allDescriptors)
-	issues := enterpriseChecks(app.cfg)
+	evidenceAttachments := app.evidenceAttachmentMap()
+	issues := enterpriseChecksWithAttachments(app.cfg, evidenceAttachments)
 	catalogGates := ValidateCatalog(descriptors)
 	_, ready := app.readinessBody()
 	accessPosture := app.accessPosture()
@@ -2418,9 +2602,10 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	evidenceBoundary := EvidenceBoundaryFor(canExportEvidence, canExportEvidence)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
-	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
-	enterpriseDryRun := EnterpriseDryRunFor(app.cfg.ProductMode, EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: app.cfg.RolePolicy}, ready, accessPosture, auditPosture, len(catalogGates)))
+	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
+	enterpriseDryRun := EnterpriseDryRunFor(app.cfg.ProductMode, EnterpriseValidationWithAttachmentsFor(Config{ProductMode: "enterprise", RolePolicy: app.cfg.RolePolicy}, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments))
 	attachmentReview := AttachmentReviewFor(enterpriseValidation)
+	externalEvidence := app.externalEvidencePosture(enterpriseValidation, session)
 	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
 	restoreProof := RestoreDrillProofFor(enterpriseValidation)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
@@ -2445,6 +2630,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Enterprise:       enterpriseValidation,
 		EnterpriseDryRun: enterpriseDryRun,
 		AttachmentReview: attachmentReview,
+		ExternalEvidence: externalEvidence,
 		RestoreProof:     restoreProof,
 		Privacy:          privacyPosture,
 		Descriptors:      descriptors,
@@ -3473,6 +3659,38 @@ func mustTemplates() *template.Template {
     </div>
   </div>
 </section>
+<section class="panel" style="margin-bottom:16px" id="external-evidence">
+  <div class="panel-head">
+    <h2>External evidence workflow</h2>
+    <span class="pill {{ if eq .ExternalEvidence.Status "candidate" }}ok{{ else if eq .ExternalEvidence.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .ExternalEvidence.Status }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .ExternalEvidence.Summary }}</p>
+    <p><span class="pill info">{{ .ExternalEvidence.Attached }} attached</span> <span class="pill {{ if .ExternalEvidence.Missing }}warn{{ else }}ok{{ end }}">{{ .ExternalEvidence.Missing }} missing</span> <span class="pill info">{{ .ExternalEvidence.ReviewCount }} review</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <div class="mode-grid" aria-label="Presence-only external evidence workflow">
+      {{ range .ExternalEvidence.Items }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .Attachment }}</strong>
+        <p>{{ .Next }}</p>
+        <p><span class="pill info">owner {{ .OwnerRole }}</span> <span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">no refs stored</span></p>
+        {{ if eq .Attachment "attached_presence_only" }}
+        <p><span class="pill ok">presence recorded</span> <span class="pill ok">evidence stays external</span></p>
+        {{ else if .CanAttach }}
+        <form method="post" action="/ui/evidence/attachments">
+          <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+          <input type="hidden" name="control_key" value="{{ .Key }}">
+          <input type="hidden" name="attestation" value="external_evidence_exists">
+          <button class="button quiet" type="submit">Mark present</button>
+        </form>
+        {{ else }}
+        <p><span class="pill warn">{{ .OwnerRole }} role required</span></p>
+        {{ end }}
+      </div>
+      {{ end }}
+    </div>
+  </div>
+</section>
 <section class="panel" style="margin-bottom:16px" id="enterprise-validation">
   <div class="panel-head">
     <h2>Enterprise validation</h2>
@@ -3727,6 +3945,14 @@ func mustTemplates() *template.Template {
       <span><strong>Scrubbed output</strong>{{ if .ActionResult.OutputScrubbed }} confirmed{{ else }} pending check{{ end }}</span>
       <span><strong>Audited</strong> value_returned=false</span>
     </div>
+    {{ end }}
+    {{ if .ActionResult.ControlKey }}
+    <div class="facts">
+      <div class="fact"><strong>{{ .ActionResult.ControlKey }}</strong><span class="muted">control key</span></div>
+      <div class="fact"><strong>{{ .ActionResult.EvidenceState }}</strong><span class="muted">evidence state</span></div>
+      <div class="fact"><strong>{{ .ActionResult.Status }}</strong><span class="muted">attachment</span></div>
+    </div>
+    <p><span class="pill ok">presence only</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">request_body_returned=false</span></p>
     {{ end }}
     {{ if .ActionResult.HandleID }}
     <div class="facts">
