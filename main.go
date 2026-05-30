@@ -452,18 +452,28 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	catalogGates := ValidateCatalog(descriptors)
 	accessPosture := app.accessPosture()
 	scopePosture := app.scopePosture(app.store.Descriptors())
+	evidencePack := app.evidencePack()
+	evidenceHash := ""
+	if evidencePack.Integrity != nil {
+		evidenceHash = evidencePack.Integrity.PackHash
+		if len(evidenceHash) > 12 {
+			evidenceHash = evidenceHash[:12]
+		}
+	}
 	data := map[string]any{
-		"Title":        "Janus",
-		"Session":      session,
-		"CSRF":         app.csrfToken(session),
-		"Descriptors":  descriptors,
-		"Issues":       issues,
-		"Mode":         app.cfg.ProductMode,
-		"Audit":        recentAudit,
-		"Posture":      auditPosture,
-		"CatalogGates": catalogGates,
-		"Access":       accessPosture,
-		"Scope":        scopePosture,
+		"Title":             "Janus",
+		"Session":           session,
+		"CSRF":              app.csrfToken(session),
+		"Descriptors":       descriptors,
+		"Issues":            issues,
+		"Mode":              app.cfg.ProductMode,
+		"Audit":             recentAudit,
+		"Posture":           auditPosture,
+		"CatalogGates":      catalogGates,
+		"Access":            accessPosture,
+		"Scope":             scopePosture,
+		"EvidenceHash":      evidenceHash,
+		"CanExportEvidence": HasRole(session, RoleAuditor),
 	}
 	renderTemplate(w, app.templates, "dashboard", data)
 }
@@ -1029,64 +1039,86 @@ func mustTemplates() *template.Template {
   <style>
     :root {
       color-scheme: light dark;
-      --bg: #f7f8f4;
-      --ink: #171917;
-      --muted: #5e665f;
-      --line: #d8ded5;
+      --bg: #f3f5f7;
+      --ink: #111418;
+      --muted: #66717d;
+      --line: #d9e0e7;
       --panel: #ffffff;
-      --accent: #1e6f5c;
-      --warn: #8f3f12;
-      --shadow: 0 12px 32px rgba(26, 38, 30, .08);
+      --panel-soft: #f8fafb;
+      --accent: #126a5a;
+      --accent-ink: #ffffff;
+      --blue: #2f5fb3;
+      --amber: #9b5d00;
+      --danger: #a64242;
+      --shadow: 0 18px 44px rgba(18, 25, 33, .08);
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #101310;
-        --ink: #f0f3ee;
-        --muted: #a9b2a9;
-        --line: #2f382f;
-        --panel: #171c18;
-        --accent: #79d2ba;
-        --warn: #ffb27a;
+        --bg: #111315;
+        --ink: #edf1f5;
+        --muted: #9aa6b2;
+        --line: #2b333b;
+        --panel: #171a1d;
+        --panel-soft: #1d2226;
+        --accent: #69c8b2;
+        --accent-ink: #071411;
+        --blue: #86aaf2;
+        --amber: #e0a04f;
+        --danger: #f08a8a;
         --shadow: none;
       }
     }
     * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
     body {
       margin: 0;
       background: var(--bg);
       color: var(--ink);
       font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
     }
     header {
       border-bottom: 1px solid var(--line);
-      background: color-mix(in srgb, var(--panel) 86%, transparent);
+      background: color-mix(in srgb, var(--panel) 90%, transparent);
       position: sticky;
       top: 0;
+      z-index: 20;
       backdrop-filter: blur(16px);
     }
-    .bar, main { width: min(1120px, calc(100% - 32px)); margin: 0 auto; }
+    .bar, main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
     .bar {
-      min-height: 64px;
-      display: flex;
+      min-height: 66px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
       align-items: center;
-      justify-content: space-between;
-      gap: 16px;
+      gap: 18px;
     }
-    .brand { display: flex; align-items: center; gap: 12px; font-weight: 750; letter-spacing: 0; }
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 760; letter-spacing: 0; }
     .mark {
-      width: 32px;
-      height: 32px;
+      width: 34px;
+      height: 34px;
       border-radius: 8px;
       display: grid;
       place-items: center;
       color: #fff;
-      background: #1e6f5c;
-      font-weight: 800;
+      background: var(--accent);
+      font-weight: 820;
     }
-    main { padding: 34px 0 48px; }
-    h1 { margin: 0; font-size: clamp(28px, 4vw, 44px); line-height: 1.05; letter-spacing: 0; }
-    h2 { margin: 0 0 12px; font-size: 18px; letter-spacing: 0; }
+    .nav { display: flex; justify-content: center; gap: 6px; min-width: 0; }
+    .nav a {
+      color: var(--muted);
+      text-decoration: none;
+      padding: 7px 10px;
+      border-radius: 8px;
+      white-space: nowrap;
+    }
+    .nav a:hover { background: var(--panel-soft); color: var(--ink); }
+    main { padding: 26px 0 52px; }
+    h1 { margin: 0; font-size: 40px; line-height: 1.04; letter-spacing: 0; }
+    h2 { margin: 0; font-size: 18px; letter-spacing: 0; }
+    h3 { margin: 0; font-size: 14px; letter-spacing: 0; }
     p { margin: 0; color: var(--muted); }
+    a { color: inherit; }
     button, .button {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -1096,50 +1128,68 @@ func mustTemplates() *template.Template {
       font: inherit;
       text-decoration: none;
       cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      white-space: nowrap;
     }
-    .primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-    .hero {
+    .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+    .quiet { background: var(--panel-soft); }
+    .overview {
       display: grid;
-      grid-template-columns: minmax(0, 1.2fr) minmax(280px, .8fr);
-      gap: 24px;
-      align-items: end;
-      margin-bottom: 28px;
+      grid-template-columns: minmax(0, 1.1fr) minmax(340px, .9fr);
+      gap: 18px;
+      align-items: stretch;
+      margin-bottom: 16px;
     }
-    .status {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-      padding: 16px;
-      box-shadow: var(--shadow);
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(12, 1fr);
-      gap: 16px;
-    }
-    .panel {
-      grid-column: span 12;
+    .intro, .status, .panel {
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--panel);
       box-shadow: var(--shadow);
-      overflow: hidden;
     }
-    .panel-head {
-      padding: 16px;
+    .intro { padding: 22px; display: grid; gap: 16px; align-content: center; }
+    .intro-copy { max-width: 720px; display: grid; gap: 10px; }
+    .eyebrow { color: var(--accent); font-weight: 720; font-size: 13px; letter-spacing: 0; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .status { padding: 0; overflow: hidden; }
+    .status-head, .panel-head {
+      padding: 15px 16px;
       border-bottom: 1px solid var(--line);
       display: flex;
       justify-content: space-between;
       gap: 12px;
       align-items: center;
     }
+    .status-body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .signal {
+      min-height: 86px;
+      padding: 14px 16px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      align-content: space-between;
+      gap: 10px;
+    }
+    .signal:nth-child(2n) { border-right: 0; }
+    .signal strong { display: block; font-size: 20px; line-height: 1.1; }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; margin-bottom: 16px; }
+    .panel { grid-column: span 12; overflow: hidden; }
+    .panel.half { grid-column: span 6; }
+    .panel-body { padding: 16px; }
+    .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); margin-top: 14px; }
+    .fact { padding: 13px 14px 0 0; min-width: 0; }
+    .fact strong { display: block; font-size: 22px; line-height: 1.1; overflow-wrap: anywhere; }
     .table-wrap { overflow-x: auto; }
-    table { width: 100%; border-collapse: collapse; min-width: 1120px; }
+    table { width: 100%; border-collapse: collapse; min-width: 900px; }
     th, td { padding: 12px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
-    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0; }
+    tr:hover td { background: var(--panel-soft); }
     .pill {
       display: inline-flex;
       align-items: center;
+      justify-self: start;
       min-height: 24px;
       padding: 2px 8px;
       border-radius: 999px;
@@ -1147,18 +1197,31 @@ func mustTemplates() *template.Template {
       color: var(--muted);
       font-size: 12px;
       white-space: nowrap;
+      max-width: 100%;
     }
+    .pill.ok { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 46%, var(--line)); }
+    .pill.info { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 46%, var(--line)); }
+    .pill.warn { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 46%, var(--line)); }
     .stack { display: grid; gap: 8px; }
     .muted { color: var(--muted); }
-    .warn { color: var(--warn); }
-    .kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 16px; }
-    .kpi { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: color-mix(in srgb, var(--panel) 76%, var(--bg)); }
-    .kpi strong { display: block; font-size: 22px; }
+    .warn { color: var(--amber); }
+    .danger { color: var(--danger); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     form { margin: 0; }
-    @media (max-width: 760px) {
-      .hero { grid-template-columns: 1fr; }
-      .bar { align-items: flex-start; padding: 14px 0; flex-direction: column; }
-      .kpis { grid-template-columns: 1fr; }
+    @media (max-width: 860px) {
+      .bar { grid-template-columns: 1fr auto; padding: 12px 0; }
+      .nav { grid-column: 1 / -1; justify-content: flex-start; overflow-x: auto; padding-bottom: 2px; }
+      .overview { grid-template-columns: 1fr; }
+      .panel.half { grid-column: span 12; }
+      .facts { grid-template-columns: 1fr; gap: 10px; }
+      h1 { font-size: 32px; }
+    }
+    @media (max-width: 560px) {
+      .bar, main { width: min(100% - 22px, 1180px); }
+      .status-body { grid-template-columns: 1fr; }
+      .signal { border-right: 0; }
+      .toolbar { display: grid; grid-template-columns: 1fr; }
+      .toolbar .button { width: 100%; }
     }
   </style>
 </head>
@@ -1166,6 +1229,16 @@ func mustTemplates() *template.Template {
 <header>
   <div class="bar">
     <div class="brand"><div class="mark">J</div><div>Janus</div></div>
+    {{ if .Session.Subject }}
+    <nav class="nav" aria-label="Primary">
+      <a href="#overview">Overview</a>
+      <a href="#posture">Posture</a>
+      <a href="#audit">Audit</a>
+      <a href="#catalog">Catalog</a>
+    </nav>
+    {{ else }}
+    <div></div>
+    {{ end }}
     {{ if .Session.Subject }}
     <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button type="submit">Sign out</button></form>
     {{ else }}
@@ -1184,69 +1257,94 @@ func mustTemplates() *template.Template {
 
 {{ define "dashboard" -}}
 {{ template "base_top" . }}
-<section class="hero">
-  <div class="stack">
-    <h1>Vault control plane</h1>
-    <p>Janus V1 is running in metadata-only mode. It shows ownership, posture, and audit-safe secret descriptors without exposing secret values.</p>
+<section class="overview" id="overview">
+  <div class="intro">
+    <div class="intro-copy">
+      <div class="eyebrow">{{ .Mode }} / metadata-only</div>
+      <h1>Vault control plane</h1>
+      <p>Ownership, posture, and audit-safe descriptors for secrets. Secret values stay outside Janus.</p>
+    </div>
+    <div class="toolbar">
+      {{ if .CanExportEvidence }}<a class="button primary" href="/api/evidence">Evidence JSON</a>{{ end }}
+      <a class="button quiet" href="/api/posture">Posture JSON</a>
+      <a class="button quiet" href="/api/warden/descriptors">Descriptors JSON</a>
+    </div>
   </div>
   <div class="status">
-    <h2>V1 posture</h2>
-    <div class="kpis">
-      <div class="kpi"><strong>{{ len .Descriptors }}</strong><span class="muted">descriptors</span></div>
-      <div class="kpi"><strong>{{ len .Issues }}</strong><span class="muted">open gates</span></div>
-      <div class="kpi"><strong>{{ .Mode }}</strong><span class="muted">mode</span></div>
+    <div class="status-head">
+      <h2>Live posture</h2>
+      {{ if .Issues }}<span class="pill warn">{{ len .Issues }} gates</span>{{ else }}<span class="pill ok">ready</span>{{ end }}
+    </div>
+    <div class="status-body">
+      <div class="signal">
+        <span class="muted">Secret values</span>
+        <strong>withheld</strong>
+        <span class="pill ok">never returned</span>
+      </div>
+      <div class="signal">
+        <span class="muted">Scope</span>
+        <strong>{{ range .Scope.AllowedScopes }}{{ . }}{{ end }}</strong>
+        {{ if .Scope.Strict }}<span class="pill ok">strict</span>{{ else }}<span class="pill warn">open</span>{{ end }}
+      </div>
+      <div class="signal">
+        <span class="muted">Audit chain</span>
+        {{ if .Posture.ChainVerified }}<strong>verified</strong><span class="pill ok">hash chained</span>{{ else }}<strong>review</strong><span class="pill warn">needs review</span>{{ end }}
+      </div>
+      <div class="signal">
+        <span class="muted">Evidence hash</span>
+        <strong class="mono">{{ if .EvidenceHash }}{{ .EvidenceHash }}{{ else }}pending{{ end }}</strong>
+        <span class="pill info">sha256</span>
+      </div>
     </div>
   </div>
 </section>
 {{ if .Issues }}
-<section class="panel" style="margin-bottom:16px">
-  <div class="panel-head"><h2>Readiness gates</h2><span class="pill">action needed</span></div>
-  <div style="padding:16px" class="stack">
+<section class="panel" style="margin-bottom:16px" id="gates">
+  <div class="panel-head"><h2>Readiness gates</h2><span class="pill warn">action needed</span></div>
+  <div class="panel-body stack">
     {{ range .Issues }}<p class="warn">{{ . }}</p>{{ end }}
   </div>
 </section>
 {{ end }}
-<section class="grid" style="margin-bottom:16px">
-  <div class="panel">
+<section class="grid" id="posture">
+  <div class="panel half">
     <div class="panel-head">
       <h2>Access policy</h2>
-      {{ if .Access.ExplicitBindings }}<span class="pill">explicit bindings</span>{{ else }}<span class="pill">bootstrap</span>{{ end }}
+      {{ if .Access.ExplicitBindings }}<span class="pill ok">explicit bindings</span>{{ else }}<span class="pill warn">bootstrap</span>{{ end }}
     </div>
-    <div style="padding:16px" class="stack">
+    <div class="panel-body stack">
       <p>
-        {{ range .Session.Roles }}<span class="pill">{{ . }}</span> {{ end }}
+        {{ range .Session.Roles }}<span class="pill info">{{ . }}</span> {{ end }}
       </p>
-      <div class="kpis">
-        <div class="kpi"><strong>{{ .Access.GateCount }}</strong><span class="muted">role gates</span></div>
-        <div class="kpi"><strong>{{ if .Access.BootstrapOwner }}on{{ else }}off{{ end }}</strong><span class="muted">bootstrap owner</span></div>
-        <div class="kpi"><strong>auditor</strong><span class="muted">evidence role</span></div>
+      <div class="facts">
+        <div class="fact"><strong>{{ .Access.GateCount }}</strong><span class="muted">role gates</span></div>
+        <div class="fact"><strong>{{ if .Access.BootstrapOwner }}on{{ else }}off{{ end }}</strong><span class="muted">bootstrap owner</span></div>
+        <div class="fact"><strong>auditor</strong><span class="muted">evidence role</span></div>
       </div>
       {{ range .Access.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
     </div>
   </div>
-</section>
-<section class="grid" style="margin-bottom:16px">
-  <div class="panel">
+  <div class="panel half">
     <div class="panel-head">
       <h2>Scope boundary</h2>
-      {{ if .Scope.Gates }}<span class="pill">review</span>{{ else }}<span class="pill">enforced</span>{{ end }}
+      {{ if .Scope.Gates }}<span class="pill warn">review</span>{{ else }}<span class="pill ok">enforced</span>{{ end }}
     </div>
-    <div style="padding:16px" class="stack">
-      <p>{{ range .Scope.AllowedScopes }}<span class="pill">{{ . }}</span> {{ end }}</p>
-      <div class="kpis">
-        <div class="kpi"><strong>{{ .Scope.DescriptorCount }}</strong><span class="muted">catalog descriptors</span></div>
-        <div class="kpi"><strong>{{ .Scope.OutOfScopeCount }}</strong><span class="muted">out of scope</span></div>
-        <div class="kpi"><strong>{{ if .Scope.Strict }}on{{ else }}off{{ end }}</strong><span class="muted">strict mode</span></div>
+    <div class="panel-body stack">
+      <p>{{ range .Scope.AllowedScopes }}<span class="pill info">{{ . }}</span> {{ end }}</p>
+      <div class="facts">
+        <div class="fact"><strong>{{ .Scope.DescriptorCount }}</strong><span class="muted">catalog descriptors</span></div>
+        <div class="fact"><strong>{{ .Scope.OutOfScopeCount }}</strong><span class="muted">out of scope</span></div>
+        <div class="fact"><strong>{{ if .Scope.Strict }}on{{ else }}off{{ end }}</strong><span class="muted">strict mode</span></div>
       </div>
       {{ range .Scope.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
     </div>
   </div>
 </section>
-<section class="grid" style="margin-bottom:16px">
+<section class="grid" id="audit">
   <div class="panel">
     <div class="panel-head">
       <h2>Audit posture</h2>
-      {{ if .Posture.LegacyEntries }}<span class="pill">chain partial</span>{{ else if .Posture.ChainVerified }}<span class="pill">chain verified</span>{{ else }}<span class="pill">chain needs review</span>{{ end }}
+      {{ if .Posture.LegacyEntries }}<span class="pill warn">chain partial</span>{{ else if .Posture.ChainVerified }}<span class="pill ok">chain verified</span>{{ else }}<span class="pill warn">chain needs review</span>{{ end }}
     </div>
     <div class="table-wrap">
       <table>
@@ -1269,11 +1367,11 @@ func mustTemplates() *template.Template {
   </div>
 </section>
 {{ if .CatalogGates }}
-<section class="grid" style="margin-bottom:16px">
+<section class="grid" id="catalog-gates">
   <div class="panel">
     <div class="panel-head">
       <h2>Catalog gates</h2>
-      <span class="pill">{{ len .CatalogGates }} open</span>
+      <span class="pill warn">{{ len .CatalogGates }} open</span>
     </div>
     <div class="table-wrap">
       <table>
@@ -1293,11 +1391,11 @@ func mustTemplates() *template.Template {
   </div>
 </section>
 {{ end }}
-<section class="grid">
+<section class="grid" id="catalog">
   <div class="panel">
     <div class="panel-head">
       <h2>Warden descriptors</h2>
-      <span class="pill">values never returned</span>
+      <span class="pill ok">values never returned</span>
     </div>
     <div class="table-wrap">
       <table>
@@ -1327,14 +1425,17 @@ func mustTemplates() *template.Template {
 
 {{ define "setup" -}}
 {{ template "base_top" . }}
-<section class="hero">
-  <div class="stack">
-    <h1>Janus is locked</h1>
-    <p>The service is deployed, but secret metadata stays closed until Zitadel login is configured.</p>
+<section class="overview">
+  <div class="intro">
+    <div class="intro-copy">
+      <div class="eyebrow">{{ .Mode }} / locked</div>
+      <h1>Janus is locked</h1>
+      <p>The service is deployed, but secret metadata stays closed until Zitadel login is configured.</p>
+    </div>
   </div>
   <div class="status">
-    <h2>Setup gates</h2>
-    <div class="stack">
+    <div class="status-head"><h2>Setup gates</h2><span class="pill warn">locked</span></div>
+    <div class="panel-body stack">
       {{ range .Issues }}<p class="warn">{{ . }}</p>{{ end }}
     </div>
   </div>
