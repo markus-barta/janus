@@ -740,6 +740,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"cross_origin_resource_policy":"same-origin"`) || !strings.Contains(body, `"cross_domain_policy":"none"`) || !strings.Contains(body, `"browser_isolation_headers"`) {
 		t.Fatalf("posture response should include browser isolation headers: %s", body)
 	}
+	if !strings.Contains(body, `"cross_origin_embedder_policy":"credentialless"`) || !strings.Contains(body, `"cross_origin_opener_policy":"same-origin"`) || !strings.Contains(body, `"dns_prefetch_control":"off"`) || !strings.Contains(body, `"origin_agent_cluster":true`) || !strings.Contains(body, `"security_header_regression":"core_routes"`) || !strings.Contains(body, `"security_header_regression_table"`) {
+		t.Fatalf("posture response should include security header regression posture: %s", body)
+	}
 	if !strings.Contains(body, `"audit_event_severity"`) || !strings.Contains(body, `"severity_counts"`) {
 		t.Fatalf("posture response should include audit severity: %s", body)
 	}
@@ -987,25 +990,101 @@ func TestDashboardShowsRestrictedStateWhenReadinessDegraded(t *testing.T) {
 	}
 }
 
-func TestSecurityHeadersUseStyleNonce(t *testing.T) {
-	app := newTestApp(t)
-	app.cfg.RequireAuth = false
+func TestSecurityHeadersAcrossCoreRoutes(t *testing.T) {
+	cases := []struct {
+		name            string
+		method          string
+		path            string
+		status          int
+		setup           func(*App, *http.Request)
+		expectBodyNonce bool
+	}{
+		{name: "health", method: http.MethodGet, path: "/healthz", status: http.StatusOK},
+		{name: "ready", method: http.MethodGet, path: "/readyz", status: http.StatusOK},
+		{name: "login", method: http.MethodGet, path: "/login", status: http.StatusFound, setup: func(app *App, _ *http.Request) {
+			app.oauth = testOAuthConfig()
+		}},
+		{name: "auth callback failure", method: http.MethodGet, path: "/oidc/callback?state=bad", status: http.StatusBadRequest, setup: func(app *App, req *http.Request) {
+			app.oauth = testOAuthConfig()
+			app.verifier = &oidc.IDTokenVerifier{}
+			req.AddCookie(&http.Cookie{Name: hostStateCookie, Value: "state-cookie-secret"})
+			req.AddCookie(&http.Cookie{Name: hostNonceCookie, Value: "nonce-cookie-secret"})
+			req.AddCookie(&http.Cookie{Name: hostPKCECookie, Value: "pkce-cookie-secret"})
+		}},
+		{name: "browser safe error", method: http.MethodGet, path: "/missing", status: http.StatusNotFound},
+		{name: "api safe error", method: http.MethodGet, path: "/api/missing", status: http.StatusNotFound},
+		{name: "api auth error", method: http.MethodGet, path: "/api/posture", status: http.StatusUnauthorized},
+		{name: "dashboard", method: http.MethodGet, path: "/", status: http.StatusOK, expectBodyNonce: true, setup: func(app *App, _ *http.Request) {
+			app.cfg.RequireAuth = false
+		}},
+	}
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	out := httptest.NewRecorder()
-	app.routes().ServeHTTP(out, req)
-	if out.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app := newTestApp(t)
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("Origin", "https://evil.example")
+			req.Header.Set("X-Request-Id", "security-headers-"+strings.ReplaceAll(tc.name, " ", "-"))
+			if tc.setup != nil {
+				tc.setup(app, req)
+			}
+			out := httptest.NewRecorder()
+			app.routes().ServeHTTP(out, req)
+			if out.Code != tc.status {
+				t.Fatalf("expected %d, got %d body=%s", tc.status, out.Code, out.Body.String())
+			}
+			assertCoreSecurityHeaders(t, tc.name, out)
+			if tc.expectBodyNonce {
+				assertStyleNonceMatchesCSP(t, out)
+			}
+		})
 	}
-	csp := out.Header().Get("Content-Security-Policy")
-	if strings.Contains(csp, "unsafe-inline") || !strings.Contains(csp, "style-src 'self' 'nonce-") {
-		t.Fatalf("CSP should use style nonce without unsafe-inline: %s", csp)
-	}
-	for _, want := range []string{"script-src 'none'", "object-src 'none'", "worker-src 'none'", "connect-src 'self'", "upgrade-insecure-requests"} {
-		if !strings.Contains(csp, want) {
-			t.Fatalf("CSP should include %q: %s", want, csp)
+}
+
+func assertCoreSecurityHeaders(t *testing.T, name string, out *httptest.ResponseRecorder) {
+	t.Helper()
+	headers := out.Header()
+	for header, want := range map[string]string{
+		"Cache-Control":                     "no-store",
+		"Cross-Origin-Embedder-Policy":      "credentialless",
+		"Cross-Origin-Opener-Policy":        "same-origin",
+		"Cross-Origin-Resource-Policy":      "same-origin",
+		"Expires":                           "0",
+		"Origin-Agent-Cluster":              "?1",
+		"Permissions-Policy":                "camera=(), geolocation=(), microphone=()",
+		"Pragma":                            "no-cache",
+		"Referrer-Policy":                   "no-referrer",
+		"Strict-Transport-Security":         "max-age=31536000; includeSubDomains",
+		"X-Content-Type-Options":            "nosniff",
+		"X-DNS-Prefetch-Control":            "off",
+		"X-Frame-Options":                   "DENY",
+		"X-Permitted-Cross-Domain-Policies": "none",
+	} {
+		if got := headers.Get(header); got != want {
+			t.Fatalf("%s: expected %s %q, got %q", name, header, want, got)
 		}
 	}
+	csp := headers.Get("Content-Security-Policy")
+	for _, want := range []string{"default-src 'self'", "script-src 'none'", "object-src 'none'", "worker-src 'none'", "base-uri 'self'", "frame-ancestors 'none'", "form-action 'self'", "connect-src 'self'", "font-src 'self'", "img-src 'self' data:", "manifest-src 'self'", "style-src 'self' 'nonce-", "upgrade-insecure-requests"} {
+		if !strings.Contains(csp, want) {
+			t.Fatalf("%s: CSP should include %q: %s", name, want, csp)
+		}
+	}
+	for _, forbidden := range []string{"unsafe-inline", "unsafe-eval"} {
+		if strings.Contains(csp, forbidden) {
+			t.Fatalf("%s: CSP should not include %q: %s", name, forbidden, csp)
+		}
+	}
+	for _, header := range []string{"Access-Control-Allow-Origin", "Access-Control-Allow-Credentials", "Access-Control-Allow-Headers", "Access-Control-Allow-Methods"} {
+		if got := headers.Get(header); got != "" {
+			t.Fatalf("%s: expected no %s header, got %q", name, header, got)
+		}
+	}
+}
+
+func assertStyleNonceMatchesCSP(t *testing.T, out *httptest.ResponseRecorder) {
+	t.Helper()
+	csp := out.Header().Get("Content-Security-Policy")
 	parts := strings.SplitN(out.Body.String(), `<style nonce="`, 2)
 	if len(parts) != 2 {
 		t.Fatalf("dashboard style tag should include nonce: %s", out.Body.String())
@@ -1013,12 +1092,6 @@ func TestSecurityHeadersUseStyleNonce(t *testing.T) {
 	nonce := strings.SplitN(parts[1], `"`, 2)[0]
 	if nonce == "" || !strings.Contains(csp, "'nonce-"+nonce+"'") {
 		t.Fatalf("CSP nonce should match style nonce: csp=%s nonce=%q", csp, nonce)
-	}
-	if got := out.Header().Get("Cross-Origin-Resource-Policy"); got != "same-origin" {
-		t.Fatalf("expected same-origin CORP header, got %q", got)
-	}
-	if got := out.Header().Get("X-Permitted-Cross-Domain-Policies"); got != "none" {
-		t.Fatalf("expected cross-domain policy lockout, got %q", got)
 	}
 }
 

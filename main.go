@@ -583,14 +583,17 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 		r = r.WithContext(context.WithValue(r.Context(), cspNonceKey{}, nonce))
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'none'; object-src 'none'; worker-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; font-src 'self'; img-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-"+nonce+"'; upgrade-insecure-requests")
+		w.Header().Set("Cross-Origin-Embedder-Policy", "credentialless")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		w.Header().Set("Expires", "0")
+		w.Header().Set("Origin-Agent-Cluster", "?1")
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		if app.cfg.SecureCookies() {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
+		w.Header().Set("X-DNS-Prefetch-Control", "off")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Permitted-Cross-Domain-Policies", "none")
@@ -1995,9 +1998,15 @@ func (app *App) postureBody() map[string]any {
 			"public_readiness_redacted":      true,
 			"safe_http_boundary_failures":    true,
 			"script_src":                     "none",
+			"cross_origin_embedder_policy":   "credentialless",
+			"cross_origin_opener_policy":     "same-origin",
 			"cross_origin_resource_policy":   "same-origin",
 			"cross_domain_policy":            "none",
+			"dns_prefetch_control":           "off",
 			"legacy_cache_headers":           true,
+			"origin_agent_cluster":           true,
+			"permissions_policy":             "camera=(), geolocation=(), microphone=()",
+			"security_header_regression":     "core_routes",
 			"value_returned":                 false,
 		},
 		"request_limits": map[string]any{
@@ -2045,6 +2054,7 @@ func (app *App) postureBody() map[string]any {
 			"strict_session_cookie",
 			"request_body_size_limit",
 			"browser_isolation_headers",
+			"security_header_regression_table",
 			"same_origin_mutation_guard",
 			"safe_http_boundary_failures",
 			"role_duty_matrix",
