@@ -350,6 +350,27 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 	}
 }
 
+func TestDashboardRendersDescriptorFocus(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/?ref=csb1-age-identity", nil)
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleDashboard)(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Descriptor focus", "csb1-age-identity", "classification", "value-free metadata", "Inspect"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard focus should render %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "plaintext") {
+		t.Fatalf("dashboard focus should remain value-free: %s", body)
+	}
+}
+
 func TestWardenResolveUIReturnsValueFreeHandle(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false

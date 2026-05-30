@@ -251,6 +251,12 @@ type UIActionResult struct {
 	ValueReturned  bool   `json:"value_returned"`
 }
 
+type DescriptorFocus struct {
+	Descriptor SecretDescriptor `json:"descriptor"`
+	Gates      []CatalogGate    `json:"gates"`
+	GateCount  int              `json:"gate_count"`
+}
+
 func main() {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -462,12 +468,16 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	app.audit(r, "dashboard.view", "allowed", actorFromContext(r.Context()), "")
 	session := currentSession(r.Context())
-	renderTemplate(w, app.templates, "dashboard", app.dashboardData(session, nil))
+	renderTemplate(w, app.templates, "dashboard", app.dashboardData(session, nil, r.URL.Query().Get("ref")))
 }
 
-func (app *App) dashboardData(session Session, actionResult *UIActionResult) map[string]any {
+func (app *App) dashboardData(session Session, actionResult *UIActionResult, selectedRef string) map[string]any {
 	principal := principalFromSession(session)
 	descriptors := app.broker.Descriptors(principal)
+	if selectedRef == "" && actionResult != nil {
+		selectedRef = actionResult.SecretRef
+	}
+	focus := focusDescriptor(descriptors, selectedRef)
 	issues := enterpriseChecks(app.cfg)
 	auditPosture := app.store.AuditPosture()
 	recentAudit := app.store.RecentAudit(8)
@@ -498,8 +508,30 @@ func (app *App) dashboardData(session Session, actionResult *UIActionResult) map
 		"CanExportEvidence": HasRole(session, RoleAuditor),
 		"ActionResult":      actionResult,
 		"Permits":           app.permits.Recent(8),
+		"SelectedRef":       focus.Descriptor.ID,
+		"Focus":             focus,
 	}
 	return data
+}
+
+func focusDescriptor(descriptors []SecretDescriptor, selectedRef string) DescriptorFocus {
+	if len(descriptors) == 0 {
+		return DescriptorFocus{}
+	}
+	selectedRef = strings.TrimSpace(selectedRef)
+	focus := descriptors[0]
+	for _, desc := range descriptors {
+		if desc.ID == selectedRef {
+			focus = desc
+			break
+		}
+	}
+	gates := ValidateCatalog([]SecretDescriptor{focus})
+	return DescriptorFocus{
+		Descriptor: focus,
+		Gates:      gates,
+		GateCount:  len(gates),
+	}
 }
 
 func (app *App) handleDescriptors(w http.ResponseWriter, r *http.Request) {
@@ -563,13 +595,13 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "warden.resolve.ui", "denied", session.Subject, "csrf failed")
 		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result, ""))
 		return
 	}
 	if err := r.ParseForm(); err != nil {
 		app.audit(r, "warden.resolve.ui", "denied", session.Subject, "bad form")
 		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: "Request form could not be read.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result, ""))
 		return
 	}
 	req := HandleRequest{
@@ -579,7 +611,7 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 	if req.Reason == "" {
 		app.audit(r, "warden.resolve.ui", "denied", session.Subject, "reason required")
 		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: "Reason required.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result, req.Ref))
 		return
 	}
 	handle, err := app.broker.ResolveHandle(principalFromSession(session), req)
@@ -599,7 +631,7 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 			app.auditWithRef(r, "warden.resolve.ui", "denied", session.Subject, "", "broker error")
 		}
 		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: message, ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(session, &result))
+		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(session, &result, req.Ref))
 		return
 	}
 	app.auditWithRef(r, "warden.resolve.ui", "allowed", session.Subject, handle.SecretRef, "")
@@ -612,7 +644,7 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:     handle.ExpiresAt.Format("15:04:05"),
 		ValueReturned: false,
 	}
-	renderTemplate(w, app.templates, "dashboard", app.dashboardData(session, &result))
+	renderTemplate(w, app.templates, "dashboard", app.dashboardData(session, &result, handle.SecretRef))
 }
 
 func (app *App) handleCreatePermit(w http.ResponseWriter, r *http.Request) {
@@ -669,13 +701,13 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "permit.create.ui", "denied", session.Subject, "csrf failed")
 		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result, ""))
 		return
 	}
 	if err := r.ParseForm(); err != nil {
 		app.audit(r, "permit.create.ui", "denied", session.Subject, "bad form")
 		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "Request form could not be read.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result, ""))
 		return
 	}
 	req := PermitRequest{
@@ -687,7 +719,7 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 	if req.Reason == "" {
 		app.audit(r, "permit.create.ui", "denied", session.Subject, "reason required")
 		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "Reason required.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(session, &result, req.Ref))
 		return
 	}
 
@@ -708,7 +740,7 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 			app.auditWithRef(r, "permit.create.ui", "denied", session.Subject, "", "broker error")
 		}
 		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: message, ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(session, &result))
+		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(session, &result, req.Ref))
 		return
 	}
 
@@ -733,7 +765,7 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:     permit.ExpiresAt.Format("15:04:05"),
 		ValueReturned: false,
 	}
-	renderTemplate(w, app.templates, "dashboard", app.dashboardData(session, &result))
+	renderTemplate(w, app.templates, "dashboard", app.dashboardData(session, &result, permit.SecretRef))
 }
 
 func (app *App) handleRunPermitUI(w http.ResponseWriter, r *http.Request) {
@@ -741,7 +773,7 @@ func (app *App) handleRunPermitUI(w http.ResponseWriter, r *http.Request) {
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "permit.run.ui", "denied", session.Subject, "csrf failed")
 		result := UIActionResult{Title: "Run blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(session, &result, ""))
 		return
 	}
 	permitID := r.PathValue("permitID")
@@ -749,7 +781,7 @@ func (app *App) handleRunPermitUI(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		app.audit(r, "permit.run.ui", "denied", session.Subject, "permit not found")
 		result := UIActionResult{Title: "Run blocked", Outcome: "denied", Message: "Permit not found.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusNotFound, app.dashboardData(session, &result))
+		renderTemplateStatus(w, app.templates, "dashboard", http.StatusNotFound, app.dashboardData(session, &result, ""))
 		return
 	}
 	run := RunPermit(permit)
@@ -771,7 +803,7 @@ func (app *App) handleRunPermitUI(w http.ResponseWriter, r *http.Request) {
 		OutputScrubbed: run.OutputScrubbed,
 		ValueReturned:  run.ValueReturned,
 	}
-	renderTemplateStatus(w, app.templates, "dashboard", http.StatusAccepted, app.dashboardData(session, &result))
+	renderTemplateStatus(w, app.templates, "dashboard", http.StatusAccepted, app.dashboardData(session, &result, permit.SecretRef))
 }
 
 func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -1398,6 +1430,7 @@ func mustTemplates() *template.Template {
     th, td { padding: 12px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
     th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0; }
     tr:hover td { background: var(--panel-soft); }
+    tr.selected td { background: color-mix(in srgb, var(--accent) 7%, var(--panel)); }
     .pill {
       display: inline-flex;
       align-items: center;
@@ -1553,6 +1586,39 @@ func mustTemplates() *template.Template {
   </div>
 </section>
 {{ end }}
+{{ if .Focus.Descriptor.ID }}
+<section class="grid" id="focus">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Descriptor focus</h2>
+      {{ if .Focus.Gates }}<span class="pill warn">{{ .Focus.GateCount }} gates</span>{{ else }}<span class="pill ok">clear</span>{{ end }}
+    </div>
+    <div class="panel-body stack">
+      <div class="intro-copy">
+        <h2>{{ .Focus.Descriptor.DisplayName }}</h2>
+        <p><span class="mono">{{ .Focus.Descriptor.ID }}</span></p>
+      </div>
+      <div class="facts">
+        <div class="fact"><strong>{{ .Focus.Descriptor.Classification }}</strong><span class="muted">classification</span></div>
+        <div class="fact"><strong>{{ .Focus.Descriptor.Owner }}</strong><span class="muted">owner</span></div>
+        <div class="fact"><strong>{{ .Focus.Descriptor.Scope }}</strong><span class="muted">scope</span></div>
+      </div>
+      <div class="facts">
+        <div class="fact"><strong>{{ .Focus.Descriptor.Provider }}</strong><span class="muted">provider</span></div>
+        <div class="fact"><strong>{{ .Focus.Descriptor.ConsumerCount }}</strong><span class="muted">consumers</span></div>
+        <div class="fact"><strong>{{ .Focus.Descriptor.RotationDays }} days</strong><span class="muted">rotation</span></div>
+      </div>
+      <p>
+        <span class="pill ok">value-free metadata</span>
+        {{ if .Focus.Descriptor.UseEnabled }}<span class="pill ok">use profiled</span>{{ else }}<span class="pill warn">use blocked</span>{{ end }}
+        <span class="pill ok">reveal disabled</span>
+        {{ range .Focus.Descriptor.Tags }}<span class="pill info">{{ . }}</span> {{ end }}
+      </p>
+      {{ range .Focus.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
+    </div>
+  </div>
+</section>
+{{ end }}
 <section class="grid" id="warden">
   <div class="panel">
     <div class="panel-head">
@@ -1564,7 +1630,7 @@ func mustTemplates() *template.Template {
         <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
         <label>Descriptor
           <select name="ref" required>
-            {{ range .Descriptors }}<option value="{{ .ID }}">{{ .DisplayName }}</option>{{ end }}
+            {{ range .Descriptors }}<option value="{{ .ID }}" {{ if eq .ID $.SelectedRef }}selected{{ end }}>{{ .DisplayName }}</option>{{ end }}
           </select>
         </label>
         <label>Reason
@@ -1586,7 +1652,7 @@ func mustTemplates() *template.Template {
         <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
         <label>Descriptor
           <select name="ref" required>
-            {{ range .Descriptors }}<option value="{{ .ID }}">{{ .DisplayName }}</option>{{ end }}
+            {{ range .Descriptors }}<option value="{{ .ID }}" {{ if eq .ID $.SelectedRef }}selected{{ end }}>{{ .DisplayName }}</option>{{ end }}
           </select>
         </label>
         <label>Action
@@ -1731,10 +1797,10 @@ func mustTemplates() *template.Template {
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Name</th><th>Provider</th><th>Scope</th><th>Owner</th><th>Class</th><th>Status</th><th>Consumers</th><th>Rotation</th><th>Use</th><th>Reveal</th></tr></thead>
+        <thead><tr><th>Name</th><th>Provider</th><th>Scope</th><th>Owner</th><th>Class</th><th>Status</th><th>Consumers</th><th>Rotation</th><th>Use</th><th>Reveal</th><th>Inspect</th></tr></thead>
         <tbody>
         {{ range .Descriptors }}
-          <tr>
+          <tr {{ if eq .ID $.SelectedRef }}class="selected"{{ end }}>
             <td><strong>{{ .DisplayName }}</strong><br><span class="muted">{{ .ID }}</span></td>
             <td>{{ .Provider }}</td>
             <td>{{ .Scope }}</td>
@@ -1745,6 +1811,7 @@ func mustTemplates() *template.Template {
             <td>{{ .RotationDays }} days</td>
             <td>{{ if .UseEnabled }}<span class="pill">profiled</span>{{ else }}<span class="pill">blocked</span>{{ end }}</td>
             <td><span class="pill">disabled</span></td>
+            <td><a class="button quiet" href="/?ref={{ .ID }}#focus">Inspect</a></td>
           </tr>
         {{ end }}
         </tbody>
