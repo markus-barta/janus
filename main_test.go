@@ -789,7 +789,7 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"action_readiness"`) || !strings.Contains(body, `"key":"evidence_export"`) || !strings.Contains(body, `"key":"handle_issue"`) || !strings.Contains(body, `"key":"permit_run_check"`) || !strings.Contains(body, `"action_readiness":"role_and_readiness_matrix"`) || !strings.Contains(body, `"role_aware_action_readiness"`) {
 		t.Fatalf("posture response should include action readiness matrix: %s", body)
 	}
-	if !strings.Contains(body, `"action_receipts":"mutation_result_receipts"`) || !strings.Contains(body, `"action_receipt_integrity":"tamper_evident_hash_proof"`) || !strings.Contains(body, `"value_free_action_receipts"`) || !strings.Contains(body, `"tamper_evident_action_receipts"`) {
+	if !strings.Contains(body, `"action_receipts":"mutation_result_receipts"`) || !strings.Contains(body, `"action_receipt_integrity":"tamper_evident_hash_proof"`) || !strings.Contains(body, `"action_receipt_verification":"copy_safe_ui_fields"`) || !strings.Contains(body, `"value_free_action_receipts"`) || !strings.Contains(body, `"tamper_evident_action_receipts"`) || !strings.Contains(body, `"action_receipt_verification_ux"`) {
 		t.Fatalf("posture response should include action receipt capability: %s", body)
 	}
 	if !strings.Contains(body, `"audit_failure_drill"`) || !strings.Contains(body, `"scenario":"audit_sink_or_chain_degraded"`) || !strings.Contains(body, `"key":"sink_write"`) || !strings.Contains(body, `"key":"public_readiness"`) || !strings.Contains(body, `"audit_failure_drill":"fail_closed_dashboard_posture_evidence"`) {
@@ -2900,7 +2900,7 @@ func TestWardenResolveUIReturnsValueFreeHandle(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Handle ready", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "value_returned=false", "zitadel-janus-oidc"} {
+	for _, want := range []string{"Handle ready", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "Copy-safe action receipt fields", "Receipt id", "Receipt hash", "Request id", "Verify receipt", "Recompute the SHA-256 hash", "copy-safe", "Covered checks", "role_checked=true", "csrf_checked=true", "readiness_checked=true", "audit_recorded=true", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "value_returned=false", "zitadel-janus-oidc"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("UI handle response should render %q: %s", want, body)
 		}
@@ -2982,7 +2982,7 @@ func TestPermitCreateUIReturnsValueFreePermit(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Permit recorded", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Audited", "approved_metadata_only", "Run safety check", "value_returned=false"} {
+	for _, want := range []string{"Permit recorded", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "Copy-safe action receipt fields", "Receipt id", "Receipt hash", "Request id", "Verify receipt", "Recompute the SHA-256 hash", "copy-safe", "Covered checks", "role_checked=true", "csrf_checked=true", "readiness_checked=true", "audit_recorded=true", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Audited", "approved_metadata_only", "Run safety check", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("permit UI response should render %q: %s", want, body)
 		}
@@ -3031,7 +3031,7 @@ func TestPermitRunUIReturnsNoExecutionValueFreeResult(t *testing.T) {
 		t.Fatalf("expected 202, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Safety check complete", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Scrubbed output", "not_executed", "output_scrubbed=true", "value_returned=false"} {
+	for _, want := range []string{"Safety check complete", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "Copy-safe action receipt fields", "Receipt id", "Receipt hash", "Request id", "Verify receipt", "Recompute the SHA-256 hash", "copy-safe", "Covered checks", "role_checked=true", "csrf_checked=true", "readiness_checked=true", "audit_recorded=true", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Scrubbed output", "not_executed", "output_scrubbed=true", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("permit run UI response should render %q: %s", want, body)
 		}

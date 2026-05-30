@@ -2257,29 +2257,30 @@ func (app *App) postureBody(session Session) map[string]any {
 			"value_returned":              false,
 		},
 		"assurance": map[string]any{
-			"route_value_leak_sentinel": true,
-			"json_errors_request_id":    true,
-			"backend_source_paths":      "not_returned",
-			"evidence_export_boundary":  "dashboard_and_json",
-			"evidence_download":         "auditor_json_with_pack_hash",
-			"evidence_receipt":          "download_header_body_match",
-			"enterprise_validation":     "self_hosted_safe_enterprise_required",
-			"enterprise_attachments":    "presence_only_no_refs",
-			"attachment_review":         "presence_only_owner_review",
-			"restore_drill_proof":       "dashboard_posture_evidence",
-			"action_readiness":          "role_and_readiness_matrix",
-			"command_center":            "dashboard_posture_api",
-			"action_receipts":           "mutation_result_receipts",
-			"action_receipt_integrity":  "tamper_evident_hash_proof",
-			"mode_guardrails":           "dashboard_posture_evidence",
-			"privacy_retention":         "dashboard_posture_evidence",
-			"negative_path_assurance":   "dashboard_posture_evidence",
-			"degraded_guidance":         "dashboard_posture_evidence",
-			"audit_failure_drill":       "fail_closed_dashboard_posture_evidence",
-			"human_readable_summary":    "dashboard_posture_evidence",
-			"assurance_gate_proofs":     "role_catalog_degraded_value_leak",
-			"operational_status":        "dashboard_posture_strip",
-			"value_returned":            false,
+			"route_value_leak_sentinel":   true,
+			"json_errors_request_id":      true,
+			"backend_source_paths":        "not_returned",
+			"evidence_export_boundary":    "dashboard_and_json",
+			"evidence_download":           "auditor_json_with_pack_hash",
+			"evidence_receipt":            "download_header_body_match",
+			"enterprise_validation":       "self_hosted_safe_enterprise_required",
+			"enterprise_attachments":      "presence_only_no_refs",
+			"attachment_review":           "presence_only_owner_review",
+			"restore_drill_proof":         "dashboard_posture_evidence",
+			"action_readiness":            "role_and_readiness_matrix",
+			"command_center":              "dashboard_posture_api",
+			"action_receipts":             "mutation_result_receipts",
+			"action_receipt_integrity":    "tamper_evident_hash_proof",
+			"action_receipt_verification": "copy_safe_ui_fields",
+			"mode_guardrails":             "dashboard_posture_evidence",
+			"privacy_retention":           "dashboard_posture_evidence",
+			"negative_path_assurance":     "dashboard_posture_evidence",
+			"degraded_guidance":           "dashboard_posture_evidence",
+			"audit_failure_drill":         "fail_closed_dashboard_posture_evidence",
+			"human_readable_summary":      "dashboard_posture_evidence",
+			"assurance_gate_proofs":       "role_catalog_degraded_value_leak",
+			"operational_status":          "dashboard_posture_strip",
+			"value_returned":              false,
 		},
 		"response_hardening": map[string]any{
 			"cache_control":                  "no-store",
@@ -2374,6 +2375,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"command_center_ux",
 			"value_free_action_receipts",
 			"tamper_evident_action_receipts",
+			"action_receipt_verification_ux",
 			"assurance_gate_proof_strip",
 			"enterprise_validation_clarity",
 			"privacy_retention_posture",
@@ -2972,6 +2974,27 @@ func mustTemplates() *template.Template {
       line-height: 1.15;
     }
     .receipt-proof .mono { font-size: 11px; }
+    .receipt-copy {
+      display: grid;
+      grid-template-columns: minmax(0, .85fr) minmax(0, 1.8fr) minmax(0, .9fr);
+      gap: 8px;
+    }
+    .receipt-copy label {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      padding: 8px 9px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .receipt-copy input {
+      min-height: 34px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+      color: var(--ink);
+      background: var(--panel);
+    }
     .hash-copy input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 1040px; }
@@ -3010,13 +3033,14 @@ func mustTemplates() *template.Template {
       .flow { grid-template-columns: 1fr; }
       .facts { grid-template-columns: 1fr; gap: 10px; }
       .verdict { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-	      .role-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-	      .ops-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-	      .command-top { grid-template-columns: 1fr; }
-	      .command-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-	      .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .role-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .ops-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .command-top { grid-template-columns: 1fr; }
+      .command-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .receipt { grid-template-columns: 1fr; }
       .receipt-proof { grid-template-columns: 1fr; }
+      .receipt-copy { grid-template-columns: 1fr; }
       .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-step:nth-child(2n) { border-right: 0; }
@@ -3027,15 +3051,16 @@ func mustTemplates() *template.Template {
       .bar, main { width: calc(100% - 22px); max-width: 1180px; }
       .status-body { grid-template-columns: 1fr; }
       .verdict { grid-template-columns: 1fr; }
-	      .role-matrix { grid-template-columns: 1fr; }
-	      .ops-strip { grid-template-columns: 1fr; }
-	      .command-grid { grid-template-columns: 1fr; }
-	      .command-actions { display: grid; grid-template-columns: 1fr; }
-	      .command-actions .button { width: 100%; }
-	      .mode-grid { grid-template-columns: 1fr; }
+      .role-matrix { grid-template-columns: 1fr; }
+      .ops-strip { grid-template-columns: 1fr; }
+      .command-grid { grid-template-columns: 1fr; }
+      .command-actions { display: grid; grid-template-columns: 1fr; }
+      .command-actions .button { width: 100%; }
+      .mode-grid { grid-template-columns: 1fr; }
       .receipt { grid-template-columns: 1fr; }
       .receipt-proof { grid-template-columns: 1fr; }
-      .assurance-flow { grid-template-columns: 1fr; }
+      .receipt-copy { grid-template-columns: 1fr; }
+	      .assurance-flow { grid-template-columns: 1fr; }
       .trust-rail { grid-template-columns: 1fr; }
       .trust-step { border-right: 0; border-bottom: 1px solid var(--line); }
       .trust-step:last-child { border-bottom: 0; }
@@ -3637,6 +3662,25 @@ func mustTemplates() *template.Template {
       <span><strong>ID</strong><span class="mono">{{ .ActionResult.Receipt.ReceiptID }}</span></span>
       <span><strong>Hash</strong><span class="mono">{{ .ActionResult.Receipt.ReceiptHash }}</span></span>
     </div>
+    <div class="receipt-copy" aria-label="Copy-safe action receipt fields">
+      <label>Receipt id
+        <input readonly value="{{ .ActionResult.Receipt.ReceiptID }}" aria-label="Receipt id">
+      </label>
+      <label>Receipt hash
+        <input readonly value="{{ .ActionResult.Receipt.ReceiptHash }}" aria-label="Receipt hash">
+      </label>
+      <label>Request id
+        <input readonly value="{{ .ActionResult.Receipt.RequestID }}" aria-label="Receipt request id">
+      </label>
+    </div>
+    <div class="receipt" aria-label="Action receipt verification">
+      <div>
+        <strong>Verify receipt</strong>
+        <p>{{ .ActionResult.Receipt.Verification }}</p>
+      </div>
+      <span class="pill ok">copy-safe</span>
+    </div>
+    <p><strong>Covered checks</strong><br><span class="pill ok">role_checked={{ .ActionResult.Receipt.RoleChecked }}</span> <span class="pill ok">csrf_checked={{ .ActionResult.Receipt.CSRFChecked }}</span> <span class="pill ok">readiness_checked={{ .ActionResult.Receipt.ReadinessChecked }}</span> <span class="pill ok">audit_recorded={{ .ActionResult.Receipt.AuditRecorded }}</span></p>
     <p><span class="pill ok">{{ .ActionResult.Receipt.Boundary }}</span> <span class="pill ok">secret_value_returned=false</span> <span class="pill ok">request_body_returned=false</span></p>
     <p><span class="pill ok">tamper_evident=true</span> <span class="pill info">{{ .ActionResult.Receipt.Algorithm }}</span> <span class="pill info">{{ .ActionResult.Receipt.Schema }}</span></p>
     <p><span class="pill info">covers</span> {{ .ActionResult.Receipt.Coverage }}</p>
