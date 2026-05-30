@@ -2015,6 +2015,31 @@ func mustTemplates() *template.Template {
     .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); margin-top: 14px; }
     .fact { padding: 13px 14px 0 0; min-width: 0; }
     .fact strong { display: block; font-size: 22px; line-height: 1.1; overflow-wrap: anywhere; }
+    .verdict {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .verdict span {
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      display: grid;
+      align-content: center;
+      padding: 7px 9px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+    }
+    .verdict strong {
+      display: block;
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.15;
+    }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 1040px; }
     th, td { padding: 12px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
@@ -2051,6 +2076,7 @@ func mustTemplates() *template.Template {
       .panel.half { grid-column: span 12; }
       .flow { grid-template-columns: 1fr; }
       .facts { grid-template-columns: 1fr; gap: 10px; }
+      .verdict { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-step:nth-child(2n) { border-right: 0; }
@@ -2060,6 +2086,7 @@ func mustTemplates() *template.Template {
     @media (max-width: 560px) {
       .bar, main { width: calc(100% - 22px); max-width: 1180px; }
       .status-body { grid-template-columns: 1fr; }
+      .verdict { grid-template-columns: 1fr; }
       .assurance-flow { grid-template-columns: 1fr; }
       .trust-rail { grid-template-columns: 1fr; }
       .trust-step { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -2214,6 +2241,14 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .ActionResult.Message }}</p>
+    {{ if .ActionResult.PermitID }}
+    <div class="verdict" aria-label="Permit safety verdict">
+      <span><strong>Metadata only</strong> secret value withheld</span>
+      <span><strong>No connector</strong> execution unavailable</span>
+      <span><strong>Scrubbed output</strong>{{ if .ActionResult.OutputScrubbed }} confirmed{{ else }} pending check{{ end }}</span>
+      <span><strong>Audited</strong> value_returned=false</span>
+    </div>
+    {{ end }}
     {{ if .ActionResult.HandleID }}
     <div class="facts">
       <div class="fact"><strong class="mono">{{ .ActionResult.HandleID }}</strong><span class="muted">handle id</span></div>
@@ -2319,6 +2354,12 @@ func mustTemplates() *template.Template {
     </div>
     <div class="panel-body">
       {{ if .CanOperate }}
+      <div class="verdict" aria-label="Permit safety verdict">
+        <span><strong>Metadata only</strong> permit never reveals values</span>
+        <span><strong>No connector</strong> run check stays closed</span>
+        <span><strong>Reasoned</strong> request is audit-linked</span>
+        <span><strong>Short lived</strong> expires automatically</span>
+      </div>
       <form class="flow" method="post" action="/ui/permits">
         <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
         <label>Descriptor

@@ -1114,7 +1114,7 @@ func TestPermitCreateUIReturnsValueFreePermit(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Permit recorded", "approved_metadata_only", "Run safety check", "value_returned=false"} {
+	for _, want := range []string{"Permit recorded", "Permit safety verdict", "Metadata only", "No connector", "Audited", "approved_metadata_only", "Run safety check", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("permit UI response should render %q: %s", want, body)
 		}
@@ -1163,7 +1163,7 @@ func TestPermitRunUIReturnsNoExecutionValueFreeResult(t *testing.T) {
 		t.Fatalf("expected 202, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Safety check complete", "not_executed", "output_scrubbed=true", "value_returned=false"} {
+	for _, want := range []string{"Safety check complete", "Permit safety verdict", "Metadata only", "No connector", "Scrubbed output", "not_executed", "output_scrubbed=true", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("permit run UI response should render %q: %s", want, body)
 		}
