@@ -2487,10 +2487,12 @@ func TestDashboardHidesOperatorActionsForViewer(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	if !strings.Contains(body, "Operator role required") {
-		t.Fatalf("viewer dashboard should explain operator gate: %s", body)
+	for _, want := range []string{"Role workbench", "hidden controls not rendered", "Operator mutation controls are not rendered for this session.", "Operator role required."} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("viewer dashboard should explain hidden operator controls %q: %s", want, body)
+		}
 	}
-	for _, forbidden := range []string{"Issue handle</button>", "Create permit</button>"} {
+	for _, forbidden := range []string{`href="#warden"`, `href="#permit"`, `action="/ui/warden/resolve"`, `action="/ui/permits"`, "Recent permits", "Issue handle</button>", "Create permit</button>"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("viewer dashboard rendered operator action %q: %s", forbidden, body)
 		}
@@ -2503,60 +2505,83 @@ func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
 		roles     []string
 		want      []string
 		forbidden []string
+		navWant   []string
+		navHidden []string
 	}{
 		{
 			name:  "viewer",
 			roles: []string{RoleViewer},
 			want: []string{
 				"Available to you",
+				"Role workbench",
 				"Safe posture and descriptor views are available.",
 				"Operator role required.",
 				"Auditor role required.",
 				"Admin role required.",
+				"Operator mutation controls are not rendered for this session.",
 			},
 			forbidden: []string{
 				"Handle and permit controls are available.",
 				"Audit rows and evidence export are available.",
 				"Admin policy review is available.",
+				`action="/ui/warden/resolve"`,
+				`action="/ui/permits"`,
 			},
+			navWant:   []string{`href="#overview"`, `href="#posture"`, `href="#catalog"`},
+			navHidden: []string{`href="#warden"`, `href="#permit"`, `href="#audit"`},
 		},
 		{
 			name:  "auditor",
 			roles: []string{RoleViewer, RoleAuditor},
 			want: []string{
 				"Available to you",
+				"Role workbench",
 				"Audit rows and evidence export are available.",
 				"Operator role required.",
 				"Admin role required.",
+				"Operator mutation controls are not rendered for this session.",
 			},
 			forbidden: []string{
 				"Handle and permit controls are available.",
 				"Admin policy review is available.",
+				`action="/ui/warden/resolve"`,
+				`action="/ui/permits"`,
 			},
+			navWant:   []string{`href="#overview"`, `href="#posture"`, `href="#audit"`, `href="#catalog"`},
+			navHidden: []string{`href="#warden"`, `href="#permit"`},
 		},
 		{
 			name:  "operator",
 			roles: []string{RoleViewer, RoleOperator},
 			want: []string{
 				"Available to you",
+				"Role workbench",
 				"Handle and permit controls are available.",
 				"Auditor role required.",
 				"Admin role required.",
+				"Request metadata handle",
+				"Request permit",
 			},
 			forbidden: []string{
 				"Audit rows and evidence export are available.",
 				"Admin policy review is available.",
 			},
+			navWant:   []string{`href="#overview"`, `href="#warden"`, `href="#permit"`, `href="#posture"`, `href="#catalog"`},
+			navHidden: []string{`href="#audit"`},
 		},
 		{
 			name:  "all roles",
 			roles: []string{RoleViewer, RoleOperator, RoleAuditor, RoleAdmin},
 			want: []string{
 				"Available to you",
+				"Role workbench",
 				"Handle and permit controls are available.",
 				"Audit rows and evidence export are available.",
 				"Admin policy review is available.",
+				"Request metadata handle",
+				"Request permit",
 			},
+			navWant: []string{`href="#overview"`, `href="#warden"`, `href="#permit"`, `href="#posture"`, `href="#audit"`, `href="#catalog"`},
 		},
 	}
 
@@ -2582,6 +2607,16 @@ func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
 			for _, forbidden := range tc.forbidden {
 				if strings.Contains(body, forbidden) {
 					t.Fatalf("%s dashboard should not render %q: %s", tc.name, forbidden, body)
+				}
+			}
+			for _, want := range tc.navWant {
+				if !strings.Contains(body, want) {
+					t.Fatalf("%s dashboard should render nav %q: %s", tc.name, want, body)
+				}
+			}
+			for _, hidden := range tc.navHidden {
+				if strings.Contains(body, hidden) {
+					t.Fatalf("%s dashboard should hide nav %q: %s", tc.name, hidden, body)
 				}
 			}
 			for _, marker := range []string{"plaintext", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {

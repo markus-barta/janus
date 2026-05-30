@@ -55,6 +55,22 @@ type RoleAvailability struct {
 	Tone   string
 }
 
+type RoleWorkbench struct {
+	Summary       string
+	Available     []RoleWorkbenchItem
+	Hidden        []RoleWorkbenchItem
+	ValueReturned bool
+}
+
+type RoleWorkbenchItem struct {
+	Key    string
+	Label  string
+	State  string
+	Detail string
+	Next   string
+	Tone   string
+}
+
 func LoadRolePolicyFromEnv() RolePolicy {
 	return RolePolicy{
 		AdminSubjects:    splitSet(envDefault("JANUS_ADMIN_SUBJECTS", "")),
@@ -221,6 +237,77 @@ func RoleAvailabilityFor(session Session) []RoleAvailability {
 			Tone:   availabilityTone(admin),
 		},
 	}
+}
+
+func RoleWorkbenchFor(session Session, ready bool) RoleWorkbench {
+	workbench := RoleWorkbench{
+		Summary:       "Role workbench shows the controls rendered for this session and hides controls outside its role boundary.",
+		ValueReturned: false,
+	}
+	workbench.Available = append(workbench.Available, RoleWorkbenchItem{
+		Key:    "posture_view",
+		Label:  "Posture view",
+		State:  "rendered",
+		Detail: "Safe posture, descriptor focus, and value boundaries are visible.",
+		Next:   "Use posture to decide the next safe action.",
+		Tone:   "ok",
+	})
+
+	if HasRole(session, RoleAuditor) {
+		workbench.addAvailable("audit_evidence", "Audit and evidence", ready, "Audit rows and evidence download are rendered for this auditor session.", "Download evidence or inspect audit posture.")
+	} else {
+		workbench.addHidden("audit_evidence", "Audit and evidence", "Auditor controls are not rendered for this session.", "Use an auditor session to inspect audit rows or download evidence.")
+	}
+
+	if HasRole(session, RoleOperator) {
+		workbench.addAvailable("operator_use", "Handle and permit", ready, "Handle, permit, and permit safety controls are rendered for this operator session.", "Issue a metadata handle or create a value-free permit.")
+	} else {
+		workbench.addHidden("operator_use", "Handle and permit", "Operator mutation controls are not rendered for this session.", "Use an operator session for metadata handles or permits.")
+	}
+
+	if HasRole(session, RoleAdmin) {
+		workbench.Available = append(workbench.Available, RoleWorkbenchItem{
+			Key:    "admin_policy",
+			Label:  "Admin policy",
+			State:  "rendered",
+			Detail: "Role policy, ownership, and enterprise control review are visible.",
+			Next:   "Review role bindings and external evidence status.",
+			Tone:   "ok",
+		})
+	} else {
+		workbench.addHidden("admin_policy", "Admin policy", "Admin policy controls are not rendered for this session.", "Use an admin session to review role and ownership policy.")
+	}
+
+	return workbench
+}
+
+func (w *RoleWorkbench) addAvailable(key, label string, ready bool, detail, next string) {
+	state := "rendered"
+	tone := "ok"
+	if !ready {
+		state = "readiness blocked"
+		tone = "warn"
+		next = "Recover readiness before using this control."
+	}
+	w.Available = append(w.Available, RoleWorkbenchItem{
+		Key:    key,
+		Label:  label,
+		State:  state,
+		Detail: detail,
+		Next:   next,
+		Tone:   tone,
+	})
+}
+
+func (w *RoleWorkbench) addHidden(key, label, detail, next string) {
+	w.Hidden = append(w.Hidden, RoleWorkbenchItem{
+		Key:    key,
+		Label:  label,
+		State:  "hidden",
+		Detail: detail,
+		Next:   next,
+		Tone:   "warn",
+	})
 }
 
 func ActionReadinessFor(session Session, ready bool) ActionReadiness {

@@ -847,9 +847,12 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	approvedUsePosture := ApprovedUsePostureFor(descriptors)
 	permitPosture := PermitPosture{ValueReturned: false}
 	var recentPermits []Permit
+	canOperate := HasRole(session, RoleOperator)
 	if app.permits != nil {
 		permitPosture = app.permits.Posture()
-		recentPermits = app.permits.Recent(8)
+		if canOperate {
+			recentPermits = app.permits.Recent(8)
+		}
 	}
 	evidenceHash := ""
 	evidenceHashFull := ""
@@ -875,6 +878,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
 	auditDrill := AuditFailureDrillFor(ready, auditPosture)
 	roleAvailability := RoleAvailabilityFor(session)
+	roleWorkbench := RoleWorkbenchFor(session, ready)
 	actionReadiness := ActionReadinessFor(session, ready)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	data := map[string]any{
@@ -891,6 +895,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Access":            accessPosture,
 		"RoleBoundaries":    RoleBoundariesFor(session),
 		"RoleAvailability":  roleAvailability,
+		"RoleWorkbench":     roleWorkbench,
 		"ActionReadiness":   actionReadiness,
 		"OperationalStatus": operationalStatus,
 		"Ready":             ready,
@@ -915,7 +920,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"EvidenceReceipt":   evidenceReceipt,
 		"CanExportEvidence": canViewAudit,
 		"CanViewAudit":      canViewAudit,
-		"CanOperate":        HasRole(session, RoleOperator),
+		"CanOperate":        canOperate,
 		"ActionResult":      actionResult,
 		"Permits":           recentPermits,
 		"PermitPosture":     permitPosture,
@@ -2980,10 +2985,15 @@ func mustTemplates() *template.Template {
     {{ if .Session.Subject }}
     <nav class="nav" aria-label="Primary">
       <a href="#overview">Overview</a>
+      {{ if .CanOperate }}
       <a href="#warden">Warden</a>
       <a href="#permit">Permit</a>
+      {{ if .Permits }}<a href="#permits">Permits</a>{{ end }}
+      {{ end }}
       <a href="#posture">Posture</a>
+      {{ if .CanViewAudit }}
       <a href="#audit">Audit</a>
+      {{ end }}
       <a href="#catalog">Catalog</a>
     </nav>
     {{ else }}
@@ -3419,6 +3429,40 @@ func mustTemplates() *template.Template {
     <p><strong>Never exported</strong><br>{{ range .EvidenceBoundary.Excludes }}<span class="pill warn">{{ . }}</span> {{ end }}</p>
   </div>
 </section>
+<section class="panel" style="margin-bottom:16px" id="role-workbench">
+  <div class="panel-head">
+    <h2>Role workbench</h2>
+    <span class="pill info">role pruned</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .RoleWorkbench.Summary }}</p>
+    <p><span class="pill ok">value_returned=false</span> <span class="pill ok">hidden controls not rendered</span></p>
+    <p><strong>Rendered now</strong></p>
+    <div class="mode-grid" aria-label="Rendered role controls">
+      {{ range .RoleWorkbench.Available }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+        <p><span class="pill info">next</span> {{ .Next }}</p>
+      </div>
+      {{ end }}
+    </div>
+    {{ if .RoleWorkbench.Hidden }}
+    <p><strong>Hidden by role</strong></p>
+    <div class="mode-grid" aria-label="Hidden role controls">
+      {{ range .RoleWorkbench.Hidden }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+        <p><span class="pill info">next</span> {{ .Next }}</p>
+      </div>
+      {{ end }}
+    </div>
+    {{ end }}
+  </div>
+</section>
 {{ if not .Ready }}
 <section class="panel security-state" style="margin-bottom:16px" id="security-state">
   <div class="panel-head"><h2>Security state</h2><span class="pill warn">restricted</span></div>
@@ -3545,6 +3589,7 @@ func mustTemplates() *template.Template {
   </div>
 </section>
 {{ end }}
+{{ if .CanOperate }}
 <section class="grid" id="warden">
   <div class="panel">
     <div class="panel-head">
@@ -3618,7 +3663,8 @@ func mustTemplates() *template.Template {
     </div>
   </div>
 </section>
-{{ if .Permits }}
+{{ end }}
+{{ if and .CanOperate .Permits }}
 <section class="grid" id="permits">
   <div class="panel">
     <div class="panel-head">
