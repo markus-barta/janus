@@ -40,6 +40,7 @@ type EvidencePack struct {
 	ReleaseWorkflow     ReleaseProvenanceWorkflow      `json:"release_provenance_workflow"`
 	PrivacyWorkflow     PrivacyRetentionWorkflow       `json:"privacy_retention_workflow"`
 	IntegrationWorkflow IntegrationConformanceWorkflow `json:"integration_conformance_workflow"`
+	RemoteAuditWorkflow RemoteAuditWorkflow            `json:"remote_audit_workflow"`
 	AssuranceSummary    AssuranceSummary               `json:"assurance_summary"`
 	Enterprise          EnterpriseValidation           `json:"enterprise_validation"`
 	EnterpriseDryRun    EnterpriseDryRun               `json:"enterprise_dry_run"`
@@ -418,6 +419,7 @@ func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
 			"release_provenance_workflow",
 			"privacy_retention_workflow",
 			"integration_conformance_workflow",
+			"remote_audit_workflow",
 			"audit_posture",
 			"recent_audit_refs",
 			"integrity_hash",

@@ -815,6 +815,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"integration_conformance_workflow"`) || !strings.Contains(body, `"label":"Integration conformance workflow"`) || !strings.Contains(body, `"control_key":"integration_conformance"`) || !strings.Contains(body, `"connector_config_returned":false`) || !strings.Contains(body, `"endpoint_returned":false`) || !strings.Contains(body, `"payload_returned":false`) || !strings.Contains(body, `"key":"identity_mapping"`) || !strings.Contains(body, `"integration_conformance_workflow":"presence_only_integration_evidence"`) || !strings.Contains(body, `"integration_conformance_presence_workflow"`) {
 		t.Fatalf("posture response should include integration conformance workflow: %s", body)
 	}
+	if !strings.Contains(body, `"remote_audit_workflow"`) || !strings.Contains(body, `"label":"Remote audit workflow"`) || !strings.Contains(body, `"control_key":"remote_audit"`) || !strings.Contains(body, `"endpoint_returned":false`) || !strings.Contains(body, `"payload_returned":false`) || !strings.Contains(body, `"audit_token_returned":false`) || !strings.Contains(body, `"key":"shipping_path"`) || !strings.Contains(body, `"remote_audit_workflow":"presence_only_audit_shipping_evidence"`) || !strings.Contains(body, `"remote_audit_presence_workflow"`) {
+		t.Fatalf("posture response should include remote audit workflow: %s", body)
+	}
 	if !strings.Contains(body, `"scope"`) || !strings.Contains(body, `"scope_bound_metadata"`) {
 		t.Fatalf("posture response should include scope policy: %s", body)
 	}
@@ -1194,6 +1197,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed integration conformance workflow")
 	}
+	postureRemoteAuditWorkflow, ok := posture["remote_audit_workflow"].(RemoteAuditWorkflow)
+	if !ok {
+		t.Fatalf("posture should expose typed remote audit workflow")
+	}
 	postureAttachmentReview, ok := posture["attachment_review"].(AttachmentReview)
 	if !ok {
 		t.Fatalf("posture should expose typed attachment review")
@@ -1240,6 +1247,9 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(postureIntegrationWorkflow, pack.IntegrationWorkflow) {
 		t.Fatalf("posture and evidence should share the same integration conformance workflow: posture=%#v evidence=%#v", postureIntegrationWorkflow, pack.IntegrationWorkflow)
+	}
+	if !reflect.DeepEqual(postureRemoteAuditWorkflow, pack.RemoteAuditWorkflow) {
+		t.Fatalf("posture and evidence should share the same remote audit workflow: posture=%#v evidence=%#v", postureRemoteAuditWorkflow, pack.RemoteAuditWorkflow)
 	}
 	if !reflect.DeepEqual(postureAttachmentReview, pack.AttachmentReview) {
 		t.Fatalf("posture and evidence should share the same attachment review: posture=%#v evidence=%#v", postureAttachmentReview, pack.AttachmentReview)
@@ -1592,6 +1602,71 @@ func TestIntegrationConformanceWorkflowTracksPresenceOnlyAttachment(t *testing.T
 				}
 			}
 			assertRouteResponseValueFree(t, route.name+" integration workflow", out)
+		})
+	}
+}
+
+func TestRemoteAuditWorkflowTracksPresenceOnlyAttachment(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	body := `{"control_key":"remote_audit","attestation":"external_evidence_exists","external_ref":"https://evidence.example/secret-cookie-secret-/run/agenix/remote-audit"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/evidence/attachments", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-Id", "remote-audit-workflow-1")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", out.Code, out.Body.String())
+	}
+	attachBody := out.Body.String()
+	for _, want := range []string{`"control_key":"remote_audit"`, `"attachment":"attached_presence_only"`, `"evidence_signal":"presence_only_workflow"`, `"request_body_returned":false`, `"request_id":"remote-audit-workflow-1"`, `"value_returned":false`} {
+		if !strings.Contains(attachBody, want) {
+			t.Fatalf("remote audit attach response should include %s: %s", want, attachBody)
+		}
+	}
+
+	routes := []struct {
+		name string
+		path string
+	}{
+		{name: "dashboard", path: "/"},
+		{name: "posture", path: "/api/posture"},
+		{name: "evidence", path: "/api/evidence"},
+	}
+	for _, route := range routes {
+		t.Run(route.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, route.path, nil)
+			out := httptest.NewRecorder()
+			app.routes().ServeHTTP(out, req)
+			if out.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+			}
+			got := out.Body.String()
+			for _, want := range []string{"Remote audit workflow", "remote_audit", "attached_presence_only", "presence_only_workflow", "evidence_ref_returned", "value_returned"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("%s should include remote audit workflow marker %q: %s", route.name, want, got)
+				}
+			}
+			if route.name == "dashboard" {
+				for _, want := range []string{"review cadence", "endpoint_returned=false", "payload_returned=false", "audit_token_returned=false", "presence recorded", "audit shipping evidence stays external", "Shipping path", "Chain continuity", "Request correlation", "Custody review", "Alert review"} {
+					if !strings.Contains(got, want) {
+						t.Fatalf("dashboard should include remote audit workflow cue %q: %s", want, got)
+					}
+				}
+			} else {
+				for _, want := range []string{"review_cadence", `"endpoint_returned":false`, `"payload_returned":false`, `"audit_token_returned":false`} {
+					if !strings.Contains(got, want) {
+						t.Fatalf("%s should include remote audit workflow JSON marker %q: %s", route.name, want, got)
+					}
+				}
+			}
+			for _, forbidden := range []string{"external_ref", "https://evidence.example", "secret-cookie-secret", "/run/agenix"} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("%s leaked request-only remote audit evidence ref %q: %s", route.name, forbidden, got)
+				}
+			}
+			assertRouteResponseValueFree(t, route.name+" remote audit workflow", out)
 		})
 	}
 }
@@ -2418,6 +2493,11 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Command center", "Command center status", "Safe quick actions", "Safety state", "Role access", "Enterprise review", "Now", "metadata_only", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Enterprise dry run", "Enterprise dry-run checklist", "self_hosted now", "enterprise target", "blockers", "required=true", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Integration conformance workflow", "Mark integration conformance present", "connector_config_returned=false", "endpoint_returned=false", "payload_returned=false", "Identity mapping", "Audit shipping", "Ticketing link", "SIEM custody", "Evidence handoff", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill workflow", "Mark restore drill present", "review cadence", "Metadata inventory", "Policy and identity", "Release provenance workflow", "Mark release provenance present", "artifact_returned=false", "Build identity", "SBOM review", "Channel trust", "Privacy and retention workflow", "Mark privacy policy present", "policy_doc_returned=false", "raw_metadata_returned=false", "Data classes", "Retention window", "Access boundary", "Payload exclusions", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "claim policy", "subject bindings", "group bindings", "Role policy proof", "Implicit elevated claims", "disabled", "Claim names are not trusted by convention", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
+		}
+	}
+	for _, want := range []string{"Remote audit workflow", "Mark remote audit present", "audit_token_returned=false", "Shipping path", "Chain continuity", "Request correlation", "Custody review", "Alert review"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render remote audit workflow %q: %s", want, body)
 		}
 	}
 	for _, want := range []string{"External evidence workflow", "Presence-only external evidence workflow", "records presence only", "no refs stored", "Mark present"} {

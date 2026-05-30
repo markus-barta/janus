@@ -896,6 +896,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	releaseWorkflow := ReleaseProvenanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	remoteAuditWorkflow := RemoteAuditWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -940,6 +941,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"ReleaseWorkflow":     releaseWorkflow,
 		"PrivacyWorkflow":     privacyWorkflow,
 		"IntegrationWorkflow": integrationWorkflow,
+		"RemoteAuditWorkflow": remoteAuditWorkflow,
 		"Privacy":             privacyPosture,
 		"AssuranceSummary":    assuranceSummary,
 		"AssuranceGates":      assuranceGates,
@@ -2361,6 +2363,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	releaseWorkflow := ReleaseProvenanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	remoteAuditWorkflow := RemoteAuditWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2400,6 +2403,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"release_provenance_workflow":      releaseWorkflow,
 		"privacy_retention_workflow":       privacyWorkflow,
 		"integration_conformance_workflow": integrationWorkflow,
+		"remote_audit_workflow":            remoteAuditWorkflow,
 		"privacy_posture":                  privacyPosture,
 		"evidence_receipt":                 evidenceReceipt,
 		"action_readiness":                 actionReadiness,
@@ -2462,6 +2466,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"release_provenance_workflow":      "presence_only_release_evidence",
 			"privacy_retention_workflow":       "presence_only_policy_evidence",
 			"integration_conformance_workflow": "presence_only_integration_evidence",
+			"remote_audit_workflow":            "presence_only_audit_shipping_evidence",
 			"action_readiness":                 "role_and_readiness_matrix",
 			"command_center":                   "dashboard_posture_api",
 			"action_receipts":                  "mutation_result_receipts",
@@ -2574,6 +2579,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"release_provenance_presence_workflow",
 			"privacy_retention_presence_workflow",
 			"integration_conformance_presence_workflow",
+			"remote_audit_presence_workflow",
 			"role_aware_action_readiness",
 			"command_center_ux",
 			"value_free_action_receipts",
@@ -2636,6 +2642,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	releaseWorkflow := ReleaseProvenanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	remoteAuditWorkflow := RemoteAuditWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2659,6 +2666,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		ReleaseWorkflow:     releaseWorkflow,
 		PrivacyWorkflow:     privacyWorkflow,
 		IntegrationWorkflow: integrationWorkflow,
+		RemoteAuditWorkflow: remoteAuditWorkflow,
 		Enterprise:          enterpriseValidation,
 		EnterpriseDryRun:    enterpriseDryRun,
 		AttachmentReview:    attachmentReview,
@@ -3764,6 +3772,40 @@ func mustTemplates() *template.Template {
         <p><span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
         <p><span class="pill info">next</span> {{ .Next }}</p>
         {{ end }}
+      </div>
+      {{ end }}
+    </div>
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="remote-audit-workflow">
+  <div class="panel-head">
+    <h2>Remote audit workflow</h2>
+    <span class="pill {{ if eq .RemoteAuditWorkflow.Status "attached" }}ok{{ else if eq .RemoteAuditWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .RemoteAuditWorkflow.Status }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .RemoteAuditWorkflow.Summary }}</p>
+    <p><span class="pill info">owner {{ .RemoteAuditWorkflow.OwnerRole }}</span> <span class="pill {{ if .RemoteAuditWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .RemoteAuditWorkflow.Required }}</span> <span class="pill {{ if .RemoteAuditWorkflow.Attached }}ok{{ else if .RemoteAuditWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .RemoteAuditWorkflow.Attachment }}</span> <span class="pill info">{{ .RemoteAuditWorkflow.EvidenceSignal }}</span> <span class="pill ok">endpoint_returned=false</span> <span class="pill ok">payload_returned=false</span> <span class="pill ok">audit_token_returned=false</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <p><span class="pill info">review cadence</span> {{ .RemoteAuditWorkflow.ReviewCadence }}</p>
+    {{ if .RemoteAuditWorkflow.Attached }}
+    <p><span class="pill ok">presence recorded</span> <span class="pill ok">audit shipping evidence stays external</span> {{ .RemoteAuditWorkflow.Next }}</p>
+    {{ else if .RemoteAuditWorkflow.CanAttach }}
+    <form method="post" action="/ui/evidence/attachments">
+      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+      <input type="hidden" name="control_key" value="{{ .RemoteAuditWorkflow.ControlKey }}">
+      <input type="hidden" name="attestation" value="external_evidence_exists">
+      <button class="button quiet" type="submit">Mark remote audit present</button>
+    </form>
+    <p>{{ .RemoteAuditWorkflow.Next }}</p>
+    {{ else }}
+    <p><span class="pill warn">{{ .RemoteAuditWorkflow.OwnerRole }} role required</span> {{ .RemoteAuditWorkflow.Next }}</p>
+    {{ end }}
+    <div class="mode-grid" aria-label="Remote audit workflow checks">
+      {{ range .RemoteAuditWorkflow.Checks }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+        <p><span class="pill info">next</span> {{ .Next }}</p>
       </div>
       {{ end }}
     </div>
