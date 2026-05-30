@@ -553,7 +553,18 @@ func (app *App) rateLimit(next http.Handler) http.Handler {
 		}
 		key := clientKey(r) + "|" + r.URL.Path
 		if !app.limiter.Allow(key) {
-			writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "Too many requests")
+			retryAfter := int(app.limiter.window.Seconds())
+			if retryAfter < 1 {
+				retryAfter = 1
+			}
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error":               "rate_limited",
+				"message":             "Too many requests",
+				"request_id":          requestID(r),
+				"retry_after_seconds": retryAfter,
+				"value_returned":      false,
+			})
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -1825,8 +1836,11 @@ func (app *App) postureBody() map[string]any {
 			"value_returned":                      false,
 		},
 		"api_errors": map[string]any{
-			"auth_denials_json": true,
-			"value_returned":    false,
+			"auth_denials_json":           true,
+			"rate_limit_retry_after":      true,
+			"rate_limit_request_id":       true,
+			"rate_limit_error_value_free": true,
+			"value_returned":              false,
 		},
 		"readiness": func() any {
 			body, _ := app.readinessBody()
@@ -1865,6 +1879,7 @@ func (app *App) postureBody() map[string]any {
 			"redacted_public_readiness",
 			"degraded_sensitive_action_guard",
 			"degraded_dashboard_banner",
+			"operational_rate_limit_denials",
 		},
 		"value_returned": false,
 	}

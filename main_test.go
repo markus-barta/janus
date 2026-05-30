@@ -731,6 +731,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"api_errors"`) || !strings.Contains(body, `"api_json_auth_errors"`) {
 		t.Fatalf("posture response should include API error posture: %s", body)
 	}
+	if !strings.Contains(body, `"rate_limit_retry_after":true`) || !strings.Contains(body, `"rate_limit_request_id":true`) || !strings.Contains(body, `"operational_rate_limit_denials"`) {
+		t.Fatalf("posture response should include operational rate-limit denials: %s", body)
+	}
 	if !strings.Contains(body, `"readiness"`) || !strings.Contains(body, `"value_free_readiness"`) {
 		t.Fatalf("posture response should include readiness posture: %s", body)
 	}
@@ -1537,6 +1540,41 @@ func TestRateLimiterBlocksBurst(t *testing.T) {
 	}
 	if limiter.Allow("test") {
 		t.Fatal("expected third request to be limited")
+	}
+}
+
+func TestRateLimitDenialIsOperationalAndValueFree(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	app.limiter = NewRateLimiter(1, time.Minute)
+
+	first := httptest.NewRequest(http.MethodGet, "/api/posture", nil)
+	first.RemoteAddr = "192.0.2.8:1234"
+	firstOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(firstOut, first)
+	if firstOut.Code != http.StatusOK {
+		t.Fatalf("expected first request 200, got %d body=%s", firstOut.Code, firstOut.Body.String())
+	}
+
+	second := httptest.NewRequest(http.MethodGet, "/api/posture", nil)
+	second.RemoteAddr = "192.0.2.8:1234"
+	second.Header.Set("X-Request-Id", "rate-limit-2")
+	secondOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(secondOut, second)
+	if secondOut.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d body=%s", secondOut.Code, secondOut.Body.String())
+	}
+	if got := secondOut.Header().Get("Retry-After"); got != "60" {
+		t.Fatalf("expected Retry-After 60, got %q", got)
+	}
+	body := secondOut.Body.String()
+	for _, want := range []string{`"error":"rate_limited"`, `"request_id":"rate-limit-2"`, `"retry_after_seconds":60`, `"value_returned":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("rate-limit denial should include %s: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "plaintext") || strings.Contains(body, "secret-cookie-secret") {
+		t.Fatalf("rate-limit denial should remain value-free: %s", body)
 	}
 }
 
