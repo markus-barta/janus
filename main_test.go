@@ -716,6 +716,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"safe_http_boundary_failures":true`) || !strings.Contains(body, `"safe_http_boundary_failures"`) || !strings.Contains(body, `"http_boundary_error_view":"safe_category_request_id"`) {
 		t.Fatalf("posture response should include safe HTTP boundary failures: %s", body)
 	}
+	if !strings.Contains(body, `"public_health_redacted":true`) || !strings.Contains(body, `"redacted_public_health"`) {
+		t.Fatalf("posture response should include redacted public health: %s", body)
+	}
 	if !strings.Contains(body, `"public_readiness_redacted":true`) || !strings.Contains(body, `"redacted_public_readiness"`) {
 		t.Fatalf("posture response should include redacted public readiness: %s", body)
 	}
@@ -1652,6 +1655,33 @@ func TestPermitStoreRejectsCorruptPersistenceFile(t *testing.T) {
 	}
 	if _, err := NewPermitStore(dataDir); err == nil {
 		t.Fatal("expected corrupt permit store to fail closed")
+	}
+}
+
+func TestHealthzIsRedactedLivenessOnly(t *testing.T) {
+	app := newTestApp(t)
+
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	for _, want := range []string{`"status":"ok"`, `"service":"janus"`, `"mode":"self_hosted"`, `"redacted":true`, `"value_returned":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("healthz should include %s: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"oidc_configured", "auth_required", "descriptor_count", "audit_entries", "secret_count", "plaintext", "secret-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("healthz should not expose %q: %s", forbidden, body)
+		}
+	}
+	if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("healthz should keep no-store header, got %q", got)
+	}
+	if got := rr.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("healthz should keep nosniff header, got %q", got)
 	}
 }
 

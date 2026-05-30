@@ -686,9 +686,11 @@ func (app *App) requireReadyUI(w http.ResponseWriter, r *http.Request, session S
 func (app *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":          "ok",
-		"service":         "janus",
-		"oidc_configured": app.cfg.OIDCConfigured(),
+		"status":         "ok",
+		"service":        "janus",
+		"mode":           app.cfg.ProductMode,
+		"redacted":       true,
+		"value_returned": false,
 	})
 }
 
@@ -1817,6 +1819,7 @@ func (app *App) postureBody() map[string]any {
 			"cache_control":                "no-store",
 			"auth_error_view":              "safe_category_request_id",
 			"http_boundary_error_view":     "safe_category_request_id",
+			"public_health_redacted":       true,
 			"public_readiness_redacted":    true,
 			"safe_http_boundary_failures":  true,
 			"script_src":                   "none",
@@ -1877,6 +1880,7 @@ func (app *App) postureBody() map[string]any {
 			"safe_http_boundary_failures",
 			"role_duty_matrix",
 			"redacted_public_readiness",
+			"redacted_public_health",
 			"degraded_sensitive_action_guard",
 			"degraded_dashboard_banner",
 			"operational_rate_limit_denials",
