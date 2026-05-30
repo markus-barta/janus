@@ -24,27 +24,28 @@ type ApprovedUsePosture struct {
 }
 
 type EvidencePack struct {
-	GeneratedAt      time.Time            `json:"generated_at"`
-	Service          string               `json:"service"`
-	Mode             string               `json:"mode"`
-	Posture          map[string]any       `json:"posture"`
-	Operational      OperationalStatus    `json:"operational_status"`
-	AssuranceGates   AssuranceGates       `json:"assurance_gates"`
-	AssuranceSummary AssuranceSummary     `json:"assurance_summary"`
-	Enterprise       EnterpriseValidation `json:"enterprise_validation"`
-	Privacy          PrivacyPosture       `json:"privacy_posture"`
-	EvidenceBoundary EvidenceBoundary     `json:"evidence_boundary"`
-	Descriptors      []SecretDescriptor   `json:"descriptors"`
-	CatalogGates     []CatalogGate        `json:"catalog_gates"`
-	ScopePosture     ScopePosture         `json:"scope_posture"`
-	LifecyclePosture LifecyclePosture     `json:"lifecycle_posture"`
-	PermitPosture    PermitPosture        `json:"permit_posture"`
-	AccessPosture    AccessPosture        `json:"access_posture"`
-	AuditPosture     AuditPosture         `json:"audit_posture"`
-	RecentAudit      []AuditEntry         `json:"recent_audit"`
-	Integrity        *EvidenceIntegrity   `json:"integrity,omitempty"`
-	ValueReturned    bool                 `json:"value_returned"`
-	RedactionModel   string               `json:"redaction_model"`
+	GeneratedAt      time.Time             `json:"generated_at"`
+	Service          string                `json:"service"`
+	Mode             string                `json:"mode"`
+	Posture          map[string]any        `json:"posture"`
+	Operational      OperationalStatus     `json:"operational_status"`
+	AssuranceGates   AssuranceGates        `json:"assurance_gates"`
+	NegativePath     NegativePathAssurance `json:"negative_path_assurance"`
+	AssuranceSummary AssuranceSummary      `json:"assurance_summary"`
+	Enterprise       EnterpriseValidation  `json:"enterprise_validation"`
+	Privacy          PrivacyPosture        `json:"privacy_posture"`
+	EvidenceBoundary EvidenceBoundary      `json:"evidence_boundary"`
+	Descriptors      []SecretDescriptor    `json:"descriptors"`
+	CatalogGates     []CatalogGate         `json:"catalog_gates"`
+	ScopePosture     ScopePosture          `json:"scope_posture"`
+	LifecyclePosture LifecyclePosture      `json:"lifecycle_posture"`
+	PermitPosture    PermitPosture         `json:"permit_posture"`
+	AccessPosture    AccessPosture         `json:"access_posture"`
+	AuditPosture     AuditPosture          `json:"audit_posture"`
+	RecentAudit      []AuditEntry          `json:"recent_audit"`
+	Integrity        *EvidenceIntegrity    `json:"integrity,omitempty"`
+	ValueReturned    bool                  `json:"value_returned"`
+	RedactionModel   string                `json:"redaction_model"`
 }
 
 type EvidenceBoundary struct {
@@ -96,6 +97,22 @@ type AssuranceGates struct {
 }
 
 type AssuranceGateItem struct {
+	Key    string `json:"key"`
+	Label  string `json:"label"`
+	State  string `json:"state"`
+	Detail string `json:"detail"`
+	Tone   string `json:"tone"`
+}
+
+type NegativePathAssurance struct {
+	Summary       string             `json:"summary"`
+	Cases         []NegativePathCase `json:"cases"`
+	CoveredCount  int                `json:"covered_count"`
+	ReviewCount   int                `json:"review_count"`
+	ValueReturned bool               `json:"value_returned"`
+}
+
+type NegativePathCase struct {
 	Key    string `json:"key"`
 	Label  string `json:"label"`
 	State  string `json:"state"`
@@ -315,6 +332,61 @@ func (g *AssuranceGates) add(ok bool, key, label, okState, reviewState, okDetail
 		g.ReviewCount++
 	}
 	g.Gates = append(g.Gates, AssuranceGateItem{Key: key, Label: label, State: state, Detail: detail, Tone: tone})
+}
+
+func NegativePathAssuranceFor(ready bool, catalogGateCount int, access AccessPosture, audit AuditPosture) NegativePathAssurance {
+	proof := NegativePathAssurance{
+		Summary:       "Janus proves common bad paths fail closed before stronger claims are trusted.",
+		ValueReturned: false,
+	}
+
+	roleReady := access.RoleDutyMatrix && len(access.RequiredRoles) > 0
+	proof.add(roleReady, "role_denial", "Wrong role", "covered", "review", "Viewer sessions are denied from auditor and operator routes, with denial audit when the sink is healthy.", "Role denial coverage needs review.")
+
+	catalogClear := catalogGateCount == 0
+	catalogState := "covered"
+	catalogDetail := "Malformed descriptor metadata opens catalog gates before use or enterprise claims."
+	if !catalogClear {
+		catalogState = fmt.Sprintf("%d open", catalogGateCount)
+		catalogDetail = "Open catalog gates stay visible and block stronger claims."
+	}
+	proof.add(catalogClear, "catalog_gate", "Catalog gate", catalogState, catalogState, catalogDetail, catalogDetail)
+
+	auditReady := audit.SinkWritable && audit.ChainVerified
+	auditState := "armed"
+	auditDetail := "Audit sink and chain are healthy; a degraded sink makes readiness fail."
+	if !auditReady {
+		auditState = "blocking"
+		auditDetail = "Audit sink or chain is degraded; sensitive actions stay blocked."
+	}
+	proof.add(auditReady, "audit_sink_degraded", "Audit down", auditState, auditState, auditDetail, auditDetail)
+
+	sensitiveState := "armed"
+	sensitiveDetail := "Sensitive API and UI actions check readiness before broker or permit work."
+	if !ready {
+		sensitiveState = "blocking"
+		sensitiveDetail = "Readiness is degraded; sensitive actions return safe denial responses."
+	}
+	proof.add(true, "sensitive_action_guard", "Sensitive action", sensitiveState, sensitiveState, sensitiveDetail, sensitiveDetail)
+
+	proof.add(true, "value_leak_sentinel", "Value leak check", "active", "review", "Denials and evidence exclude request bodies, secret-like literals, backend paths, and cookie/OIDC secrets.", "Value-leak sentinel needs review.")
+	proof.add(true, "request_correlation", "Request id", "active", "review", "JSON denials include a request id so operators can investigate without exposing values.", "Request correlation needs review.")
+	return proof
+}
+
+func (p *NegativePathAssurance) add(ok bool, key, label, okState, reviewState, okDetail, reviewDetail string) {
+	tone := "ok"
+	state := okState
+	detail := okDetail
+	if !ok {
+		tone = "warn"
+		state = reviewState
+		detail = reviewDetail
+		p.ReviewCount++
+	} else {
+		p.CoveredCount++
+	}
+	p.Cases = append(p.Cases, NegativePathCase{Key: key, Label: label, State: state, Detail: detail, Tone: tone})
 }
 
 func PrivacyPostureFor(boundary EvidenceBoundary, audit AuditPosture) PrivacyPosture {

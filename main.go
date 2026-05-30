@@ -867,6 +867,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
+	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	roleAvailability := RoleAvailabilityFor(session)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	data := map[string]any{
@@ -895,6 +896,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Privacy":           privacyPosture,
 		"AssuranceSummary":  assuranceSummary,
 		"AssuranceGates":    assuranceGates,
+		"NegativePath":      negativePath,
 		"EvidenceHash":      evidenceHash,
 		"EvidenceHashFull":  evidenceHashFull,
 		"EvidenceBoundary":  evidenceBoundary,
@@ -2085,6 +2087,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
+	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	roleAvailability := RoleAvailabilityFor(session)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	return map[string]any{
@@ -2103,16 +2106,17 @@ func (app *App) postureBody(session Session) map[string]any {
 			"duties":          []string{"posture", "use_actions", "audit_export", "admin_policy"},
 			"value_returned":  false,
 		},
-		"scope":                 scopePosture,
-		"lifecycle":             lifecyclePosture,
-		"approved_use":          approvedUsePosture,
-		"permits":               permitPosture,
-		"mode_posture":          ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
-		"enterprise_validation": enterpriseValidation,
-		"privacy_posture":       privacyPosture,
-		"assurance_summary":     assuranceSummary,
-		"assurance_gates":       assuranceGates,
-		"operational_status":    operationalStatus,
+		"scope":                   scopePosture,
+		"lifecycle":               lifecyclePosture,
+		"approved_use":            approvedUsePosture,
+		"permits":                 permitPosture,
+		"mode_posture":            ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"enterprise_validation":   enterpriseValidation,
+		"privacy_posture":         privacyPosture,
+		"assurance_summary":       assuranceSummary,
+		"assurance_gates":         assuranceGates,
+		"negative_path_assurance": negativePath,
+		"operational_status":      operationalStatus,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
 			"pkce_s256":                   app.cfg.OIDCConfigured(),
@@ -2154,6 +2158,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"evidence_download":         "auditor_json_with_pack_hash",
 			"enterprise_validation":     "self_hosted_safe_enterprise_required",
 			"privacy_retention":         "dashboard_posture_evidence",
+			"negative_path_assurance":   "dashboard_posture_evidence",
 			"human_readable_summary":    "dashboard_posture_evidence",
 			"assurance_gate_proofs":     "role_catalog_degraded_value_leak",
 			"operational_status":        "dashboard_posture_strip",
@@ -2246,6 +2251,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"assurance_gate_proof_strip",
 			"enterprise_validation_clarity",
 			"privacy_retention_posture",
+			"negative_path_assurance_matrix",
 		},
 		"value_returned": false,
 	}
@@ -2273,6 +2279,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
+	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, RoleAvailabilityFor(session))
 	pack := EvidencePack{
 		GeneratedAt:      time.Now().UTC(),
@@ -2281,6 +2288,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Posture:          app.postureBody(session),
 		Operational:      operationalStatus,
 		AssuranceGates:   assuranceGates,
+		NegativePath:     negativePath,
 		AssuranceSummary: assuranceSummary,
 		Enterprise:       enterpriseValidation,
 		Privacy:          privacyPosture,
@@ -3001,10 +3009,29 @@ func mustTemplates() *template.Template {
       {{ end }}
     </div>
   </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="available-to-you">
-  <div class="panel-head">
-    <h2>Available to you</h2>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="negative-path-assurance">
+	  <div class="panel-head">
+	    <h2>Blocked-path checks</h2>
+	    <span class="pill {{ if .NegativePath.ReviewCount }}warn{{ else }}ok{{ end }}">{{ if .NegativePath.ReviewCount }}{{ .NegativePath.ReviewCount }} review{{ else }}covered{{ end }}</span>
+	  </div>
+	  <div class="panel-body stack">
+	    <p>{{ .NegativePath.Summary }}</p>
+	    <p><span class="pill ok">value_returned=false</span> <span class="pill info">{{ .NegativePath.CoveredCount }} covered</span></p>
+	    <div class="mode-grid" aria-label="Negative-path assurance">
+	      {{ range .NegativePath.Cases }}
+	      <div class="mode-item {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Detail }}</p>
+	      </div>
+	      {{ end }}
+	    </div>
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="available-to-you">
+	  <div class="panel-head">
+	    <h2>Available to you</h2>
     <span class="pill info">role gated</span>
   </div>
   <div class="panel-body">

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -719,6 +720,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"assurance_gates"`) || !strings.Contains(body, `"key":"role_denial"`) || !strings.Contains(body, `"key":"catalog_metadata"`) || !strings.Contains(body, `"key":"degraded_actions"`) || !strings.Contains(body, `"key":"value_leak_sentinel"`) || !strings.Contains(body, `"assurance_gate_proof_strip"`) {
 		t.Fatalf("posture response should include assurance gate proofs: %s", body)
 	}
+	if !strings.Contains(body, `"negative_path_assurance"`) || !strings.Contains(body, `"key":"audit_sink_degraded"`) || !strings.Contains(body, `"key":"sensitive_action_guard"`) || !strings.Contains(body, `"negative_path_assurance_matrix"`) || !strings.Contains(body, `"negative_path_assurance":"dashboard_posture_evidence"`) {
+		t.Fatalf("posture response should include negative-path assurance: %s", body)
+	}
 	if !strings.Contains(body, `"operational_status"`) || !strings.Contains(body, `"key":"role_duties"`) || !strings.Contains(body, `"key":"value_boundary"`) || !strings.Contains(body, `"operational_status_strip"`) || !strings.Contains(body, `"operational_status":"dashboard_posture_strip"`) {
 		t.Fatalf("posture response should include operational status strip: %s", body)
 	}
@@ -827,6 +831,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"assurance_gates"`) || !strings.Contains(body, `"key":"value_leak_sentinel"`) {
 		t.Fatalf("evidence response should include assurance gates: %s", body)
+	}
+	if !strings.Contains(body, `"negative_path_assurance"`) || !strings.Contains(body, `"key":"role_denial"`) || !strings.Contains(body, `"key":"audit_sink_degraded"`) || !strings.Contains(body, `"key":"request_correlation"`) {
+		t.Fatalf("evidence response should include negative-path assurance: %s", body)
 	}
 	if !strings.Contains(body, `"enterprise_validation"`) || !strings.Contains(body, `"key":"privacy_policy"`) {
 		t.Fatalf("evidence response should include enterprise validation: %s", body)
@@ -950,6 +957,118 @@ func TestAssuranceGateProofDirectAbuseCases(t *testing.T) {
 			t.Fatalf("degraded denial should be clear and correlated: %s", out.Body.String())
 		}
 	})
+}
+
+func TestNegativePathAssuranceMatrix(t *testing.T) {
+	proof := NegativePathAssuranceFor(true, 0, AccessPosture{
+		RoleDutyMatrix: true,
+		RequiredRoles: map[string]string{
+			"/api/evidence":            RoleAuditor,
+			"POST /api/warden/resolve": RoleOperator,
+		},
+	}, AuditPosture{SinkWritable: true, ChainVerified: true})
+	if proof.ValueReturned || proof.ReviewCount != 0 || proof.CoveredCount < 5 {
+		t.Fatalf("negative-path assurance should be covered and value-free: %#v", proof)
+	}
+	for _, key := range []string{"role_denial", "catalog_gate", "audit_sink_degraded", "sensitive_action_guard", "value_leak_sentinel", "request_correlation"} {
+		if !negativePathHasKey(proof.Cases, key) {
+			t.Fatalf("negative-path assurance should cover %q: %#v", key, proof)
+		}
+	}
+
+	degraded := NegativePathAssuranceFor(false, 2, AccessPosture{}, AuditPosture{})
+	if degraded.ReviewCount == 0 || !negativePathHasState(degraded.Cases, "audit_sink_degraded", "blocking") || !negativePathHasState(degraded.Cases, "sensitive_action_guard", "blocking") {
+		t.Fatalf("degraded negative-path assurance should show blocking states: %#v", degraded)
+	}
+}
+
+func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	session := Session{Subject: "dev-local", Roles: AllRoles(), Expiry: time.Now().UTC().Add(time.Hour)}
+
+	postureProof, ok := app.postureBody(session)["negative_path_assurance"].(NegativePathAssurance)
+	if !ok {
+		t.Fatalf("posture should expose typed negative-path assurance")
+	}
+	pack := app.evidencePack(session)
+	if !reflect.DeepEqual(postureProof, pack.NegativePath) {
+		t.Fatalf("posture and evidence should share the same negative-path proof: posture=%#v evidence=%#v", postureProof, pack.NegativePath)
+	}
+	if pack.NegativePath.ValueReturned || !negativePathHasKey(pack.NegativePath.Cases, "value_leak_sentinel") {
+		t.Fatalf("negative-path evidence should stay value-free and include leak sentinel: %#v", pack.NegativePath)
+	}
+}
+
+func TestAuditSinkDegradedBlocksSensitiveActions(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	app.store.auditFile = filepath.Join(t.TempDir(), "missing-parent", "audit.jsonl")
+
+	readiness, ready := app.readinessBody()
+	if ready {
+		t.Fatalf("audit sink degradation should fail readiness: %#v", readiness)
+	}
+	checks, ok := readiness["checks"].(map[string]bool)
+	if !ok || checks["audit_sink"] {
+		t.Fatalf("readiness should show audit sink degraded: %#v", readiness)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/warden/resolve", strings.NewReader(`{"ref":"raw-secret-value","reason":"plaintext body should not echo"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-Id", "audit-down-1")
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", out.Code, out.Body.String())
+	}
+	assertRouteResponseValueFree(t, "audit sink degraded", out)
+	assertJSONErrorRequestCorrelated(t, "audit sink degraded", "audit-down-1", out)
+	if !strings.Contains(out.Body.String(), `"audit_sink":false`) || !strings.Contains(out.Body.String(), `"system_degraded"`) {
+		t.Fatalf("audit degradation denial should be explicit and safe: %s", out.Body.String())
+	}
+}
+
+func TestSensitiveAPIsFailClosedWhenReadinessDegraded(t *testing.T) {
+	cases := []struct {
+		name        string
+		method      string
+		path        string
+		body        string
+		contentType string
+	}{
+		{name: "evidence export", method: http.MethodGet, path: "/api/evidence"},
+		{name: "resolve handle", method: http.MethodPost, path: "/api/warden/resolve", body: `{"ref":"raw-secret-value","reason":"plaintext body should not echo"}`, contentType: "application/json"},
+		{name: "create permit", method: http.MethodPost, path: "/api/permits", body: `{"ref":"raw-secret-value","action":"metadata_use","destination":"secrets/backend","reason":"plaintext body should not echo"}`, contentType: "application/json"},
+		{name: "run permit", method: http.MethodPost, path: "/api/permits/raw-secret-value/run"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app := newTestApp(t)
+			app.cfg.RequireAuth = false
+			app.permits = nil
+
+			reqID := "degraded-" + strings.NewReplacer(" ", "-", "/", "-").Replace(tc.name)
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("X-Request-Id", reqID)
+			if tc.contentType != "" {
+				req.Header.Set("Content-Type", tc.contentType)
+			}
+			out := httptest.NewRecorder()
+			app.routes().ServeHTTP(out, req)
+			if out.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d body=%s", out.Code, out.Body.String())
+			}
+			assertRouteResponseValueFree(t, tc.name, out)
+			assertJSONErrorRequestCorrelated(t, tc.name, reqID, out)
+			for _, want := range []string{`"error":"system_degraded"`, `"redacted":true`, `"value_returned":false`} {
+				if !strings.Contains(out.Body.String(), want) {
+					t.Fatalf("%s degraded denial should include %s: %s", tc.name, want, out.Body.String())
+				}
+			}
+		})
+	}
 }
 
 func TestRolePolicyMapsZitadelClaims(t *testing.T) {
@@ -1146,6 +1265,24 @@ func assuranceGateHasKey(items []AssuranceGateItem, key string) bool {
 	return false
 }
 
+func negativePathHasKey(items []NegativePathCase, key string) bool {
+	for _, item := range items {
+		if item.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func negativePathHasState(items []NegativePathCase, key, state string) bool {
+	for _, item := range items {
+		if item.Key == key && item.State == state {
+			return true
+		}
+	}
+	return false
+}
+
 func catalogGateHasCode(items []CatalogGate, code string) bool {
 	for _, item := range items {
 		if item.Code == code {
@@ -1232,7 +1369,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Download evidence", "integrity.pack_hash", "Download JSON", "Hash preview", "copy-safe metadata", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Download evidence", "integrity.pack_hash", "Download JSON", "Hash preview", "copy-safe metadata", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
