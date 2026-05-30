@@ -33,9 +33,19 @@ type AccessPosture struct {
 	BootstrapOwner   bool              `json:"bootstrap_owner"`
 	KnownRoles       []string          `json:"known_roles"`
 	RequiredRoles    map[string]string `json:"required_roles"`
+	RoleDutyMatrix   bool              `json:"role_duty_matrix"`
+	DutyModel        string            `json:"duty_model"`
 	Gates            []AccessGate      `json:"gates"`
 	GateCount        int               `json:"gate_count"`
 	ValueReturned    bool              `json:"value_returned"`
+}
+
+type RoleBoundary struct {
+	Role    string
+	Duty    string
+	Allowed string
+	Blocked string
+	Active  bool
 }
 
 func LoadRolePolicyFromEnv() RolePolicy {
@@ -133,9 +143,44 @@ func AccessPostureFor(policy RolePolicy) AccessPosture {
 			"POST /api/permits":          RoleOperator,
 			"POST /api/permits/{id}/run": RoleOperator,
 		},
-		Gates:         gates,
-		GateCount:     len(gates),
-		ValueReturned: false,
+		RoleDutyMatrix: true,
+		DutyModel:      "separated_admin_auditor_operator_viewer",
+		Gates:          gates,
+		GateCount:      len(gates),
+		ValueReturned:  false,
+	}
+}
+
+func RoleBoundariesFor(session Session) []RoleBoundary {
+	return []RoleBoundary{
+		{
+			Role:    RoleAdmin,
+			Duty:    "Policy and ownership",
+			Allowed: "Review role policy and future admin approvals.",
+			Blocked: "Does not bypass audit, approval, or value-return rules.",
+			Active:  HasRole(session, RoleAdmin),
+		},
+		{
+			Role:    RoleAuditor,
+			Duty:    "Evidence and audit",
+			Allowed: "View audit events and export evidence.",
+			Blocked: "No handle, permit, or access-broadening controls.",
+			Active:  HasRole(session, RoleAuditor),
+		},
+		{
+			Role:    RoleOperator,
+			Duty:    "Approved use",
+			Allowed: "Request metadata handles and permit safety checks.",
+			Blocked: "No evidence export or role-policy changes.",
+			Active:  HasRole(session, RoleOperator),
+		},
+		{
+			Role:    RoleViewer,
+			Duty:    "Posture only",
+			Allowed: "Read safe posture and descriptor metadata.",
+			Blocked: "No secret-use, audit export, or admin controls.",
+			Active:  HasRole(session, RoleViewer),
+		},
 	}
 }
 

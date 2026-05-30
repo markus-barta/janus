@@ -748,6 +748,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Posture":           auditPosture,
 		"CatalogGates":      catalogGates,
 		"Access":            accessPosture,
+		"RoleBoundaries":    RoleBoundariesFor(session),
 		"Ready":             ready,
 		"Readiness":         readinessBody,
 		"SessionPosture":    app.sessionPosture(session),
@@ -1770,6 +1771,7 @@ func (app *App) postureBody() map[string]any {
 			"browser_isolation_headers",
 			"same_origin_mutation_guard",
 			"safe_http_boundary_failures",
+			"role_duty_matrix",
 		},
 		"value_returned": false,
 	}
@@ -2156,6 +2158,41 @@ func mustTemplates() *template.Template {
       font-size: 13px;
       line-height: 1.15;
     }
+    .role-matrix {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .role-card {
+      min-height: 172px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      padding: 11px 12px;
+      display: grid;
+      align-content: start;
+      gap: 8px;
+      min-width: 0;
+    }
+    .role-card.active {
+      border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
+      background: color-mix(in srgb, var(--accent) 8%, var(--panel));
+    }
+    .role-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+    }
+    .role-head strong { overflow-wrap: anywhere; }
+    .role-label {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.2;
+      text-transform: uppercase;
+    }
+    .role-card p { font-size: 13px; line-height: 1.3; }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 1040px; }
     th, td { padding: 12px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
@@ -2193,6 +2230,7 @@ func mustTemplates() *template.Template {
       .flow { grid-template-columns: 1fr; }
       .facts { grid-template-columns: 1fr; gap: 10px; }
       .verdict { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .role-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-step:nth-child(2n) { border-right: 0; }
@@ -2203,6 +2241,7 @@ func mustTemplates() *template.Template {
       .bar, main { width: calc(100% - 22px); max-width: 1180px; }
       .status-body { grid-template-columns: 1fr; }
       .verdict { grid-template-columns: 1fr; }
+      .role-matrix { grid-template-columns: 1fr; }
       .assurance-flow { grid-template-columns: 1fr; }
       .trust-rail { grid-template-columns: 1fr; }
       .trust-step { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -2576,6 +2615,27 @@ func mustTemplates() *template.Template {
         <div class="fact"><strong>{{ if .Scope.Strict }}on{{ else }}off{{ end }}</strong><span class="muted">strict mode</span></div>
       </div>
       {{ range .Scope.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Duty boundary</h2>
+      <span class="pill info">role matrix</span>
+    </div>
+    <div class="panel-body">
+      <div class="role-matrix" aria-label="Role duty matrix">
+        {{ range .RoleBoundaries }}
+        <div class="role-card {{ if .Active }}active{{ end }}">
+          <div class="role-head">
+            <strong>{{ .Role }}</strong>
+            {{ if .Active }}<span class="pill ok">active</span>{{ else }}<span class="pill">inactive</span>{{ end }}
+          </div>
+          <div class="role-label">{{ .Duty }}</div>
+          <p>{{ .Allowed }}</p>
+          <p class="warn">{{ .Blocked }}</p>
+        </div>
+        {{ end }}
+      </div>
     </div>
   </div>
   <div class="panel">
