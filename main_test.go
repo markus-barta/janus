@@ -723,6 +723,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"negative_path_assurance"`) || !strings.Contains(body, `"key":"audit_sink_degraded"`) || !strings.Contains(body, `"key":"sensitive_action_guard"`) || !strings.Contains(body, `"negative_path_assurance_matrix"`) || !strings.Contains(body, `"negative_path_assurance":"dashboard_posture_evidence"`) {
 		t.Fatalf("posture response should include negative-path assurance: %s", body)
 	}
+	if !strings.Contains(body, `"degraded_guidance"`) || !strings.Contains(body, `"key":"audit_sink"`) || !strings.Contains(body, `"key":"evidence_export"`) || !strings.Contains(body, `"key":"enterprise_controls"`) || !strings.Contains(body, `"degraded_guidance_panel"`) || !strings.Contains(body, `"degraded_guidance":"dashboard_posture_evidence"`) {
+		t.Fatalf("posture response should include degraded-state guidance: %s", body)
+	}
 	if !strings.Contains(body, `"operational_status"`) || !strings.Contains(body, `"key":"role_duties"`) || !strings.Contains(body, `"key":"value_boundary"`) || !strings.Contains(body, `"operational_status_strip"`) || !strings.Contains(body, `"operational_status":"dashboard_posture_strip"`) {
 		t.Fatalf("posture response should include operational status strip: %s", body)
 	}
@@ -834,6 +837,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"negative_path_assurance"`) || !strings.Contains(body, `"key":"role_denial"`) || !strings.Contains(body, `"key":"audit_sink_degraded"`) || !strings.Contains(body, `"key":"request_correlation"`) {
 		t.Fatalf("evidence response should include negative-path assurance: %s", body)
+	}
+	if !strings.Contains(body, `"degraded_guidance"`) || !strings.Contains(body, `"key":"readiness"`) || !strings.Contains(body, `"key":"audit_sink"`) || !strings.Contains(body, `"key":"enterprise_controls"`) {
+		t.Fatalf("evidence response should include degraded-state guidance: %s", body)
 	}
 	if !strings.Contains(body, `"enterprise_validation"`) || !strings.Contains(body, `"key":"privacy_policy"`) {
 		t.Fatalf("evidence response should include enterprise validation: %s", body)
@@ -987,17 +993,79 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	app.cfg.RequireAuth = false
 	session := Session{Subject: "dev-local", Roles: AllRoles(), Expiry: time.Now().UTC().Add(time.Hour)}
 
-	postureProof, ok := app.postureBody(session)["negative_path_assurance"].(NegativePathAssurance)
+	posture := app.postureBody(session)
+	postureProof, ok := posture["negative_path_assurance"].(NegativePathAssurance)
 	if !ok {
 		t.Fatalf("posture should expose typed negative-path assurance")
+	}
+	postureGuidance, ok := posture["degraded_guidance"].(DegradedGuidance)
+	if !ok {
+		t.Fatalf("posture should expose typed degraded-state guidance")
 	}
 	pack := app.evidencePack(session)
 	if !reflect.DeepEqual(postureProof, pack.NegativePath) {
 		t.Fatalf("posture and evidence should share the same negative-path proof: posture=%#v evidence=%#v", postureProof, pack.NegativePath)
 	}
+	if !reflect.DeepEqual(postureGuidance, pack.Guidance) {
+		t.Fatalf("posture and evidence should share the same degraded guidance: posture=%#v evidence=%#v", postureGuidance, pack.Guidance)
+	}
 	if pack.NegativePath.ValueReturned || !negativePathHasKey(pack.NegativePath.Cases, "value_leak_sentinel") {
 		t.Fatalf("negative-path evidence should stay value-free and include leak sentinel: %#v", pack.NegativePath)
 	}
+}
+
+func TestDegradedGuidanceCoversReadyBlockedAndRoleGatedStates(t *testing.T) {
+	access := AccessPosture{ExplicitBindings: true}
+	audit := AuditPosture{SinkWritable: true, ChainVerified: true}
+	selfHosted := EnterpriseValidationFor(Config{ProductMode: "self_hosted"}, true, access, audit, 0)
+	ready := DegradedGuidanceFor(true, audit, EvidenceBoundaryFor(true, true), selfHosted)
+	if ready.ValueReturned || ready.BlockedCount != 0 || ready.ReviewCount != 0 {
+		t.Fatalf("ready self-hosted guidance should be clear and value-free: %#v", ready)
+	}
+	if !degradedGuidanceHasState(ready.Items, "readiness", "ready") || !degradedGuidanceHasState(ready.Items, "audit_sink", "ready") || !degradedGuidanceHasState(ready.Items, "enterprise_controls", "not_claimed") {
+		t.Fatalf("ready guidance should name clear states: %#v", ready)
+	}
+
+	auditDown := DegradedGuidanceFor(false, AuditPosture{ChainVerified: true}, EvidenceBoundaryFor(true, true), selfHosted)
+	if auditDown.BlockedCount == 0 || !degradedGuidanceHasState(auditDown.Items, "audit_sink", "blocked") || !degradedGuidanceHasAction(auditDown.Items, "audit_sink", "Recover audit storage") {
+		t.Fatalf("audit-down guidance should explain recovery: %#v", auditDown)
+	}
+
+	viewer := DegradedGuidanceFor(true, audit, EvidenceBoundaryFor(false, false), selfHosted)
+	if viewer.ReviewCount == 0 || !degradedGuidanceHasState(viewer.Items, "evidence_export", "role gated") || !degradedGuidanceHasAction(viewer.Items, "evidence_export", "Use an auditor session") {
+		t.Fatalf("viewer guidance should explain evidence role gate: %#v", viewer)
+	}
+
+	for _, spec := range enterpriseValidationSpecs() {
+		t.Setenv(spec.EnvKey, "")
+	}
+	enterprise := EnterpriseValidationFor(Config{ProductMode: "enterprise"}, true, access, audit, 0)
+	blocked := DegradedGuidanceFor(true, audit, EvidenceBoundaryFor(true, true), enterprise)
+	if blocked.BlockedCount == 0 || !degradedGuidanceHasState(blocked.Items, "enterprise_controls", "blocked") || !degradedGuidanceHasAction(blocked.Items, "enterprise_controls", "Attach external evidence") {
+		t.Fatalf("enterprise guidance should explain missing controls: %#v", blocked)
+	}
+}
+
+func TestPostureGuidanceIsSessionAwareForEvidenceGate(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "viewer", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/posture", nil)
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{`"degraded_guidance"`, `"key":"evidence_export"`, `"state":"role gated"`, "Use an auditor session", `"value_returned":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("viewer posture guidance should include %s: %s", want, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "viewer posture guidance", out)
 }
 
 func TestAuditSinkDegradedBlocksSensitiveActions(t *testing.T) {
@@ -1283,6 +1351,24 @@ func negativePathHasState(items []NegativePathCase, key, state string) bool {
 	return false
 }
 
+func degradedGuidanceHasState(items []DegradedGuidanceItem, key, state string) bool {
+	for _, item := range items {
+		if item.Key == key && item.State == state {
+			return true
+		}
+	}
+	return false
+}
+
+func degradedGuidanceHasAction(items []DegradedGuidanceItem, key, action string) bool {
+	for _, item := range items {
+		if item.Key == key && strings.Contains(item.Action, action) {
+			return true
+		}
+	}
+	return false
+}
+
 func catalogGateHasCode(items []CatalogGate, code string) bool {
 	for _, item := range items {
 		if item.Code == code {
@@ -1369,7 +1455,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Download evidence", "integrity.pack_hash", "Download JSON", "Hash preview", "copy-safe metadata", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Download evidence", "integrity.pack_hash", "Download JSON", "Hash preview", "copy-safe metadata", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
@@ -1393,7 +1479,7 @@ func TestDashboardShowsRestrictedStateWhenReadinessDegraded(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Security state", "restricted", "Sensitive actions are blocked", "ready=false", "value_returned=false"} {
+	for _, want := range []string{"Security state", "restricted", "Sensitive actions are blocked", "ready=false", "Next safe steps", "Restore the failed readiness check", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("degraded dashboard should render %q: %s", want, body)
 		}
@@ -1403,6 +1489,55 @@ func TestDashboardShowsRestrictedStateWhenReadinessDegraded(t *testing.T) {
 			t.Fatalf("degraded dashboard leaked %q: %s", forbidden, body)
 		}
 	}
+}
+
+func TestDashboardShowsAuditSinkRecoveryGuidance(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	app.store.auditFile = filepath.Join(t.TempDir(), "missing-parent", "audit.jsonl")
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Next safe steps", "Audit storage", "Required-audit actions stay blocked", "Recover audit storage", "chain verifies", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("audit sink guidance should render %q: %s", want, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "audit sink dashboard guidance", out)
+}
+
+func TestDashboardShowsEnterpriseMissingControlGuidance(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	app.cfg.ProductMode = "enterprise"
+	app.cfg.RolePolicy = RolePolicy{
+		AdminSubjects:    map[string]bool{"markus@barta.com": true},
+		AuditorSubjects:  map[string]bool{"markus@barta.com": true},
+		OperatorSubjects: map[string]bool{"markus@barta.com": true},
+		BootstrapOwner:   false,
+	}
+	for _, spec := range enterpriseValidationSpecs() {
+		t.Setenv(spec.EnvKey, "")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Next safe steps", "Enterprise controls", "Attach external evidence before claiming enterprise readiness", "Enterprise validation", "blocked", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("enterprise guidance should render %q: %s", want, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "enterprise dashboard guidance", out)
 }
 
 func TestSecurityHeadersAcrossCoreRoutes(t *testing.T) {
@@ -1991,7 +2126,7 @@ func TestDashboardAuditRowsRequireAuditorRole(t *testing.T) {
 		t.Fatalf("expected viewer dashboard 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	viewerBody := out.Body.String()
-	if !strings.Contains(viewerBody, "Auditor role required") || !strings.Contains(viewerBody, "restricted") || !strings.Contains(viewerBody, "auditor_required") || !strings.Contains(viewerBody, "Evidence JSON is gated") {
+	if !strings.Contains(viewerBody, "Auditor role required") || !strings.Contains(viewerBody, "restricted") || !strings.Contains(viewerBody, "auditor_required") || !strings.Contains(viewerBody, "Evidence JSON is gated") || !strings.Contains(viewerBody, "Use an auditor session to download evidence") {
 		t.Fatalf("viewer dashboard should gate audit rows: %s", viewerBody)
 	}
 	if strings.Contains(viewerBody, "private-ref") {

@@ -868,6 +868,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
+	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
 	roleAvailability := RoleAvailabilityFor(session)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	data := map[string]any{
@@ -897,6 +898,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"AssuranceSummary":  assuranceSummary,
 		"AssuranceGates":    assuranceGates,
 		"NegativePath":      negativePath,
+		"Guidance":          degradedGuidance,
 		"EvidenceHash":      evidenceHash,
 		"EvidenceHashFull":  evidenceHashFull,
 		"EvidenceBoundary":  evidenceBoundary,
@@ -2082,12 +2084,14 @@ func (app *App) postureBody(session Session) map[string]any {
 	if app.permits != nil {
 		permitPosture = app.permits.Posture()
 	}
-	evidenceBoundary := EvidenceBoundaryFor(true, true)
+	canExportEvidence := HasRole(session, RoleAuditor)
+	evidenceBoundary := EvidenceBoundaryFor(canExportEvidence, canExportEvidence)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
+	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
 	roleAvailability := RoleAvailabilityFor(session)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	return map[string]any{
@@ -2116,6 +2120,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"assurance_summary":       assuranceSummary,
 		"assurance_gates":         assuranceGates,
 		"negative_path_assurance": negativePath,
+		"degraded_guidance":       degradedGuidance,
 		"operational_status":      operationalStatus,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
@@ -2159,6 +2164,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_validation":     "self_hosted_safe_enterprise_required",
 			"privacy_retention":         "dashboard_posture_evidence",
 			"negative_path_assurance":   "dashboard_posture_evidence",
+			"degraded_guidance":         "dashboard_posture_evidence",
 			"human_readable_summary":    "dashboard_posture_evidence",
 			"assurance_gate_proofs":     "role_catalog_degraded_value_leak",
 			"operational_status":        "dashboard_posture_strip",
@@ -2252,6 +2258,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_validation_clarity",
 			"privacy_retention_posture",
 			"negative_path_assurance_matrix",
+			"degraded_guidance_panel",
 		},
 		"value_returned": false,
 	}
@@ -2274,12 +2281,14 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	accessPosture := app.accessPosture()
 	scopePosture := app.scopePosture(allDescriptors)
 	auditPosture := app.store.AuditPosture()
-	evidenceBoundary := EvidenceBoundaryFor(true, true)
+	canExportEvidence := HasRole(session, RoleAuditor)
+	evidenceBoundary := EvidenceBoundaryFor(canExportEvidence, canExportEvidence)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
+	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, RoleAvailabilityFor(session))
 	pack := EvidencePack{
 		GeneratedAt:      time.Now().UTC(),
@@ -2289,6 +2298,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Operational:      operationalStatus,
 		AssuranceGates:   assuranceGates,
 		NegativePath:     negativePath,
+		Guidance:         degradedGuidance,
 		AssuranceSummary: assuranceSummary,
 		Enterprise:       enterpriseValidation,
 		Privacy:          privacyPosture,
@@ -2957,11 +2967,31 @@ func mustTemplates() *template.Template {
         {{ end }}
       </div>
     </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="assurance-summary">
-  <div class="panel-head">
-    <h2>Assurance summary</h2>
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="degraded-guidance">
+	  <div class="panel-head">
+	    <h2>Next safe steps</h2>
+	    <span class="pill {{ if .Guidance.BlockedCount }}warn{{ else if .Guidance.ReviewCount }}warn{{ else }}ok{{ end }}">{{ if .Guidance.BlockedCount }}{{ .Guidance.BlockedCount }} blocked{{ else if .Guidance.ReviewCount }}{{ .Guidance.ReviewCount }} review{{ else }}clear{{ end }}</span>
+	  </div>
+	  <div class="panel-body stack">
+	    <p>{{ .Guidance.Summary }}</p>
+	    <p><span class="pill ok">value_returned=false</span> <span class="pill info">safe actions only</span></p>
+	    <div class="mode-grid" aria-label="Degraded-state guidance">
+	      {{ range .Guidance.Items }}
+	      <div class="mode-item {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Impact }}</p>
+	        <p><span class="pill info">{{ .Role }}</span> {{ .Action }}</p>
+	      </div>
+	      {{ end }}
+	    </div>
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="assurance-summary">
+	  <div class="panel-head">
+	    <h2>Assurance summary</h2>
     <span class="pill {{ if .AssuranceSummary.Review }}warn{{ else }}ok{{ end }}">{{ .AssuranceSummary.Verdict }}</span>
   </div>
   <div class="panel-body stack">

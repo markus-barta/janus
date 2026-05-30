@@ -31,6 +31,7 @@ type EvidencePack struct {
 	Operational      OperationalStatus     `json:"operational_status"`
 	AssuranceGates   AssuranceGates        `json:"assurance_gates"`
 	NegativePath     NegativePathAssurance `json:"negative_path_assurance"`
+	Guidance         DegradedGuidance      `json:"degraded_guidance"`
 	AssuranceSummary AssuranceSummary      `json:"assurance_summary"`
 	Enterprise       EnterpriseValidation  `json:"enterprise_validation"`
 	Privacy          PrivacyPosture        `json:"privacy_posture"`
@@ -117,6 +118,24 @@ type NegativePathCase struct {
 	Label  string `json:"label"`
 	State  string `json:"state"`
 	Detail string `json:"detail"`
+	Tone   string `json:"tone"`
+}
+
+type DegradedGuidance struct {
+	Summary       string                 `json:"summary"`
+	Items         []DegradedGuidanceItem `json:"items"`
+	BlockedCount  int                    `json:"blocked_count"`
+	ReviewCount   int                    `json:"review_count"`
+	ValueReturned bool                   `json:"value_returned"`
+}
+
+type DegradedGuidanceItem struct {
+	Key    string `json:"key"`
+	Label  string `json:"label"`
+	State  string `json:"state"`
+	Impact string `json:"impact"`
+	Action string `json:"action"`
+	Role   string `json:"role"`
 	Tone   string `json:"tone"`
 }
 
@@ -387,6 +406,110 @@ func (p *NegativePathAssurance) add(ok bool, key, label, okState, reviewState, o
 		p.CoveredCount++
 	}
 	p.Cases = append(p.Cases, NegativePathCase{Key: key, Label: label, State: state, Detail: detail, Tone: tone})
+}
+
+func DegradedGuidanceFor(ready bool, audit AuditPosture, boundary EvidenceBoundary, enterprise EnterpriseValidation) DegradedGuidance {
+	guidance := DegradedGuidance{
+		Summary:       "Janus names blocked states and the next safe action without exposing sensitive data.",
+		ValueReturned: false,
+	}
+
+	readinessState := "ready"
+	readinessTone := "ok"
+	readinessImpact := "Sensitive actions may continue through the normal role gates."
+	readinessAction := "Keep monitoring posture and evidence."
+	if !ready {
+		readinessState = "blocked"
+		readinessTone = "warn"
+		readinessImpact = "Sensitive actions are stopped until readiness recovers."
+		readinessAction = "Restore the failed readiness check before retrying."
+		guidance.BlockedCount++
+	}
+	guidance.add(DegradedGuidanceItem{
+		Key:    "readiness",
+		Label:  "Readiness",
+		State:  readinessState,
+		Impact: readinessImpact,
+		Action: readinessAction,
+		Role:   "operator",
+		Tone:   readinessTone,
+	})
+
+	auditState := "ready"
+	auditTone := "ok"
+	auditImpact := "Audit events can be written and the local chain verifies."
+	auditAction := "Keep audit storage writable and included in backup."
+	if !audit.SinkWritable || !audit.ChainVerified {
+		auditState = "blocked"
+		auditTone = "warn"
+		auditImpact = "Required-audit actions stay blocked while audit evidence is unsafe."
+		auditAction = "Recover audit storage, then confirm the chain verifies."
+		guidance.BlockedCount++
+	}
+	guidance.add(DegradedGuidanceItem{
+		Key:    "audit_sink",
+		Label:  "Audit storage",
+		State:  auditState,
+		Impact: auditImpact,
+		Action: auditAction,
+		Role:   "operator",
+		Tone:   auditTone,
+	})
+
+	evidenceState := "available"
+	evidenceTone := "ok"
+	evidenceImpact := "Evidence export is available with integrity metadata."
+	evidenceAction := "Download evidence from an auditor session when needed."
+	if boundary.Gate != "export_ready" {
+		evidenceState = "role gated"
+		evidenceTone = "warn"
+		evidenceImpact = "Evidence JSON is hidden from this session."
+		evidenceAction = "Use an auditor session to download evidence."
+		guidance.ReviewCount++
+	}
+	guidance.add(DegradedGuidanceItem{
+		Key:    "evidence_export",
+		Label:  "Evidence export",
+		State:  evidenceState,
+		Impact: evidenceImpact,
+		Action: evidenceAction,
+		Role:   boundary.Audience,
+		Tone:   evidenceTone,
+	})
+
+	enterpriseState := enterprise.Status
+	if enterpriseState == "" {
+		enterpriseState = "not_claimed"
+	}
+	enterpriseTone := "info"
+	enterpriseImpact := "Current mode does not claim enterprise readiness."
+	enterpriseAction := "Keep self-hosted evidence clear before making enterprise claims."
+	if enterpriseState == "candidate" {
+		enterpriseTone = "ok"
+		enterpriseImpact = "Enterprise controls are attached for review."
+		enterpriseAction = "Keep external review evidence with the release."
+	} else if enterpriseState == "blocked" {
+		enterpriseTone = "warn"
+		enterpriseImpact = fmt.Sprintf("%d enterprise controls need evidence.", enterprise.MissingCount)
+		enterpriseAction = "Attach external evidence before claiming enterprise readiness."
+		guidance.BlockedCount++
+		guidance.ReviewCount++
+	}
+	guidance.add(DegradedGuidanceItem{
+		Key:    "enterprise_controls",
+		Label:  "Enterprise controls",
+		State:  enterpriseState,
+		Impact: enterpriseImpact,
+		Action: enterpriseAction,
+		Role:   "admin",
+		Tone:   enterpriseTone,
+	})
+
+	return guidance
+}
+
+func (g *DegradedGuidance) add(item DegradedGuidanceItem) {
+	g.Items = append(g.Items, item)
 }
 
 func PrivacyPostureFor(boundary EvidenceBoundary, audit AuditPosture) PrivacyPosture {
