@@ -1910,6 +1910,36 @@ func mustTemplates() *template.Template {
     .trust-step strong { font-size: 16px; line-height: 1.15; overflow-wrap: anywhere; }
     .trust-step.ok strong { color: var(--accent); }
     .trust-step.warn strong { color: var(--amber); }
+    .assurance-flow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+    .assurance-step {
+      min-height: 86px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--panel-soft) 78%, transparent);
+      padding: 11px 12px;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 7px;
+      min-width: 0;
+    }
+    .assurance-step b {
+      width: 24px;
+      height: 24px;
+      border-radius: 999px;
+      display: inline-grid;
+      place-items: center;
+      background: var(--ink);
+      color: var(--panel);
+      font-size: 12px;
+      line-height: 1;
+    }
+    .assurance-step strong { font-size: 15px; line-height: 1.2; overflow-wrap: anywhere; }
+    .assurance-step span { color: var(--muted); font-size: 12px; line-height: 1.25; }
     .flow {
       display: grid;
       grid-template-columns: minmax(220px, 1fr) minmax(260px, 1.2fr) auto;
@@ -1994,6 +2024,7 @@ func mustTemplates() *template.Template {
       .panel.half { grid-column: span 12; }
       .flow { grid-template-columns: 1fr; }
       .facts { grid-template-columns: 1fr; gap: 10px; }
+      .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-step:nth-child(2n) { border-right: 0; }
       .trust-step:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
@@ -2002,6 +2033,7 @@ func mustTemplates() *template.Template {
     @media (max-width: 560px) {
       .bar, main { width: calc(100% - 22px); max-width: 1180px; }
       .status-body { grid-template-columns: 1fr; }
+      .assurance-flow { grid-template-columns: 1fr; }
       .trust-rail { grid-template-columns: 1fr; }
       .trust-step { border-right: 0; border-bottom: 1px solid var(--line); }
       .trust-step:last-child { border-bottom: 0; }
@@ -2056,6 +2088,28 @@ func mustTemplates() *template.Template {
       {{ if .CanExportEvidence }}<a class="button primary" href="/api/evidence">Evidence JSON</a>{{ end }}
       <a class="button quiet" href="/api/posture">Posture JSON</a>
       <a class="button quiet" href="/api/warden/descriptors">Descriptors JSON</a>
+    </div>
+    <div class="assurance-flow" aria-label="Assurance flow">
+      <div class="assurance-step">
+        <b>1</b>
+        <strong>Known human</strong>
+        <span>{{ if .Session.Email }}{{ .Session.Email }}{{ else }}{{ .Session.Subject }}{{ end }}</span>
+      </div>
+      <div class="assurance-step">
+        <b>2</b>
+        <strong>Metadata only</strong>
+        <span>{{ len .Descriptors }} descriptors, values withheld</span>
+      </div>
+      <div class="assurance-step">
+        <b>3</b>
+        <strong>Use gate</strong>
+        <span>{{ if .ApprovedUse.BlockedCount }}{{ .ApprovedUse.BlockedCount }} blocked{{ else }}profiled and closed{{ end }}</span>
+      </div>
+      <div class="assurance-step">
+        <b>4</b>
+        <strong>Audit trail</strong>
+        <span>{{ if .Posture.ChainVerified }}chain verified{{ else }}review needed{{ end }}</span>
+      </div>
     </div>
     <div class="trust-rail" aria-label="Trust posture">
       <div class="trust-step {{ if .Ready }}ok{{ else }}warn{{ end }}">

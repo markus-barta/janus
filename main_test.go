@@ -863,13 +863,15 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Live posture", "Trust posture", "Catalog gates", "Approved use", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Scope boundary", "Lifecycle posture"} {
+	for _, want := range []string{"Live posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Scope boundary", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
 	}
-	if strings.Contains(body, "plaintext") {
-		t.Fatalf("dashboard should remain value-free: %s", body)
+	for _, forbidden := range []string{"plaintext", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("dashboard should remain value-free, found %q: %s", forbidden, body)
+		}
 	}
 }
 
