@@ -46,6 +46,7 @@ type EvidencePack struct {
 	AuditPosture     AuditPosture          `json:"audit_posture"`
 	RecentAudit      []AuditEntry          `json:"recent_audit"`
 	Integrity        *EvidenceIntegrity    `json:"integrity,omitempty"`
+	Receipt          *EvidenceReceipt      `json:"evidence_receipt,omitempty"`
 	ValueReturned    bool                  `json:"value_returned"`
 	RedactionModel   string                `json:"redaction_model"`
 }
@@ -218,6 +219,7 @@ func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
 			"audit_posture",
 			"recent_audit_refs",
 			"integrity_hash",
+			"evidence_receipt",
 		},
 		Excludes: []string{
 			"secret_values",

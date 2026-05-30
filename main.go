@@ -863,6 +863,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		}
 	}
 	evidenceBoundary := EvidenceBoundaryFor(canViewAudit, evidenceHash != "")
+	evidenceReceipt := EvidenceReceiptFor(evidenceBoundary, nil)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
@@ -904,6 +905,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"EvidenceHash":      evidenceHash,
 		"EvidenceHashFull":  evidenceHashFull,
 		"EvidenceBoundary":  evidenceBoundary,
+		"EvidenceReceipt":   evidenceReceipt,
 		"CanExportEvidence": canViewAudit,
 		"CanViewAudit":      canViewAudit,
 		"CanOperate":        HasRole(session, RoleOperator),
@@ -974,8 +976,15 @@ func (app *App) handleEvidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app.audit(r, "evidence.export", "allowed", session.Subject, "")
+	pack := app.evidencePack(session)
+	if pack.Integrity != nil {
+		w.Header().Set("X-Janus-Evidence-Hash", pack.Integrity.PackHash)
+		w.Header().Set("X-Janus-Evidence-Algorithm", pack.Integrity.Algorithm)
+		w.Header().Set("X-Janus-Evidence-Body-Field", "integrity.pack_hash")
+		w.Header().Set("X-Janus-Value-Returned", "false")
+	}
 	w.Header().Set("Content-Disposition", `attachment; filename="janus-evidence.json"`)
-	writeJSON(w, http.StatusOK, app.evidencePack(session))
+	writeJSON(w, http.StatusOK, pack)
 }
 
 func (app *App) handleResolveHandle(w http.ResponseWriter, r *http.Request) {
@@ -2088,6 +2097,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	}
 	canExportEvidence := HasRole(session, RoleAuditor)
 	evidenceBoundary := EvidenceBoundaryFor(canExportEvidence, canExportEvidence)
+	evidenceReceipt := EvidenceReceiptFor(evidenceBoundary, nil)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates))
@@ -2121,6 +2131,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"mode_guardrails":         modeGuardrails,
 		"enterprise_validation":   enterpriseValidation,
 		"privacy_posture":         privacyPosture,
+		"evidence_receipt":        evidenceReceipt,
 		"assurance_summary":       assuranceSummary,
 		"assurance_gates":         assuranceGates,
 		"negative_path_assurance": negativePath,
@@ -2165,6 +2176,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"backend_source_paths":      "not_returned",
 			"evidence_export_boundary":  "dashboard_and_json",
 			"evidence_download":         "auditor_json_with_pack_hash",
+			"evidence_receipt":          "download_header_body_match",
 			"enterprise_validation":     "self_hosted_safe_enterprise_required",
 			"mode_guardrails":           "dashboard_posture_evidence",
 			"privacy_retention":         "dashboard_posture_evidence",
@@ -2260,6 +2272,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"human_readable_assurance_summary",
 			"operational_status_strip",
 			"evidence_download_receipt",
+			"exact_evidence_download_receipt",
 			"assurance_gate_proof_strip",
 			"enterprise_validation_clarity",
 			"privacy_retention_posture",
@@ -2327,6 +2340,8 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	pack.EvidenceBoundary = evidenceBoundary
 	integrity := EvidenceIntegrityFor(pack)
 	pack.Integrity = &integrity
+	receipt := EvidenceReceiptFor(evidenceBoundary, &integrity)
+	pack.Receipt = &receipt
 	return pack
 }
 
@@ -3174,22 +3189,22 @@ func mustTemplates() *template.Template {
     {{ if .CanExportEvidence }}
     <div class="receipt" aria-label="Evidence download receipt">
       <div>
-        <strong>Download evidence</strong>
-        <p>Evidence JSON includes <span class="mono">integrity.pack_hash</span>; values stay withheld.</p>
+        <strong>Exact download receipt</strong>
+        <p>The downloaded JSON includes <span class="mono">{{ .EvidenceReceipt.BodyField }}</span>, and the response header <span class="mono">{{ .EvidenceReceipt.HashHeader }}</span> matches it.</p>
       </div>
       <a class="button primary" href="/api/evidence" download="janus-evidence.json">Download JSON</a>
     </div>
     {{ if .EvidenceHashFull }}
-    <label class="hash-copy">Hash preview
+    <label class="hash-copy">Current preview
       <input readonly value="{{ .EvidenceHashFull }}" aria-label="Evidence hash preview">
     </label>
-    <p><span class="pill info">sha256-json-v1</span> <span class="pill ok">copy-safe metadata</span></p>
+    <p><span class="pill info">{{ .EvidenceReceipt.Algorithm }}</span> <span class="pill ok">copy-safe metadata</span> <span class="pill info">exact hash returned on download</span></p>
     {{ end }}
     {{ else }}
     <div class="receipt" aria-label="Evidence download receipt">
       <div>
         <strong>Download restricted</strong>
-        <p>Auditor role is required before Janus returns an evidence pack.</p>
+        <p>Auditor role is required before Janus returns an evidence pack or exact receipt.</p>
       </div>
       <span class="pill warn">auditor required</span>
     </div>
@@ -3205,10 +3220,15 @@ func mustTemplates() *template.Template {
         <strong>{{ if .EvidenceBoundary.HashAvailable }}hash ready{{ else }}restricted{{ end }}</strong>
         <p>{{ .EvidenceBoundary.Integrity }}</p>
       </div>
+      <div class="mode-item {{ if .CanExportEvidence }}ok{{ else }}warn{{ end }}">
+        <span>Receipt</span>
+        <strong>{{ .EvidenceReceipt.State }}</strong>
+        <p>{{ .EvidenceReceipt.Verification }}</p>
+      </div>
       <div class="mode-item ok">
         <span>Boundary</span>
         <strong>metadata only</strong>
-        <p>No secret-bearing payloads are exported.</p>
+        <p>No secret-bearing payloads are exported. Coverage: {{ .EvidenceReceipt.Coverage }}.</p>
       </div>
     </div>
     <p><strong>Included evidence</strong><br>{{ range .EvidenceBoundary.Includes }}<span class="pill info">{{ . }}</span> {{ end }}</p>

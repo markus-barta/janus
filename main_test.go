@@ -714,6 +714,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"evidence_download":"auditor_json_with_pack_hash"`) || !strings.Contains(body, `"evidence_download_receipt"`) {
 		t.Fatalf("posture response should include evidence download affordance: %s", body)
 	}
+	if !strings.Contains(body, `"evidence_receipt"`) || !strings.Contains(body, `"state":"ready"`) || !strings.Contains(body, `"hash_header":"X-Janus-Evidence-Hash"`) || !strings.Contains(body, `"body_field":"integrity.pack_hash"`) || !strings.Contains(body, `"evidence_receipt":"download_header_body_match"`) || !strings.Contains(body, `"exact_evidence_download_receipt"`) {
+		t.Fatalf("posture response should include exact evidence receipt posture: %s", body)
+	}
 	if !strings.Contains(body, `"assurance_summary"`) || !strings.Contains(body, `"verdict"`) || !strings.Contains(body, `"Value boundary"`) || !strings.Contains(body, `"human_readable_assurance_summary"`) || !strings.Contains(body, `"human_readable_summary":"dashboard_posture_evidence"`) {
 		t.Fatalf("posture response should include human-readable assurance summary: %s", body)
 	}
@@ -819,15 +822,32 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	if got := out.Header().Get("Content-Disposition"); !strings.Contains(got, "janus-evidence.json") {
 		t.Fatalf("evidence response should be downloadable, got Content-Disposition %q", got)
 	}
+	headerHash := out.Header().Get("X-Janus-Evidence-Hash")
+	if len(headerHash) != 64 || out.Header().Get("X-Janus-Evidence-Algorithm") != "sha256-json-v1" || out.Header().Get("X-Janus-Evidence-Body-Field") != "integrity.pack_hash" || out.Header().Get("X-Janus-Value-Returned") != "false" {
+		t.Fatalf("evidence response should include exact value-free receipt headers: %#v", out.Header())
+	}
 	body := out.Body.String()
 	if !strings.Contains(body, `"value_returned":false`) || strings.Contains(body, `"plaintext"`) {
 		t.Fatalf("evidence response should be value-free: %s", body)
+	}
+	var pack EvidencePack
+	if err := json.Unmarshal(out.Body.Bytes(), &pack); err != nil {
+		t.Fatalf("evidence response should decode: %v", err)
+	}
+	if pack.Integrity == nil || pack.Integrity.PackHash != headerHash {
+		t.Fatalf("evidence body hash should match exact download header: header=%q pack=%#v", headerHash, pack.Integrity)
+	}
+	if pack.Receipt == nil || pack.Receipt.PackHash != headerHash || pack.Receipt.HashHeader != "X-Janus-Evidence-Hash" || pack.Receipt.BodyField != "integrity.pack_hash" || pack.Receipt.ValueReturned {
+		t.Fatalf("evidence response should include exact value-free receipt: %#v", pack.Receipt)
 	}
 	if !strings.Contains(body, `"redaction_model"`) {
 		t.Fatalf("evidence response should explain redaction model: %s", body)
 	}
 	if !strings.Contains(body, `"evidence_boundary"`) || !strings.Contains(body, `"gate":"export_ready"`) || !strings.Contains(body, `"secret_values"`) || !strings.Contains(body, `"backend_source_paths"`) || !strings.Contains(body, `"hash_available":true`) {
 		t.Fatalf("evidence response should include export boundary: %s", body)
+	}
+	if !strings.Contains(body, `"evidence_receipt"`) || !strings.Contains(body, `"hash_header":"X-Janus-Evidence-Hash"`) || !strings.Contains(body, `"body_field":"integrity.pack_hash"`) || !strings.Contains(body, `"coverage":"evidence_json_without_integrity_or_receipt"`) {
+		t.Fatalf("evidence response should include exact receipt body: %s", body)
 	}
 	if !strings.Contains(body, `"assurance_summary"`) || !strings.Contains(body, `"proven"`) || !strings.Contains(body, `"review"`) || !strings.Contains(body, `"Browser and API boundary"`) {
 		t.Fatalf("evidence response should include assurance summary: %s", body)
@@ -1073,7 +1093,7 @@ func TestPostureGuidanceIsSessionAwareForEvidenceGate(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{`"degraded_guidance"`, `"key":"evidence_export"`, `"state":"role gated"`, "Use an auditor session", `"value_returned":false`} {
+	for _, want := range []string{`"degraded_guidance"`, `"key":"evidence_export"`, `"state":"role gated"`, `"evidence_receipt"`, `"state":"role_gated"`, `"hash_header":"X-Janus-Evidence-Hash"`, `"body_field":"integrity.pack_hash"`, "Use an auditor session", `"value_returned":false`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("viewer posture guidance should include %s: %s", want, body)
 		}
@@ -1539,7 +1559,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Download evidence", "integrity.pack_hash", "Download JSON", "Hash preview", "copy-safe metadata", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
@@ -2230,7 +2250,7 @@ func TestDashboardAuditRowsRequireAuditorRole(t *testing.T) {
 		t.Fatalf("expected viewer dashboard 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	viewerBody := out.Body.String()
-	if !strings.Contains(viewerBody, "Auditor role required") || !strings.Contains(viewerBody, "restricted") || !strings.Contains(viewerBody, "auditor_required") || !strings.Contains(viewerBody, "Evidence JSON is gated") || !strings.Contains(viewerBody, "Use an auditor session to download evidence") {
+	if !strings.Contains(viewerBody, "Auditor role required") || !strings.Contains(viewerBody, "restricted") || !strings.Contains(viewerBody, "auditor_required") || !strings.Contains(viewerBody, "Evidence JSON is gated") || !strings.Contains(viewerBody, "exact receipt") || !strings.Contains(viewerBody, "Use an auditor session to download evidence") {
 		t.Fatalf("viewer dashboard should gate audit rows: %s", viewerBody)
 	}
 	if strings.Contains(viewerBody, "private-ref") {
@@ -2593,6 +2613,9 @@ func TestEvidenceIntegrityIsValueFreeAndStableShape(t *testing.T) {
 	}
 	if pack.Integrity.ValueReturned || pack.Integrity.GeneratedAt.IsZero() {
 		t.Fatalf("integrity metadata should be value-free and timestamped: %#v", pack.Integrity)
+	}
+	if pack.Receipt == nil || pack.Receipt.PackHash != pack.Integrity.PackHash || !pack.Receipt.HashAvailable || pack.Receipt.HashHeader != "X-Janus-Evidence-Hash" || pack.Receipt.BodyField != "integrity.pack_hash" || pack.Receipt.ValueReturned {
+		t.Fatalf("receipt should mirror integrity hash without values: %#v", pack.Receipt)
 	}
 }
 
