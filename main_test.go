@@ -3077,6 +3077,16 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 			t.Fatalf("dashboard should render enterprise release gate %q: %s", want, body)
 		}
 	}
+	for _, want := range []string{"Enterprise validation", "Enterprise validation witness", "Validation status", "Control gaps", "Enterprise validation evidence flags", "presence only", "self-hosted safe", "enterprise required"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render enterprise validation witness %q: %s", want, body)
+		}
+	}
+	for _, want := range []string{"Attachment review", "Attachment review witness", "Enterprise attachment review witness", "Review status", "Attachments", "Attachment review evidence flags", "Enterprise attachment owner review"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard should render attachment review witness %q: %s", want, body)
+		}
+	}
 	for _, want := range []string{"Role policy readiness", "bootstrap_to_explicit_zitadel_lanes", "ready lanes", "missing lanes", "subject_values_returned=false", "group_values_returned=false", "claim_values_returned=false", "backend_path_returned=false", "token_returned=false", "Role policy readiness lanes", "Bootstrap to explicit role setup path", "Admin lane", "Auditor lane", "Operator lane", "Zitadel role lanes", "subject_binding_configured=false", "group_binding_configured=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render role policy readiness %q: %s", want, body)
@@ -3092,7 +3102,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 			t.Fatalf("dashboard should render auth failure posture %q: %s", want, body)
 		}
 	}
-	for _, want := range []string{"External evidence workflow", "Presence-only external evidence workflow", "records presence only", "no refs stored", "Mark present"} {
+	for _, want := range []string{"External evidence workflow", "Evidence intake witness", "External evidence intake witness", "Intake status", "Presence records", "External evidence intake flags", "Presence-only external evidence workflow", "records presence only", "no refs stored", "Mark present"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render external evidence workflow %q: %s", want, body)
 		}

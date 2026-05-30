@@ -4314,7 +4314,34 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .ExternalEvidence.Summary }}</p>
-    <p><span class="pill info">{{ .ExternalEvidence.Attached }} attached</span> <span class="pill {{ if .ExternalEvidence.Missing }}warn{{ else }}ok{{ end }}">{{ .ExternalEvidence.Missing }} missing</span> <span class="pill info">{{ .ExternalEvidence.ReviewCount }} review</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <p><span class="pill info">Evidence intake witness</span> presence only, evidence values private</p>
+    <div class="witness-grid" aria-label="External evidence intake witness">
+      <div class="witness-card {{ if eq .ExternalEvidence.Status "candidate" }}ok{{ else if eq .ExternalEvidence.Status "blocked" }}warn{{ else }}info{{ end }}">
+        <span>Intake status</span>
+        <strong>{{ .ExternalEvidence.Status }}</strong>
+        <p>{{ .ExternalEvidence.Required }} controls tracked for enterprise evidence.</p>
+      </div>
+      <div class="witness-card {{ if .ExternalEvidence.Missing }}warn{{ else }}ok{{ end }}">
+        <span>Presence records</span>
+        <strong>{{ .ExternalEvidence.Attached }} attached</strong>
+        <p>{{ .ExternalEvidence.Missing }} missing, {{ .ExternalEvidence.ReviewCount }} review.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Evidence boundary</span>
+        <strong>values withheld</strong>
+        <p>No files, URLs, refs, notes, or evidence values are stored or shown.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>External evidence intake flags</summary>
+      <div class="flag-cloud" aria-label="External evidence value-free intake flags">
+        <span class="pill info">{{ .ExternalEvidence.Attached }} attached</span>
+        <span class="pill {{ if .ExternalEvidence.Missing }}warn{{ else }}ok{{ end }}">{{ .ExternalEvidence.Missing }} missing</span>
+        <span class="pill info">{{ .ExternalEvidence.ReviewCount }} review</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     <div class="mode-grid" aria-label="Presence-only external evidence workflow">
       {{ range .ExternalEvidence.Items }}
       <div class="mode-item {{ .Tone }}">
@@ -4346,7 +4373,34 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .Enterprise.Summary }}</p>
-    <p><span class="pill ok">value_returned=false</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill info">presence only</span> <span class="pill info">self-hosted safe</span> <span class="pill warn">enterprise required</span></p>
+    <p><span class="pill info">Enterprise validation witness</span> control state visible, evidence values private</p>
+    <div class="witness-grid" aria-label="Enterprise validation witness">
+      <div class="witness-card {{ if eq .Enterprise.Status "candidate" }}ok{{ else if eq .Enterprise.Status "not_claimed" }}info{{ else }}warn{{ end }}">
+        <span>Validation status</span>
+        <strong>{{ .Enterprise.Status }}</strong>
+        <p>{{ .Enterprise.Mode }} mode is explicit.</p>
+      </div>
+      <div class="witness-card {{ if .Enterprise.MissingCount }}warn{{ else }}ok{{ end }}">
+        <span>Control gaps</span>
+        <strong>{{ .Enterprise.MissingCount }}</strong>
+        <p>{{ len .Enterprise.Controls }} controls tracked for review.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Evidence boundary</span>
+        <strong>values withheld</strong>
+        <p>Only presence and state are shown; evidence refs and secret values stay outside Janus.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Enterprise validation evidence flags</summary>
+      <div class="flag-cloud" aria-label="Enterprise validation value-free evidence flags">
+        <span class="pill ok">value_returned=false</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill info">presence only</span>
+        <span class="pill info">self-hosted safe</span>
+        <span class="pill warn">enterprise required</span>
+      </div>
+    </details>
     <div class="mode-grid" aria-label="Enterprise validation controls">
       {{ range .Enterprise.Controls }}
       <div class="mode-item {{ .Tone }}">
@@ -4368,7 +4422,34 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .AttachmentReview.Summary }}</p>
-    <p><span class="pill {{ if .AttachmentReview.Required }}warn{{ else }}info{{ end }}">{{ .AttachmentReview.Required }} required</span> <span class="pill {{ if .AttachmentReview.Attached }}ok{{ else }}info{{ end }}">{{ .AttachmentReview.Attached }} attached</span> <span class="pill {{ if .AttachmentReview.Missing }}warn{{ else }}ok{{ end }}">{{ .AttachmentReview.Missing }} missing</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <p><span class="pill info">Attachment review witness</span> owner readiness visible, evidence values private</p>
+    <div class="witness-grid" aria-label="Enterprise attachment review witness">
+      <div class="witness-card {{ if eq .AttachmentReview.Status "candidate" }}ok{{ else if eq .AttachmentReview.Status "blocked" }}warn{{ else }}info{{ end }}">
+        <span>Review status</span>
+        <strong>{{ .AttachmentReview.Status }}</strong>
+        <p>{{ .AttachmentReview.ReviewCount }} owner review items.</p>
+      </div>
+      <div class="witness-card {{ if .AttachmentReview.Missing }}warn{{ else }}ok{{ end }}">
+        <span>Attachments</span>
+        <strong>{{ .AttachmentReview.Attached }} attached</strong>
+        <p>{{ .AttachmentReview.ReviewCount }} review items, {{ .AttachmentReview.Missing }} missing before enterprise promotion.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Evidence boundary</span>
+        <strong>values withheld</strong>
+        <p>Owner review shows presence only; evidence refs and values stay external.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Attachment review evidence flags</summary>
+      <div class="flag-cloud" aria-label="Attachment review value-free evidence flags">
+        <span class="pill {{ if .AttachmentReview.Required }}warn{{ else }}info{{ end }}">{{ .AttachmentReview.Required }} required</span>
+        <span class="pill {{ if .AttachmentReview.Attached }}ok{{ else }}info{{ end }}">{{ .AttachmentReview.Attached }} attached</span>
+        <span class="pill {{ if .AttachmentReview.Missing }}warn{{ else }}ok{{ end }}">{{ .AttachmentReview.Missing }} missing</span>
+        <span class="pill ok">evidence_ref_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     <div class="mode-grid" aria-label="Enterprise attachment owner review">
       {{ range .AttachmentReview.Owners }}
       <div class="mode-item {{ if .Missing }}warn{{ else if .Attached }}ok{{ else }}info{{ end }}">
