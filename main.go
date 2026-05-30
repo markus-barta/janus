@@ -4183,7 +4183,38 @@ func mustTemplates() *template.Template {
 	    <h2>Available to you</h2>
     <span class="pill info">role gated</span>
   </div>
-  <div class="panel-body">
+  <div class="panel-body stack">
+    <div class="witness-grid" aria-label="Session capability witness">
+      <div class="witness-card ok">
+        <span>Capability view</span>
+        <strong>{{ len .RoleAvailability }} duties</strong>
+        <p>Session duties are shown as safe labels, not raw identity data.</p>
+      </div>
+      <div class="witness-card info">
+        <span>Role boundary</span>
+        <strong>role gated</strong>
+        <p>Controls outside this session's roles stay unavailable or hidden.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>values withheld</strong>
+        <p>Role availability never returns subjects, groups, claims, tokens, cookies, env, or secret values.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Role availability evidence flags</summary>
+      <div class="flag-cloud" aria-label="Role availability value-free evidence flags">
+        <span class="pill info">{{ len .RoleAvailability }} duties</span>
+        <span class="pill info">role gated</span>
+        <span class="pill ok">identity_values_returned=false</span>
+        <span class="pill ok">claim_values_returned=false</span>
+        <span class="pill ok">group_values_returned=false</span>
+        <span class="pill ok">token_returned=false</span>
+        <span class="pill ok">cookie_value_returned=false</span>
+        <span class="pill ok">env_values_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     <div class="mode-grid" aria-label="Available to you">
       {{ range .RoleAvailability }}
       <div class="mode-item {{ .Tone }}">
@@ -4271,7 +4302,36 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .ActionReadiness.Summary }}</p>
-    <p><span class="pill ok">value_returned=false</span> <span class="pill info">{{ .ActionReadiness.Gated }} role gated</span> <span class="pill {{ if .ActionReadiness.Blocked }}warn{{ else }}ok{{ end }}">{{ .ActionReadiness.Blocked }} readiness blocked</span></p>
+    <div class="witness-grid" aria-label="Action readiness witness">
+      <div class="witness-card {{ if .ActionReadiness.Blocked }}warn{{ else }}ok{{ end }}">
+        <span>Available actions</span>
+        <strong>{{ .ActionReadiness.Available }}</strong>
+        <p>Safe actions are visible only when their role and readiness checks pass.</p>
+      </div>
+      <div class="witness-card {{ if or .ActionReadiness.Gated .ActionReadiness.Blocked }}warn{{ else }}ok{{ end }}">
+        <span>Action gates</span>
+        <strong>{{ .ActionReadiness.Gated }} role / {{ .ActionReadiness.Blocked }} readiness</strong>
+        <p>Role-gated or readiness-blocked actions fail closed before connector work.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Value boundary</span>
+        <strong>values withheld</strong>
+        <p>Action readiness returns safety labels and next steps, not secret values or connector output.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Action readiness evidence flags</summary>
+      <div class="flag-cloud" aria-label="Action readiness value-free evidence flags">
+        <span class="pill ok">{{ .ActionReadiness.Available }} available</span>
+        <span class="pill info">{{ .ActionReadiness.Gated }} role gated</span>
+        <span class="pill {{ if .ActionReadiness.Blocked }}warn{{ else }}ok{{ end }}">{{ .ActionReadiness.Blocked }} readiness blocked</span>
+        <span class="pill ok">connector_output_returned=false</span>
+        <span class="pill ok">request_body_returned=false</span>
+        <span class="pill ok">backend_path_returned=false</span>
+        <span class="pill ok">env_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
     <div class="mode-grid" aria-label="Action readiness">
       {{ range .ActionReadiness.Actions }}
       <div class="mode-item {{ .Tone }}">
