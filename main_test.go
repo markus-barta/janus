@@ -716,6 +716,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"assurance_summary"`) || !strings.Contains(body, `"verdict"`) || !strings.Contains(body, `"Value boundary"`) || !strings.Contains(body, `"human_readable_assurance_summary"`) || !strings.Contains(body, `"human_readable_summary":"dashboard_posture_evidence"`) {
 		t.Fatalf("posture response should include human-readable assurance summary: %s", body)
 	}
+	if !strings.Contains(body, `"assurance_gates"`) || !strings.Contains(body, `"key":"role_denial"`) || !strings.Contains(body, `"key":"catalog_metadata"`) || !strings.Contains(body, `"key":"degraded_actions"`) || !strings.Contains(body, `"key":"value_leak_sentinel"`) || !strings.Contains(body, `"assurance_gate_proof_strip"`) {
+		t.Fatalf("posture response should include assurance gate proofs: %s", body)
+	}
 	if !strings.Contains(body, `"operational_status"`) || !strings.Contains(body, `"key":"role_duties"`) || !strings.Contains(body, `"key":"value_boundary"`) || !strings.Contains(body, `"operational_status_strip"`) || !strings.Contains(body, `"operational_status":"dashboard_posture_strip"`) {
 		t.Fatalf("posture response should include operational status strip: %s", body)
 	}
@@ -816,6 +819,9 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"operational_status"`) || !strings.Contains(body, `"key":"evidence_export"`) || !strings.Contains(body, `"key":"scope_boundary"`) {
 		t.Fatalf("evidence response should include operational status: %s", body)
 	}
+	if !strings.Contains(body, `"assurance_gates"`) || !strings.Contains(body, `"key":"value_leak_sentinel"`) {
+		t.Fatalf("evidence response should include assurance gates: %s", body)
+	}
 	if !strings.Contains(body, `"scope_posture"`) {
 		t.Fatalf("evidence response should include scope posture: %s", body)
 	}
@@ -878,6 +884,60 @@ func TestWardenAPIRequiresOperatorRole(t *testing.T) {
 	if len(recent) != 1 || recent[0].Outcome != "denied" || !strings.Contains(recent[0].Reason, "operator") {
 		t.Fatalf("expected denied operator audit event: %#v", recent)
 	}
+}
+
+func TestAssuranceGateProofDirectAbuseCases(t *testing.T) {
+	t.Run("viewer role denial is value-free and audited", func(t *testing.T) {
+		app := newTestApp(t)
+		session := Session{Subject: "viewer", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+		rr := httptest.NewRecorder()
+		app.writeSession(rr, session)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/evidence", nil)
+		req.AddCookie(rr.Result().Cookies()[0])
+		out := httptest.NewRecorder()
+		app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence))(out, req)
+		if out.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d body=%s", out.Code, out.Body.String())
+		}
+		assertRouteResponseValueFree(t, "viewer role denial", out)
+		recent := app.store.RecentAudit(1)
+		if len(recent) != 1 || recent[0].Outcome != "denied" || !strings.Contains(recent[0].Reason, "auditor") {
+			t.Fatalf("expected denied auditor audit event: %#v", recent)
+		}
+	})
+
+	t.Run("malformed catalog metadata opens gates", func(t *testing.T) {
+		gates := ValidateCatalog([]SecretDescriptor{{}})
+		for _, code := range []string{"missing_id", "missing_owner", "weak_classification", "missing_scope", "missing_source", "missing_consumers", "no_approved_use_profile"} {
+			if !catalogGateHasCode(gates, code) {
+				t.Fatalf("expected catalog gate %q in %#v", code, gates)
+			}
+		}
+		proof := AssuranceGatesFor(true, len(gates), AccessPosture{RoleDutyMatrix: true, RequiredRoles: map[string]string{"/api/evidence": RoleAuditor}})
+		if proof.ValueReturned || proof.ReviewCount == 0 || !assuranceGateHasKey(proof.Gates, "catalog_metadata") {
+			t.Fatalf("assurance gate proof should expose catalog review without values: %#v", proof)
+		}
+	})
+
+	t.Run("degraded sensitive action is blocked value-free", func(t *testing.T) {
+		app := newTestApp(t)
+		app.cfg.RequireAuth = false
+		app.permits = nil
+
+		req := httptest.NewRequest(http.MethodPost, "/api/warden/resolve", strings.NewReader(`{"ref":"zitadel-janus-oidc","reason":"local smoke"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Request-Id", "assurance-degraded-1")
+		out := httptest.NewRecorder()
+		app.routes().ServeHTTP(out, req)
+		if out.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d body=%s", out.Code, out.Body.String())
+		}
+		assertRouteResponseValueFree(t, "degraded sensitive action", out)
+		if !strings.Contains(out.Body.String(), `"system_degraded"`) || !strings.Contains(out.Body.String(), `"request_id":"assurance-degraded-1"`) {
+			t.Fatalf("degraded denial should be clear and correlated: %s", out.Body.String())
+		}
+	})
 }
 
 func TestRolePolicyMapsZitadelClaims(t *testing.T) {
@@ -994,6 +1054,24 @@ func assuranceHasLabel(items []AssuranceItem, label string) bool {
 	return false
 }
 
+func assuranceGateHasKey(items []AssuranceGateItem, key string) bool {
+	for _, item := range items {
+		if item.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func catalogGateHasCode(items []CatalogGate, code string) bool {
+	for _, item := range items {
+		if item.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDockerComposePinsExplicitJanusRoleBindings(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "docker-compose.yml"))
 	if err != nil {
@@ -1026,7 +1104,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Assurance summary", "Proven controls", "Review items", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "not_claimed", "Evidence export", "Download evidence", "integrity.pack_hash", "Download JSON", "Hash preview", "copy-safe metadata", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "not_claimed", "Evidence export", "Download evidence", "integrity.pack_hash", "Download JSON", "Hash preview", "copy-safe metadata", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}

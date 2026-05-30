@@ -864,6 +864,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	}
 	evidenceBoundary := EvidenceBoundaryFor(canViewAudit, evidenceHash != "")
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
+	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	roleAvailability := RoleAvailabilityFor(session)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	data := map[string]any{
@@ -889,6 +890,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"ApprovedUse":       approvedUsePosture,
 		"ModePosture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
 		"AssuranceSummary":  assuranceSummary,
+		"AssuranceGates":    assuranceGates,
 		"EvidenceHash":      evidenceHash,
 		"EvidenceHashFull":  evidenceHashFull,
 		"EvidenceBoundary":  evidenceBoundary,
@@ -1948,6 +1950,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	}
 	evidenceBoundary := EvidenceBoundaryFor(true, true)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
+	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	roleAvailability := RoleAvailabilityFor(session)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	return map[string]any{
@@ -1972,6 +1975,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"permits":            permitPosture,
 		"mode_posture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
 		"assurance_summary":  assuranceSummary,
+		"assurance_gates":    assuranceGates,
 		"operational_status": operationalStatus,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
@@ -2013,6 +2017,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"evidence_export_boundary":  "dashboard_and_json",
 			"evidence_download":         "auditor_json_with_pack_hash",
 			"human_readable_summary":    "dashboard_posture_evidence",
+			"assurance_gate_proofs":     "role_catalog_degraded_value_leak",
 			"operational_status":        "dashboard_posture_strip",
 			"value_returned":            false,
 		},
@@ -2100,6 +2105,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"human_readable_assurance_summary",
 			"operational_status_strip",
 			"evidence_download_receipt",
+			"assurance_gate_proof_strip",
 		},
 		"value_returned": false,
 	}
@@ -2124,6 +2130,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	auditPosture := app.store.AuditPosture()
 	evidenceBoundary := EvidenceBoundaryFor(true, true)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
+	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, RoleAvailabilityFor(session))
 	pack := EvidencePack{
 		GeneratedAt:      time.Now().UTC(),
@@ -2131,6 +2138,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Mode:             app.cfg.ProductMode,
 		Posture:          app.postureBody(session),
 		Operational:      operationalStatus,
+		AssuranceGates:   assuranceGates,
 		AssuranceSummary: assuranceSummary,
 		Descriptors:      descriptors,
 		CatalogGates:     catalogGates,
@@ -2829,6 +2837,25 @@ func mustTemplates() *template.Template {
       {{ end }}
     </div>
     {{ end }}
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="assurance-gates">
+  <div class="panel-head">
+    <h2>Assurance gates</h2>
+    <span class="pill {{ if .AssuranceGates.ReviewCount }}warn{{ else }}ok{{ end }}">{{ if .AssuranceGates.ReviewCount }}{{ .AssuranceGates.ReviewCount }} review{{ else }}covered{{ end }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .AssuranceGates.Summary }}</p>
+    <p><span class="pill ok">value_returned=false</span> <span class="pill info">abuse tested</span></p>
+    <div class="mode-grid" aria-label="Assurance gate proofs">
+      {{ range .AssuranceGates.Gates }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+      </div>
+      {{ end }}
+    </div>
   </div>
 </section>
 <section class="panel" style="margin-bottom:16px" id="available-to-you">

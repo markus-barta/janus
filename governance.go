@@ -29,6 +29,7 @@ type EvidencePack struct {
 	Mode             string             `json:"mode"`
 	Posture          map[string]any     `json:"posture"`
 	Operational      OperationalStatus  `json:"operational_status"`
+	AssuranceGates   AssuranceGates     `json:"assurance_gates"`
 	AssuranceSummary AssuranceSummary   `json:"assurance_summary"`
 	EvidenceBoundary EvidenceBoundary   `json:"evidence_boundary"`
 	Descriptors      []SecretDescriptor `json:"descriptors"`
@@ -78,6 +79,21 @@ type OperationalStatus struct {
 }
 
 type OperationalStatusItem struct {
+	Key    string `json:"key"`
+	Label  string `json:"label"`
+	State  string `json:"state"`
+	Detail string `json:"detail"`
+	Tone   string `json:"tone"`
+}
+
+type AssuranceGates struct {
+	Summary       string              `json:"summary"`
+	Gates         []AssuranceGateItem `json:"gates"`
+	ReviewCount   int                 `json:"review_count"`
+	ValueReturned bool                `json:"value_returned"`
+}
+
+type AssuranceGateItem struct {
 	Key    string `json:"key"`
 	Label  string `json:"label"`
 	State  string `json:"state"`
@@ -217,6 +233,49 @@ func (s *OperationalStatus) add(ok bool, key, label, okState, reviewState, okDet
 		return
 	}
 	s.Items = append(s.Items, OperationalStatusItem{Key: key, Label: label, State: reviewState, Detail: reviewDetail, Tone: "warn"})
+}
+
+func AssuranceGatesFor(ready bool, catalogGateCount int, access AccessPosture) AssuranceGates {
+	gates := AssuranceGates{
+		Summary:       "Abuse gates are enforced by tests and surfaced here without secret values.",
+		ValueReturned: false,
+	}
+
+	roleReady := access.RoleDutyMatrix && len(access.RequiredRoles) > 0
+	gates.add(roleReady, "role_denial", "Role denial", "enforced", "review", "Viewer requests to operator and auditor routes are denied and audited.", "Role boundary tests need review.")
+
+	catalogClear := catalogGateCount == 0
+	catalogState := "clear"
+	catalogDetail := "Catalog metadata has owners, classes, scope, consumers, and approved-use profiles."
+	if !catalogClear {
+		catalogState = fmt.Sprintf("%d open", catalogGateCount)
+		catalogDetail = "Malformed or incomplete catalog metadata stays visible before stronger claims."
+	}
+	gates.add(catalogClear, "catalog_metadata", "Catalog metadata", catalogState, catalogState, catalogDetail, catalogDetail)
+
+	degradedState := "armed"
+	degradedDetail := "Sensitive actions are guarded by readiness checks."
+	if !ready {
+		degradedState = "blocking"
+		degradedDetail = "Readiness is degraded; sensitive actions are blocked."
+	}
+	gates.add(true, "degraded_actions", "Degraded actions", degradedState, degradedState, degradedDetail, degradedDetail)
+
+	gates.add(true, "value_leak_sentinel", "Value leak sentinel", "active", "review", "Public, API, and UI routes are checked for value-free responses.", "Route value-leak sentinel needs review.")
+	return gates
+}
+
+func (g *AssuranceGates) add(ok bool, key, label, okState, reviewState, okDetail, reviewDetail string) {
+	tone := "ok"
+	state := okState
+	detail := okDetail
+	if !ok {
+		tone = "warn"
+		state = reviewState
+		detail = reviewDetail
+		g.ReviewCount++
+	}
+	g.Gates = append(g.Gates, AssuranceGateItem{Key: key, Label: label, State: state, Detail: detail, Tone: tone})
 }
 
 func ApprovedUsePostureFor(descriptors []SecretDescriptor) ApprovedUsePosture {
