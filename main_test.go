@@ -1178,6 +1178,19 @@ func TestReadyzRequiresPermitStore(t *testing.T) {
 	}
 }
 
+func TestDockerfileHealthcheckUsesReadyz(t *testing.T) {
+	raw, err := os.ReadFile("Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	for _, want := range []string{"HEALTHCHECK", "/readyz", `"ready":true`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Dockerfile healthcheck should include %q: %s", want, body)
+		}
+	}
+}
+
 func TestSetupPageRendersWhenAuthMissing(t *testing.T) {
 	tTempDir = t.TempDir()
 	store, err := NewStore(tTempDir, "")

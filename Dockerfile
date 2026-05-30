@@ -12,4 +12,5 @@ COPY --from=build /out/janus /app/janus
 RUN mkdir -p /data && chown janus:janus /data
 USER janus
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8080/readyz | grep -q '"ready":true' || exit 1
 ENTRYPOINT ["/app/janus"]
