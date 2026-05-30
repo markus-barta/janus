@@ -895,6 +895,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	restoreWorkflow := RestoreDrillWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	releaseWorkflow := ReleaseProvenanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -905,57 +906,58 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	commandCenter := CommandCenterFor(ready, operationalStatus, actionReadiness, modeGuardrails, attachmentReview, evidenceBoundary)
 	data := map[string]any{
-		"Title":             "Janus",
-		"CSPNonce":          cspNonceFromContext(r.Context()),
-		"Session":           session,
-		"CSRF":              app.csrfToken(session),
-		"Descriptors":       descriptors,
-		"Issues":            issues,
-		"Mode":              app.cfg.ProductMode,
-		"Audit":             recentAudit,
-		"Posture":           auditPosture,
-		"CatalogGates":      catalogGates,
-		"Access":            accessPosture,
-		"RoleBoundaries":    RoleBoundariesFor(session),
-		"RoleAvailability":  roleAvailability,
-		"RoleWorkbench":     roleWorkbench,
-		"ActionReadiness":   actionReadiness,
-		"OperationalStatus": operationalStatus,
-		"CommandCenter":     commandCenter,
-		"Ready":             ready,
-		"Readiness":         readinessBody,
-		"SessionPosture":    app.sessionPosture(session),
-		"Scope":             scopePosture,
-		"Lifecycle":         lifecyclePosture,
-		"ApprovedUse":       approvedUsePosture,
-		"ModePosture":       ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
-		"ModeGuardrails":    modeGuardrails,
-		"Enterprise":        enterpriseValidation,
-		"EnterpriseDryRun":  enterpriseDryRun,
-		"AttachmentReview":  attachmentReview,
-		"ExternalEvidence":  externalEvidence,
-		"RestoreProof":      restoreProof,
-		"RestoreWorkflow":   restoreWorkflow,
-		"ReleaseWorkflow":   releaseWorkflow,
-		"PrivacyWorkflow":   privacyWorkflow,
-		"Privacy":           privacyPosture,
-		"AssuranceSummary":  assuranceSummary,
-		"AssuranceGates":    assuranceGates,
-		"NegativePath":      negativePath,
-		"Guidance":          degradedGuidance,
-		"AuditDrill":        auditDrill,
-		"EvidenceHash":      evidenceHash,
-		"EvidenceHashFull":  evidenceHashFull,
-		"EvidenceBoundary":  evidenceBoundary,
-		"EvidenceReceipt":   evidenceReceipt,
-		"CanExportEvidence": canViewAudit,
-		"CanViewAudit":      canViewAudit,
-		"CanOperate":        canOperate,
-		"ActionResult":      actionResult,
-		"Permits":           recentPermits,
-		"PermitPosture":     permitPosture,
-		"SelectedRef":       focus.Descriptor.ID,
-		"Focus":             focus,
+		"Title":               "Janus",
+		"CSPNonce":            cspNonceFromContext(r.Context()),
+		"Session":             session,
+		"CSRF":                app.csrfToken(session),
+		"Descriptors":         descriptors,
+		"Issues":              issues,
+		"Mode":                app.cfg.ProductMode,
+		"Audit":               recentAudit,
+		"Posture":             auditPosture,
+		"CatalogGates":        catalogGates,
+		"Access":              accessPosture,
+		"RoleBoundaries":      RoleBoundariesFor(session),
+		"RoleAvailability":    roleAvailability,
+		"RoleWorkbench":       roleWorkbench,
+		"ActionReadiness":     actionReadiness,
+		"OperationalStatus":   operationalStatus,
+		"CommandCenter":       commandCenter,
+		"Ready":               ready,
+		"Readiness":           readinessBody,
+		"SessionPosture":      app.sessionPosture(session),
+		"Scope":               scopePosture,
+		"Lifecycle":           lifecyclePosture,
+		"ApprovedUse":         approvedUsePosture,
+		"ModePosture":         ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"ModeGuardrails":      modeGuardrails,
+		"Enterprise":          enterpriseValidation,
+		"EnterpriseDryRun":    enterpriseDryRun,
+		"AttachmentReview":    attachmentReview,
+		"ExternalEvidence":    externalEvidence,
+		"RestoreProof":        restoreProof,
+		"RestoreWorkflow":     restoreWorkflow,
+		"ReleaseWorkflow":     releaseWorkflow,
+		"PrivacyWorkflow":     privacyWorkflow,
+		"IntegrationWorkflow": integrationWorkflow,
+		"Privacy":             privacyPosture,
+		"AssuranceSummary":    assuranceSummary,
+		"AssuranceGates":      assuranceGates,
+		"NegativePath":        negativePath,
+		"Guidance":            degradedGuidance,
+		"AuditDrill":          auditDrill,
+		"EvidenceHash":        evidenceHash,
+		"EvidenceHashFull":    evidenceHashFull,
+		"EvidenceBoundary":    evidenceBoundary,
+		"EvidenceReceipt":     evidenceReceipt,
+		"CanExportEvidence":   canViewAudit,
+		"CanViewAudit":        canViewAudit,
+		"CanOperate":          canOperate,
+		"ActionResult":        actionResult,
+		"Permits":             recentPermits,
+		"PermitPosture":       permitPosture,
+		"SelectedRef":         focus.Descriptor.ID,
+		"Focus":               focus,
 	}
 	return data
 }
@@ -2358,6 +2360,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	restoreWorkflow := RestoreDrillWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	releaseWorkflow := ReleaseProvenanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2382,30 +2385,31 @@ func (app *App) postureBody(session Session) map[string]any {
 			"duties":          []string{"posture", "use_actions", "audit_export", "admin_policy"},
 			"value_returned":  false,
 		},
-		"scope":                       scopePosture,
-		"lifecycle":                   lifecyclePosture,
-		"approved_use":                approvedUsePosture,
-		"permits":                     permitPosture,
-		"mode_posture":                ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
-		"mode_guardrails":             modeGuardrails,
-		"enterprise_validation":       enterpriseValidation,
-		"enterprise_dry_run":          enterpriseDryRun,
-		"attachment_review":           attachmentReview,
-		"external_evidence":           externalEvidence,
-		"restore_drill_proof":         restoreProof,
-		"restore_drill_workflow":      restoreWorkflow,
-		"release_provenance_workflow": releaseWorkflow,
-		"privacy_retention_workflow":  privacyWorkflow,
-		"privacy_posture":             privacyPosture,
-		"evidence_receipt":            evidenceReceipt,
-		"action_readiness":            actionReadiness,
-		"command_center":              commandCenter,
-		"assurance_summary":           assuranceSummary,
-		"assurance_gates":             assuranceGates,
-		"negative_path_assurance":     negativePath,
-		"degraded_guidance":           degradedGuidance,
-		"audit_failure_drill":         auditDrill,
-		"operational_status":          operationalStatus,
+		"scope":                            scopePosture,
+		"lifecycle":                        lifecyclePosture,
+		"approved_use":                     approvedUsePosture,
+		"permits":                          permitPosture,
+		"mode_posture":                     ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"mode_guardrails":                  modeGuardrails,
+		"enterprise_validation":            enterpriseValidation,
+		"enterprise_dry_run":               enterpriseDryRun,
+		"attachment_review":                attachmentReview,
+		"external_evidence":                externalEvidence,
+		"restore_drill_proof":              restoreProof,
+		"restore_drill_workflow":           restoreWorkflow,
+		"release_provenance_workflow":      releaseWorkflow,
+		"privacy_retention_workflow":       privacyWorkflow,
+		"integration_conformance_workflow": integrationWorkflow,
+		"privacy_posture":                  privacyPosture,
+		"evidence_receipt":                 evidenceReceipt,
+		"action_readiness":                 actionReadiness,
+		"command_center":                   commandCenter,
+		"assurance_summary":                assuranceSummary,
+		"assurance_gates":                  assuranceGates,
+		"negative_path_assurance":          negativePath,
+		"degraded_guidance":                degradedGuidance,
+		"audit_failure_drill":              auditDrill,
+		"operational_status":               operationalStatus,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
 			"pkce_s256":                   app.cfg.OIDCConfigured(),
@@ -2440,37 +2444,38 @@ func (app *App) postureBody(session Session) map[string]any {
 			"value_returned":              false,
 		},
 		"assurance": map[string]any{
-			"route_value_leak_sentinel":   true,
-			"json_errors_request_id":      true,
-			"backend_source_paths":        "not_returned",
-			"role_policy_proof":           "explicit_counts_no_values",
-			"role_claim_policy":           "explicit_only_no_ambient_grants",
-			"evidence_export_boundary":    "dashboard_and_json",
-			"evidence_download":           "auditor_json_with_pack_hash",
-			"evidence_receipt":            "download_header_body_match",
-			"enterprise_validation":       "self_hosted_safe_enterprise_required",
-			"enterprise_attachments":      "presence_only_no_refs",
-			"enterprise_dry_run":          "self_hosted_to_enterprise_checklist",
-			"external_evidence_workflow":  "presence_only_no_refs",
-			"attachment_review":           "presence_only_owner_review",
-			"restore_drill_proof":         "dashboard_posture_evidence",
-			"restore_drill_workflow":      "presence_only_recovery_evidence",
-			"release_provenance_workflow": "presence_only_release_evidence",
-			"privacy_retention_workflow":  "presence_only_policy_evidence",
-			"action_readiness":            "role_and_readiness_matrix",
-			"command_center":              "dashboard_posture_api",
-			"action_receipts":             "mutation_result_receipts",
-			"action_receipt_integrity":    "tamper_evident_hash_proof",
-			"action_receipt_verification": "copy_safe_ui_fields",
-			"mode_guardrails":             "dashboard_posture_evidence",
-			"privacy_retention":           "dashboard_posture_evidence",
-			"negative_path_assurance":     "dashboard_posture_evidence",
-			"degraded_guidance":           "dashboard_posture_evidence",
-			"audit_failure_drill":         "fail_closed_dashboard_posture_evidence",
-			"human_readable_summary":      "dashboard_posture_evidence",
-			"assurance_gate_proofs":       "role_catalog_degraded_value_leak",
-			"operational_status":          "dashboard_posture_strip",
-			"value_returned":              false,
+			"route_value_leak_sentinel":        true,
+			"json_errors_request_id":           true,
+			"backend_source_paths":             "not_returned",
+			"role_policy_proof":                "explicit_counts_no_values",
+			"role_claim_policy":                "explicit_only_no_ambient_grants",
+			"evidence_export_boundary":         "dashboard_and_json",
+			"evidence_download":                "auditor_json_with_pack_hash",
+			"evidence_receipt":                 "download_header_body_match",
+			"enterprise_validation":            "self_hosted_safe_enterprise_required",
+			"enterprise_attachments":           "presence_only_no_refs",
+			"enterprise_dry_run":               "self_hosted_to_enterprise_checklist",
+			"external_evidence_workflow":       "presence_only_no_refs",
+			"attachment_review":                "presence_only_owner_review",
+			"restore_drill_proof":              "dashboard_posture_evidence",
+			"restore_drill_workflow":           "presence_only_recovery_evidence",
+			"release_provenance_workflow":      "presence_only_release_evidence",
+			"privacy_retention_workflow":       "presence_only_policy_evidence",
+			"integration_conformance_workflow": "presence_only_integration_evidence",
+			"action_readiness":                 "role_and_readiness_matrix",
+			"command_center":                   "dashboard_posture_api",
+			"action_receipts":                  "mutation_result_receipts",
+			"action_receipt_integrity":         "tamper_evident_hash_proof",
+			"action_receipt_verification":      "copy_safe_ui_fields",
+			"mode_guardrails":                  "dashboard_posture_evidence",
+			"privacy_retention":                "dashboard_posture_evidence",
+			"negative_path_assurance":          "dashboard_posture_evidence",
+			"degraded_guidance":                "dashboard_posture_evidence",
+			"audit_failure_drill":              "fail_closed_dashboard_posture_evidence",
+			"human_readable_summary":           "dashboard_posture_evidence",
+			"assurance_gate_proofs":            "role_catalog_degraded_value_leak",
+			"operational_status":               "dashboard_posture_strip",
+			"value_returned":                   false,
 		},
 		"response_hardening": map[string]any{
 			"cache_control":                  "no-store",
@@ -2568,6 +2573,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"restore_drill_presence_workflow",
 			"release_provenance_presence_workflow",
 			"privacy_retention_presence_workflow",
+			"integration_conformance_presence_workflow",
 			"role_aware_action_readiness",
 			"command_center_ux",
 			"value_free_action_receipts",
@@ -2629,6 +2635,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	restoreWorkflow := RestoreDrillWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	releaseWorkflow := ReleaseProvenanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
+	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
 	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
@@ -2636,37 +2643,38 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	actionReadiness := ActionReadinessFor(session, ready)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, RoleAvailabilityFor(session))
 	pack := EvidencePack{
-		GeneratedAt:      time.Now().UTC(),
-		Service:          "janus",
-		Mode:             app.cfg.ProductMode,
-		Posture:          app.postureBody(session),
-		Operational:      operationalStatus,
-		ModeGuardrails:   modeGuardrails,
-		ActionReadiness:  actionReadiness,
-		AssuranceGates:   assuranceGates,
-		NegativePath:     negativePath,
-		Guidance:         degradedGuidance,
-		AuditDrill:       auditDrill,
-		AssuranceSummary: assuranceSummary,
-		RestoreWorkflow:  restoreWorkflow,
-		ReleaseWorkflow:  releaseWorkflow,
-		PrivacyWorkflow:  privacyWorkflow,
-		Enterprise:       enterpriseValidation,
-		EnterpriseDryRun: enterpriseDryRun,
-		AttachmentReview: attachmentReview,
-		ExternalEvidence: externalEvidence,
-		RestoreProof:     restoreProof,
-		Privacy:          privacyPosture,
-		Descriptors:      descriptors,
-		CatalogGates:     catalogGates,
-		ScopePosture:     scopePosture,
-		LifecyclePosture: LifecyclePostureFor(descriptors, time.Now().UTC()),
-		PermitPosture:    PermitPosture{ValueReturned: false},
-		AccessPosture:    accessPosture,
-		AuditPosture:     auditPosture,
-		RecentAudit:      app.store.RecentAudit(50),
-		ValueReturned:    false,
-		RedactionModel:   "metadata-only; secret values are not stored, read, rendered, logged, or exported by Janus V1.x",
+		GeneratedAt:         time.Now().UTC(),
+		Service:             "janus",
+		Mode:                app.cfg.ProductMode,
+		Posture:             app.postureBody(session),
+		Operational:         operationalStatus,
+		ModeGuardrails:      modeGuardrails,
+		ActionReadiness:     actionReadiness,
+		AssuranceGates:      assuranceGates,
+		NegativePath:        negativePath,
+		Guidance:            degradedGuidance,
+		AuditDrill:          auditDrill,
+		AssuranceSummary:    assuranceSummary,
+		RestoreWorkflow:     restoreWorkflow,
+		ReleaseWorkflow:     releaseWorkflow,
+		PrivacyWorkflow:     privacyWorkflow,
+		IntegrationWorkflow: integrationWorkflow,
+		Enterprise:          enterpriseValidation,
+		EnterpriseDryRun:    enterpriseDryRun,
+		AttachmentReview:    attachmentReview,
+		ExternalEvidence:    externalEvidence,
+		RestoreProof:        restoreProof,
+		Privacy:             privacyPosture,
+		Descriptors:         descriptors,
+		CatalogGates:        catalogGates,
+		ScopePosture:        scopePosture,
+		LifecyclePosture:    LifecyclePostureFor(descriptors, time.Now().UTC()),
+		PermitPosture:       PermitPosture{ValueReturned: false},
+		AccessPosture:       accessPosture,
+		AuditPosture:        auditPosture,
+		RecentAudit:         app.store.RecentAudit(50),
+		ValueReturned:       false,
+		RedactionModel:      "metadata-only; secret values are not stored, read, rendered, logged, or exported by Janus V1.x",
 	}
 	if app.permits != nil {
 		pack.PermitPosture = app.permits.Posture()
@@ -3756,6 +3764,40 @@ func mustTemplates() *template.Template {
         <p><span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
         <p><span class="pill info">next</span> {{ .Next }}</p>
         {{ end }}
+      </div>
+      {{ end }}
+    </div>
+  </div>
+</section>
+<section class="panel" style="margin-bottom:16px" id="integration-conformance-workflow">
+  <div class="panel-head">
+    <h2>Integration conformance workflow</h2>
+    <span class="pill {{ if eq .IntegrationWorkflow.Status "attached" }}ok{{ else if eq .IntegrationWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .IntegrationWorkflow.Status }}</span>
+  </div>
+  <div class="panel-body stack">
+    <p>{{ .IntegrationWorkflow.Summary }}</p>
+    <p><span class="pill info">owner {{ .IntegrationWorkflow.OwnerRole }}</span> <span class="pill {{ if .IntegrationWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .IntegrationWorkflow.Required }}</span> <span class="pill {{ if .IntegrationWorkflow.Attached }}ok{{ else if .IntegrationWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .IntegrationWorkflow.Attachment }}</span> <span class="pill info">{{ .IntegrationWorkflow.EvidenceSignal }}</span> <span class="pill ok">connector_config_returned=false</span> <span class="pill ok">endpoint_returned=false</span> <span class="pill ok">payload_returned=false</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+    <p><span class="pill info">review cadence</span> {{ .IntegrationWorkflow.ReviewCadence }}</p>
+    {{ if .IntegrationWorkflow.Attached }}
+    <p><span class="pill ok">presence recorded</span> <span class="pill ok">connector evidence stays external</span> {{ .IntegrationWorkflow.Next }}</p>
+    {{ else if .IntegrationWorkflow.CanAttach }}
+    <form method="post" action="/ui/evidence/attachments">
+      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+      <input type="hidden" name="control_key" value="{{ .IntegrationWorkflow.ControlKey }}">
+      <input type="hidden" name="attestation" value="external_evidence_exists">
+      <button class="button quiet" type="submit">Mark integration conformance present</button>
+    </form>
+    <p>{{ .IntegrationWorkflow.Next }}</p>
+    {{ else }}
+    <p><span class="pill warn">{{ .IntegrationWorkflow.OwnerRole }} role required</span> {{ .IntegrationWorkflow.Next }}</p>
+    {{ end }}
+    <div class="mode-grid" aria-label="Integration conformance workflow checks">
+      {{ range .IntegrationWorkflow.Checks }}
+      <div class="mode-item {{ .Tone }}">
+        <span>{{ .Label }}</span>
+        <strong>{{ .State }}</strong>
+        <p>{{ .Detail }}</p>
+        <p><span class="pill info">next</span> {{ .Next }}</p>
       </div>
       {{ end }}
     </div>
