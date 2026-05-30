@@ -172,12 +172,18 @@ type EnterpriseValidation struct {
 }
 
 type EnterpriseValidationControl struct {
-	Key      string `json:"key"`
-	Label    string `json:"label"`
-	State    string `json:"state"`
-	Required bool   `json:"required"`
-	Detail   string `json:"detail"`
-	Tone     string `json:"tone"`
+	Key                 string `json:"key"`
+	Label               string `json:"label"`
+	State               string `json:"state"`
+	Required            bool   `json:"required"`
+	Detail              string `json:"detail"`
+	OwnerRole           string `json:"owner_role"`
+	Attachment          string `json:"attachment"`
+	EvidenceSignal      string `json:"evidence_signal"`
+	Next                string `json:"next"`
+	EvidenceRefReturned bool   `json:"evidence_ref_returned"`
+	ValueReturned       bool   `json:"value_returned"`
+	Tone                string `json:"tone"`
 }
 
 type PrivacyPosture struct {

@@ -1815,56 +1815,70 @@ func enterpriseChecks(cfg Config) []string {
 }
 
 type enterpriseValidationSpec struct {
-	Key     string
-	Label   string
-	EnvKey  string
-	Missing string
-	Detail  string
+	Key       string
+	Label     string
+	EnvKey    string
+	Missing   string
+	Detail    string
+	OwnerRole string
+	Next      string
 }
 
 func enterpriseValidationSpecs() []enterpriseValidationSpec {
 	return []enterpriseValidationSpec{
 		{
-			Key:     "remote_audit",
-			Label:   "Remote audit",
-			EnvKey:  "JANUS_REMOTE_AUDIT",
-			Missing: "Enterprise mode needs remote audit shipping before production use.",
-			Detail:  "Audit evidence must leave the host and be reviewed outside Janus.",
+			Key:       "remote_audit",
+			Label:     "Remote audit",
+			EnvKey:    "JANUS_REMOTE_AUDIT",
+			Missing:   "Enterprise mode needs remote audit shipping before production use.",
+			Detail:    "Audit evidence must leave the host and be reviewed outside Janus.",
+			OwnerRole: "auditor",
+			Next:      "Attach remote audit shipping evidence outside Janus.",
 		},
 		{
-			Key:     "break_glass_review",
-			Label:   "Break-glass review",
-			EnvKey:  "JANUS_BREAK_GLASS_REVIEW",
-			Missing: "Enterprise mode needs a documented break-glass review owner.",
-			Detail:  "Emergency access needs a named review path and owner.",
+			Key:       "break_glass_review",
+			Label:     "Break-glass review",
+			EnvKey:    "JANUS_BREAK_GLASS_REVIEW",
+			Missing:   "Enterprise mode needs a documented break-glass review owner.",
+			Detail:    "Emergency access needs a named review path and owner.",
+			OwnerRole: "admin",
+			Next:      "Attach break-glass owner and review evidence outside Janus.",
 		},
 		{
-			Key:     "restore_drill",
-			Label:   "Restore drill",
-			EnvKey:  "JANUS_RESTORE_DRILL",
-			Missing: "Enterprise mode needs a recent restore drill record.",
-			Detail:  "Recovery evidence must prove metadata, audit, scope, and policy survive restore.",
+			Key:       "restore_drill",
+			Label:     "Restore drill",
+			EnvKey:    "JANUS_RESTORE_DRILL",
+			Missing:   "Enterprise mode needs a recent restore drill record.",
+			Detail:    "Recovery evidence must prove metadata, audit, scope, and policy survive restore.",
+			OwnerRole: "operator",
+			Next:      "Attach the latest restore drill record outside Janus.",
 		},
 		{
-			Key:     "integration_conformance",
-			Label:   "Integration conformance",
-			EnvKey:  "JANUS_INTEGRATION_CONFORMANCE",
-			Missing: "Enterprise mode needs integration conformance evidence.",
-			Detail:  "Identity, audit, ticketing, SIEM, and custody integrations need reviewed conformance.",
+			Key:       "integration_conformance",
+			Label:     "Integration conformance",
+			EnvKey:    "JANUS_INTEGRATION_CONFORMANCE",
+			Missing:   "Enterprise mode needs integration conformance evidence.",
+			Detail:    "Identity, audit, ticketing, SIEM, and custody integrations need reviewed conformance.",
+			OwnerRole: "admin",
+			Next:      "Attach integration conformance evidence outside Janus.",
 		},
 		{
-			Key:     "release_provenance",
-			Label:   "Release provenance",
-			EnvKey:  "JANUS_RELEASE_PROVENANCE",
-			Missing: "Enterprise mode needs trusted release provenance.",
-			Detail:  "Operators need provenance, channel, and build evidence before stronger claims.",
+			Key:       "release_provenance",
+			Label:     "Release provenance",
+			EnvKey:    "JANUS_RELEASE_PROVENANCE",
+			Missing:   "Enterprise mode needs trusted release provenance.",
+			Detail:    "Operators need provenance, channel, and build evidence before stronger claims.",
+			OwnerRole: "operator",
+			Next:      "Attach release provenance evidence outside Janus.",
 		},
 		{
-			Key:     "privacy_policy",
-			Label:   "Privacy policy",
-			EnvKey:  "JANUS_PRIVACY_POLICY",
-			Missing: "Enterprise mode needs privacy and retention policy evidence.",
-			Detail:  "Evidence exports, audit, retention, and raw metadata access need a reviewed policy.",
+			Key:       "privacy_policy",
+			Label:     "Privacy policy",
+			EnvKey:    "JANUS_PRIVACY_POLICY",
+			Missing:   "Enterprise mode needs privacy and retention policy evidence.",
+			Detail:    "Evidence exports, audit, retention, and raw metadata access need a reviewed policy.",
+			OwnerRole: "admin",
+			Next:      "Attach reviewed privacy and retention policy evidence outside Janus.",
 		},
 	}
 }
@@ -1888,16 +1902,23 @@ func EnterpriseValidationFor(cfg Config, ready bool, access AccessPosture, audit
 	}
 
 	validation.Controls = append(validation.Controls, EnterpriseValidationControl{
-		Key:      "self_hosted_baseline",
-		Label:    "Self-hosted baseline",
-		State:    "ready",
-		Required: true,
-		Detail:   "Redacted readiness, explicit roles, catalog gates, and local audit must be clear.",
-		Tone:     "ok",
+		Key:                 "self_hosted_baseline",
+		Label:               "Self-hosted baseline",
+		State:               "ready",
+		Required:            true,
+		Detail:              "Redacted readiness, explicit roles, catalog gates, and local audit must be clear.",
+		OwnerRole:           "admin",
+		Attachment:          "local_posture",
+		EvidenceSignal:      "local_controls",
+		Next:                "Keep local readiness, role, audit, and catalog gates clear.",
+		EvidenceRefReturned: false,
+		ValueReturned:       false,
+		Tone:                "ok",
 	})
 	if !ready || !access.ExplicitBindings || !audit.ChainVerified || catalogGateCount > 0 {
 		validation.Controls[0].State = "review"
 		validation.Controls[0].Tone = "warn"
+		validation.Controls[0].Next = "Clear local readiness, role, audit, and catalog gates first."
 		if enterpriseMode {
 			validation.MissingCount++
 		}
@@ -1905,18 +1926,28 @@ func EnterpriseValidationFor(cfg Config, ready bool, access AccessPosture, audit
 
 	for _, spec := range enterpriseValidationSpecs() {
 		control := EnterpriseValidationControl{
-			Key:      spec.Key,
-			Label:    spec.Label,
-			State:    "not_claimed",
-			Required: enterpriseMode,
-			Detail:   spec.Detail,
-			Tone:     "info",
+			Key:                 spec.Key,
+			Label:               spec.Label,
+			State:               "not_claimed",
+			Required:            enterpriseMode,
+			Detail:              spec.Detail,
+			OwnerRole:           spec.OwnerRole,
+			Attachment:          "not_claimed",
+			EvidenceSignal:      "presence_only_env_flag",
+			Next:                "Switch to enterprise only after this external evidence exists.",
+			EvidenceRefReturned: false,
+			ValueReturned:       false,
+			Tone:                "info",
 		}
 		if enterpriseMode {
 			control.State = "missing"
+			control.Attachment = "missing"
+			control.Next = spec.Next
 			control.Tone = "warn"
 			if os.Getenv(spec.EnvKey) != "" {
 				control.State = "attached"
+				control.Attachment = "attached_presence_only"
+				control.Next = "Keep external evidence current and reviewed outside Janus."
 				control.Tone = "ok"
 			} else {
 				validation.MissingCount++
@@ -2178,6 +2209,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"evidence_download":         "auditor_json_with_pack_hash",
 			"evidence_receipt":          "download_header_body_match",
 			"enterprise_validation":     "self_hosted_safe_enterprise_required",
+			"enterprise_attachments":    "presence_only_no_refs",
 			"mode_guardrails":           "dashboard_posture_evidence",
 			"privacy_retention":         "dashboard_posture_evidence",
 			"negative_path_assurance":   "dashboard_posture_evidence",
@@ -2273,6 +2305,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"operational_status_strip",
 			"evidence_download_receipt",
 			"exact_evidence_download_receipt",
+			"enterprise_evidence_attachment_matrix",
 			"assurance_gate_proof_strip",
 			"enterprise_validation_clarity",
 			"privacy_retention_posture",
@@ -3146,13 +3179,16 @@ func mustTemplates() *template.Template {
   </div>
   <div class="panel-body stack">
     <p>{{ .Enterprise.Summary }}</p>
-    <p><span class="pill ok">value_returned=false</span> <span class="pill info">self-hosted safe</span> <span class="pill warn">enterprise required</span></p>
+    <p><span class="pill ok">value_returned=false</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill info">presence only</span> <span class="pill info">self-hosted safe</span> <span class="pill warn">enterprise required</span></p>
     <div class="mode-grid" aria-label="Enterprise validation controls">
       {{ range .Enterprise.Controls }}
       <div class="mode-item {{ .Tone }}">
         <span>{{ .Label }}</span>
         <strong>{{ .State }}</strong>
         <p>{{ .Detail }}</p>
+        <p><span class="pill info">owner {{ .OwnerRole }}</span> <span class="pill {{ if eq .Attachment "missing" }}warn{{ else if eq .Attachment "attached_presence_only" }}ok{{ else }}info{{ end }}">{{ .Attachment }}</span></p>
+        <p><span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
+        <p><span class="pill info">next</span> {{ .Next }}</p>
       </div>
       {{ end }}
     </div>
