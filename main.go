@@ -882,6 +882,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	roleWorkbench := RoleWorkbenchFor(session, ready)
 	actionReadiness := ActionReadinessFor(session, ready)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
+	commandCenter := CommandCenterFor(ready, operationalStatus, actionReadiness, modeGuardrails, attachmentReview, evidenceBoundary)
 	data := map[string]any{
 		"Title":             "Janus",
 		"CSPNonce":          cspNonceFromContext(r.Context()),
@@ -899,6 +900,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"RoleWorkbench":     roleWorkbench,
 		"ActionReadiness":   actionReadiness,
 		"OperationalStatus": operationalStatus,
+		"CommandCenter":     commandCenter,
 		"Ready":             ready,
 		"Readiness":         readinessBody,
 		"SessionPosture":    app.sessionPosture(session),
@@ -2185,6 +2187,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	roleAvailability := RoleAvailabilityFor(session)
 	actionReadiness := ActionReadinessFor(session, ready)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
+	commandCenter := CommandCenterFor(ready, operationalStatus, actionReadiness, modeGuardrails, attachmentReview, evidenceBoundary)
 	return map[string]any{
 		"service":            "janus",
 		"mode":               app.cfg.ProductMode,
@@ -2213,6 +2216,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"privacy_posture":         privacyPosture,
 		"evidence_receipt":        evidenceReceipt,
 		"action_readiness":        actionReadiness,
+		"command_center":          commandCenter,
 		"assurance_summary":       assuranceSummary,
 		"assurance_gates":         assuranceGates,
 		"negative_path_assurance": negativePath,
@@ -2264,6 +2268,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"attachment_review":         "presence_only_owner_review",
 			"restore_drill_proof":       "dashboard_posture_evidence",
 			"action_readiness":          "role_and_readiness_matrix",
+			"command_center":            "dashboard_posture_api",
 			"action_receipts":           "mutation_result_receipts",
 			"action_receipt_integrity":  "tamper_evident_hash_proof",
 			"mode_guardrails":           "dashboard_posture_evidence",
@@ -2366,6 +2371,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_attachment_review_workflow",
 			"restore_drill_proof",
 			"role_aware_action_readiness",
+			"command_center_ux",
 			"value_free_action_receipts",
 			"tamper_evident_action_receipts",
 			"assurance_gate_proof_strip",
@@ -2716,13 +2722,61 @@ func mustTemplates() *template.Template {
       min-width: 0;
     }
     .trust-step:last-child { border-right: 0; }
-    .trust-step span { color: var(--muted); font-size: 12px; }
-    .trust-step strong { font-size: 16px; line-height: 1.15; overflow-wrap: anywhere; }
-    .trust-step.ok strong { color: var(--accent); }
-    .trust-step.warn strong { color: var(--amber); }
-    .mode-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+	    .trust-step span { color: var(--muted); font-size: 12px; }
+	    .trust-step strong { font-size: 16px; line-height: 1.15; overflow-wrap: anywhere; }
+	    .trust-step.ok strong { color: var(--accent); }
+	    .trust-step.warn strong { color: var(--amber); }
+	    .command-top {
+	      display: grid;
+	      grid-template-columns: minmax(0, 1fr) auto;
+	      gap: 14px;
+	      align-items: start;
+	      margin-bottom: 14px;
+	    }
+	    .command-state {
+	      min-width: 164px;
+	      border: 1px solid var(--line);
+	      border-radius: 8px;
+	      background: var(--panel-soft);
+	      padding: 11px 12px;
+	      display: grid;
+	      gap: 4px;
+	    }
+	    .command-state span { color: var(--muted); font-size: 12px; }
+	    .command-state strong { font-size: 22px; line-height: 1.1; overflow-wrap: anywhere; }
+	    .command-state.ok strong { color: var(--accent); }
+	    .command-state.warn strong { color: var(--amber); }
+	    .command-state.info strong { color: var(--blue); }
+	    .command-grid {
+	      display: grid;
+	      grid-template-columns: repeat(4, minmax(0, 1fr));
+	      gap: 10px;
+	    }
+	    .command-card {
+	      min-height: 134px;
+	      border: 1px solid var(--line);
+	      border-radius: 8px;
+	      background: var(--panel-soft);
+	      padding: 12px;
+	      display: grid;
+	      align-content: space-between;
+	      gap: 8px;
+	      min-width: 0;
+	    }
+	    .command-card span { color: var(--muted); font-size: 12px; }
+	    .command-card strong { font-size: 17px; line-height: 1.15; overflow-wrap: anywhere; }
+	    .command-card.ok strong { color: var(--accent); }
+	    .command-card.warn strong { color: var(--amber); }
+	    .command-card.info strong { color: var(--blue); }
+	    .command-actions {
+	      display: flex;
+	      flex-wrap: wrap;
+	      gap: 8px;
+	      margin-top: 14px;
+	    }
+	    .mode-grid {
+	      display: grid;
+	      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 10px;
     }
     .mode-item {
@@ -2956,9 +3010,11 @@ func mustTemplates() *template.Template {
       .flow { grid-template-columns: 1fr; }
       .facts { grid-template-columns: 1fr; gap: 10px; }
       .verdict { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .role-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .ops-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	      .role-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	      .ops-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	      .command-top { grid-template-columns: 1fr; }
+	      .command-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	      .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .receipt { grid-template-columns: 1fr; }
       .receipt-proof { grid-template-columns: 1fr; }
       .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2971,9 +3027,12 @@ func mustTemplates() *template.Template {
       .bar, main { width: calc(100% - 22px); max-width: 1180px; }
       .status-body { grid-template-columns: 1fr; }
       .verdict { grid-template-columns: 1fr; }
-      .role-matrix { grid-template-columns: 1fr; }
-      .ops-strip { grid-template-columns: 1fr; }
-      .mode-grid { grid-template-columns: 1fr; }
+	      .role-matrix { grid-template-columns: 1fr; }
+	      .ops-strip { grid-template-columns: 1fr; }
+	      .command-grid { grid-template-columns: 1fr; }
+	      .command-actions { display: grid; grid-template-columns: 1fr; }
+	      .command-actions .button { width: 100%; }
+	      .mode-grid { grid-template-columns: 1fr; }
       .receipt { grid-template-columns: 1fr; }
       .receipt-proof { grid-template-columns: 1fr; }
       .assurance-flow { grid-template-columns: 1fr; }
@@ -2990,11 +3049,12 @@ func mustTemplates() *template.Template {
 <header>
   <div class="bar">
     <div class="brand"><div class="mark">J</div><div>Janus</div></div>
-    {{ if .Session.Subject }}
-    <nav class="nav" aria-label="Primary">
-      <a href="#overview">Overview</a>
-      {{ if .CanOperate }}
-      <a href="#warden">Warden</a>
+	    {{ if .Session.Subject }}
+	    <nav class="nav" aria-label="Primary">
+	      <a href="#overview">Overview</a>
+	      <a href="#command-center">Command</a>
+	      {{ if .CanOperate }}
+	      <a href="#warden">Warden</a>
       <a href="#permit">Permit</a>
       {{ if .Permits }}<a href="#permits">Permits</a>{{ end }}
       {{ end }}
@@ -3128,10 +3188,46 @@ func mustTemplates() *template.Template {
       </div>
     </div>
 	  </div>
-	</section>
-	<section class="panel" style="margin-bottom:16px" id="mode-guardrails">
-	  <div class="panel-head">
-	    <h2>Mode guardrails</h2>
+		</section>
+		<section class="panel" style="margin-bottom:16px" id="command-center">
+		  <div class="panel-head">
+		    <h2>Command center</h2>
+		    <span class="pill {{ if eq .CommandCenter.State "ready" }}ok{{ else if eq .CommandCenter.State "review" }}info{{ else }}warn{{ end }}">{{ .CommandCenter.State }}</span>
+		  </div>
+		  <div class="panel-body">
+		    <div class="command-top">
+		      <div class="stack">
+		        <p>{{ .CommandCenter.Summary }}</p>
+		        <p><span class="pill ok">{{ .CommandCenter.Boundary }}</span> <span class="pill ok">value_returned=false</span> <span class="pill info">{{ .CommandCenter.AvailableActions }} safe actions</span> <span class="pill {{ if .CommandCenter.BlockedActions }}warn{{ else }}ok{{ end }}">{{ .CommandCenter.BlockedActions }} blocked</span> <span class="pill {{ if .CommandCenter.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .CommandCenter.ReviewCount }} review</span></p>
+		      </div>
+		      <div class="command-state {{ if eq .CommandCenter.State "ready" }}ok{{ else if eq .CommandCenter.State "review" }}info{{ else }}warn{{ end }}">
+		        <span>Now</span>
+		        <strong>{{ .CommandCenter.State }}</strong>
+		        <span>metadata only</span>
+		      </div>
+		    </div>
+		    <div class="command-grid" aria-label="Command center status">
+		      {{ range .CommandCenter.Cards }}
+		      <div class="command-card {{ .Tone }}">
+		        <span>{{ .Label }}</span>
+		        <strong>{{ .State }}</strong>
+		        <p>{{ .Detail }}</p>
+		        <p><span class="pill info">next</span> {{ .Next }}</p>
+		      </div>
+		      {{ end }}
+		    </div>
+		    {{ if .CommandCenter.QuickActions }}
+		    <div class="command-actions" aria-label="Safe quick actions">
+		      {{ range .CommandCenter.QuickActions }}
+		      <a class="button {{ if eq .Key "evidence_export" }}primary{{ else }}quiet{{ end }}" href="{{ .Href }}">{{ .Label }}</a>
+		      {{ end }}
+		    </div>
+		    {{ end }}
+		  </div>
+		</section>
+		<section class="panel" style="margin-bottom:16px" id="mode-guardrails">
+		  <div class="panel-head">
+		    <h2>Mode guardrails</h2>
 	    <span class="pill {{ if .ModeGuardrails.BlockedCount }}warn{{ else if .ModeGuardrails.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .ModeGuardrails.Claim }}</span>
 	  </div>
 	  <div class="panel-body stack">

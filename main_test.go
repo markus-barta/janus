@@ -843,6 +843,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"operational_status"`) || !strings.Contains(body, `"key":"role_duties"`) || !strings.Contains(body, `"key":"value_boundary"`) || !strings.Contains(body, `"operational_status_strip"`) || !strings.Contains(body, `"operational_status":"dashboard_posture_strip"`) {
 		t.Fatalf("posture response should include operational status strip: %s", body)
 	}
+	if !strings.Contains(body, `"command_center"`) || !strings.Contains(body, `"key":"safety_state"`) || !strings.Contains(body, `"key":"role_access"`) || !strings.Contains(body, `"key":"enterprise_review"`) || !strings.Contains(body, `"key":"evidence_export"`) || !strings.Contains(body, `"command_center":"dashboard_posture_api"`) || !strings.Contains(body, `"command_center_ux"`) {
+		t.Fatalf("posture response should include command center UX: %s", body)
+	}
 	if !strings.Contains(body, `"mode_posture"`) || !strings.Contains(body, `"current":"Self-hosted"`) || !strings.Contains(body, `"enterprise":"not_claimed"`) || !strings.Contains(body, `"mode_posture_evidence"`) {
 		t.Fatalf("posture response should include product-mode evidence: %s", body)
 	}
@@ -1748,6 +1751,24 @@ func actionReadinessHasState(items []ActionReadinessItem, key, state string) boo
 	return false
 }
 
+func commandCenterHasCard(items []CommandCenterCard, key, state string) bool {
+	for _, item := range items {
+		if item.Key == key && item.State == state {
+			return true
+		}
+	}
+	return false
+}
+
+func commandCenterHasAction(items []CommandCenterAction, key, href string) bool {
+	for _, item := range items {
+		if item.Key == key && item.Href == href && !item.ValueReturned {
+			return true
+		}
+	}
+	return false
+}
+
 func degradedGuidanceHasState(items []DegradedGuidanceItem, key, state string) bool {
 	for _, item := range items {
 		if item.Key == key && item.State == state {
@@ -1973,7 +1994,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
+	for _, want := range []string{"Session identity", "Local Dev", "admin", "Live posture", "Operational status", "Command center", "Command center status", "Safe quick actions", "Safety state", "Role access", "Enterprise review", "Now", "metadata_only", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Known human", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Evidence JSON", "Request metadata handle", "Request permit", "Access policy", "bootstrap owner", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
@@ -2622,7 +2643,7 @@ func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
 				`action="/ui/warden/resolve"`,
 				`action="/ui/permits"`,
 			},
-			navWant:   []string{`href="#overview"`, `href="#posture"`, `href="#catalog"`},
+			navWant:   []string{`href="#overview"`, `href="#command-center"`, `href="#posture"`, `href="#catalog"`},
 			navHidden: []string{`href="#warden"`, `href="#permit"`, `href="#audit"`},
 		},
 		{
@@ -2642,7 +2663,7 @@ func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
 				`action="/ui/warden/resolve"`,
 				`action="/ui/permits"`,
 			},
-			navWant:   []string{`href="#overview"`, `href="#posture"`, `href="#audit"`, `href="#catalog"`},
+			navWant:   []string{`href="#overview"`, `href="#command-center"`, `href="#posture"`, `href="#audit"`, `href="#catalog"`},
 			navHidden: []string{`href="#warden"`, `href="#permit"`},
 		},
 		{
@@ -2661,7 +2682,7 @@ func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
 				"Audit rows and evidence export are available.",
 				"Admin policy review is available.",
 			},
-			navWant:   []string{`href="#overview"`, `href="#warden"`, `href="#permit"`, `href="#posture"`, `href="#catalog"`},
+			navWant:   []string{`href="#overview"`, `href="#command-center"`, `href="#warden"`, `href="#permit"`, `href="#posture"`, `href="#catalog"`},
 			navHidden: []string{`href="#audit"`},
 		},
 		{
@@ -2676,7 +2697,7 @@ func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
 				"Request metadata handle",
 				"Request permit",
 			},
-			navWant: []string{`href="#overview"`, `href="#warden"`, `href="#permit"`, `href="#posture"`, `href="#audit"`, `href="#catalog"`},
+			navWant: []string{`href="#overview"`, `href="#command-center"`, `href="#warden"`, `href="#permit"`, `href="#posture"`, `href="#audit"`, `href="#catalog"`},
 		},
 	}
 
@@ -2755,6 +2776,49 @@ func TestActionReadinessDistinguishesRoleAndReadinessGates(t *testing.T) {
 	}
 	if !actionReadinessHasState(degraded.Actions, "posture_view", "available") || !actionReadinessHasState(degraded.Actions, "admin_policy_review", "available") {
 		t.Fatalf("degraded readiness should leave safe review actions available: %#v", degraded)
+	}
+}
+
+func TestCommandCenterSurfacesSafeNextActions(t *testing.T) {
+	policy := RolePolicy{
+		AdminSubjects:    map[string]bool{"markus@barta.com": true},
+		AuditorSubjects:  map[string]bool{"markus@barta.com": true},
+		OperatorSubjects: map[string]bool{"markus@barta.com": true},
+		BootstrapOwner:   false,
+	}
+	access := AccessPostureFor(policy)
+	audit := AuditPosture{ChainVerified: true, SinkWritable: true}
+	enterprise := EnterpriseValidationFor(Config{ProductMode: "self_hosted", RolePolicy: policy}, true, access, audit, 0)
+	attachments := AttachmentReviewFor(enterprise)
+	mode := ModeGuardrailsFor(Config{ProductMode: "self_hosted", RolePolicy: policy}, true, nil, access, audit, 0, enterprise)
+
+	viewerActions := ActionReadinessFor(Session{Roles: []string{RoleViewer}}, true)
+	viewer := CommandCenterFor(true, OperationalStatus{Verdict: "review", Summary: "review visible"}, viewerActions, mode, attachments, EvidenceBoundaryFor(false, false))
+	if viewer.ValueReturned || viewer.Boundary != "metadata_only" || viewer.AvailableActions != 1 || viewer.BlockedActions != 0 || viewer.ReviewCount == 0 {
+		t.Fatalf("viewer command center should stay value-free and show safe review state: %#v", viewer)
+	}
+	if !commandCenterHasCard(viewer.Cards, "role_access", "1 available") || !commandCenterHasCard(viewer.Cards, "enterprise_review", "not_claimed") || !commandCenterHasCard(viewer.Cards, "evidence_export", "auditor_required") {
+		t.Fatalf("viewer command center should summarize role, enterprise, and evidence state: %#v", viewer)
+	}
+	if !commandCenterHasAction(viewer.QuickActions, "posture_view", "#posture") || commandCenterHasAction(viewer.QuickActions, "handle_issue", "#warden") {
+		t.Fatalf("viewer command center should only expose available quick actions: %#v", viewer.QuickActions)
+	}
+
+	degradedActions := ActionReadinessFor(Session{Roles: AllRoles()}, false)
+	degraded := CommandCenterFor(false, OperationalStatus{Verdict: "review", Summary: "readiness degraded"}, degradedActions, mode, attachments, EvidenceBoundaryFor(true, true))
+	if degraded.State != "restricted" || degraded.BlockedActions == 0 || !commandCenterHasCard(degraded.Cards, "safety_state", "restricted") {
+		t.Fatalf("degraded command center should fail closed: %#v", degraded)
+	}
+
+	for _, spec := range enterpriseValidationSpecs() {
+		t.Setenv(spec.EnvKey, "")
+	}
+	enterpriseBlockedValidation := EnterpriseValidationFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, access, audit, 0)
+	enterpriseBlockedReview := AttachmentReviewFor(enterpriseBlockedValidation)
+	enterpriseBlockedMode := ModeGuardrailsFor(Config{ProductMode: "enterprise", RolePolicy: policy}, true, nil, access, audit, 0, enterpriseBlockedValidation)
+	blocked := CommandCenterFor(true, OperationalStatus{Verdict: "review", Summary: "enterprise blocked"}, ActionReadinessFor(Session{Roles: AllRoles()}, true), enterpriseBlockedMode, enterpriseBlockedReview, EvidenceBoundaryFor(true, true))
+	if blocked.State != "blocked" || !commandCenterHasCard(blocked.Cards, "enterprise_review", "blocked") || blocked.ValueReturned {
+		t.Fatalf("enterprise command center should surface missing external evidence: %#v", blocked)
 	}
 }
 

@@ -138,6 +138,38 @@ type ActionReadinessItem struct {
 	Tone          string `json:"tone"`
 }
 
+type CommandCenter struct {
+	Summary          string                `json:"summary"`
+	State            string                `json:"state"`
+	Boundary         string                `json:"boundary"`
+	AvailableActions int                   `json:"available_actions"`
+	BlockedActions   int                   `json:"blocked_actions"`
+	ReviewCount      int                   `json:"review_count"`
+	Cards            []CommandCenterCard   `json:"cards"`
+	QuickActions     []CommandCenterAction `json:"quick_actions"`
+	ValueReturned    bool                  `json:"value_returned"`
+}
+
+type CommandCenterCard struct {
+	Key    string `json:"key"`
+	Label  string `json:"label"`
+	State  string `json:"state"`
+	Detail string `json:"detail"`
+	Next   string `json:"next"`
+	Tone   string `json:"tone"`
+}
+
+type CommandCenterAction struct {
+	Key           string `json:"key"`
+	Label         string `json:"label"`
+	State         string `json:"state"`
+	Href          string `json:"href"`
+	RequiredRole  string `json:"required_role"`
+	Safety        string `json:"safety"`
+	ValueReturned bool   `json:"value_returned"`
+	Tone          string `json:"tone"`
+}
+
 type ActionReceipt struct {
 	Schema              string `json:"schema"`
 	Algorithm           string `json:"algorithm"`
@@ -463,6 +495,143 @@ func (s *OperationalStatus) add(ok bool, key, label, okState, reviewState, okDet
 		return
 	}
 	s.Items = append(s.Items, OperationalStatusItem{Key: key, Label: label, State: reviewState, Detail: reviewDetail, Tone: "warn"})
+}
+
+func CommandCenterFor(ready bool, operational OperationalStatus, actions ActionReadiness, mode ModeGuardrails, attachments AttachmentReview, boundary EvidenceBoundary) CommandCenter {
+	reviewCount := actions.Gated + mode.ReviewCount + attachments.ReviewCount
+	blockedActions := actions.Blocked
+	blockedCount := blockedActions + mode.BlockedCount + attachments.Missing
+	center := CommandCenter{
+		Summary:          "Safe metadata controls are available; review items stay visible before stronger claims.",
+		State:            "review",
+		Boundary:         "metadata_only",
+		AvailableActions: actions.Available,
+		BlockedActions:   blockedActions,
+		ReviewCount:      reviewCount,
+		ValueReturned:    false,
+	}
+	if !ready {
+		center.State = "restricted"
+		center.Summary = "Sensitive actions are fail-closed until readiness returns."
+	} else if blockedCount > 0 {
+		center.State = "blocked"
+		center.Summary = "Some controls are blocked; read-only posture stays available while fixes happen."
+	} else if operational.Verdict == "operational" && reviewCount == 0 {
+		center.State = "ready"
+		center.Summary = "Current session is ready, scoped, role-complete, and value-free."
+	}
+
+	safetyState := "ready"
+	safetyTone := "ok"
+	safetyNext := "Use the available role actions or keep reviewing posture."
+	if !ready {
+		safetyState = "restricted"
+		safetyTone = "warn"
+		safetyNext = "Recover readiness before using sensitive actions."
+	}
+	center.Cards = append(center.Cards, CommandCenterCard{
+		Key:    "safety_state",
+		Label:  "Safety state",
+		State:  safetyState,
+		Detail: operational.Summary,
+		Next:   safetyNext,
+		Tone:   safetyTone,
+	})
+
+	roleTone := "ok"
+	roleNext := "Use the available dashboard actions."
+	if actions.Blocked > 0 {
+		roleTone = "warn"
+		roleNext = "Recover readiness before using blocked actions."
+	} else if actions.Gated > 0 {
+		roleTone = "info"
+		roleNext = "Use a session with the matching role for gated duties."
+	}
+	center.Cards = append(center.Cards, CommandCenterCard{
+		Key:    "role_access",
+		Label:  "Role access",
+		State:  fmt.Sprintf("%d available", actions.Available),
+		Detail: fmt.Sprintf("%d role gated, %d readiness blocked.", actions.Gated, actions.Blocked),
+		Next:   roleNext,
+		Tone:   roleTone,
+	})
+
+	enterpriseTone := "info"
+	enterpriseNext := "Stay self-hosted until external evidence is reviewed."
+	if attachments.Missing > 0 || attachments.Status == "blocked" {
+		enterpriseTone = "warn"
+		enterpriseNext = "Attach missing external evidence outside Janus."
+	} else if attachments.Status == "candidate" {
+		enterpriseTone = "ok"
+		enterpriseNext = "Keep owner review current outside Janus."
+	}
+	center.Cards = append(center.Cards, CommandCenterCard{
+		Key:    "enterprise_review",
+		Label:  "Enterprise review",
+		State:  attachments.Status,
+		Detail: fmt.Sprintf("%d required, %d attached, %d missing.", attachments.Required, attachments.Attached, attachments.Missing),
+		Next:   enterpriseNext,
+		Tone:   enterpriseTone,
+	})
+
+	evidenceTone := "warn"
+	evidenceNext := "Use an auditor session to export evidence."
+	evidenceDetail := "Evidence JSON is role-gated and values stay withheld."
+	if boundary.Gate == "export_ready" {
+		evidenceTone = "ok"
+		evidenceNext = "Download the evidence JSON when an audit pack is needed."
+		if boundary.HashAvailable {
+			evidenceDetail = "Evidence JSON and receipt hash are ready."
+		} else {
+			evidenceDetail = "Evidence JSON is available; exact hash is returned on download."
+		}
+	}
+	center.Cards = append(center.Cards, CommandCenterCard{
+		Key:    "evidence_export",
+		Label:  "Evidence export",
+		State:  boundary.Gate,
+		Detail: evidenceDetail,
+		Next:   evidenceNext,
+		Tone:   evidenceTone,
+	})
+
+	for _, action := range actions.Actions {
+		if action.State != "available" {
+			continue
+		}
+		if href := commandActionHref(action.Key); href != "" {
+			center.QuickActions = append(center.QuickActions, CommandCenterAction{
+				Key:           action.Key,
+				Label:         action.Label,
+				State:         action.State,
+				Href:          href,
+				RequiredRole:  action.RequiredRole,
+				Safety:        action.Safety,
+				ValueReturned: false,
+				Tone:          action.Tone,
+			})
+		}
+	}
+	return center
+}
+
+func commandActionHref(key string) string {
+	switch key {
+	case "posture_view":
+		return "#posture"
+	case "evidence_export":
+		return "/api/evidence"
+	case "handle_issue":
+		return "#warden"
+	case "permit_create":
+		return "#permit"
+	case "permit_run_check":
+		return "#permit"
+	case "admin_policy_review":
+		return "#role-workbench"
+	default:
+		return ""
+	}
 }
 
 func ModeGuardrailsFor(cfg Config, ready bool, issues []string, access AccessPosture, audit AuditPosture, catalogGateCount int, enterprise EnterpriseValidation) ModeGuardrails {
