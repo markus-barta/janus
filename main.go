@@ -1823,7 +1823,7 @@ func mustTemplates() *template.Template {
     .bar {
       min-height: 66px;
       display: grid;
-      grid-template-columns: auto 1fr auto;
+      grid-template-columns: auto minmax(0, 1fr) auto auto;
       align-items: center;
       gap: 18px;
     }
@@ -1847,6 +1847,32 @@ func mustTemplates() *template.Template {
       white-space: nowrap;
     }
     .nav a:hover { background: var(--panel-soft); color: var(--ink); }
+    .account {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+      max-width: 280px;
+      justify-self: end;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px 9px;
+      background: var(--panel-soft);
+    }
+    .account strong {
+      font-size: 13px;
+      line-height: 1.2;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .account span {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.2;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     main { padding: 26px 0 52px; }
     h1 { margin: 0; font-size: 40px; line-height: 1.04; letter-spacing: 0; }
     h2 { margin: 0; font-size: 18px; letter-spacing: 0; }
@@ -2020,6 +2046,7 @@ func mustTemplates() *template.Template {
     @media (max-width: 860px) {
       .bar { grid-template-columns: 1fr auto; padding: 12px 0; }
       .nav { grid-column: 1 / -1; justify-content: flex-start; overflow-x: auto; padding-bottom: 2px; }
+      .account { grid-column: 1 / -1; justify-self: stretch; max-width: none; }
       .overview { grid-template-columns: 1fr; }
       .panel.half { grid-column: span 12; }
       .flow { grid-template-columns: 1fr; }
@@ -2060,6 +2087,10 @@ func mustTemplates() *template.Template {
     <div></div>
     {{ end }}
     {{ if .Session.Subject }}
+    <div class="account" aria-label="Session identity">
+      <strong>{{ if .Session.Name }}{{ .Session.Name }}{{ else if .Session.Email }}{{ .Session.Email }}{{ else }}{{ .Session.Subject }}{{ end }}</strong>
+      <span>{{ range .Session.Roles }}{{ . }} {{ end }}</span>
+    </div>
     <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button type="submit">Sign out</button></form>
     {{ else }}
     <a class="button primary" href="/login">Sign in</a>
