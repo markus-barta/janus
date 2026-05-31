@@ -6827,10 +6827,10 @@ func mustTemplates() *template.Template {
 	      <p>Checks a copy-safe witness proof line and hash. Pasted input is not echoed, stored, or returned.</p>
 	    </div>
 	    <div class="toolbar">
-	      <a class="button primary" href="/session-witness">Witness</a>
+	      <a class="button quiet" href="/session-witness">Witness</a>
+	      <a class="button primary" href="/session-witness/evidence.txt">Evidence text</a>
 	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
 	      <a class="button quiet" href="/session-witness/proof.txt">Proof pack</a>
-	      <a class="button quiet" href="/session-witness/evidence.txt">Evidence text</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
 		      <form method="post" action="/session-witness/verify-current-pack">
 		        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
@@ -6978,10 +6978,10 @@ func mustTemplates() *template.Template {
 	      <p>{{ .AuthenticatedBrowser.Summary }}</p>
 	    </div>
 	    <div class="toolbar">
-	      <a class="button primary" href="/">Dashboard</a>
+	      <a class="button primary" href="/session-witness/evidence.txt">Evidence text</a>
+	      <a class="button quiet" href="/">Dashboard</a>
 	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
 	      <a class="button quiet" href="/session-witness/proof.txt">Proof pack</a>
-	      <a class="button quiet" href="/session-witness/evidence.txt">Evidence text</a>
 	      <a class="button quiet" href="/session-witness/verify">Verify proof</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
 		      <form method="post" action="/session-witness/verify-current-pack">
@@ -6996,10 +6996,10 @@ func mustTemplates() *template.Template {
 	        <p>signed_browser_capture=true</p>
 	      </div>
 	      <div class="reviewer-step action">
-	        <a class="button primary" href="/session-witness/proof.txt">Open proof pack</a>
+	        <a class="button primary" href="/session-witness/evidence.txt">Open evidence text</a>
 	      </div>
 	      <div class="reviewer-step action">
-	        <a class="button quiet" href="/session-witness/evidence.txt">Open evidence text</a>
+	        <a class="button quiet" href="/session-witness/proof.txt">Open proof pack</a>
 	      </div>
 	      <div class="reviewer-step action">
 		        <form method="post" action="/session-witness/verify-current-pack">
@@ -7010,7 +7010,7 @@ func mustTemplates() *template.Template {
 	      <div class="reviewer-step ok">
 	        <span>Boundary</span>
 	        <strong>values withheld</strong>
-	        <p>proof_pack_contains_verification=true</p>
+	        <p>evidence_text_copy_safe=true</p>
 	      </div>
 	    </div>
 	    <div class="reviewer-flow" aria-label="Reviewer launch checklist">

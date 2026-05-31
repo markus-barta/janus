@@ -645,10 +645,16 @@ func TestSessionWitnessPageRendersCopySafeCapture(t *testing.T) {
 	}
 	capturedAt, freshUntil := assertWitnessFreshnessHeaders(t, out)
 	body := out.Body.String()
-	for _, want := range []string{"Session witness capture", "Reviewer handoff", "browser proof ready", "Open proof pack", "Open evidence text", "Evidence text", "Verify proof pack", "Verify current proof pack", "Reviewer launch checklist", "Browser session", "Current proof pack", "Evidence receipt", "Human capture", "JANUS-195 real browser proof remains.", "signed_browser_capture=true", "proof_pack_contains_verification=true", "Capture proof", "Proof hash", pageReceiptHash, "Captured", "Fresh until", capturedAt, freshUntil, "sha256-witness-v1", "freshness_seconds=300", "captured_at=" + capturedAt, "fresh_until=" + freshUntil, "hash_header=X-Janus-Witness-Hash", "hash_body_field=receipt.hash", "Witness headers", "Session witness value boundary", "janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signed_session_browser_proof_no_identity_values", "X-Janus-Witness-State", "X-Janus-Witness-Flow", "X-Janus-Witness-Signal", "X-Janus-Witness-Hash", "X-Janus-Witness-Captured-At", "X-Janus-Witness-Fresh-Until", "X-Janus-Witness-Freshness-Seconds", "request_id=session-witness-page-123", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Session witness capture", "Reviewer handoff", "browser proof ready", "Open proof pack", "Open evidence text", "Evidence text", "Verify proof pack", "Verify current proof pack", "Reviewer launch checklist", "Browser session", "Current proof pack", "Evidence receipt", "Human capture", "JANUS-195 real browser proof remains.", "signed_browser_capture=true", "evidence_text_copy_safe=true", "Capture proof", "Proof hash", pageReceiptHash, "Captured", "Fresh until", capturedAt, freshUntil, "sha256-witness-v1", "freshness_seconds=300", "captured_at=" + capturedAt, "fresh_until=" + freshUntil, "hash_header=X-Janus-Witness-Hash", "hash_body_field=receipt.hash", "Witness headers", "Session witness value boundary", "janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signed_session_browser_proof_no_identity_values", "X-Janus-Witness-State", "X-Janus-Witness-Flow", "X-Janus-Witness-Signal", "X-Janus-Witness-Hash", "X-Janus-Witness-Captured-At", "X-Janus-Witness-Fresh-Until", "X-Janus-Witness-Freshness-Seconds", "request_id=session-witness-page-123", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("session witness page should include %s: %s", want, body)
 		}
+	}
+	if !strings.Contains(body, `<a class="button primary" href="/session-witness/evidence.txt">Evidence text</a>`) || !strings.Contains(body, `<a class="button primary" href="/session-witness/evidence.txt">Open evidence text</a>`) {
+		t.Fatalf("session witness page should make evidence text the primary handoff: %s", body)
+	}
+	if strings.Contains(body, `<a class="button primary" href="/session-witness/proof.txt">Open proof pack</a>`) {
+		t.Fatalf("session witness page should not make proof pack the primary handoff: %s", body)
 	}
 	if !strings.Contains(body, `action="/session-witness/verify-current-pack"`) || !strings.Contains(body, "Verify current proof pack") {
 		t.Fatalf("session witness page should include one-click proof-pack verifier action: %s", body)
@@ -1054,6 +1060,9 @@ func TestSessionWitnessVerifierUIAndAPIAreValueFree(t *testing.T) {
 		if !strings.Contains(pageBody, want) {
 			t.Fatalf("verifier page should include %q: %s", want, pageBody)
 		}
+	}
+	if !strings.Contains(pageBody, `<a class="button primary" href="/session-witness/evidence.txt">Evidence text</a>`) {
+		t.Fatalf("verifier page should keep evidence text as the safe primary reference: %s", pageBody)
 	}
 	assertRouteResponseValueFree(t, "session witness verifier page", pageOut)
 
