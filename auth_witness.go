@@ -97,6 +97,7 @@ type WitnessReceiptVerification struct {
 	Status              string                            `json:"status"`
 	Summary             string                            `json:"summary"`
 	Receipt             *WitnessVerificationReceipt       `json:"receipt,omitempty"`
+	Evidence            *WitnessEvidenceReceipt           `json:"evidence,omitempty"`
 	Schema              string                            `json:"schema,omitempty"`
 	State               string                            `json:"state,omitempty"`
 	Flow                string                            `json:"flow,omitempty"`
@@ -132,6 +133,28 @@ type WitnessVerificationReceipt struct {
 	InputReturned       bool   `json:"input_returned"`
 	RequestBodyReturned bool   `json:"request_body_returned"`
 	ValueReturned       bool   `json:"value_returned"`
+}
+
+type WitnessEvidenceReceipt struct {
+	Label                  string   `json:"label"`
+	Line                   string   `json:"line"`
+	Status                 string   `json:"status"`
+	Summary                string   `json:"summary"`
+	SourceRequestID        string   `json:"source_request_id"`
+	CapturedAt             string   `json:"captured_at"`
+	FreshUntil             string   `json:"fresh_until"`
+	FreshnessSeconds       int      `json:"freshness_seconds"`
+	HashMatch              bool     `json:"hash_match"`
+	Fresh                  bool     `json:"fresh"`
+	Verified               bool     `json:"verified"`
+	ProofPackVerified      bool     `json:"proof_pack_verified"`
+	VerificationHash       string   `json:"verification_hash,omitempty"`
+	VerificationHashHeader string   `json:"verification_hash_header,omitempty"`
+	CopySafe               bool     `json:"copy_safe"`
+	InputReturned          bool     `json:"input_returned"`
+	RequestBodyReturned    bool     `json:"request_body_returned"`
+	ValueReturned          bool     `json:"value_returned"`
+	Excluded               []string `json:"excluded"`
 }
 
 type WitnessReceiptVerificationCheck struct {
@@ -723,6 +746,78 @@ func WitnessReceiptVerificationLineFor(verification WitnessReceiptVerification, 
 		" input_returned=false" +
 		" request_body_returned=false" +
 		" value_returned=false"
+}
+
+func WitnessEvidenceReceiptFor(verification WitnessReceiptVerification) WitnessEvidenceReceipt {
+	verificationHash := ""
+	verificationHashHeader := ""
+	if verification.Receipt != nil {
+		verificationHash = verification.Receipt.Hash
+		verificationHashHeader = verification.Receipt.HashHeader
+	}
+	evidence := WitnessEvidenceReceipt{
+		Label:                  "Signed-browser evidence receipt",
+		Status:                 safeDisplayState(verification.Status),
+		Summary:                "Review-ready evidence: verification state and value-boundary facts only.",
+		SourceRequestID:        safeDisplayState(verification.RequestID),
+		CapturedAt:             safeDisplayState(verification.CapturedAt),
+		FreshUntil:             safeDisplayState(verification.FreshUntil),
+		FreshnessSeconds:       verification.FreshnessSeconds,
+		HashMatch:              verification.HashMatch,
+		Fresh:                  verification.Fresh,
+		Verified:               verification.Verified,
+		ProofPackVerified:      witnessCheckPassed(verification.Checks, "proof_pack_shape"),
+		VerificationHash:       verificationHash,
+		VerificationHashHeader: verificationHashHeader,
+		CopySafe:               true,
+		InputReturned:          false,
+		RequestBodyReturned:    false,
+		ValueReturned:          false,
+		Excluded: []string{
+			"cookie_value",
+			"token",
+			"subject",
+			"email",
+			"name",
+			"claim_values",
+			"request_body",
+			"backend_path",
+			"env_values",
+			"connector_output",
+			"permit_payload",
+			"secret_value",
+		},
+	}
+	evidence.Line = WitnessEvidenceLineFor(evidence)
+	return evidence
+}
+
+func WitnessEvidenceLineFor(evidence WitnessEvidenceReceipt) string {
+	return "janus_signed_browser_evidence" +
+		" status=" + safeDisplayState(evidence.Status) +
+		" source_request_id=" + safeDisplayState(evidence.SourceRequestID) +
+		" captured_at=" + safeDisplayState(evidence.CapturedAt) +
+		" fresh_until=" + safeDisplayState(evidence.FreshUntil) +
+		" freshness_seconds=" + strconv.Itoa(evidence.FreshnessSeconds) +
+		" hash_match=" + strconv.FormatBool(evidence.HashMatch) +
+		" fresh=" + strconv.FormatBool(evidence.Fresh) +
+		" verified=" + strconv.FormatBool(evidence.Verified) +
+		" proof_pack_verified=" + strconv.FormatBool(evidence.ProofPackVerified) +
+		" verification_hash=" + safeDisplayState(evidence.VerificationHash) +
+		" verification_hash_header=" + safeDisplayState(evidence.VerificationHashHeader) +
+		" copy_safe=true" +
+		" input_returned=false" +
+		" request_body_returned=false" +
+		" value_returned=false"
+}
+
+func witnessCheckPassed(checks []WitnessReceiptVerificationCheck, key string) bool {
+	for _, check := range checks {
+		if check.Key == key && check.Tone == "ok" {
+			return true
+		}
+	}
+	return false
 }
 
 func parseWitnessProofLine(proofLine string) (map[string]string, []WitnessReceiptVerificationCheck, bool) {

@@ -1058,6 +1058,15 @@ func applyWitnessVerificationHeaders(w http.ResponseWriter, receipt WitnessVerif
 	w.Header().Set("X-Janus-Value-Returned", "false")
 }
 
+func attachWitnessEvidence(w http.ResponseWriter, verification WitnessReceiptVerification, requestID string) WitnessReceiptVerification {
+	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID)
+	verification.Receipt = &receipt
+	evidence := WitnessEvidenceReceiptFor(verification)
+	verification.Evidence = &evidence
+	applyWitnessVerificationHeaders(w, receipt)
+	return verification
+}
+
 func focusDescriptor(descriptors []SecretDescriptor, selectedRef string) DescriptorFocus {
 	if len(descriptors) == 0 {
 		return DescriptorFocus{}
@@ -1264,9 +1273,7 @@ func (app *App) handleSessionWitnessVerifyPost(w http.ResponseWriter, r *http.Re
 		ProofHash: r.Form.Get("proof_hash"),
 	}
 	verification := VerifyAuthenticatedBrowserCaptureReceipt(req, time.Now().UTC())
-	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
-	verification.Receipt = &receipt
-	applyWitnessVerificationHeaders(w, receipt)
+	verification = attachWitnessEvidence(w, verification, requestID(r))
 	status := http.StatusOK
 	if !verification.Verified {
 		status = http.StatusUnprocessableEntity
@@ -1294,9 +1301,7 @@ func (app *App) handleSessionWitnessVerifyPackPost(w http.ResponseWriter, r *htt
 		return
 	}
 	verification := VerifyAuthenticatedBrowserProofPack(r.Form.Get("proof_pack"), time.Now().UTC())
-	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
-	verification.Receipt = &receipt
-	applyWitnessVerificationHeaders(w, receipt)
+	verification = attachWitnessEvidence(w, verification, requestID(r))
 	status := http.StatusOK
 	if !verification.Verified {
 		status = http.StatusUnprocessableEntity
@@ -1316,9 +1321,7 @@ func (app *App) handleSessionWitnessVerifyCurrent(w http.ResponseWriter, r *http
 		return
 	}
 	verification := app.currentSessionWitnessVerification(r, session)
-	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
-	verification.Receipt = &receipt
-	applyWitnessVerificationHeaders(w, receipt)
+	verification = attachWitnessEvidence(w, verification, requestID(r))
 	status := http.StatusOK
 	if !verification.Verified {
 		status = http.StatusUnprocessableEntity
@@ -1338,9 +1341,7 @@ func (app *App) handleSessionWitnessVerifyCurrentPack(w http.ResponseWriter, r *
 		return
 	}
 	verification := app.currentSessionWitnessProofPackVerification(r, session)
-	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
-	verification.Receipt = &receipt
-	applyWitnessVerificationHeaders(w, receipt)
+	verification = attachWitnessEvidence(w, verification, requestID(r))
 	status := http.StatusOK
 	if !verification.Verified {
 		status = http.StatusUnprocessableEntity
@@ -1363,9 +1364,7 @@ func (app *App) handleAuthSessionWitnessVerify(w http.ResponseWriter, r *http.Re
 		return
 	}
 	verification := VerifyAuthenticatedBrowserCaptureReceipt(req, time.Now().UTC())
-	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
-	verification.Receipt = &receipt
-	applyWitnessVerificationHeaders(w, receipt)
+	verification = attachWitnessEvidence(w, verification, requestID(r))
 	status := http.StatusOK
 	if !verification.Verified {
 		status = http.StatusUnprocessableEntity
@@ -1392,9 +1391,7 @@ func (app *App) handleAuthSessionWitnessVerifyPack(w http.ResponseWriter, r *htt
 		return
 	}
 	verification := VerifyAuthenticatedBrowserProofPack(req.ProofPack, time.Now().UTC())
-	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
-	verification.Receipt = &receipt
-	applyWitnessVerificationHeaders(w, receipt)
+	verification = attachWitnessEvidence(w, verification, requestID(r))
 	status := http.StatusOK
 	if !verification.Verified {
 		status = http.StatusUnprocessableEntity
@@ -1415,9 +1412,7 @@ func (app *App) handleAuthSessionWitnessVerifyCurrentPack(w http.ResponseWriter,
 		return
 	}
 	verification := app.currentSessionWitnessProofPackVerification(r, session)
-	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
-	verification.Receipt = &receipt
-	applyWitnessVerificationHeaders(w, receipt)
+	verification = attachWitnessEvidence(w, verification, requestID(r))
 	status := http.StatusOK
 	if !verification.Verified {
 		status = http.StatusUnprocessableEntity
@@ -6895,6 +6890,36 @@ func mustTemplates() *template.Template {
 	    {{ end }}
 	  </div>
 	</section>
+	{{ if .Verification.Evidence }}
+	<section class="panel" style="margin-bottom:16px" id="copy-safe-evidence">
+	  <div class="panel-head">
+	    <h2>Copy-safe evidence receipt</h2>
+	    <span class="pill ok">cite this</span>
+	  </div>
+	  <div class="panel-body stack">
+	    <p>{{ .Verification.Evidence.Summary }}</p>
+	    <div class="receipt-proof" aria-label="Copy-safe signed-browser evidence fields">
+	      <span>Status<strong>{{ .Verification.Evidence.Status }}</strong></span>
+	      <span>Source request<strong>{{ .Verification.Evidence.SourceRequestID }}</strong></span>
+	      <span>Captured<strong>{{ .Verification.Evidence.CapturedAt }}</strong></span>
+	      <span>Fresh until<strong>{{ .Verification.Evidence.FreshUntil }}</strong></span>
+	      <span>Verified<strong>{{ .Verification.Evidence.Verified }}</strong></span>
+	      <span>Proof pack<strong>{{ .Verification.Evidence.ProofPackVerified }}</strong></span>
+	      <span>Verification hash<strong class="mono">{{ .Verification.Evidence.VerificationHash }}</strong></span>
+	    </div>
+	    <p class="capture-line mono">{{ .Verification.Evidence.Line }}</p>
+	    <p><span class="pill ok">copy_safe={{ .Verification.Evidence.CopySafe }}</span> <span class="pill ok">input_returned={{ .Verification.Evidence.InputReturned }}</span> <span class="pill ok">request_body_returned={{ .Verification.Evidence.RequestBodyReturned }}</span> <span class="pill ok">value_returned={{ .Verification.Evidence.ValueReturned }}</span></p>
+	    <details class="evidence-flags">
+	      <summary>Excluded from this receipt</summary>
+	      <div class="flag-cloud" aria-label="Excluded signed-browser evidence fields">
+	        {{ range .Verification.Evidence.Excluded }}
+	        <span class="pill ok">{{ . }}_returned=false</span>
+	        {{ end }}
+	      </div>
+	    </details>
+	  </div>
+	</section>
+	{{ end }}
 	<section class="panel" style="margin-bottom:16px" id="verification-checks">
 	  <div class="panel-head">
 	    <h2>Verification checks</h2>

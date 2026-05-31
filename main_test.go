@@ -859,7 +859,7 @@ func TestSessionWitnessVerifyCurrentPackUsesWholeProofPack(t *testing.T) {
 		}
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Verification result", "verified", "Proof pack handoff", "Proof pack signed browser capture", "Proof pack contains verification", "Proof pack witness fields", "Proof pack verification hash match", "Proof pack verification receipt fields", "Proof pack shape", "Verification hash", verificationHash, "source_request_id=verify-current-pack-123", "hash_match=true", "fresh=true", "verified=true", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Verification result", "verified", "Proof pack handoff", "Proof pack signed browser capture", "Proof pack contains verification", "Proof pack witness fields", "Proof pack verification hash match", "Proof pack verification receipt fields", "Proof pack shape", "Copy-safe evidence receipt", "janus_signed_browser_evidence", "proof_pack_verified=true", "Verification hash", verificationHash, "source_request_id=verify-current-pack-123", "hash_match=true", "fresh=true", "verified=true", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("current proof-pack verifier should include %q: %s", want, body)
 		}
@@ -1177,7 +1177,7 @@ func TestSessionWitnessVerifierUIAndAPIAreValueFree(t *testing.T) {
 		t.Fatalf("current proof-pack verifier API should set verification hash header, got %q", apiCurrentPackVerificationHash)
 	}
 	apiCurrentPackBody := apiCurrentPackOut.Body.String()
-	for _, want := range []string{`"verification"`, `"receipt"`, `"schema":"janus-witness-verification-v1"`, `"hash":"` + apiCurrentPackVerificationHash + `"`, `"status":"verified"`, `"hash_match":true`, `"fresh":true`, `"verified":true`, `"request_id":"api-current-pack-ui-api-123"`, `"key":"proof_pack_handoff"`, `"key":"proof_pack_signed_browser_capture"`, `"key":"proof_pack_contains_verification"`, `"key":"proof_pack_verification_receipt_matches"`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
+	for _, want := range []string{`"verification"`, `"receipt"`, `"evidence"`, `"line":"janus_signed_browser_evidence`, `"schema":"janus-witness-verification-v1"`, `"hash":"` + apiCurrentPackVerificationHash + `"`, `"verification_hash":"` + apiCurrentPackVerificationHash + `"`, `"status":"verified"`, `"hash_match":true`, `"fresh":true`, `"verified":true`, `"proof_pack_verified":true`, `"request_id":"api-current-pack-ui-api-123"`, `"key":"proof_pack_handoff"`, `"key":"proof_pack_signed_browser_capture"`, `"key":"proof_pack_contains_verification"`, `"key":"proof_pack_verification_receipt_matches"`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
 		if !strings.Contains(apiCurrentPackBody, want) {
 			t.Fatalf("current proof-pack verifier API should include %q: %s", want, apiCurrentPackBody)
 		}
