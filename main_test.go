@@ -2502,7 +2502,7 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"break_glass_review_workflow"`) || !strings.Contains(body, `"label":"Break-glass review workflow"`) || !strings.Contains(body, `"control_key":"break_glass_review"`) || !strings.Contains(body, `"procedure_returned":false`) || !strings.Contains(body, `"contact_path_returned":false`) || !strings.Contains(body, `"access_target_returned":false`) || !strings.Contains(body, `"credential_returned":false`) || !strings.Contains(body, `"key":"owner_review"`) || !strings.Contains(body, `"break_glass_review_workflow":"presence_only_emergency_access_evidence"`) || !strings.Contains(body, `"break_glass_review_presence_workflow"`) {
 		t.Fatalf("posture response should include break-glass review workflow: %s", body)
 	}
-	if !strings.Contains(body, `"supply_chain_posture"`) || !strings.Contains(body, `"label":"Supply-chain posture"`) || !strings.Contains(body, `"builder":"golang:1.26.3-alpine"`) || !strings.Contains(body, `"dependency_state":"no_open_alerts_at_release_review"`) || !strings.Contains(body, `"scanner_output_returned":false`) || !strings.Contains(body, `"package_lock_returned":false`) || !strings.Contains(body, `"backend_path_returned":false`) || !strings.Contains(body, `"env_returned":false`) || !strings.Contains(body, `"key":"dependency_alerts"`) || !strings.Contains(body, `"supply_chain_posture":"summary_only_dependency_security_evidence"`) || !strings.Contains(body, `"supply_chain_posture_summary"`) {
+	if !strings.Contains(body, `"supply_chain_posture"`) || !strings.Contains(body, `"label":"Supply-chain posture"`) || !strings.Contains(body, `"builder":"golang:1.26.3-alpine"`) || !strings.Contains(body, `"build_provenance"`) || !strings.Contains(body, `"label":"Build provenance receipt"`) || !strings.Contains(body, `"commit_bound"`) || !strings.Contains(body, `"build_time_bound"`) || !strings.Contains(body, `"evidence_signal":"copy_safe_build_provenance_receipt"`) || !strings.Contains(body, `"artifact_returned":false`) || !strings.Contains(body, `"sbom_returned":false`) || !strings.Contains(body, `"dependency_state":"no_open_alerts_at_release_review"`) || !strings.Contains(body, `"scanner_output_returned":false`) || !strings.Contains(body, `"package_lock_returned":false`) || !strings.Contains(body, `"backend_path_returned":false`) || !strings.Contains(body, `"env_returned":false`) || !strings.Contains(body, `"key":"dependency_alerts"`) || !strings.Contains(body, `"key":"build_provenance_receipt"`) || !strings.Contains(body, `"supply_chain_posture":"summary_only_dependency_security_evidence"`) || !strings.Contains(body, `"supply_chain_posture_summary"`) {
 		t.Fatalf("posture response should include supply-chain posture: %s", body)
 	}
 	if !strings.Contains(body, `"enterprise_claim_review"`) || !strings.Contains(body, `"label":"Enterprise claim review"`) || !strings.Contains(body, `"claim":"self_hosted_not_enterprise"`) || !strings.Contains(body, `"current_mode":"self_hosted"`) || !strings.Contains(body, `"target_mode":"enterprise"`) || !strings.Contains(body, `"evidence_signal":"presence_only_enterprise_claim_review"`) || !strings.Contains(body, `"procedure_returned":false`) || !strings.Contains(body, `"ticket_url_returned":false`) || !strings.Contains(body, `"backend_path_returned":false`) || !strings.Contains(body, `"request_body_returned":false`) || !strings.Contains(body, `"env_returned":false`) || !strings.Contains(body, `"enterprise_claim_review":"presence_only_claim_review"`) || !strings.Contains(body, `"enterprise_claim_review_workflow"`) {
@@ -3758,6 +3758,33 @@ func TestRolePolicyReadinessDistinguishesBootstrapAndExplicitLanes(t *testing.T)
 	}
 }
 
+func TestBuildProvenanceReceiptDistinguishesBoundAndUnknownBuilds(t *testing.T) {
+	bound := buildProvenanceFor("golang:1.26.3-alpine", "barta.cm/janus", "go1.26.3", "c3384ed9abc123456", "2026-05-31T15:42:00Z")
+	if bound.Status != "bound" || !bound.CommitBound || !bound.BuildTimeBound || bound.CommitShort != "c3384ed9abc1" {
+		t.Fatalf("bound build receipt should expose copy-safe build identity: %#v", bound)
+	}
+	if bound.Builder != "golang:1.26.3-alpine" || bound.ModulePath != "barta.cm/janus" || bound.GoVersion != "go1.26.3" || bound.EvidenceSignal != "copy_safe_build_provenance_receipt" {
+		t.Fatalf("bound build receipt should include builder/module/runtime evidence: %#v", bound)
+	}
+	if bound.ArtifactReturned || bound.SBOMReturned || bound.ScannerOutputReturned || bound.EnvReturned || bound.BackendPathReturned || bound.SecretValueReturned || bound.ValueReturned {
+		t.Fatalf("bound build receipt should remain value-free: %#v", bound)
+	}
+	if !supplyChainItemHasState(bound.Checks, "commit_binding", "bound") || !supplyChainItemHasState(bound.Checks, "build_time_binding", "bound") || !supplyChainItemHasState(bound.Checks, "artifact_boundary", "withheld") {
+		t.Fatalf("bound build receipt should include expected checks: %#v", bound.Checks)
+	}
+
+	unknown := buildProvenanceFor("", "", "", "", "")
+	if unknown.Status != "incomplete" || unknown.CommitBound || unknown.BuildTimeBound || unknown.Commit != "unknown" || unknown.BuildTime != "unknown" || unknown.CommitShort != "unknown" {
+		t.Fatalf("unknown build receipt should be honest about missing bindings: %#v", unknown)
+	}
+	if unknown.ArtifactReturned || unknown.SBOMReturned || unknown.ScannerOutputReturned || unknown.EnvReturned || unknown.BackendPathReturned || unknown.SecretValueReturned || unknown.ValueReturned {
+		t.Fatalf("unknown build receipt should remain value-free: %#v", unknown)
+	}
+	if !supplyChainItemHasState(unknown.Checks, "commit_binding", "unknown") || !supplyChainItemHasState(unknown.Checks, "build_time_binding", "unknown") {
+		t.Fatalf("unknown build receipt should show missing binding checks: %#v", unknown.Checks)
+	}
+}
+
 func TestProductModePostureDistinguishesClaims(t *testing.T) {
 	policy := RolePolicy{
 		AdminSubjects:    map[string]bool{"markus@barta.com": true},
@@ -4526,6 +4553,15 @@ func rolePolicyReadinessHasLane(items []RolePolicyLane, role, state string) bool
 	return false
 }
 
+func supplyChainItemHasState(items []SupplyChainPostureItem, key, state string) bool {
+	for _, item := range items {
+		if item.Key == key && item.State == state && !item.ValueReturned {
+			return true
+		}
+	}
+	return false
+}
+
 func sessionRoleEvidenceHasRole(items []SessionRoleSignal, role, state string) bool {
 	for _, item := range items {
 		if item.Role == role && item.State == state && !item.ValueReturned {
@@ -4661,7 +4697,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 			t.Fatalf("dashboard should render deployment mode witness cue %q: %s", want, body)
 		}
 	}
-	for _, want := range []string{"Supply-chain posture", "Dependency alerts", "Patched builder", "Module integrity", "Vulnerability scan", "Evidence boundary", "golang:1.26.3-alpine", "no_open_alerts_at_release_review", "scanner_output_returned=false", "package_lock_returned=false", "backend_path_returned=false", "env_returned=false"} {
+	for _, want := range []string{"Supply-chain posture", "Dependency alerts", "Patched builder", "Build provenance", "Build receipt", "commit_bound=", "build_time_bound=", "copy_safe_build_provenance_receipt", "artifact_returned=false", "sbom_returned=false", "Module integrity", "Vulnerability scan", "Evidence boundary", "golang:1.26.3-alpine", "no_open_alerts_at_release_review", "scanner_output_returned=false", "package_lock_returned=false", "backend_path_returned=false", "env_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render supply-chain posture %q: %s", want, body)
 		}

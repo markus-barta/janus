@@ -1,9 +1,11 @@
 FROM golang:1.26.3-alpine AS build
+ARG JANUS_BUILD_COMMIT=unknown
+ARG JANUS_BUILD_TIME=unknown
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/janus .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X 'main.buildCommit=${JANUS_BUILD_COMMIT}' -X 'main.buildTime=${JANUS_BUILD_TIME}'" -o /out/janus .
 
 FROM alpine:3.22
 RUN addgroup -S janus && adduser -S -G janus janus

@@ -4864,27 +4864,38 @@ func mustTemplates() *template.Template {
 	        <strong>{{ .SupplyChain.DependencyState }}</strong>
 	        <p>Builder {{ .SupplyChain.Builder }}. Review cadence: {{ .SupplyChain.ReviewCadence }}.</p>
 	      </div>
-	      <div class="witness-card {{ if .SupplyChain.OpenAlerts }}warn{{ else }}ok{{ end }}">
-	        <span>Alert posture</span>
-	        <strong>{{ .SupplyChain.OpenAlerts }} open</strong>
-	        <p>{{ .SupplyChain.FixedAlerts }} fixed alerts retained as safe release evidence.</p>
-	      </div>
-	      <div class="witness-card ok">
-	        <span>Evidence boundary</span>
-	        <strong>values withheld</strong>
-	        <p>Scanner output, package files, backend paths, env, evidence refs, and values are not returned.</p>
-	      </div>
+		      <div class="witness-card {{ if .SupplyChain.OpenAlerts }}warn{{ else }}ok{{ end }}">
+		        <span>Alert posture</span>
+		        <strong>{{ .SupplyChain.OpenAlerts }} open</strong>
+		        <p>{{ .SupplyChain.FixedAlerts }} fixed alerts retained as safe release evidence.</p>
+		      </div>
+		      <div class="witness-card {{ if eq .SupplyChain.BuildProvenance.Status "bound" }}ok{{ else }}warn{{ end }}">
+		        <span>Build receipt</span>
+		        <strong>{{ .SupplyChain.BuildProvenance.CommitShort }}</strong>
+		        <p>{{ .SupplyChain.BuildProvenance.GoVersion }} / {{ .SupplyChain.BuildProvenance.BuildTime }}</p>
+		      </div>
+		      <div class="witness-card ok">
+		        <span>Evidence boundary</span>
+		        <strong>values withheld</strong>
+		        <p>Scanner output, package files, backend paths, env, evidence refs, and values are not returned.</p>
+		      </div>
 	    </div>
 	    <details class="evidence-flags">
 	      <summary>Supply-chain evidence flags</summary>
 	      <div class="flag-cloud" aria-label="Supply-chain value-free evidence flags">
 	        <span class="pill ok">{{ .SupplyChain.DependencyState }}</span>
 	        <span class="pill info">builder {{ .SupplyChain.Builder }}</span>
-	        <span class="pill ok">{{ .SupplyChain.OpenAlerts }} open alerts</span>
-	        <span class="pill info">{{ .SupplyChain.FixedAlerts }} fixed alerts</span>
-	        <span class="pill info">review cadence</span>
-	        <span class="pill info">{{ .SupplyChain.ReviewCadence }}</span>
-	        <span class="pill ok">scanner_output_returned=false</span>
+		        <span class="pill ok">{{ .SupplyChain.OpenAlerts }} open alerts</span>
+		        <span class="pill info">{{ .SupplyChain.FixedAlerts }} fixed alerts</span>
+		        <span class="pill {{ if .SupplyChain.BuildProvenance.CommitBound }}ok{{ else }}warn{{ end }}">commit_bound={{ .SupplyChain.BuildProvenance.CommitBound }}</span>
+		        <span class="pill {{ if .SupplyChain.BuildProvenance.BuildTimeBound }}ok{{ else }}warn{{ end }}">build_time_bound={{ .SupplyChain.BuildProvenance.BuildTimeBound }}</span>
+		        <span class="pill info">commit {{ .SupplyChain.BuildProvenance.CommitShort }}</span>
+		        <span class="pill info">{{ .SupplyChain.BuildProvenance.EvidenceSignal }}</span>
+		        <span class="pill ok">artifact_returned=false</span>
+		        <span class="pill ok">sbom_returned=false</span>
+		        <span class="pill info">review cadence</span>
+		        <span class="pill info">{{ .SupplyChain.ReviewCadence }}</span>
+		        <span class="pill ok">scanner_output_returned=false</span>
 	        <span class="pill ok">package_lock_returned=false</span>
 	        <span class="pill ok">backend_path_returned=false</span>
 	        <span class="pill ok">env_returned=false</span>
