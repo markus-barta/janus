@@ -3670,6 +3670,7 @@ func mustTemplates() *template.Template {
       font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       letter-spacing: 0;
       -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
     }
     .skip-link {
       position: fixed;
@@ -3797,6 +3798,7 @@ func mustTemplates() *template.Template {
     .intro-copy { max-width: 720px; display: grid; gap: 10px; min-width: 0; }
     .eyebrow { color: var(--accent); font-weight: 720; font-size: 13px; letter-spacing: 0; overflow-wrap: anywhere; }
     .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .toolbar form { min-width: 0; }
     .safety-ribbon {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -3875,6 +3877,80 @@ func mustTemplates() *template.Template {
     .reviewer-step.action { align-content: center; justify-items: stretch; }
     .reviewer-step.action form { display: grid; }
     .reviewer-step.action .button { width: 100%; }
+    .evidence-workstation {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--accent) 4%, var(--panel-soft));
+      padding: 12px;
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+    }
+    .workstation-head {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+    .workstation-head span {
+      color: var(--accent);
+      font-weight: 720;
+      font-size: 12px;
+      line-height: 1.15;
+    }
+    .workstation-head strong {
+      font-size: 18px;
+      line-height: 1.15;
+      overflow-wrap: anywhere;
+    }
+    .workstation-head p { font-size: 13px; line-height: 1.35; }
+    .handoff-path {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      align-items: stretch;
+      min-width: 0;
+    }
+    .handoff-step {
+      min-height: 154px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 12px;
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      gap: 8px;
+      min-width: 0;
+    }
+    .handoff-step b {
+      width: 26px;
+      height: 26px;
+      border-radius: 999px;
+      display: inline-grid;
+      place-items: center;
+      background: var(--ink);
+      color: var(--panel);
+      font-size: 12px;
+      line-height: 1;
+    }
+    .handoff-step strong {
+      font-size: 16px;
+      line-height: 1.15;
+      overflow-wrap: anywhere;
+    }
+    .handoff-step p { font-size: 13px; line-height: 1.35; }
+    .handoff-step.ok { border-color: color-mix(in srgb, var(--accent) 42%, var(--line)); }
+    .handoff-step.info { border-color: color-mix(in srgb, var(--blue) 36%, var(--line)); }
+    .handoff-step.warn { border-color: color-mix(in srgb, var(--amber) 40%, var(--line)); }
+    .handoff-step.ok strong { color: var(--accent); }
+    .handoff-step.info strong { color: var(--blue); }
+    .handoff-step.warn strong { color: var(--amber); }
+    .handoff-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .handoff-step form { display: grid; min-width: 0; }
+    .handoff-step .button { width: 100%; min-width: 0; overflow-wrap: anywhere; }
     .ops-strip {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -4363,6 +4439,7 @@ func mustTemplates() *template.Template {
       .safety-ribbon { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .session-proof { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .session-proof-item.action { width: auto; grid-column: 1 / -1; }
+      .handoff-path { grid-template-columns: 1fr; }
       .ops-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .command-top { grid-template-columns: 1fr; }
       .command-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -4400,6 +4477,9 @@ func mustTemplates() *template.Template {
       .session-proof-item.action { grid-column: auto; }
       .reviewer-flow { grid-template-columns: 1fr; }
       .reviewer-step { min-height: auto; }
+      .handoff-path { grid-template-columns: 1fr; }
+      .handoff-step { min-height: auto; }
+      .handoff-actions { grid-template-columns: 1fr; }
       .command-grid { grid-template-columns: 1fr; }
       .command-actions { display: grid; grid-template-columns: 1fr; }
       .command-actions .button { width: 100%; }
@@ -4418,6 +4498,14 @@ func mustTemplates() *template.Template {
       .signal { border-right: 0; }
       .toolbar { display: grid; grid-template-columns: 1fr; }
       .toolbar .button { width: 100%; }
+      main, .overview, .intro, .status, .panel, .intro-copy, .toolbar, .evidence-workstation, .handoff-path, .handoff-step, .workstation-head {
+        min-width: 0;
+        max-width: 100%;
+      }
+      .intro-copy p, .workstation-head p, .handoff-step p {
+        max-width: 100%;
+        overflow-wrap: anywhere;
+      }
     }
     @media (max-width: 380px) {
       .safety-ribbon { grid-template-columns: 1fr; }
@@ -7076,7 +7164,7 @@ func mustTemplates() *template.Template {
 	    <div class="intro-copy">
 	      <div class="eyebrow">{{ .Mode }} / {{ .Capture.Schema }} / verifier</div>
 	      <h1>Witness receipt verifier</h1>
-	      <p>Checks a copy-safe witness proof line and hash. Pasted input is not echoed, stored, or returned.</p>
+	      <p>Checks copy-safe evidence and proof receipts. Pasted input is not returned.</p>
 	    </div>
 	    <div class="toolbar">
 	      <a class="button quiet" href="/session-witness">Witness</a>
@@ -7093,6 +7181,37 @@ func mustTemplates() *template.Template {
 		        <button class="button quiet" type="submit">Verify current evidence</button>
 		      </form>
 	      <a class="button quiet" href="/">Dashboard</a>
+	    </div>
+	    <div class="evidence-workstation" aria-label="Evidence verification workstation">
+	      <div class="workstation-head">
+	        <span>Evidence workstation</span>
+	        <strong>Use current evidence first</strong>
+	        <p>One click records current evidence and checks its audit row.</p>
+	      </div>
+	      <div class="handoff-path">
+	        <div class="handoff-step ok">
+	          <b>1</b>
+	          <strong>Verify this session</strong>
+	          <p>Runs the current evidence roundtrip. No paste needed.</p>
+		          <form method="post" action="/session-witness/evidence/verify-current-record">
+		            <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+		            <button class="button primary" type="submit">Verify current evidence</button>
+		          </form>
+	        </div>
+	        <div class="handoff-step info">
+	          <b>2</b>
+	          <strong>Paste a record</strong>
+	          <p>Use this when a reviewer sends a record from another browser session.</p>
+	          <a class="button quiet" href="#evidence-record-form">Paste evidence record</a>
+	        </div>
+	        <div class="handoff-step ok">
+	          <b>3</b>
+	          <strong>Keep the receipt</strong>
+	          <p>Verification returns normalized facts and a receipt hash, never the submitted record body.</p>
+	          <a class="button quiet" href="/session-witness/evidence.txt">Open evidence text</a>
+	        </div>
+	      </div>
+	      <p><span class="pill ok">input_not_returned=true</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">value_returned=false</span></p>
 	    </div>
 	    <div class="safety-ribbon" aria-label="Witness verifier posture">
 	      <div class="safety-chip {{ if and .Verification .Verification.Verified }}ok{{ else if .Verification }}warn{{ else }}info{{ end }}">
@@ -7122,14 +7241,15 @@ func mustTemplates() *template.Template {
 	      {{ end }}
 	    </div>
 	  </div>
-	  <div class="status">
+	  <div class="status" id="evidence-record-form">
 	    <div class="status-head"><h2>Verify evidence record</h2><span class="pill ok">input not returned</span></div>
 	    <div class="panel-body stack">
-	      <form class="stack" method="post" action="/session-witness/evidence/verify-record">
+	      <form class="stack" method="post" action="/session-witness/evidence/verify-record" aria-describedby="evidence-record-help">
 	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-	        <label>Evidence record<textarea name="evidence_record" required spellcheck="false" autocomplete="off"></textarea></label>
+	        <label>Evidence record<textarea name="evidence_record" required spellcheck="false" autocomplete="off" placeholder="Paste evidence record here"></textarea></label>
 	        <button class="button primary" type="submit">Verify evidence record</button>
 	      </form>
+	      <p id="evidence-record-help">Paste only a Janus evidence record. Verification returns facts and a receipt, not the pasted body.</p>
 	      <p><span class="pill ok">input_returned=false</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">value_returned=false</span></p>
 	    </div>
 	  </div>
@@ -7301,35 +7421,42 @@ func mustTemplates() *template.Template {
 		        <button class="button quiet" type="submit">Verify current proof pack</button>
 		      </form>
 	    </div>
-	    <div class="reviewer-flow" aria-label="Signed-browser reviewer handoff">
-	      <div class="reviewer-step ok">
-	        <span>Reviewer handoff</span>
-	        <strong>browser proof ready</strong>
-	        <p>signed_browser_capture=true</p>
+	    <div class="evidence-workstation" aria-label="Evidence handoff workstation">
+	      <div class="workstation-head">
+	        <span>Evidence handoff</span>
+	        <strong>Record, verify, retain</strong>
+	        <p>Write the current-session evidence record, check the audit row, then keep the copy-safe receipt.</p>
 	      </div>
-	      <div class="reviewer-step action">
-		        <form method="post" action="/session-witness/evidence/record">
-		          <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-		          <button class="button primary" type="submit">Record evidence</button>
-		        </form>
+	      <div class="handoff-path">
+	        <div class="handoff-step ok">
+	          <b>1</b>
+	          <strong>Record evidence</strong>
+	          <p>Writes one audit-linked record without exposing identity or secret values.</p>
+		          <form method="post" action="/session-witness/evidence/record">
+		            <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+		            <button class="button primary" type="submit">Record evidence</button>
+		          </form>
+	        </div>
+	        <div class="handoff-step ok">
+	          <b>2</b>
+	          <strong>Verify current evidence</strong>
+	          <p>Checks the stored audit row without copying, pasting, or returning the record body.</p>
+		          <form method="post" action="/session-witness/evidence/verify-current-record">
+		            <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+		            <button class="button primary" type="submit">Verify current evidence</button>
+		          </form>
+	        </div>
+	        <div class="handoff-step info">
+	          <b>3</b>
+	          <strong>Keep the receipt</strong>
+	          <p>Evidence text is the safe handoff. Proof-pack details remain available for deeper review.</p>
+	          <div class="handoff-actions">
+	            <a class="button quiet" href="/session-witness/evidence.txt">Open evidence text</a>
+	            <a class="button quiet" href="/session-witness/verify">Open verifier</a>
+	          </div>
+	        </div>
 	      </div>
-	      <div class="reviewer-step action">
-	        <a class="button quiet" href="/session-witness/evidence.txt">Open evidence text</a>
-	      </div>
-	      <div class="reviewer-step action">
-	        <a class="button quiet" href="/session-witness/proof.txt">Open proof pack</a>
-	      </div>
-	      <div class="reviewer-step action">
-		        <form method="post" action="/session-witness/verify-current-pack">
-		          <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-		          <button class="button quiet" type="submit">Verify proof pack</button>
-		        </form>
-	      </div>
-	      <div class="reviewer-step ok">
-	        <span>Boundary</span>
-	        <strong>values withheld</strong>
-	        <p>evidence_text_copy_safe=true</p>
-	      </div>
+	      <p><span class="pill ok">evidence_record_primary=true</span> <span class="pill ok">current_evidence_verifier=true</span> <span class="pill ok">value_returned=false</span></p>
 	    </div>
 	    <div class="reviewer-flow" aria-label="Reviewer launch checklist">
 	      {{ range .LaunchChecklist }}

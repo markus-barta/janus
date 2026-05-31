@@ -645,7 +645,7 @@ func TestSessionWitnessPageRendersCopySafeCapture(t *testing.T) {
 	}
 	capturedAt, freshUntil := assertWitnessFreshnessHeaders(t, out)
 	body := out.Body.String()
-	for _, want := range []string{"Session witness capture", "Reviewer handoff", "browser proof ready", "Record evidence", "Open proof pack", "Open evidence text", "Evidence text", "Verify proof pack", "Verify current proof pack", "Reviewer launch checklist", "Browser session", "Current proof pack", "Evidence receipt", "Human capture", "JANUS-195 real browser proof remains.", "signed_browser_capture=true", "evidence_text_copy_safe=true", "Capture proof", "Proof hash", pageReceiptHash, "Captured", "Fresh until", capturedAt, freshUntil, "sha256-witness-v1", "freshness_seconds=300", "captured_at=" + capturedAt, "fresh_until=" + freshUntil, "hash_header=X-Janus-Witness-Hash", "hash_body_field=receipt.hash", "Witness headers", "Session witness value boundary", "janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signed_session_browser_proof_no_identity_values", "X-Janus-Witness-State", "X-Janus-Witness-Flow", "X-Janus-Witness-Signal", "X-Janus-Witness-Hash", "X-Janus-Witness-Captured-At", "X-Janus-Witness-Fresh-Until", "X-Janus-Witness-Freshness-Seconds", "request_id=session-witness-page-123", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Session witness capture", "Evidence handoff", "Record, verify, retain", "Record evidence", "Verify current evidence", "Keep the receipt", "Open evidence text", "Open verifier", "Evidence text", "Verify current proof pack", "Reviewer launch checklist", "Browser session", "Current proof pack", "Evidence receipt", "Human capture", "JANUS-195 real browser proof remains.", "evidence_record_primary=true", "current_evidence_verifier=true", "Capture proof", "Proof hash", pageReceiptHash, "Captured", "Fresh until", capturedAt, freshUntil, "sha256-witness-v1", "freshness_seconds=300", "captured_at=" + capturedAt, "fresh_until=" + freshUntil, "hash_header=X-Janus-Witness-Hash", "hash_body_field=receipt.hash", "Witness headers", "Session witness value boundary", "janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signed_session_browser_proof_no_identity_values", "X-Janus-Witness-State", "X-Janus-Witness-Flow", "X-Janus-Witness-Signal", "X-Janus-Witness-Hash", "X-Janus-Witness-Captured-At", "X-Janus-Witness-Fresh-Until", "X-Janus-Witness-Freshness-Seconds", "request_id=session-witness-page-123", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("session witness page should include %s: %s", want, body)
 		}
@@ -658,6 +658,9 @@ func TestSessionWitnessPageRendersCopySafeCapture(t *testing.T) {
 	}
 	if !strings.Contains(body, `action="/session-witness/verify-current-pack"`) || !strings.Contains(body, "Verify current proof pack") {
 		t.Fatalf("session witness page should include one-click proof-pack verifier action: %s", body)
+	}
+	if !strings.Contains(body, `action="/session-witness/evidence/verify-current-record"`) || !strings.Contains(body, `<button class="button primary" type="submit">Verify current evidence</button>`) {
+		t.Fatalf("session witness page should include one-click current evidence verifier action: %s", body)
 	}
 	for _, forbidden := range []string{"subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
 		if strings.Contains(body, forbidden) {
@@ -1562,7 +1565,7 @@ func TestSessionWitnessVerifierUIAndAPIAreValueFree(t *testing.T) {
 		t.Fatalf("expected verifier page 200, got %d body=%s", pageOut.Code, pageOut.Body.String())
 	}
 	pageBody := pageOut.Body.String()
-	for _, want := range []string{"Witness receipt verifier", "Verify evidence record", "Verify current evidence", "Verify proof pack", "Verify proof line", "Proof pack", "Evidence record", "Evidence text", "Verify witness receipt", `action="/session-witness/evidence/verify-record"`, `action="/session-witness/evidence/verify-current-record"`, "proof_pack_returned=false", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Witness receipt verifier", "Evidence workstation", "Use current evidence first", "Verify this session", "Paste evidence record", "Keep the receipt", "Verify evidence record", "Verify current evidence", "Verify proof pack", "Verify proof line", "Proof pack", "Evidence record", "Evidence text", "Verify witness receipt", `id="evidence-record-form"`, `placeholder="Paste evidence record here"`, `action="/session-witness/evidence/verify-record"`, `action="/session-witness/evidence/verify-current-record"`, "proof_pack_returned=false", "input_not_returned=true", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
 		if !strings.Contains(pageBody, want) {
 			t.Fatalf("verifier page should include %q: %s", want, pageBody)
 		}
