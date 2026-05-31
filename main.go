@@ -534,6 +534,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /session-witness.txt", app.withAuth(app.handleSessionWitnessText))
 	mux.HandleFunc("GET /session-witness/proof.txt", app.withAuth(app.handleSessionWitnessProofText))
 	mux.HandleFunc("GET /session-witness/evidence.txt", app.withAuth(app.handleSessionWitnessEvidenceText))
+	mux.HandleFunc("POST /session-witness/evidence/record", app.withAuth(app.handleSessionWitnessEvidenceRecord))
 	mux.HandleFunc("GET /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPage))
 	mux.HandleFunc("POST /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPost))
 	mux.HandleFunc("POST /session-witness/verify-pack", app.withAuth(app.handleSessionWitnessVerifyPackPost))
@@ -581,7 +582,7 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
-	case "/session-witness/verify-current", "/session-witness/verify-current-pack", "/session-witness/verify-pack":
+	case "/session-witness/verify-current", "/session-witness/verify-current-pack", "/session-witness/verify-pack", "/session-witness/evidence/record":
 		return []string{http.MethodPost}, true
 	case "/logout", "/api/warden/resolve", "/api/evidence/attachments", "/api/permits", "/ui/warden/resolve", "/ui/evidence/attachments", "/ui/permits":
 		return []string{http.MethodPost}, true
@@ -1196,6 +1197,33 @@ func (app *App) handleSessionWitnessEvidenceText(w http.ResponseWriter, r *http.
 	app.audit(r, "auth.session.witness.evidence_text", "allowed", session.Subject, "")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(CurrentSessionEvidenceTextFor(verification, checklist)))
+}
+
+func (app *App) handleSessionWitnessEvidenceRecord(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "auth.session.witness.evidence.record", "denied", session.Subject, "csrf failed")
+		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		return
+	}
+	witness, _ := app.authenticatedBrowserWitnessCapture(session)
+	verification := app.currentSessionWitnessProofPackVerification(r, session)
+	verification = attachWitnessEvidence(w, verification, requestID(r))
+	checklist := ReviewerLaunchChecklistFor(witness, &verification)
+	auditRecorded := false
+	status := http.StatusUnprocessableEntity
+	if verification.Verified && verification.Evidence != nil && verification.Evidence.ProofPackVerified {
+		app.audit(r, "auth.session.witness.evidence.record", "allowed", session.Subject, "copy_safe_evidence_recorded")
+		auditRecorded = true
+		status = http.StatusOK
+	} else {
+		app.audit(r, "auth.session.witness.evidence.record", verification.Status, session.Subject, "copy_safe_evidence_not_recorded")
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Disposition", `inline; filename="janus-current-session-evidence-record.txt"`)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(CurrentSessionEvidenceRecordTextFor(verification, checklist, requestID(r), auditRecorded)))
 }
 
 func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request) {
@@ -6996,7 +7024,13 @@ func mustTemplates() *template.Template {
 	        <p>signed_browser_capture=true</p>
 	      </div>
 	      <div class="reviewer-step action">
-	        <a class="button primary" href="/session-witness/evidence.txt">Open evidence text</a>
+		        <form method="post" action="/session-witness/evidence/record">
+		          <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+		          <button class="button primary" type="submit">Record evidence</button>
+		        </form>
+	      </div>
+	      <div class="reviewer-step action">
+	        <a class="button quiet" href="/session-witness/evidence.txt">Open evidence text</a>
 	      </div>
 	      <div class="reviewer-step action">
 	        <a class="button quiet" href="/session-witness/proof.txt">Open proof pack</a>
