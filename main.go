@@ -537,12 +537,14 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPost))
 	mux.HandleFunc("POST /session-witness/verify-pack", app.withAuth(app.handleSessionWitnessVerifyPackPost))
 	mux.HandleFunc("POST /session-witness/verify-current", app.withAuth(app.handleSessionWitnessVerifyCurrent))
+	mux.HandleFunc("POST /session-witness/verify-current-pack", app.withAuth(app.handleSessionWitnessVerifyCurrentPack))
 	mux.HandleFunc("GET /api/warden/descriptors", app.withAuth(app.handleDescriptors))
 	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle)))
 	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit)))
 	mux.HandleFunc("GET /api/auth/session-witness", app.withAuth(app.handleAuthSessionWitness))
 	mux.HandleFunc("POST /api/auth/session-witness/verify", app.withAuth(app.handleAuthSessionWitnessVerify))
 	mux.HandleFunc("POST /api/auth/session-witness/verify-pack", app.withAuth(app.handleAuthSessionWitnessVerifyPack))
+	mux.HandleFunc("POST /api/auth/session-witness/verify-current-pack", app.withAuth(app.handleAuthSessionWitnessVerifyCurrentPack))
 	mux.HandleFunc("GET /api/posture", app.withAuth(app.handlePosture))
 	mux.HandleFunc("GET /api/evidence", app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence)))
 	mux.HandleFunc("POST /api/evidence/attachments", app.withAuth(app.handleAttachEvidence))
@@ -578,11 +580,11 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
-	case "/session-witness/verify-current", "/session-witness/verify-pack":
+	case "/session-witness/verify-current", "/session-witness/verify-current-pack", "/session-witness/verify-pack":
 		return []string{http.MethodPost}, true
 	case "/logout", "/api/warden/resolve", "/api/evidence/attachments", "/api/permits", "/ui/warden/resolve", "/ui/evidence/attachments", "/ui/permits":
 		return []string{http.MethodPost}, true
-	case "/api/auth/session-witness/verify", "/api/auth/session-witness/verify-pack":
+	case "/api/auth/session-witness/verify", "/api/auth/session-witness/verify-pack", "/api/auth/session-witness/verify-current-pack":
 		return []string{http.MethodPost}, true
 	}
 	switch {
@@ -1218,6 +1220,21 @@ func (app *App) currentSessionWitnessVerification(r *http.Request, session Sessi
 	}, capturedAt)
 }
 
+func (app *App) currentSessionWitnessProofPackVerification(r *http.Request, session Session) WitnessReceiptVerification {
+	witness, capture := app.authenticatedBrowserWitnessCapture(session)
+	reqID := requestID(r)
+	capturedAt := time.Now().UTC()
+	witnessReceipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID, capturedAt)
+	currentVerification := VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{
+		ProofLine: witnessReceipt.Input,
+		ProofHash: witnessReceipt.Hash,
+	}, capturedAt)
+	currentReceipt := WitnessReceiptVerificationReceiptFor(currentVerification, reqID)
+	currentVerification.Receipt = &currentReceipt
+	proofPack := CurrentSessionWitnessProofTextFor(witness, capture, reqID, witnessReceipt, currentVerification)
+	return VerifyAuthenticatedBrowserProofPack(proofPack, capturedAt)
+}
+
 func (app *App) handleSessionWitnessVerifyPage(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	app.audit(r, "auth.session.witness.verify.page", "allowed", session.Subject, "")
@@ -1310,6 +1327,28 @@ func (app *App) handleSessionWitnessVerifyCurrent(w http.ResponseWriter, r *http
 	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification))
 }
 
+func (app *App) handleSessionWitnessVerifyCurrentPack(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "auth.session.witness.verify.current_pack", "denied", session.Subject, "csrf failed")
+		verification := VerifyAuthenticatedBrowserProofPack("", time.Now().UTC())
+		verification.Status = "blocked"
+		verification.Summary = "CSRF token required."
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification))
+		return
+	}
+	verification := app.currentSessionWitnessProofPackVerification(r, session)
+	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
+	verification.Receipt = &receipt
+	applyWitnessVerificationHeaders(w, receipt)
+	status := http.StatusOK
+	if !verification.Verified {
+		status = http.StatusUnprocessableEntity
+	}
+	app.audit(r, "auth.session.witness.verify.current_pack", verification.Status, session.Subject, "")
+	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification))
+}
+
 func (app *App) handleAuthSessionWitnessVerify(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	if !app.csrfAllowed(r, session) {
@@ -1361,6 +1400,29 @@ func (app *App) handleAuthSessionWitnessVerifyPack(w http.ResponseWriter, r *htt
 		status = http.StatusUnprocessableEntity
 	}
 	app.audit(r, "auth.session.witness.verify_pack", verification.Status, session.Subject, "")
+	writeJSON(w, status, map[string]any{
+		"verification":   verification,
+		"request_id":     requestID(r),
+		"value_returned": false,
+	})
+}
+
+func (app *App) handleAuthSessionWitnessVerifyCurrentPack(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "auth.session.witness.verify_current_pack", "denied", session.Subject, "csrf failed")
+		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		return
+	}
+	verification := app.currentSessionWitnessProofPackVerification(r, session)
+	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
+	verification.Receipt = &receipt
+	applyWitnessVerificationHeaders(w, receipt)
+	status := http.StatusOK
+	if !verification.Verified {
+		status = http.StatusUnprocessableEntity
+	}
+	app.audit(r, "auth.session.witness.verify_current_pack", verification.Status, session.Subject, "")
 	writeJSON(w, status, map[string]any{
 		"verification":   verification,
 		"request_id":     requestID(r),
@@ -6757,10 +6819,10 @@ func mustTemplates() *template.Template {
 	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
 	      <a class="button quiet" href="/session-witness/proof.txt">Proof pack</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
-	      <form method="post" action="/session-witness/verify-current">
-	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-	        <button class="button quiet" type="submit">Verify current session</button>
-	      </form>
+		      <form method="post" action="/session-witness/verify-current-pack">
+		        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+		        <button class="button quiet" type="submit">Verify current proof pack</button>
+		      </form>
 	      <a class="button quiet" href="/">Dashboard</a>
 	    </div>
 	    <div class="safety-ribbon" aria-label="Witness verifier posture">
@@ -6869,10 +6931,10 @@ func mustTemplates() *template.Template {
 	      <a class="button quiet" href="/session-witness/proof.txt">Proof pack</a>
 	      <a class="button quiet" href="/session-witness/verify">Verify proof</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
-	      <form method="post" action="/session-witness/verify-current">
-	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-	        <button class="button quiet" type="submit">Verify current session</button>
-	      </form>
+		      <form method="post" action="/session-witness/verify-current-pack">
+		        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+		        <button class="button quiet" type="submit">Verify current proof pack</button>
+		      </form>
 	    </div>
 	    <div class="reviewer-flow" aria-label="Signed-browser reviewer handoff">
 	      <div class="reviewer-step ok">
@@ -6884,10 +6946,10 @@ func mustTemplates() *template.Template {
 	        <a class="button primary" href="/session-witness/proof.txt">Open proof pack</a>
 	      </div>
 	      <div class="reviewer-step action">
-	        <form method="post" action="/session-witness/verify-current">
-	          <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-	          <button class="button quiet" type="submit">Verify now</button>
-	        </form>
+		        <form method="post" action="/session-witness/verify-current-pack">
+		          <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+		          <button class="button quiet" type="submit">Verify proof pack</button>
+		        </form>
 	      </div>
 	      <div class="reviewer-step ok">
 	        <span>Boundary</span>
