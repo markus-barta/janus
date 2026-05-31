@@ -890,6 +890,84 @@ func TestSessionWitnessEvidenceRecordWritesCopySafeAuditReceipt(t *testing.T) {
 	assertRouteResponseValueFree(t, "session witness evidence record", out)
 }
 
+func TestSessionWitnessEvidenceRecordAPIWritesAndVerifiesCopySafeAuditReceipt(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+	cookie := rr.Result().Cookies()[0]
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session-witness/evidence/record", strings.NewReader(`{"ignored":"secret-cookie-secret"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://vault.barta.cm")
+	req.Header.Set("X-CSRF-Token", app.csrfToken(session))
+	req.Header.Set("X-Request-Id", "api-evidence-record-producer-123")
+	req.AddCookie(cookie)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected evidence record API 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	var body struct {
+		Record              string `json:"record"`
+		RecordBodyField     string `json:"record_body_field"`
+		RequestID           string `json:"request_id"`
+		AuditAction         string `json:"audit_action"`
+		AuditRecorded       bool   `json:"audit_recorded"`
+		AuditHashAlgorithm  string `json:"audit_hash_algorithm"`
+		AuditEventHash      string `json:"audit_event_hash"`
+		AuditPrevHash       string `json:"audit_prev_hash"`
+		AuditChainLink      string `json:"audit_chain_link"`
+		AuditSeverity       string `json:"audit_severity"`
+		InputReturned       bool   `json:"input_returned"`
+		RequestBodyReturned bool   `json:"request_body_returned"`
+		ValueReturned       bool   `json:"value_returned"`
+	}
+	if err := json.Unmarshal(out.Body.Bytes(), &body); err != nil {
+		t.Fatalf("evidence record API should return JSON: %v body=%s", err, out.Body.String())
+	}
+	recent := app.store.RecentAudit(1)
+	if len(recent) != 1 || recent[0].Action != "auth.session.witness.evidence.record" || recent[0].Outcome != "allowed" || recent[0].Severity != "notice" || recent[0].RequestID != "api-evidence-record-producer-123" || recent[0].Reason != "copy_safe_evidence_recorded" {
+		t.Fatalf("evidence record API should write correlated audit event, got %#v", recent)
+	}
+	for _, want := range []string{"janus_current_session_evidence_record", "record_status=recorded", "record_request_id=api-evidence-record-producer-123", "audit_action=auth.session.witness.evidence.record", "audit_recorded=true", "audit_hash_algorithm=sha256-audit-entry-v1", "audit_event_hash=" + recent[0].EventHash, "audit_prev_hash=genesis", "audit_chain_link=genesis-" + recent[0].EventHash, "audit_severity=notice", "evidence_line=janus_signed_browser_evidence", "copy_safe=true", "input_returned=false", "request_body_returned=false", "proof_pack_returned=false", "identity_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "value_returned=false"} {
+		if !strings.Contains(body.Record, want) {
+			t.Fatalf("evidence record API record should include %q: %#v", want, body)
+		}
+	}
+	if body.RecordBodyField != "record" || body.RequestID != "api-evidence-record-producer-123" || body.AuditAction != "auth.session.witness.evidence.record" || !body.AuditRecorded || body.AuditHashAlgorithm != "sha256-audit-entry-v1" || body.AuditEventHash != recent[0].EventHash || body.AuditPrevHash != "genesis" || body.AuditChainLink != "genesis-"+recent[0].EventHash || body.AuditSeverity != "notice" || body.InputReturned || body.RequestBodyReturned || body.ValueReturned {
+		t.Fatalf("evidence record API should return normalized copy-safe metadata: %#v", body)
+	}
+	for _, forbidden := range []string{"subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "actor_hash", "janus_current_session_witness_proof", "witness_proof_line=", "proof_pack_input=", "proof_pack\":\""} {
+		if strings.Contains(out.Body.String(), forbidden) {
+			t.Fatalf("evidence record API leaked forbidden value %q: %s", forbidden, out.Body.String())
+		}
+	}
+
+	verifyReqBody, err := json.Marshal(WitnessEvidenceRecordVerificationRequest{EvidenceRecord: body.Record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifyReq := httptest.NewRequest(http.MethodPost, "/api/auth/session-witness/evidence/verify-record", strings.NewReader(string(verifyReqBody)))
+	verifyReq.Header.Set("Content-Type", "application/json")
+	verifyReq.Header.Set("Origin", "https://vault.barta.cm")
+	verifyReq.Header.Set("X-CSRF-Token", app.csrfToken(session))
+	verifyReq.Header.Set("X-Request-Id", "api-evidence-record-produced-verify-123")
+	verifyReq.AddCookie(cookie)
+	verifyOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(verifyOut, verifyReq)
+	if verifyOut.Code != http.StatusOK {
+		t.Fatalf("produced evidence record should verify, got %d body=%s", verifyOut.Code, verifyOut.Body.String())
+	}
+	for _, want := range []string{`"status":"verified"`, `"audit_row_found":true`, `"chain_link_match":true`, `"value_boundary_valid":true`, `"request_id":"api-evidence-record-produced-verify-123"`, `"value_returned":false`} {
+		if !strings.Contains(verifyOut.Body.String(), want) {
+			t.Fatalf("produced evidence record verifier should include %q: %s", want, verifyOut.Body.String())
+		}
+	}
+	assertRouteResponseValueFree(t, "session witness evidence record API", out)
+	assertRouteResponseValueFree(t, "session witness produced evidence record verifier API", verifyOut)
+}
+
 func TestSessionWitnessEvidenceRecordVerifierMatchesAuditChain(t *testing.T) {
 	app := newTestApp(t)
 	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
@@ -1587,6 +1665,7 @@ func TestWitnessVerifierAPIRequiresCSRF(t *testing.T) {
 		{path: "/api/auth/session-witness/verify", body: `{"proof_line":"secret-cookie-secret","proof_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`},
 		{path: "/api/auth/session-witness/verify-pack", body: `{"proof_pack":"secret-cookie-secret"}`},
 		{path: "/api/auth/session-witness/verify-current-pack"},
+		{path: "/api/auth/session-witness/evidence/record", body: `{"ignored":"secret-cookie-secret"}`},
 		{path: "/api/auth/session-witness/evidence/verify-record", body: `{"evidence_record":"secret-cookie-secret"}`},
 	} {
 		req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
@@ -5037,6 +5116,7 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "auth witness verifier bad post", method: http.MethodPost, path: "/api/auth/session-witness/verify", body: `{"proof_line":"secret-cookie-secret","proof_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, contentType: "application/json", status: http.StatusUnprocessableEntity},
 		{name: "auth witness proof pack verifier bad post", method: http.MethodPost, path: "/api/auth/session-witness/verify-pack", body: `{"proof_pack":"secret-cookie-secret"}`, contentType: "application/json", status: http.StatusUnprocessableEntity},
 		{name: "auth witness current proof pack verifier", method: http.MethodPost, path: "/api/auth/session-witness/verify-current-pack", status: http.StatusOK},
+		{name: "auth witness evidence record producer", method: http.MethodPost, path: "/api/auth/session-witness/evidence/record", body: `{"ignored":"secret-cookie-secret"}`, contentType: "application/json", status: http.StatusOK},
 		{name: "auth witness evidence record verifier bad post", method: http.MethodPost, path: "/api/auth/session-witness/evidence/verify-record", body: `{"evidence_record":"secret-cookie-secret"}`, contentType: "application/json", status: http.StatusUnprocessableEntity},
 		{name: "descriptors", method: http.MethodGet, path: "/api/warden/descriptors", status: http.StatusOK},
 		{name: "audit", method: http.MethodGet, path: "/api/audit/recent", status: http.StatusOK},
@@ -5088,6 +5168,7 @@ func TestJSONErrorResponsesAreRequestCorrelated(t *testing.T) {
 		{name: "auth required browser witness", method: http.MethodGet, path: "/api/auth/session-witness", status: http.StatusUnauthorized},
 		{name: "auth required witness verifier", method: http.MethodPost, path: "/api/auth/session-witness/verify", status: http.StatusUnauthorized},
 		{name: "auth required proof pack verifier", method: http.MethodPost, path: "/api/auth/session-witness/verify-pack", status: http.StatusUnauthorized},
+		{name: "auth required evidence record producer", method: http.MethodPost, path: "/api/auth/session-witness/evidence/record", status: http.StatusUnauthorized},
 		{name: "auth required evidence record verifier", method: http.MethodPost, path: "/api/auth/session-witness/evidence/verify-record", status: http.StatusUnauthorized},
 		{name: "auth required resolve", method: http.MethodPost, path: "/api/warden/resolve", status: http.StatusUnauthorized},
 		{name: "auth required evidence", method: http.MethodGet, path: "/api/evidence", status: http.StatusUnauthorized},

@@ -548,6 +548,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /api/auth/session-witness/verify", app.withAuth(app.handleAuthSessionWitnessVerify))
 	mux.HandleFunc("POST /api/auth/session-witness/verify-pack", app.withAuth(app.handleAuthSessionWitnessVerifyPack))
 	mux.HandleFunc("POST /api/auth/session-witness/verify-current-pack", app.withAuth(app.handleAuthSessionWitnessVerifyCurrentPack))
+	mux.HandleFunc("POST /api/auth/session-witness/evidence/record", app.withAuth(app.handleAuthSessionWitnessEvidenceRecord))
 	mux.HandleFunc("POST /api/auth/session-witness/evidence/verify-record", app.withAuth(app.handleAuthSessionWitnessEvidenceRecordVerify))
 	mux.HandleFunc("GET /api/posture", app.withAuth(app.handlePosture))
 	mux.HandleFunc("GET /api/evidence", app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence)))
@@ -588,7 +589,7 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 		return []string{http.MethodPost}, true
 	case "/logout", "/api/warden/resolve", "/api/evidence/attachments", "/api/permits", "/ui/warden/resolve", "/ui/evidence/attachments", "/ui/permits":
 		return []string{http.MethodPost}, true
-	case "/api/auth/session-witness/verify", "/api/auth/session-witness/verify-pack", "/api/auth/session-witness/verify-current-pack", "/api/auth/session-witness/evidence/verify-record":
+	case "/api/auth/session-witness/verify", "/api/auth/session-witness/verify-pack", "/api/auth/session-witness/verify-current-pack", "/api/auth/session-witness/evidence/record", "/api/auth/session-witness/evidence/verify-record":
 		return []string{http.MethodPost}, true
 	}
 	switch {
@@ -1067,7 +1068,9 @@ func attachWitnessEvidence(w http.ResponseWriter, verification WitnessReceiptVer
 	verification.Receipt = &receipt
 	evidence := WitnessEvidenceReceiptFor(verification)
 	verification.Evidence = &evidence
-	applyWitnessVerificationHeaders(w, receipt)
+	if w != nil {
+		applyWitnessVerificationHeaders(w, receipt)
+	}
 	return verification
 }
 
@@ -1201,13 +1204,14 @@ func (app *App) handleSessionWitnessEvidenceText(w http.ResponseWriter, r *http.
 	_, _ = w.Write([]byte(CurrentSessionEvidenceTextFor(verification, checklist)))
 }
 
-func (app *App) handleSessionWitnessEvidenceRecord(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	if !app.csrfAllowed(r, session) {
-		app.audit(r, "auth.session.witness.evidence.record", "denied", session.Subject, "csrf failed")
-		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
-		return
-	}
+type sessionEvidenceRecordResult struct {
+	Record        string
+	AuditEntry    AuditEntry
+	AuditRecorded bool
+	Status        int
+}
+
+func (app *App) currentSessionEvidenceRecord(w http.ResponseWriter, r *http.Request, session Session) sessionEvidenceRecordResult {
 	witness, _ := app.authenticatedBrowserWitnessCapture(session)
 	verification := app.currentSessionWitnessProofPackVerification(r, session)
 	verification = attachWitnessEvidence(w, verification, requestID(r))
@@ -1225,11 +1229,27 @@ func (app *App) handleSessionWitnessEvidenceRecord(w http.ResponseWriter, r *htt
 	} else {
 		app.audit(r, "auth.session.witness.evidence.record", verification.Status, session.Subject, "copy_safe_evidence_not_recorded")
 	}
+	return sessionEvidenceRecordResult{
+		Record:        CurrentSessionEvidenceRecordTextFor(verification, checklist, requestID(r), auditEntry, auditRecorded),
+		AuditEntry:    auditEntry,
+		AuditRecorded: auditRecorded,
+		Status:        status,
+	}
+}
+
+func (app *App) handleSessionWitnessEvidenceRecord(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "auth.session.witness.evidence.record", "denied", session.Subject, "csrf failed")
+		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		return
+	}
+	result := app.currentSessionEvidenceRecord(w, r, session)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Disposition", `inline; filename="janus-current-session-evidence-record.txt"`)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(status)
-	_, _ = w.Write([]byte(CurrentSessionEvidenceRecordTextFor(verification, checklist, requestID(r), auditEntry, auditRecorded)))
+	w.WriteHeader(result.Status)
+	_, _ = w.Write([]byte(result.Record))
 }
 
 func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request) {
@@ -1246,6 +1266,44 @@ func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request)
 		"receipt":        receipt,
 		"request_id":     reqID,
 		"value_returned": false,
+	})
+}
+
+func (app *App) handleAuthSessionWitnessEvidenceRecord(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "auth.session.witness.evidence.record.api", "denied", session.Subject, "csrf failed")
+		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		return
+	}
+	result := app.currentSessionEvidenceRecord(nil, r, session)
+	prevHash := "genesis"
+	if result.AuditEntry.PrevHash != "" {
+		prevHash = result.AuditEntry.PrevHash
+	}
+	eventHash := result.AuditEntry.EventHash
+	chainLink := "missing"
+	if result.AuditRecorded && eventHash != "" {
+		chainLink = prevHash + "-" + eventHash
+	}
+	severity := result.AuditEntry.Severity
+	if severity == "" {
+		severity = "missing"
+	}
+	writeJSON(w, result.Status, map[string]any{
+		"record":                result.Record,
+		"record_body_field":     "record",
+		"request_id":            requestID(r),
+		"audit_action":          "auth.session.witness.evidence.record",
+		"audit_recorded":        result.AuditRecorded,
+		"audit_hash_algorithm":  "sha256-audit-entry-v1",
+		"audit_event_hash":      eventHash,
+		"audit_prev_hash":       prevHash,
+		"audit_chain_link":      chainLink,
+		"audit_severity":        severity,
+		"input_returned":        false,
+		"request_body_returned": false,
+		"value_returned":        false,
 	})
 }
 
