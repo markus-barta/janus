@@ -427,7 +427,7 @@ func TestSessionPostureIsValueFree(t *testing.T) {
 	if posture.SecondsRemaining <= 0 || posture.ExpiresAt == "" || posture.ExpiresLabel == "" {
 		t.Fatalf("session expiry should be visible without values: %#v", posture)
 	}
-	if !posture.CSRFBound || !posture.CookieSigned || posture.ValueReturned {
+	if !posture.CSRFBound || !posture.CookieSigned || !posture.CookieHostPrefixed || posture.ValueReturned {
 		t.Fatalf("unexpected session controls: %#v", posture)
 	}
 	raw, err := json.Marshal(posture)
@@ -471,12 +471,69 @@ func TestSessionRoleEvidenceIsValueFreeAndRoleAware(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedBrowserWitnessIsValueFreeAndRoleAware(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	roleEvidence := SessionRoleEvidenceFor(session, true, true, true)
+
+	witness := app.authenticatedBrowserWitness(session, roleEvidence, true)
+	if witness.State != "authenticated" || !witness.Authenticated || witness.Flow != "zitadel_oidc_pkce_to_signed_session" || witness.EvidenceSignal != "signed_session_browser_proof_no_identity_values" || witness.ValueReturned {
+		t.Fatalf("expected authenticated browser witness: %#v", witness)
+	}
+	if witness.IdentityValuesReturned || witness.SubjectReturned || witness.EmailReturned || witness.NameReturned || witness.ClaimValuesReturned || witness.GroupValuesReturned || witness.TokenReturned || witness.CookieValueReturned || witness.RequestBodyReturned || witness.EnvValuesReturned || witness.BackendPathReturned || witness.ConnectorOutputReturned || witness.PermitPayloadReturned || witness.SecretValueReturned {
+		t.Fatalf("browser witness should not return identity or backend values: %#v", witness)
+	}
+	if witness.SessionCookiePolicy != "host_prefixed_strict_signed" || witness.CSRFBoundary != "bound_to_signed_session" || witness.CSPBoundary != "script_src_none" {
+		t.Fatalf("browser witness should expose browser security posture: %#v", witness)
+	}
+	if !authenticatedBrowserGateHasState(witness.Gates, "login_completed", "authenticated") || !authenticatedBrowserGateHasState(witness.Gates, "cookie_boundary", "host_prefixed_strict_signed") || !authenticatedBrowserGateHasState(witness.Gates, "value_boundary", "values_withheld") {
+		t.Fatalf("browser witness should expose copy-safe gates: %#v", witness.Gates)
+	}
+	raw, err := json.Marshal(witness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("browser witness leaked value %q: %s", forbidden, raw)
+		}
+	}
+}
+
 func TestConfigUsesHostPrefixedStateCookieForHTTPS(t *testing.T) {
 	app := newTestApp(t)
 
 	if app.cfg.StateCookieName() != hostStateCookie {
 		t.Fatalf("secure deployments should use host-prefixed state cookie, got %s", app.cfg.StateCookieName())
 	}
+}
+
+func TestAuthenticatedBrowserWitnessAPIIsAuthenticatedAndValueFree(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/session-witness", nil)
+	req.Header.Set("X-Request-Id", "browser-witness-123")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{`"witness"`, `"label":"Authenticated browser witness"`, `"state":"authenticated"`, `"flow":"zitadel_oidc_pkce_to_signed_session"`, `"session_cookie_policy":"host_prefixed_strict_signed"`, `"csrf_boundary":"bound_to_signed_session"`, `"csp_boundary":"script_src_none"`, `"evidence_signal":"signed_session_browser_proof_no_identity_values"`, `"key":"login_completed"`, `"key":"value_boundary"`, `"request_id":"browser-witness-123"`, `"identity_values_returned":false`, `"subject_returned":false`, `"email_returned":false`, `"name_returned":false`, `"claim_values_returned":false`, `"group_values_returned":false`, `"token_returned":false`, `"cookie_value_returned":false`, `"request_body_returned":false`, `"env_values_returned":false`, `"backend_path_returned":false`, `"connector_output_returned":false`, `"permit_payload_returned":false`, `"secret_value_returned":false`, `"value_returned":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("browser witness API should include %s: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("browser witness API leaked value %q: %s", forbidden, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "browser witness API", out)
 }
 
 func TestConfigUsesHostPrefixedNonceCookieForHTTPS(t *testing.T) {
@@ -1050,6 +1107,9 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"authenticated_role_evidence"`) || !strings.Contains(body, `"label":"Signed-in role receipt"`) || !strings.Contains(body, `"evidence_signal":"signed_in_role_receipt_no_identity_values"`) || !strings.Contains(body, `"identity_boundary":"identity_claim_values_withheld"`) || !strings.Contains(body, `"key":"identity_boundary"`) || !strings.Contains(body, `"identity_values_returned":false`) || !strings.Contains(body, `"subject_returned":false`) || !strings.Contains(body, `"email_returned":false`) || !strings.Contains(body, `"name_returned":false`) || !strings.Contains(body, `"claim_values_returned":false`) || !strings.Contains(body, `"group_values_returned":false`) || !strings.Contains(body, `"token_returned":false`) || !strings.Contains(body, `"cookie_value_returned":false`) || !strings.Contains(body, `"authenticated_role_receipt"`) {
 		t.Fatalf("posture response should include authenticated role evidence: %s", body)
 	}
+	if !strings.Contains(body, `"authenticated_browser_witness"`) || !strings.Contains(body, `"label":"Authenticated browser witness"`) || !strings.Contains(body, `"flow":"local_dev_signed_session"`) || !strings.Contains(body, `"session_cookie_policy":"host_prefixed_strict_signed"`) || !strings.Contains(body, `"csrf_boundary":"bound_to_signed_session"`) || !strings.Contains(body, `"csp_boundary":"script_src_none"`) || !strings.Contains(body, `"evidence_signal":"signed_session_browser_proof_no_identity_values"`) || !strings.Contains(body, `"connector_output_returned":false`) || !strings.Contains(body, `"permit_payload_returned":false`) || !strings.Contains(body, `"secret_value_returned":false`) || !strings.Contains(body, `"authenticated_browser_witness_api"`) {
+		t.Fatalf("posture response should include authenticated browser witness: %s", body)
+	}
 	if !strings.Contains(body, `"role_policy_readiness"`) || !strings.Contains(body, `"label":"Role policy readiness"`) || !strings.Contains(body, `"evidence_signal":"bootstrap_to_explicit_zitadel_lanes"`) || !strings.Contains(body, `"key":"zitadel_lanes"`) || !strings.Contains(body, `"bootstrap_owner_state"`) || !strings.Contains(body, `"subject_binding_configured"`) || !strings.Contains(body, `"group_binding_configured"`) || !strings.Contains(body, `"subject_values_returned":false`) || !strings.Contains(body, `"group_values_returned":false`) || !strings.Contains(body, `"claim_values_returned":false`) || !strings.Contains(body, `"token_returned":false`) || !strings.Contains(body, `"backend_path_returned":false`) || !strings.Contains(body, `"role_policy_readiness_workflow"`) {
 		t.Fatalf("posture response should include role policy readiness workflow: %s", body)
 	}
@@ -1253,6 +1313,12 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if !strings.Contains(body, `"authenticated_role_evidence"`) || !strings.Contains(body, `"label":"Signed-in role receipt"`) || !strings.Contains(body, `"evidence_signal":"signed_in_role_receipt_no_identity_values"`) || !strings.Contains(body, `"identity_values_returned":false`) || !strings.Contains(body, `"subject_returned":false`) || !strings.Contains(body, `"email_returned":false`) || !strings.Contains(body, `"name_returned":false`) || !strings.Contains(body, `"claim_values_returned":false`) || !strings.Contains(body, `"token_returned":false`) {
 		t.Fatalf("evidence response should include authenticated role evidence: %s", body)
+	}
+	if pack.AuthenticatedBrowser.ValueReturned || pack.AuthenticatedBrowser.IdentityValuesReturned || pack.AuthenticatedBrowser.TokenReturned || pack.AuthenticatedBrowser.CookieValueReturned || pack.AuthenticatedBrowser.SecretValueReturned {
+		t.Fatalf("evidence authenticated browser witness should stay value-free: %#v", pack.AuthenticatedBrowser)
+	}
+	if !strings.Contains(body, `"authenticated_browser_witness"`) || !strings.Contains(body, `"label":"Authenticated browser witness"`) || !strings.Contains(body, `"evidence_signal":"signed_session_browser_proof_no_identity_values"`) || !strings.Contains(body, `"session_cookie_policy":"host_prefixed_strict_signed"`) || !strings.Contains(body, `"csrf_boundary":"bound_to_signed_session"`) || !strings.Contains(body, `"csp_boundary":"script_src_none"`) || !strings.Contains(body, `"connector_output_returned":false`) || !strings.Contains(body, `"permit_payload_returned":false`) || !strings.Contains(body, `"secret_value_returned":false`) {
+		t.Fatalf("evidence response should include authenticated browser witness: %s", body)
 	}
 	if !strings.Contains(body, `"assurance_gates"`) || !strings.Contains(body, `"key":"value_leak_sentinel"`) {
 		t.Fatalf("evidence response should include assurance gates: %s", body)
@@ -1479,6 +1545,10 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("posture should expose typed authenticated role evidence")
 	}
+	postureAuthenticatedBrowser, ok := posture["authenticated_browser_witness"].(AuthenticatedBrowserWitness)
+	if !ok {
+		t.Fatalf("posture should expose typed authenticated browser witness")
+	}
 	postureRolePolicyReadiness, ok := posture["role_policy_readiness"].(RolePolicyReadiness)
 	if !ok {
 		t.Fatalf("posture should expose typed role policy readiness")
@@ -1552,6 +1622,9 @@ func TestNegativePathAssuranceSharedByPostureAndEvidence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(postureAuthenticatedRole, pack.AuthenticatedRole) {
 		t.Fatalf("posture and evidence should share the same authenticated role evidence: posture=%#v evidence=%#v", postureAuthenticatedRole, pack.AuthenticatedRole)
+	}
+	if !reflect.DeepEqual(postureAuthenticatedBrowser, pack.AuthenticatedBrowser) {
+		t.Fatalf("posture and evidence should share the same authenticated browser witness: posture=%#v evidence=%#v", postureAuthenticatedBrowser, pack.AuthenticatedBrowser)
 	}
 	if !reflect.DeepEqual(postureRolePolicyReadiness, pack.RolePolicyReadiness) {
 		t.Fatalf("posture and evidence should share the same role policy readiness: posture=%#v evidence=%#v", postureRolePolicyReadiness, pack.RolePolicyReadiness)
@@ -3061,6 +3134,15 @@ func sessionRoleEvidenceHasGate(items []SessionRoleGateSignal, key, state string
 	return false
 }
 
+func authenticatedBrowserGateHasState(items []AuthenticatedBrowserGate, key, state string) bool {
+	for _, item := range items {
+		if item.Key == key && item.State == state && !item.ValueReturned {
+			return true
+		}
+	}
+	return false
+}
+
 func privacySurfaceHasKey(items []PrivacySurface, key string) bool {
 	for _, item := range items {
 		if item.Key == key {
@@ -3204,7 +3286,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 			t.Fatalf("dashboard should render role policy readiness %q: %s", want, body)
 		}
 	}
-	for _, want := range []string{"Signed-in role receipt", "Human validation witness", "Roles Janus sees", "Privacy boundary", "Evidence flags", "signed_in_role_receipt_no_identity_values", "identity_claim_values_withheld", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "cookie_value_returned=false", "Authenticated role gates", "Signed-in role states", "Identity boundary"} {
+	for _, want := range []string{"Signed-in role receipt", "Authenticated browser witness", "Browser proof", "Login proof", "Local smoke flow", "strict signed session", "copy-safe browser proof", "Authenticated browser gates", "Human validation witness", "Roles Janus sees", "Privacy boundary", "Evidence flags", "signed_in_role_receipt_no_identity_values", "signed_session_browser_proof_no_identity_values", "host_prefixed_strict_signed", "bound_to_signed_session", "script_src_none", "connector_output_returned=false", "permit_payload_returned=false", "secret_value_returned=false", "identity_claim_values_withheld", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "cookie_value_returned=false", "Authenticated role gates", "Signed-in role states", "Identity boundary"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render authenticated role evidence %q: %s", want, body)
 		}
@@ -3231,7 +3313,7 @@ func TestDashboardRendersRequestHandleWitnessForOperator(t *testing.T) {
 	session := Session{
 		Subject: "operator-subject",
 		Email:   "operator@example.test",
-		Name:    "Operator",
+		Name:    "Sensitive Person",
 		Roles:   []string{RoleViewer, RoleOperator},
 		Expiry:  time.Now().UTC().Add(time.Hour),
 	}
@@ -3274,12 +3356,15 @@ func TestDashboardRendersRequestHandleWitnessForOperator(t *testing.T) {
 		"env_returned=false",
 		"value_returned=false",
 		"Issue metadata handle",
+		"Authenticated browser witness",
+		"Zitadel to Janus flow",
+		"signed_session_browser_proof_no_identity_values",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("operator dashboard should render request handle witness %q: %s", want, body)
 		}
 	}
-	for _, forbidden := range []string{"plaintext", "secret-value", "backend_path=/", "source_path=/", "request_body=local smoke"} {
+	for _, forbidden := range []string{"operator-subject", "operator@example.test", "Sensitive Person", "plaintext", "secret-value", "backend_path=/", "source_path=/", "request_body=local smoke"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("request handle witness should remain value-free, found %q: %s", forbidden, body)
 		}
@@ -3854,6 +3939,7 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "api missing", method: http.MethodGet, path: "/api/missing?ref=raw-secret-value", status: http.StatusNotFound},
 		{name: "api method", method: http.MethodDelete, path: "/api/posture", status: http.StatusMethodNotAllowed},
 		{name: "posture", method: http.MethodGet, path: "/api/posture", status: http.StatusOK},
+		{name: "auth witness", method: http.MethodGet, path: "/api/auth/session-witness", status: http.StatusOK},
 		{name: "descriptors", method: http.MethodGet, path: "/api/warden/descriptors", status: http.StatusOK},
 		{name: "audit", method: http.MethodGet, path: "/api/audit/recent", status: http.StatusOK},
 		{name: "evidence", method: http.MethodGet, path: "/api/evidence", status: http.StatusOK},
@@ -3901,6 +3987,7 @@ func TestJSONErrorResponsesAreRequestCorrelated(t *testing.T) {
 		status int
 	}{
 		{name: "auth required posture", method: http.MethodGet, path: "/api/posture", status: http.StatusUnauthorized},
+		{name: "auth required browser witness", method: http.MethodGet, path: "/api/auth/session-witness", status: http.StatusUnauthorized},
 		{name: "auth required resolve", method: http.MethodPost, path: "/api/warden/resolve", status: http.StatusUnauthorized},
 		{name: "auth required evidence", method: http.MethodGet, path: "/api/evidence", status: http.StatusUnauthorized},
 		{name: "auth required evidence attach", method: http.MethodPost, path: "/api/evidence/attachments", status: http.StatusUnauthorized},

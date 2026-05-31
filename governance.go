@@ -24,50 +24,51 @@ type ApprovedUsePosture struct {
 }
 
 type EvidencePack struct {
-	GeneratedAt         time.Time                      `json:"generated_at"`
-	Service             string                         `json:"service"`
-	Mode                string                         `json:"mode"`
-	Posture             map[string]any                 `json:"posture"`
-	Operational         OperationalStatus              `json:"operational_status"`
-	SupplyChain         SupplyChainPosture             `json:"supply_chain_posture"`
-	AuthFailure         AuthFailurePosture             `json:"auth_failure_posture"`
-	AuthenticatedRole   SessionRoleEvidence            `json:"authenticated_role_evidence"`
-	RolePolicyReadiness RolePolicyReadiness            `json:"role_policy_readiness"`
-	ModeGuardrails      ModeGuardrails                 `json:"mode_guardrails"`
-	ActionReadiness     ActionReadiness                `json:"action_readiness"`
-	AssuranceGates      AssuranceGates                 `json:"assurance_gates"`
-	NegativePath        NegativePathAssurance          `json:"negative_path_assurance"`
-	Guidance            DegradedGuidance               `json:"degraded_guidance"`
-	AuditDrill          AuditFailureDrill              `json:"audit_failure_drill"`
-	RestoreProof        RestoreDrillProof              `json:"restore_drill_proof"`
-	RestoreWorkflow     RestoreDrillWorkflow           `json:"restore_drill_workflow"`
-	ReleaseWorkflow     ReleaseProvenanceWorkflow      `json:"release_provenance_workflow"`
-	PrivacyWorkflow     PrivacyRetentionWorkflow       `json:"privacy_retention_workflow"`
-	IntegrationWorkflow IntegrationConformanceWorkflow `json:"integration_conformance_workflow"`
-	RemoteAuditWorkflow RemoteAuditWorkflow            `json:"remote_audit_workflow"`
-	BreakGlassWorkflow  BreakGlassReviewWorkflow       `json:"break_glass_review_workflow"`
-	AssuranceSummary    AssuranceSummary               `json:"assurance_summary"`
-	Enterprise          EnterpriseValidation           `json:"enterprise_validation"`
-	EnterpriseDryRun    EnterpriseDryRun               `json:"enterprise_dry_run"`
-	EnterpriseClaim     EnterpriseClaimReview          `json:"enterprise_claim_review"`
-	EnterpriseRelease   EnterpriseReleaseGate          `json:"enterprise_release_gate"`
-	AttachmentReview    AttachmentReview               `json:"attachment_review"`
-	ExternalEvidence    ExternalEvidencePosture        `json:"external_evidence"`
-	Privacy             PrivacyPosture                 `json:"privacy_posture"`
-	EvidenceBoundary    EvidenceBoundary               `json:"evidence_boundary"`
-	Descriptors         []SecretDescriptor             `json:"descriptors"`
-	CatalogGates        []CatalogGate                  `json:"catalog_gates"`
-	ScopePosture        ScopePosture                   `json:"scope_posture"`
-	LifecyclePosture    LifecyclePosture               `json:"lifecycle_posture"`
-	PermitPosture       PermitPosture                  `json:"permit_posture"`
-	AccessPosture       AccessPosture                  `json:"access_posture"`
-	AuditPosture        AuditPosture                   `json:"audit_posture"`
-	AuditTrail          AuditTrailWitness              `json:"audit_trail"`
-	RecentAudit         []AuditTrailRow                `json:"recent_audit"`
-	Integrity           *EvidenceIntegrity             `json:"integrity,omitempty"`
-	Receipt             *EvidenceReceipt               `json:"evidence_receipt,omitempty"`
-	ValueReturned       bool                           `json:"value_returned"`
-	RedactionModel      string                         `json:"redaction_model"`
+	GeneratedAt          time.Time                      `json:"generated_at"`
+	Service              string                         `json:"service"`
+	Mode                 string                         `json:"mode"`
+	Posture              map[string]any                 `json:"posture"`
+	Operational          OperationalStatus              `json:"operational_status"`
+	SupplyChain          SupplyChainPosture             `json:"supply_chain_posture"`
+	AuthFailure          AuthFailurePosture             `json:"auth_failure_posture"`
+	AuthenticatedRole    SessionRoleEvidence            `json:"authenticated_role_evidence"`
+	AuthenticatedBrowser AuthenticatedBrowserWitness    `json:"authenticated_browser_witness"`
+	RolePolicyReadiness  RolePolicyReadiness            `json:"role_policy_readiness"`
+	ModeGuardrails       ModeGuardrails                 `json:"mode_guardrails"`
+	ActionReadiness      ActionReadiness                `json:"action_readiness"`
+	AssuranceGates       AssuranceGates                 `json:"assurance_gates"`
+	NegativePath         NegativePathAssurance          `json:"negative_path_assurance"`
+	Guidance             DegradedGuidance               `json:"degraded_guidance"`
+	AuditDrill           AuditFailureDrill              `json:"audit_failure_drill"`
+	RestoreProof         RestoreDrillProof              `json:"restore_drill_proof"`
+	RestoreWorkflow      RestoreDrillWorkflow           `json:"restore_drill_workflow"`
+	ReleaseWorkflow      ReleaseProvenanceWorkflow      `json:"release_provenance_workflow"`
+	PrivacyWorkflow      PrivacyRetentionWorkflow       `json:"privacy_retention_workflow"`
+	IntegrationWorkflow  IntegrationConformanceWorkflow `json:"integration_conformance_workflow"`
+	RemoteAuditWorkflow  RemoteAuditWorkflow            `json:"remote_audit_workflow"`
+	BreakGlassWorkflow   BreakGlassReviewWorkflow       `json:"break_glass_review_workflow"`
+	AssuranceSummary     AssuranceSummary               `json:"assurance_summary"`
+	Enterprise           EnterpriseValidation           `json:"enterprise_validation"`
+	EnterpriseDryRun     EnterpriseDryRun               `json:"enterprise_dry_run"`
+	EnterpriseClaim      EnterpriseClaimReview          `json:"enterprise_claim_review"`
+	EnterpriseRelease    EnterpriseReleaseGate          `json:"enterprise_release_gate"`
+	AttachmentReview     AttachmentReview               `json:"attachment_review"`
+	ExternalEvidence     ExternalEvidencePosture        `json:"external_evidence"`
+	Privacy              PrivacyPosture                 `json:"privacy_posture"`
+	EvidenceBoundary     EvidenceBoundary               `json:"evidence_boundary"`
+	Descriptors          []SecretDescriptor             `json:"descriptors"`
+	CatalogGates         []CatalogGate                  `json:"catalog_gates"`
+	ScopePosture         ScopePosture                   `json:"scope_posture"`
+	LifecyclePosture     LifecyclePosture               `json:"lifecycle_posture"`
+	PermitPosture        PermitPosture                  `json:"permit_posture"`
+	AccessPosture        AccessPosture                  `json:"access_posture"`
+	AuditPosture         AuditPosture                   `json:"audit_posture"`
+	AuditTrail           AuditTrailWitness              `json:"audit_trail"`
+	RecentAudit          []AuditTrailRow                `json:"recent_audit"`
+	Integrity            *EvidenceIntegrity             `json:"integrity,omitempty"`
+	Receipt              *EvidenceReceipt               `json:"evidence_receipt,omitempty"`
+	ValueReturned        bool                           `json:"value_returned"`
+	RedactionModel       string                         `json:"redaction_model"`
 }
 
 type EvidenceBoundary struct {
@@ -424,6 +425,7 @@ func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
 			"permit_posture",
 			"auth_failure_posture",
 			"authenticated_role_evidence",
+			"authenticated_browser_witness",
 			"role_policy_readiness",
 			"enterprise_release_gate",
 			"enterprise_claim_review",

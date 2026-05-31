@@ -337,6 +337,7 @@ type SessionPosture struct {
 	ExpiresLabel       string `json:"expires_label,omitempty"`
 	SecondsRemaining   int    `json:"seconds_remaining,omitempty"`
 	CookieSameSite     string `json:"cookie_same_site"`
+	CookieHostPrefixed bool   `json:"cookie_host_prefixed"`
 	CSRFBound          bool   `json:"csrf_bound"`
 	CookieSigned       bool   `json:"cookie_signed"`
 	ValueReturned      bool   `json:"value_returned"`
@@ -532,6 +533,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /api/warden/descriptors", app.withAuth(app.handleDescriptors))
 	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle)))
 	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit)))
+	mux.HandleFunc("GET /api/auth/session-witness", app.withAuth(app.handleAuthSessionWitness))
 	mux.HandleFunc("GET /api/posture", app.withAuth(app.handlePosture))
 	mux.HandleFunc("GET /api/evidence", app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence)))
 	mux.HandleFunc("POST /api/evidence/attachments", app.withAuth(app.handleAttachEvidence))
@@ -563,7 +565,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/posture", "/api/evidence":
+	case "/", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/logout", "/api/warden/resolve", "/api/evidence/attachments", "/api/permits", "/ui/warden/resolve", "/ui/evidence/attachments", "/ui/permits":
 		return []string{http.MethodPost}, true
@@ -913,6 +915,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	supplyChain := SupplyChainPostureFor(evidenceBoundary)
 	authFailure := AuthFailurePostureFor(app.cfg)
 	authenticatedRole := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
+	authenticatedBrowser := app.authenticatedBrowserWitness(session, authenticatedRole, ready)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
@@ -939,69 +942,74 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
 	commandCenter := CommandCenterFor(ready, operationalStatus, actionReadiness, modeGuardrails, attachmentReview, evidenceBoundary)
 	data := map[string]any{
-		"Title":               "Janus",
-		"CSPNonce":            cspNonceFromContext(r.Context()),
-		"Session":             session,
-		"CSRF":                app.csrfToken(session),
-		"Descriptors":         descriptors,
-		"Issues":              issues,
-		"Mode":                app.cfg.ProductMode,
-		"Audit":               recentAudit,
-		"AuditTrail":          auditTrail,
-		"Posture":             auditPosture,
-		"CatalogGates":        catalogGates,
-		"Access":              accessPosture,
-		"RolePolicyReadiness": rolePolicyReadiness,
-		"RoleBoundaries":      RoleBoundariesFor(session),
-		"RoleAvailability":    roleAvailability,
-		"RoleWorkbench":       roleWorkbench,
-		"ActionReadiness":     actionReadiness,
-		"OperationalStatus":   operationalStatus,
-		"SupplyChain":         supplyChain,
-		"AuthFailure":         authFailure,
-		"AuthenticatedRole":   authenticatedRole,
-		"CommandCenter":       commandCenter,
-		"Ready":               ready,
-		"Readiness":           readinessBody,
-		"SessionPosture":      app.sessionPosture(session),
-		"Scope":               scopePosture,
-		"Lifecycle":           lifecyclePosture,
-		"ApprovedUse":         approvedUsePosture,
-		"ModePosture":         ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
-		"ModeGuardrails":      modeGuardrails,
-		"Enterprise":          enterpriseValidation,
-		"EnterpriseDryRun":    enterpriseDryRun,
-		"EnterpriseClaim":     enterpriseClaim,
-		"EnterpriseRelease":   enterpriseReleaseGate,
-		"AttachmentReview":    attachmentReview,
-		"ExternalEvidence":    externalEvidence,
-		"RestoreProof":        restoreProof,
-		"RestoreWorkflow":     restoreWorkflow,
-		"ReleaseWorkflow":     releaseWorkflow,
-		"PrivacyWorkflow":     privacyWorkflow,
-		"IntegrationWorkflow": integrationWorkflow,
-		"RemoteAuditWorkflow": remoteAuditWorkflow,
-		"BreakGlassWorkflow":  breakGlassWorkflow,
-		"Privacy":             privacyPosture,
-		"AssuranceSummary":    assuranceSummary,
-		"AssuranceGates":      assuranceGates,
-		"NegativePath":        negativePath,
-		"Guidance":            degradedGuidance,
-		"AuditDrill":          auditDrill,
-		"EvidenceHash":        evidenceHash,
-		"EvidenceHashFull":    evidenceHashFull,
-		"EvidenceBoundary":    evidenceBoundary,
-		"EvidenceReceipt":     evidenceReceipt,
-		"CanExportEvidence":   canViewAudit,
-		"CanViewAudit":        canViewAudit,
-		"CanOperate":          canOperate,
-		"ActionResult":        actionResult,
-		"Permits":             recentPermits,
-		"PermitPosture":       permitPosture,
-		"SelectedRef":         focus.Descriptor.ID,
-		"Focus":               focus,
+		"Title":                "Janus",
+		"CSPNonce":             cspNonceFromContext(r.Context()),
+		"Session":              session,
+		"CSRF":                 app.csrfToken(session),
+		"Descriptors":          descriptors,
+		"Issues":               issues,
+		"Mode":                 app.cfg.ProductMode,
+		"Audit":                recentAudit,
+		"AuditTrail":           auditTrail,
+		"Posture":              auditPosture,
+		"CatalogGates":         catalogGates,
+		"Access":               accessPosture,
+		"RolePolicyReadiness":  rolePolicyReadiness,
+		"RoleBoundaries":       RoleBoundariesFor(session),
+		"RoleAvailability":     roleAvailability,
+		"RoleWorkbench":        roleWorkbench,
+		"ActionReadiness":      actionReadiness,
+		"OperationalStatus":    operationalStatus,
+		"SupplyChain":          supplyChain,
+		"AuthFailure":          authFailure,
+		"AuthenticatedRole":    authenticatedRole,
+		"AuthenticatedBrowser": authenticatedBrowser,
+		"CommandCenter":        commandCenter,
+		"Ready":                ready,
+		"Readiness":            readinessBody,
+		"SessionPosture":       app.sessionPosture(session),
+		"Scope":                scopePosture,
+		"Lifecycle":            lifecyclePosture,
+		"ApprovedUse":          approvedUsePosture,
+		"ModePosture":          ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"ModeGuardrails":       modeGuardrails,
+		"Enterprise":           enterpriseValidation,
+		"EnterpriseDryRun":     enterpriseDryRun,
+		"EnterpriseClaim":      enterpriseClaim,
+		"EnterpriseRelease":    enterpriseReleaseGate,
+		"AttachmentReview":     attachmentReview,
+		"ExternalEvidence":     externalEvidence,
+		"RestoreProof":         restoreProof,
+		"RestoreWorkflow":      restoreWorkflow,
+		"ReleaseWorkflow":      releaseWorkflow,
+		"PrivacyWorkflow":      privacyWorkflow,
+		"IntegrationWorkflow":  integrationWorkflow,
+		"RemoteAuditWorkflow":  remoteAuditWorkflow,
+		"BreakGlassWorkflow":   breakGlassWorkflow,
+		"Privacy":              privacyPosture,
+		"AssuranceSummary":     assuranceSummary,
+		"AssuranceGates":       assuranceGates,
+		"NegativePath":         negativePath,
+		"Guidance":             degradedGuidance,
+		"AuditDrill":           auditDrill,
+		"EvidenceHash":         evidenceHash,
+		"EvidenceHashFull":     evidenceHashFull,
+		"EvidenceBoundary":     evidenceBoundary,
+		"EvidenceReceipt":      evidenceReceipt,
+		"CanExportEvidence":    canViewAudit,
+		"CanViewAudit":         canViewAudit,
+		"CanOperate":           canOperate,
+		"ActionResult":         actionResult,
+		"Permits":              recentPermits,
+		"PermitPosture":        permitPosture,
+		"SelectedRef":          focus.Descriptor.ID,
+		"Focus":                focus,
 	}
 	return data
+}
+
+func (app *App) authenticatedBrowserWitness(session Session, roleEvidence SessionRoleEvidence, ready bool) AuthenticatedBrowserWitness {
+	return AuthenticatedBrowserWitnessFor(session, roleEvidence, app.sessionPosture(session), app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
 }
 
 func focusDescriptor(descriptors []SecretDescriptor, selectedRef string) DescriptorFocus {
@@ -1058,6 +1066,18 @@ func (app *App) handlePosture(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	app.audit(r, "posture.view", "allowed", session.Subject, "")
 	writeJSON(w, http.StatusOK, app.postureBody(session))
+}
+
+func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	_, ready := app.readinessBody()
+	roleEvidence := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
+	app.audit(r, "auth.session.witness", "allowed", session.Subject, "")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"witness":        app.authenticatedBrowserWitness(session, roleEvidence, ready),
+		"request_id":     requestID(r),
+		"value_returned": false,
+	})
 }
 
 func (app *App) handleEvidence(w http.ResponseWriter, r *http.Request) {
@@ -1783,6 +1803,7 @@ func (app *App) sessionPosture(session Session) SessionPosture {
 		AbsoluteTTLSeconds: int(defaultSessionTTL.Seconds()),
 		TTLLabel:           durationLabel(defaultSessionTTL),
 		CookieSameSite:     "Strict",
+		CookieHostPrefixed: app.cfg.SessionCookieName() == hostSessionCookie,
 		CSRFBound:          true,
 		CookieSigned:       len(app.cfg.CookieKey) >= 32,
 		ValueReturned:      false,
@@ -2519,6 +2540,7 @@ func (app *App) postureBody(session Session) map[string]any {
 	supplyChain := SupplyChainPostureFor(evidenceBoundary)
 	authFailure := AuthFailurePostureFor(app.cfg)
 	authenticatedRole := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
+	authenticatedBrowser := app.authenticatedBrowserWitness(session, authenticatedRole, ready)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
@@ -2592,6 +2614,7 @@ func (app *App) postureBody(session Session) map[string]any {
 		"supply_chain_posture":             supplyChain,
 		"auth_failure_posture":             authFailure,
 		"authenticated_role_evidence":      authenticatedRole,
+		"authenticated_browser_witness":    authenticatedBrowser,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
 			"pkce_s256":                   app.cfg.OIDCConfigured(),
@@ -2643,6 +2666,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"enterprise_release_gate":          "single_value_free_release_decision",
 			"auth_failure_posture":             "safe_reason_codes_no_provider_values",
 			"authenticated_role_evidence":      "signed_in_role_receipt_no_identity_values",
+			"authenticated_browser_witness":    "signed_session_browser_proof_no_identity_values",
 			"external_evidence_workflow":       "presence_only_no_refs",
 			"attachment_review":                "presence_only_owner_review",
 			"restore_drill_proof":              "dashboard_posture_evidence",
@@ -2717,6 +2741,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"rate_limited_runtime",
 			"role_gated_audit_evidence",
 			"safe_audit_trail_export",
+			"authenticated_browser_witness",
 			"scope_bound_metadata",
 			"lifecycle_gated_normal_use",
 			"persistent_permit_records",
@@ -2759,6 +2784,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"evidence_export_boundary_ux",
 			"role_availability_ux",
 			"authenticated_role_receipt",
+			"authenticated_browser_witness_api",
 			"human_readable_assurance_summary",
 			"operational_status_strip",
 			"supply_chain_posture_summary",
@@ -2833,6 +2859,7 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	supplyChain := SupplyChainPostureFor(evidenceBoundary)
 	authFailure := AuthFailurePostureFor(app.cfg)
 	authenticatedRole := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
+	authenticatedBrowser := app.authenticatedBrowserWitness(session, authenticatedRole, ready)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
 	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
@@ -2856,47 +2883,48 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	actionReadiness := ActionReadinessFor(session, ready)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, RoleAvailabilityFor(session))
 	pack := EvidencePack{
-		GeneratedAt:         time.Now().UTC(),
-		Service:             "janus",
-		Mode:                app.cfg.ProductMode,
-		Posture:             app.postureBody(session),
-		Operational:         operationalStatus,
-		SupplyChain:         supplyChain,
-		AuthFailure:         authFailure,
-		AuthenticatedRole:   authenticatedRole,
-		RolePolicyReadiness: rolePolicyReadiness,
-		ModeGuardrails:      modeGuardrails,
-		ActionReadiness:     actionReadiness,
-		AssuranceGates:      assuranceGates,
-		NegativePath:        negativePath,
-		Guidance:            degradedGuidance,
-		AuditDrill:          auditDrill,
-		AssuranceSummary:    assuranceSummary,
-		RestoreWorkflow:     restoreWorkflow,
-		ReleaseWorkflow:     releaseWorkflow,
-		PrivacyWorkflow:     privacyWorkflow,
-		IntegrationWorkflow: integrationWorkflow,
-		RemoteAuditWorkflow: remoteAuditWorkflow,
-		BreakGlassWorkflow:  breakGlassWorkflow,
-		Enterprise:          enterpriseValidation,
-		EnterpriseDryRun:    enterpriseDryRun,
-		EnterpriseClaim:     enterpriseClaim,
-		EnterpriseRelease:   enterpriseReleaseGate,
-		AttachmentReview:    attachmentReview,
-		ExternalEvidence:    externalEvidence,
-		RestoreProof:        restoreProof,
-		Privacy:             privacyPosture,
-		Descriptors:         descriptors,
-		CatalogGates:        catalogGates,
-		ScopePosture:        scopePosture,
-		LifecyclePosture:    LifecyclePostureFor(descriptors, time.Now().UTC()),
-		PermitPosture:       PermitPosture{ValueReturned: false},
-		AccessPosture:       accessPosture,
-		AuditPosture:        auditPosture,
-		AuditTrail:          auditTrail,
-		RecentAudit:         auditTrail.Rows,
-		ValueReturned:       false,
-		RedactionModel:      "metadata-only; secret values are not stored, read, rendered, logged, or exported by Janus V1.x",
+		GeneratedAt:          time.Now().UTC(),
+		Service:              "janus",
+		Mode:                 app.cfg.ProductMode,
+		Posture:              app.postureBody(session),
+		Operational:          operationalStatus,
+		SupplyChain:          supplyChain,
+		AuthFailure:          authFailure,
+		AuthenticatedRole:    authenticatedRole,
+		AuthenticatedBrowser: authenticatedBrowser,
+		RolePolicyReadiness:  rolePolicyReadiness,
+		ModeGuardrails:       modeGuardrails,
+		ActionReadiness:      actionReadiness,
+		AssuranceGates:       assuranceGates,
+		NegativePath:         negativePath,
+		Guidance:             degradedGuidance,
+		AuditDrill:           auditDrill,
+		AssuranceSummary:     assuranceSummary,
+		RestoreWorkflow:      restoreWorkflow,
+		ReleaseWorkflow:      releaseWorkflow,
+		PrivacyWorkflow:      privacyWorkflow,
+		IntegrationWorkflow:  integrationWorkflow,
+		RemoteAuditWorkflow:  remoteAuditWorkflow,
+		BreakGlassWorkflow:   breakGlassWorkflow,
+		Enterprise:           enterpriseValidation,
+		EnterpriseDryRun:     enterpriseDryRun,
+		EnterpriseClaim:      enterpriseClaim,
+		EnterpriseRelease:    enterpriseReleaseGate,
+		AttachmentReview:     attachmentReview,
+		ExternalEvidence:     externalEvidence,
+		RestoreProof:         restoreProof,
+		Privacy:              privacyPosture,
+		Descriptors:          descriptors,
+		CatalogGates:         catalogGates,
+		ScopePosture:         scopePosture,
+		LifecyclePosture:     LifecyclePostureFor(descriptors, time.Now().UTC()),
+		PermitPosture:        PermitPosture{ValueReturned: false},
+		AccessPosture:        accessPosture,
+		AuditPosture:         auditPosture,
+		AuditTrail:           auditTrail,
+		RecentAudit:          auditTrail.Rows,
+		ValueReturned:        false,
+		RedactionModel:       "metadata-only; secret values are not stored, read, rendered, logged, or exported by Janus V1.x",
 	}
 	if app.permits != nil {
 		pack.PermitPosture = app.permits.Posture()
@@ -4303,8 +4331,14 @@ func mustTemplates() *template.Template {
 	  </div>
 	  <div class="panel-body stack">
 	    <p>{{ .AuthenticatedRole.Summary }}</p>
+	    <p><span class="pill info">{{ .AuthenticatedBrowser.Label }}</span> {{ .AuthenticatedBrowser.Summary }}</p>
 	    <p><span class="pill info">Human validation witness</span> role gates visible, identity values private</p>
 	    <div class="witness-grid" aria-label="Human validation witness">
+	      <div class="witness-card {{ if eq .AuthenticatedBrowser.State "authenticated" }}ok{{ else if eq .AuthenticatedBrowser.State "local_smoke" }}info{{ else }}warn{{ end }}">
+	        <span>Browser proof</span>
+	        <strong>{{ .AuthenticatedBrowser.State }}</strong>
+	        <p>{{ if eq .AuthenticatedBrowser.AuthMode "zitadel_oidc" }}Zitadel to Janus flow{{ else }}Local smoke flow{{ end }}, strict signed session, copy-safe browser proof.</p>
+	      </div>
 	      <div class="witness-card {{ if eq .AuthenticatedRole.State "signed_in" }}ok{{ else if eq .AuthenticatedRole.State "local_auth_disabled" }}info{{ else }}warn{{ end }}">
 	        <span>Session</span>
 	        <strong>{{ if eq .AuthenticatedRole.State "signed_in" }}Signed in{{ else if eq .AuthenticatedRole.State "local_auth_disabled" }}Local smoke{{ else }}Needs login{{ end }}</strong>
@@ -4328,6 +4362,10 @@ func mustTemplates() *template.Template {
 	        <span class="pill info">{{ .AuthenticatedRole.AuthMode }}</span>
 	        <span class="pill info">{{ .AuthenticatedRole.IdentityBoundary }}</span>
 	        <span class="pill ok">{{ .AuthenticatedRole.EvidenceSignal }}</span>
+	        <span class="pill ok">{{ .AuthenticatedBrowser.EvidenceSignal }}</span>
+	        <span class="pill info">{{ .AuthenticatedBrowser.SessionCookiePolicy }}</span>
+	        <span class="pill info">{{ .AuthenticatedBrowser.CSRFBoundary }}</span>
+	        <span class="pill info">{{ .AuthenticatedBrowser.CSPBoundary }}</span>
 	        <span class="pill ok">identity_values_returned=false</span>
 	        <span class="pill ok">subject_returned=false</span>
 	        <span class="pill ok">email_returned=false</span>
@@ -4339,9 +4377,22 @@ func mustTemplates() *template.Template {
 	        <span class="pill ok">request_body_returned=false</span>
 	        <span class="pill ok">env_values_returned=false</span>
 	        <span class="pill ok">backend_path_returned=false</span>
+	        <span class="pill ok">connector_output_returned=false</span>
+	        <span class="pill ok">permit_payload_returned=false</span>
+	        <span class="pill ok">secret_value_returned=false</span>
 	        <span class="pill ok">value_returned=false</span>
 	      </div>
 	    </details>
+	    <div class="mode-grid" aria-label="Authenticated browser gates">
+	      {{ range .AuthenticatedBrowser.Gates }}
+	      <div class="mode-item {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Detail }}</p>
+	        <p><span class="pill ok">value_returned=false</span></p>
+	      </div>
+	      {{ end }}
+	    </div>
 	    <div class="mode-grid" aria-label="Signed-in role states">
 	      {{ range .AuthenticatedRole.Roles }}
 	      <div class="mode-item {{ .Tone }}">
