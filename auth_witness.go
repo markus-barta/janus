@@ -92,6 +92,10 @@ type WitnessProofPackVerificationRequest struct {
 	ProofPack string `json:"proof_pack"`
 }
 
+type WitnessEvidenceRecordVerificationRequest struct {
+	EvidenceRecord string `json:"evidence_record"`
+}
+
 type WitnessReceiptVerification struct {
 	Label               string                            `json:"label"`
 	Status              string                            `json:"status"`
