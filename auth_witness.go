@@ -486,7 +486,30 @@ func WitnessReceiptVerificationRequestFromProofPack(proofPack string) (WitnessRe
 		ok = false
 	}
 
-	required := []string{"handoff", "signed_browser_capture", "proof_pack_contains_verification", "witness_proof_line", "witness_hash", "copy_safe", "input_returned", "request_body_returned", "value_returned"}
+	required := []string{
+		"handoff",
+		"signed_browser_capture",
+		"proof_pack_contains_verification",
+		"current_session_verified",
+		"witness_proof_line",
+		"witness_algorithm",
+		"witness_hash",
+		"witness_hash_header",
+		"witness_hash_body_field",
+		"verification_status",
+		"verification_verified",
+		"verification_hash_match",
+		"verification_fresh",
+		"verification_algorithm",
+		"verification_hash",
+		"verification_hash_header",
+		"verification_hash_body_field",
+		"verification_receipt_line",
+		"copy_safe",
+		"input_returned",
+		"request_body_returned",
+		"value_returned",
+	}
 	for _, key := range required {
 		if fields[key] == "" {
 			checks = append(checks, witnessVerificationCheck("proof_pack_missing_"+key, "Proof pack field", key, "The proof pack is missing a required copy-safe field.", false))
@@ -497,6 +520,17 @@ func WitnessReceiptVerificationRequestFromProofPack(proofPack string) (WitnessRe
 		"handoff":                          "reviewer_ready",
 		"signed_browser_capture":           "true",
 		"proof_pack_contains_verification": "true",
+		"current_session_verified":         "true",
+		"witness_algorithm":                "sha256-witness-v1",
+		"witness_hash_header":              "X-Janus-Witness-Hash",
+		"witness_hash_body_field":          "receipt.hash",
+		"verification_status":              "verified",
+		"verification_verified":            "true",
+		"verification_hash_match":          "true",
+		"verification_fresh":               "true",
+		"verification_algorithm":           "sha256-witness-verification-v1",
+		"verification_hash_header":         "X-Janus-Witness-Verification-Hash",
+		"verification_hash_body_field":     "verification.receipt.hash",
 		"copy_safe":                        "true",
 		"input_returned":                   "false",
 		"request_body_returned":            "false",
@@ -516,6 +550,62 @@ func WitnessReceiptVerificationRequestFromProofPack(proofPack string) (WitnessRe
 		checks = append(checks, witnessVerificationCheck("proof_pack_witness_hash", "Proof pack hash", fields["witness_hash"], "Expected a 64-character lowercase witness hash.", hashOK))
 		ok = ok && hashOK
 	}
+	witnessFields := map[string]string{}
+	if fields["witness_proof_line"] != "" {
+		var proofLineOK bool
+		witnessFields, _, proofLineOK = parseWitnessProofLine(fields["witness_proof_line"])
+		checks = append(checks, witnessVerificationCheck("proof_pack_witness_line_shape", "Proof pack witness line", proofPackMatchState(proofLineOK), "The embedded witness line must have the expected Janus shape.", proofLineOK))
+		ok = ok && proofLineOK
+		if proofLineOK {
+			witnessMatchOK := true
+			for _, key := range []string{"schema", "state", "flow", "signal", "body_field", "request_id", "captured_at", "fresh_until", "freshness_seconds", "value_returned"} {
+				if fields[key] == "" {
+					continue
+				}
+				match := fields[key] == witnessFields[key]
+				witnessMatchOK = witnessMatchOK && match
+			}
+			checks = append(checks, witnessVerificationCheck("proof_pack_witness_line_matches", "Proof pack witness fields", proofPackMatchState(witnessMatchOK), "Top-level proof-pack fields must match the embedded witness line.", witnessMatchOK))
+			ok = ok && witnessMatchOK
+		}
+	}
+	if fields["verification_hash"] != "" {
+		hashOK := isLowerHexString(fields["verification_hash"], 64)
+		checks = append(checks, witnessVerificationCheck("proof_pack_verification_hash", "Proof pack verification hash", fields["verification_hash"], "Expected a 64-character lowercase verification hash.", hashOK))
+		ok = ok && hashOK
+	}
+	if fields["verification_receipt_line"] != "" {
+		receiptFields, receiptLineOK := parseWitnessVerificationLine(fields["verification_receipt_line"])
+		checks = append(checks, witnessVerificationCheck("proof_pack_verification_receipt_shape", "Proof pack verification receipt", proofPackMatchState(receiptLineOK), "The embedded verification receipt must have the expected Janus shape.", receiptLineOK))
+		ok = ok && receiptLineOK
+		if receiptLineOK {
+			sum := sha256.Sum256([]byte(fields["verification_receipt_line"]))
+			receiptHash := hex.EncodeToString(sum[:])
+			hashMatch := fields["verification_hash"] != "" && fields["verification_hash"] == receiptHash
+			checks = append(checks, witnessVerificationCheck("proof_pack_verification_hash_match", "Proof pack verification hash match", proofPackMatchState(hashMatch), "The verification hash must match the embedded verification receipt line.", hashMatch))
+			receiptMatches := receiptFields["schema"] == witnessVerificationReceiptSchema &&
+				receiptFields["status"] == fields["verification_status"] &&
+				receiptFields["hash_match"] == fields["verification_hash_match"] &&
+				receiptFields["fresh"] == fields["verification_fresh"] &&
+				receiptFields["verified"] == fields["verification_verified"] &&
+				receiptFields["expected_hash"] == fields["witness_hash"] &&
+				receiptFields["source_schema"] == fields["schema"] &&
+				receiptFields["source_state"] == fields["state"] &&
+				receiptFields["source_flow"] == fields["flow"] &&
+				receiptFields["source_request_id"] == fields["request_id"] &&
+				receiptFields["captured_at"] == fields["captured_at"] &&
+				receiptFields["fresh_until"] == fields["fresh_until"] &&
+				receiptFields["freshness_seconds"] == fields["freshness_seconds"] &&
+				receiptFields["input_returned"] == "false" &&
+				receiptFields["request_body_returned"] == "false" &&
+				receiptFields["value_returned"] == "false"
+			if len(witnessFields) > 0 {
+				receiptMatches = receiptMatches && receiptFields["source_request_id"] == witnessFields["request_id"]
+			}
+			checks = append(checks, witnessVerificationCheck("proof_pack_verification_receipt_matches", "Proof pack verification receipt fields", proofPackMatchState(receiptMatches), "Verification receipt fields must match the proof-pack witness fields.", receiptMatches))
+			ok = ok && hashMatch && receiptMatches
+		}
+	}
 	if ok {
 		checks = append(checks, witnessVerificationCheck("proof_pack_shape", "Proof pack shape", "valid", "The proof pack contains the expected Janus field set.", true))
 	}
@@ -523,6 +613,74 @@ func WitnessReceiptVerificationRequestFromProofPack(proofPack string) (WitnessRe
 		ProofLine: fields["witness_proof_line"],
 		ProofHash: fields["witness_hash"],
 	}, checks, ok
+}
+
+func parseWitnessVerificationLine(line string) (map[string]string, bool) {
+	fields := map[string]string{}
+	ok := true
+	allowed := map[string]bool{
+		"schema":                true,
+		"verifier_request_id":   true,
+		"status":                true,
+		"source_schema":         true,
+		"source_state":          true,
+		"source_flow":           true,
+		"source_request_id":     true,
+		"captured_at":           true,
+		"fresh_until":           true,
+		"freshness_seconds":     true,
+		"expected_hash":         true,
+		"hash_match":            true,
+		"fresh":                 true,
+		"verified":              true,
+		"input_returned":        true,
+		"request_body_returned": true,
+		"value_returned":        true,
+	}
+	required := []string{
+		"schema",
+		"verifier_request_id",
+		"status",
+		"source_schema",
+		"source_state",
+		"source_flow",
+		"source_request_id",
+		"captured_at",
+		"fresh_until",
+		"freshness_seconds",
+		"expected_hash",
+		"hash_match",
+		"fresh",
+		"verified",
+		"input_returned",
+		"request_body_returned",
+		"value_returned",
+	}
+	for _, part := range strings.Fields(strings.TrimSpace(line)) {
+		key, value, found := strings.Cut(part, "=")
+		if !found || strings.TrimSpace(key) == "" || !allowed[key] {
+			ok = false
+			continue
+		}
+		if _, exists := fields[key]; exists {
+			ok = false
+			continue
+		}
+		fields[key] = value
+	}
+	for _, key := range required {
+		if fields[key] == "" {
+			ok = false
+		}
+	}
+	return fields, ok
+}
+
+func proofPackMatchState(ok bool) string {
+	if ok {
+		return "match"
+	}
+	return "mismatch"
 }
 
 func WitnessReceiptVerificationReceiptFor(verification WitnessReceiptVerification, requestID string) WitnessVerificationReceipt {

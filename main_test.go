@@ -881,7 +881,7 @@ func TestWitnessProofPackVerifierVerifiesWholePackWithoutEcho(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"key":"proof_pack_handoff"`, `"key":"proof_pack_signed_browser_capture"`, `"key":"proof_pack_contains_verification"`, `"key":"proof_pack_shape"`, `"status":"verified"`, `"hash_match":true`, `"fresh":true`, `"verified":true`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
+	for _, want := range []string{`"key":"proof_pack_handoff"`, `"key":"proof_pack_signed_browser_capture"`, `"key":"proof_pack_contains_verification"`, `"key":"proof_pack_witness_line_matches"`, `"key":"proof_pack_verification_hash_match"`, `"key":"proof_pack_verification_receipt_matches"`, `"key":"proof_pack_shape"`, `"status":"verified"`, `"hash_match":true`, `"fresh":true`, `"verified":true`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("proof-pack verification should include %s: %s", want, raw)
 		}
@@ -889,6 +889,33 @@ func TestWitnessProofPackVerifierVerifiesWholePackWithoutEcho(t *testing.T) {
 	for _, forbidden := range []string{"witness_proof_line=", pack, "subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
 		if strings.Contains(string(raw), forbidden) {
 			t.Fatalf("proof-pack verification leaked forbidden value %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestWitnessProofPackVerifierRejectsTamperedWrapperWithoutEcho(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	capturedAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	pack := testCurrentSessionProofPack(t, app, session, "verify-pack-tamper-123", capturedAt)
+	tampered := strings.Replace(pack, "state=authenticated\n", "state=missing\n", 1)
+
+	verification := VerifyAuthenticatedBrowserProofPack(tampered, capturedAt.Add(2*time.Minute))
+	if verification.Verified || verification.Status != "blocked" {
+		t.Fatalf("tampered proof pack should be blocked, got %#v", verification)
+	}
+	raw, err := json.Marshal(verification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"key":"proof_pack_witness_line_matches"`, `"state":"mismatch"`, `"status":"blocked"`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("tampered proof-pack verification should include %s: %s", want, raw)
+		}
+	}
+	for _, forbidden := range []string{"state=missing", "witness_proof_line=", tampered, "subject-123", "person@example.test", "Person Name", "secret-cookie-secret"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("tampered proof-pack verification leaked forbidden value %q: %s", forbidden, raw)
 		}
 	}
 }
