@@ -820,6 +820,59 @@ func WitnessEvidenceLineFor(evidence WitnessEvidenceReceipt) string {
 		" value_returned=false"
 }
 
+func CurrentSessionEvidenceTextFor(verification WitnessReceiptVerification, checklist []ReviewerLaunchCheck) string {
+	evidence := verification.Evidence
+	if evidence == nil {
+		generated := WitnessEvidenceReceiptFor(verification)
+		evidence = &generated
+	}
+	return "janus_current_session_evidence\n" +
+		"evidence_line=" + evidence.Line + "\n" +
+		"evidence_status=" + safeDisplayState(evidence.Status) + "\n" +
+		"source_request_id=" + safeDisplayState(evidence.SourceRequestID) + "\n" +
+		"captured_at=" + safeDisplayState(evidence.CapturedAt) + "\n" +
+		"fresh_until=" + safeDisplayState(evidence.FreshUntil) + "\n" +
+		"freshness_seconds=" + strconv.Itoa(evidence.FreshnessSeconds) + "\n" +
+		"hash_match=" + strconv.FormatBool(evidence.HashMatch) + "\n" +
+		"fresh=" + strconv.FormatBool(evidence.Fresh) + "\n" +
+		"verified=" + strconv.FormatBool(evidence.Verified) + "\n" +
+		"proof_pack_verified=" + strconv.FormatBool(evidence.ProofPackVerified) + "\n" +
+		"verification_hash=" + safeDisplayState(evidence.VerificationHash) + "\n" +
+		"verification_hash_header=" + safeDisplayState(evidence.VerificationHashHeader) + "\n" +
+		"verification_hash_body_field=verification.receipt.hash\n" +
+		"launch_check_browser_session=" + reviewerLaunchChecklistState(checklist, "browser_session") + "\n" +
+		"launch_check_current_proof_pack=" + reviewerLaunchChecklistState(checklist, "current_proof_pack") + "\n" +
+		"launch_check_evidence_receipt=" + reviewerLaunchChecklistState(checklist, "evidence_receipt") + "\n" +
+		"launch_check_human_capture=" + reviewerLaunchChecklistState(checklist, "human_capture") + "\n" +
+		"copy_safe=true\n" +
+		"input_returned=false\n" +
+		"request_body_returned=false\n" +
+		"proof_pack_returned=false\n" +
+		"identity_values_returned=false\n" +
+		"subject_returned=false\n" +
+		"email_returned=false\n" +
+		"name_returned=false\n" +
+		"claim_values_returned=false\n" +
+		"group_values_returned=false\n" +
+		"token_returned=false\n" +
+		"cookie_value_returned=false\n" +
+		"env_values_returned=false\n" +
+		"backend_path_returned=false\n" +
+		"connector_output_returned=false\n" +
+		"permit_payload_returned=false\n" +
+		"secret_value_returned=false\n" +
+		"value_returned=false\n"
+}
+
+func reviewerLaunchChecklistState(checklist []ReviewerLaunchCheck, key string) string {
+	for _, check := range checklist {
+		if check.Key == key {
+			return safeDisplayState(check.State)
+		}
+	}
+	return "missing"
+}
+
 func ReviewerLaunchChecklistFor(witness AuthenticatedBrowserWitness, verification *WitnessReceiptVerification) []ReviewerLaunchCheck {
 	sessionTone := "ok"
 	if witness.State == "local_smoke" {

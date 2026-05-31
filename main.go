@@ -533,6 +533,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /session-witness", app.withAuth(app.handleSessionWitnessPage))
 	mux.HandleFunc("GET /session-witness.txt", app.withAuth(app.handleSessionWitnessText))
 	mux.HandleFunc("GET /session-witness/proof.txt", app.withAuth(app.handleSessionWitnessProofText))
+	mux.HandleFunc("GET /session-witness/evidence.txt", app.withAuth(app.handleSessionWitnessEvidenceText))
 	mux.HandleFunc("GET /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPage))
 	mux.HandleFunc("POST /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPost))
 	mux.HandleFunc("POST /session-witness/verify-pack", app.withAuth(app.handleSessionWitnessVerifyPackPost))
@@ -576,7 +577,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
@@ -1182,6 +1183,19 @@ func (app *App) handleSessionWitnessProofText(w http.ResponseWriter, r *http.Req
 	app.audit(r, "auth.session.witness.proof_text", "allowed", session.Subject, "")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(CurrentSessionWitnessProofTextFor(witness, capture, reqID, witnessReceipt, verification)))
+}
+
+func (app *App) handleSessionWitnessEvidenceText(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	witness, _ := app.authenticatedBrowserWitnessCapture(session)
+	verification := app.currentSessionWitnessProofPackVerification(r, session)
+	verification = attachWitnessEvidence(w, verification, requestID(r))
+	checklist := ReviewerLaunchChecklistFor(witness, &verification)
+	w.Header().Set("Content-Disposition", `inline; filename="janus-current-session-evidence.txt"`)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	app.audit(r, "auth.session.witness.evidence_text", "allowed", session.Subject, "")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(CurrentSessionEvidenceTextFor(verification, checklist)))
 }
 
 func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request) {
@@ -6816,6 +6830,7 @@ func mustTemplates() *template.Template {
 	      <a class="button primary" href="/session-witness">Witness</a>
 	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
 	      <a class="button quiet" href="/session-witness/proof.txt">Proof pack</a>
+	      <a class="button quiet" href="/session-witness/evidence.txt">Evidence text</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
 		      <form method="post" action="/session-witness/verify-current-pack">
 		        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
@@ -6966,6 +6981,7 @@ func mustTemplates() *template.Template {
 	      <a class="button primary" href="/">Dashboard</a>
 	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
 	      <a class="button quiet" href="/session-witness/proof.txt">Proof pack</a>
+	      <a class="button quiet" href="/session-witness/evidence.txt">Evidence text</a>
 	      <a class="button quiet" href="/session-witness/verify">Verify proof</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
 		      <form method="post" action="/session-witness/verify-current-pack">
@@ -6981,6 +6997,9 @@ func mustTemplates() *template.Template {
 	      </div>
 	      <div class="reviewer-step action">
 	        <a class="button primary" href="/session-witness/proof.txt">Open proof pack</a>
+	      </div>
+	      <div class="reviewer-step action">
+	        <a class="button quiet" href="/session-witness/evidence.txt">Open evidence text</a>
 	      </div>
 	      <div class="reviewer-step action">
 		        <form method="post" action="/session-witness/verify-current-pack">

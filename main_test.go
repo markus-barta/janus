@@ -645,7 +645,7 @@ func TestSessionWitnessPageRendersCopySafeCapture(t *testing.T) {
 	}
 	capturedAt, freshUntil := assertWitnessFreshnessHeaders(t, out)
 	body := out.Body.String()
-	for _, want := range []string{"Session witness capture", "Reviewer handoff", "browser proof ready", "Open proof pack", "Verify proof pack", "Verify current proof pack", "Reviewer launch checklist", "Browser session", "Current proof pack", "Evidence receipt", "Human capture", "JANUS-195 real browser proof remains.", "signed_browser_capture=true", "proof_pack_contains_verification=true", "Capture proof", "Proof hash", pageReceiptHash, "Captured", "Fresh until", capturedAt, freshUntil, "sha256-witness-v1", "freshness_seconds=300", "captured_at=" + capturedAt, "fresh_until=" + freshUntil, "hash_header=X-Janus-Witness-Hash", "hash_body_field=receipt.hash", "Witness headers", "Session witness value boundary", "janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signed_session_browser_proof_no_identity_values", "X-Janus-Witness-State", "X-Janus-Witness-Flow", "X-Janus-Witness-Signal", "X-Janus-Witness-Hash", "X-Janus-Witness-Captured-At", "X-Janus-Witness-Fresh-Until", "X-Janus-Witness-Freshness-Seconds", "request_id=session-witness-page-123", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Session witness capture", "Reviewer handoff", "browser proof ready", "Open proof pack", "Open evidence text", "Evidence text", "Verify proof pack", "Verify current proof pack", "Reviewer launch checklist", "Browser session", "Current proof pack", "Evidence receipt", "Human capture", "JANUS-195 real browser proof remains.", "signed_browser_capture=true", "proof_pack_contains_verification=true", "Capture proof", "Proof hash", pageReceiptHash, "Captured", "Fresh until", capturedAt, freshUntil, "sha256-witness-v1", "freshness_seconds=300", "captured_at=" + capturedAt, "fresh_until=" + freshUntil, "hash_header=X-Janus-Witness-Hash", "hash_body_field=receipt.hash", "Witness headers", "Session witness value boundary", "janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signed_session_browser_proof_no_identity_values", "X-Janus-Witness-State", "X-Janus-Witness-Flow", "X-Janus-Witness-Signal", "X-Janus-Witness-Hash", "X-Janus-Witness-Captured-At", "X-Janus-Witness-Fresh-Until", "X-Janus-Witness-Freshness-Seconds", "request_id=session-witness-page-123", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("session witness page should include %s: %s", want, body)
 		}
@@ -766,9 +766,55 @@ func TestSessionWitnessProofTextRendersCurrentVerificationPack(t *testing.T) {
 	assertRouteResponseValueFree(t, "session witness proof text", out)
 }
 
+func TestSessionWitnessEvidenceTextRendersCopySafeReceipt(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodGet, "/session-witness/evidence.txt", nil)
+	req.Header.Set("X-Request-Id", "session-witness-evidence-123")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	for header, want := range map[string]string{
+		"Content-Type":                                 "text/plain; charset=utf-8",
+		"Content-Disposition":                          `inline; filename="janus-current-session-evidence.txt"`,
+		"X-Janus-Witness-Verification-Schema":          "janus-witness-verification-v1",
+		"X-Janus-Witness-Verification-Algorithm":       "sha256-witness-verification-v1",
+		"X-Janus-Witness-Verification-Hash-Body-Field": "verification.receipt.hash",
+		"X-Janus-Value-Returned":                       "false",
+		"X-Content-Type-Options":                       "nosniff",
+		"Cross-Origin-Resource-Policy":                 "same-origin",
+	} {
+		if got := out.Header().Get(header); got != want {
+			t.Fatalf("session witness evidence text should set %s=%q, got %q", header, want, got)
+		}
+	}
+	verificationHash := out.Header().Get("X-Janus-Witness-Verification-Hash")
+	if len(verificationHash) != 64 || !isLowerHex(verificationHash) {
+		t.Fatalf("evidence text should set verification hash header, got %q", verificationHash)
+	}
+	body := out.Body.String()
+	for _, want := range []string{"janus_current_session_evidence", "evidence_line=janus_signed_browser_evidence", "evidence_status=verified", "source_request_id=session-witness-evidence-123", "captured_at=", "fresh_until=", "freshness_seconds=300", "hash_match=true", "fresh=true", "verified=true", "proof_pack_verified=true", "verification_hash=" + verificationHash, "verification_hash_header=X-Janus-Witness-Verification-Hash", "verification_hash_body_field=verification.receipt.hash", "launch_check_browser_session=authenticated", "launch_check_current_proof_pack=verified", "launch_check_evidence_receipt=copy_safe", "launch_check_human_capture=pending", "copy_safe=true", "input_returned=false", "request_body_returned=false", "proof_pack_returned=false", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "env_values_returned=false", "backend_path_returned=false", "connector_output_returned=false", "permit_payload_returned=false", "secret_value_returned=false", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("session witness evidence text should include %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"janus_current_session_witness_proof", "witness_proof_line=", "proof_line=", "proof_pack_input=", "subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("session witness evidence text leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "session witness evidence text", out)
+}
+
 func TestSessionWitnessPageRequiresAuthentication(t *testing.T) {
 	app := newTestApp(t)
-	for _, path := range []string{"/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/verify"} {
+	for _, path := range []string{"/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/session-witness/verify"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("X-Request-Id", "session-witness-auth-required")
 		out := httptest.NewRecorder()
@@ -1004,7 +1050,7 @@ func TestSessionWitnessVerifierUIAndAPIAreValueFree(t *testing.T) {
 		t.Fatalf("expected verifier page 200, got %d body=%s", pageOut.Code, pageOut.Body.String())
 	}
 	pageBody := pageOut.Body.String()
-	for _, want := range []string{"Witness receipt verifier", "Verify proof pack", "Verify proof line", "Proof pack", "Verify witness receipt", "proof_pack_returned=false", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Witness receipt verifier", "Verify proof pack", "Verify proof line", "Proof pack", "Evidence text", "Verify witness receipt", "proof_pack_returned=false", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
 		if !strings.Contains(pageBody, want) {
 			t.Fatalf("verifier page should include %q: %s", want, pageBody)
 		}
@@ -4378,6 +4424,9 @@ func TestSecurityHeadersAcrossCoreRoutes(t *testing.T) {
 		{name: "session witness proof text", method: http.MethodGet, path: "/session-witness/proof.txt", status: http.StatusOK, setup: func(app *App, _ *http.Request) {
 			app.cfg.RequireAuth = false
 		}},
+		{name: "session witness evidence text", method: http.MethodGet, path: "/session-witness/evidence.txt", status: http.StatusOK, setup: func(app *App, _ *http.Request) {
+			app.cfg.RequireAuth = false
+		}},
 		{name: "session witness page", method: http.MethodGet, path: "/session-witness", status: http.StatusOK, expectBodyNonce: true, setup: func(app *App, _ *http.Request) {
 			app.cfg.RequireAuth = false
 		}},
@@ -4638,6 +4687,7 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "session witness page", method: http.MethodGet, path: "/session-witness", status: http.StatusOK},
 		{name: "session witness text", method: http.MethodGet, path: "/session-witness.txt", status: http.StatusOK},
 		{name: "session witness proof text", method: http.MethodGet, path: "/session-witness/proof.txt", status: http.StatusOK},
+		{name: "session witness evidence text", method: http.MethodGet, path: "/session-witness/evidence.txt", status: http.StatusOK},
 		{name: "session witness verifier", method: http.MethodGet, path: "/session-witness/verify", status: http.StatusOK},
 		{name: "session witness verifier bad post", method: http.MethodPost, path: "/session-witness/verify", body: "proof_line=secret-cookie-secret&proof_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", contentType: "application/x-www-form-urlencoded", status: http.StatusUnprocessableEntity},
 		{name: "session witness proof pack verifier bad post", method: http.MethodPost, path: "/session-witness/verify-pack", body: "proof_pack=secret-cookie-secret", contentType: "application/x-www-form-urlencoded", status: http.StatusUnprocessableEntity},
