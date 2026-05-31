@@ -5438,6 +5438,47 @@ func mustTemplates() *template.Template {
     <p><span class="pill info">next</span> {{ .ActionResult.Receipt.Next }}</p>
     {{ end }}
     {{ if .ActionResult.PermitID }}
+    {{ if .ActionResult.OutputScrubbed }}
+    <div class="witness-grid" aria-label="Permit safety check result witness">
+      <div class="witness-card ok">
+        <span>Execution verdict</span>
+        <strong>{{ .ActionResult.Status }}</strong>
+        <p>The safety check returns a closed result instead of executing a connector.</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Scrubbed output</span>
+        <strong>confirmed</strong>
+        <p>No command output, connector response, payload, or secret value is returned.</p>
+      </div>
+      <div class="witness-card info">
+        <span>Run denial reason</span>
+        <strong>closed</strong>
+        <p>{{ .ActionResult.RunReason }}</p>
+      </div>
+      <div class="witness-card ok">
+        <span>Permit context</span>
+        <strong>short lived</strong>
+        <p>Permit <span class="mono">{{ .ActionResult.PermitID }}</span> stays metadata-only until it expires at {{ .ActionResult.ExpiresAt }}.</p>
+      </div>
+    </div>
+    <details class="evidence-flags">
+      <summary>Permit safety check evidence flags</summary>
+      <div class="flag-cloud" aria-label="Permit safety check value-free evidence flags">
+        <span class="pill ok">run_status={{ .ActionResult.Status }}</span>
+        <span class="pill ok">run_reason_returned=true</span>
+        <span class="pill ok">output_scrubbed={{ .ActionResult.OutputScrubbed }}</span>
+        <span class="pill ok">connector_execution=false</span>
+        <span class="pill ok">connector_output_returned=false</span>
+        <span class="pill ok">permit_payload_returned=false</span>
+        <span class="pill ok">secret_value_returned=false</span>
+        <span class="pill ok">backend_path_returned=false</span>
+        <span class="pill ok">source_path_returned=false</span>
+        <span class="pill ok">request_body_returned=false</span>
+        <span class="pill ok">env_returned=false</span>
+        <span class="pill ok">value_returned=false</span>
+      </div>
+    </details>
+    {{ end }}
     <div class="verdict" aria-label="Permit safety verdict">
       <span><strong>Metadata only</strong> secret value withheld</span>
       <span><strong>No connector</strong> execution unavailable</span>
@@ -5690,6 +5731,44 @@ func mustTemplates() *template.Template {
     <div class="panel-head">
       <h2>Recent permits</h2>
       {{ if .PermitPosture.Persisted }}<span class="pill ok">{{ len .Permits }} durable</span>{{ else }}<span class="pill warn">{{ len .Permits }} in memory</span>{{ end }}
+    </div>
+    <div class="panel-body stack">
+      <div class="witness-grid" aria-label="Recent permit safety witness">
+        <div class="witness-card ok">
+          <span>Check boundary</span>
+          <strong>metadata only</strong>
+          <p>Running a safety check evaluates the permit record and never asks for a secret value.</p>
+        </div>
+        <div class="witness-card ok">
+          <span>No connector execution</span>
+          <strong>closed</strong>
+          <p>V1 has no execution connector, so permit checks return a no-execution verdict.</p>
+        </div>
+        <div class="witness-card ok">
+          <span>Scrubbed result</span>
+          <strong>required</strong>
+          <p>Check output is scrubbed and no connector output, payload, request body, or env data is returned.</p>
+        </div>
+        <div class="witness-card info">
+          <span>Receipt after check</span>
+          <strong>copy-safe</strong>
+          <p>Each check writes audit evidence and returns request id, receipt id, and receipt hash.</p>
+        </div>
+      </div>
+      <details class="evidence-flags">
+        <summary>Recent permit evidence flags</summary>
+        <div class="flag-cloud" aria-label="Recent permit value-free evidence flags">
+          <span class="pill ok">permit_count={{ len .Permits }}</span>
+          <span class="pill ok">run_check_available=true</span>
+          <span class="pill ok">connector_execution=false</span>
+          <span class="pill ok">connector_output_returned=false</span>
+          <span class="pill ok">permit_payload_returned=false</span>
+          <span class="pill ok">request_body_returned=false</span>
+          <span class="pill ok">env_returned=false</span>
+          <span class="pill ok">secret_value_returned=false</span>
+          <span class="pill ok">value_returned=false</span>
+        </div>
+      </details>
     </div>
     <div class="table-wrap">
       <table>

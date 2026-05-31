@@ -4387,12 +4387,12 @@ func TestPermitRunUIReturnsNoExecutionValueFreeResult(t *testing.T) {
 		t.Fatalf("expected 202, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Safety check complete", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "Copy-safe action receipt fields", "Receipt id", "Receipt hash", "Request id", "Verify receipt", "Recompute the SHA-256 hash", "copy-safe", "Covered checks", "role_checked=true", "csrf_checked=true", "readiness_checked=true", "audit_recorded=true", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Scrubbed output", "not_executed", "output_scrubbed=true", "value_returned=false"} {
+	for _, want := range []string{"Safety check complete", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "Copy-safe action receipt fields", "Receipt id", "Receipt hash", "Request id", "Verify receipt", "Recompute the SHA-256 hash", "copy-safe", "Covered checks", "role_checked=true", "csrf_checked=true", "readiness_checked=true", "audit_recorded=true", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety check result witness", "Execution verdict", "Run denial reason", "Permit safety check evidence flags", "run_status=not_executed", "run_reason_returned=true", "connector_execution=false", "connector_output_returned=false", "permit_payload_returned=false", "backend_path_returned=false", "source_path_returned=false", "env_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Scrubbed output", "not_executed", "output_scrubbed=true", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("permit run UI response should render %q: %s", want, body)
 		}
 	}
-	if strings.Contains(body, "plaintext") {
+	if strings.Contains(body, "plaintext") || strings.Contains(body, "connector_output=secret") {
 		t.Fatalf("permit run UI response should remain value-free: %s", body)
 	}
 }
@@ -4419,9 +4419,14 @@ func TestDashboardRendersRecentPermits(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Recent permits", permit.ID, "Run safety check", "approved_metadata_only", "durable"} {
+	for _, want := range []string{"Recent permits", "Recent permit safety witness", "Check boundary", "No connector execution", "Scrubbed result", "Receipt after check", "Recent permit evidence flags", "permit_count=1", "run_check_available=true", "connector_execution=false", "connector_output_returned=false", "permit_payload_returned=false", "request_body_returned=false", "env_returned=false", "secret_value_returned=false", "value_returned=false", permit.ID, "Run safety check", "approved_metadata_only", "durable"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render recent permit %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"plaintext", "secret-value", "connector_output=secret", "backend_path=/", "request_body=local smoke"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("recent permit witness should remain value-free, found %q: %s", forbidden, body)
 		}
 	}
 }
