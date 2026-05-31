@@ -674,6 +674,8 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Expires", "0")
 		w.Header().Set("Origin-Agent-Cluster", "?1")
 		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("X-Janus-Build-Commit", shortCommit(buildCommit))
+		w.Header().Set("X-Janus-Build-Time", cleanBuildField(buildTime))
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		if app.cfg.SecureCookies() {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
@@ -3845,10 +3847,6 @@ func (app *App) browserSmokeReceiptCSRFRefreshAllowed(r *http.Request) bool {
 		return false
 	}
 	accept := strings.ToLower(r.Header.Get("Accept"))
-	mode := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Mode")))
-	if !strings.Contains(accept, "text/html") && mode != "navigate" {
-		return false
-	}
 	if strings.Contains(accept, "application/json") || strings.Contains(accept, "text/plain") {
 		return false
 	}
@@ -3856,15 +3854,19 @@ func (app *App) browserSmokeReceiptCSRFRefreshAllowed(r *http.Request) bool {
 	if site == "cross-site" {
 		return false
 	}
+	mode := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Mode")))
 	dest := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")))
 	if dest != "" && dest != "document" {
 		return false
 	}
-	return true
+	ua := strings.ToLower(r.Header.Get("User-Agent"))
+	return strings.Contains(accept, "text/html") || mode == "navigate" || strings.Contains(ua, "mozilla/")
 }
 
 func mustTemplates() *template.Template {
-	return template.Must(template.New("janus").Parse(`
+	return template.Must(template.New("janus").Funcs(template.FuncMap{
+		"buildCommitShort": func() string { return shortCommit(buildCommit) },
+	}).Parse(`
 {{ define "base_top" -}}
 <!doctype html>
 <html lang="en">
@@ -3948,7 +3950,8 @@ func mustTemplates() *template.Template {
       align-items: center;
       gap: 18px;
     }
-    .brand { display: flex; align-items: center; gap: 12px; font-weight: 760; letter-spacing: 0; }
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 760; letter-spacing: 0; min-width: 0; }
+    .brand small { color: var(--muted); font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
     .mark {
       width: 34px;
       height: 34px;
@@ -4761,7 +4764,7 @@ func mustTemplates() *template.Template {
 <a class="skip-link" href="#command-center">Skip to command center</a>
 <header>
   <div class="bar">
-    <div class="brand"><div class="mark">J</div><div>Janus</div></div>
+    <div class="brand"><div class="mark">J</div><div>Janus</div><small>build {{ buildCommitShort }}</small></div>
 		    {{ if .Session.Subject }}
 		    <nav class="nav" aria-label="Primary">
 			      {{ if .WitnessPage }}
