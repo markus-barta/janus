@@ -1020,12 +1020,15 @@ func (app *App) authenticatedBrowserWitnessCapture(session Session) (Authenticat
 	return app.authenticatedBrowserWitness(session, roleEvidence, ready), AuthenticatedBrowserCaptureFor()
 }
 
-func applyAuthenticatedBrowserWitnessHeaders(w http.ResponseWriter, witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture) {
+func applyAuthenticatedBrowserWitnessHeaders(w http.ResponseWriter, witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, receipt AuthenticatedBrowserCaptureReceipt) {
 	w.Header().Set("X-Janus-Witness-Schema", capture.Schema)
 	w.Header().Set("X-Janus-Witness-State", witness.State)
 	w.Header().Set("X-Janus-Witness-Flow", witness.Flow)
 	w.Header().Set("X-Janus-Witness-Signal", witness.EvidenceSignal)
 	w.Header().Set("X-Janus-Witness-Body-Field", capture.BodyField)
+	w.Header().Set("X-Janus-Witness-Algorithm", receipt.Algorithm)
+	w.Header().Set("X-Janus-Witness-Hash", receipt.Hash)
+	w.Header().Set("X-Janus-Witness-Hash-Body-Field", receipt.BodyField)
 	w.Header().Set("X-Janus-Value-Returned", "false")
 }
 
@@ -1089,7 +1092,8 @@ func (app *App) handleSessionWitnessPage(w http.ResponseWriter, r *http.Request)
 	session := currentSession(r.Context())
 	witness, capture := app.authenticatedBrowserWitnessCapture(session)
 	reqID := requestID(r)
-	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture)
+	receipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID)
+	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture, receipt)
 	app.audit(r, "auth.session.witness.page", "allowed", session.Subject, "")
 	renderTemplate(w, app.templates, "session_witness", map[string]any{
 		"Title":                "Janus Session Witness",
@@ -1101,8 +1105,9 @@ func (app *App) handleSessionWitnessPage(w http.ResponseWriter, r *http.Request)
 		"AuthenticatedRole":    SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), witness.Ready),
 		"AuthenticatedBrowser": witness,
 		"Capture":              capture,
-		"CaptureHeaders":       AuthenticatedBrowserCaptureHeadersFor(witness, capture, reqID),
+		"CaptureHeaders":       AuthenticatedBrowserCaptureHeadersFor(witness, capture, reqID, receipt),
 		"CaptureLine":          AuthenticatedBrowserCaptureLineFor(witness, capture, reqID),
+		"Receipt":              receipt,
 		"RequestID":            reqID,
 	})
 }
@@ -1111,23 +1116,27 @@ func (app *App) handleSessionWitnessText(w http.ResponseWriter, r *http.Request)
 	session := currentSession(r.Context())
 	witness, capture := app.authenticatedBrowserWitnessCapture(session)
 	reqID := requestID(r)
-	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture)
+	receipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID)
+	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture, receipt)
 	w.Header().Set("Content-Disposition", `inline; filename="janus-session-witness.txt"`)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	app.audit(r, "auth.session.witness.text", "allowed", session.Subject, "")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(AuthenticatedBrowserCaptureTextFor(witness, capture, reqID)))
+	_, _ = w.Write([]byte(AuthenticatedBrowserCaptureTextFor(witness, capture, reqID, receipt)))
 }
 
 func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	witness, capture := app.authenticatedBrowserWitnessCapture(session)
-	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture)
+	reqID := requestID(r)
+	receipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID)
+	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture, receipt)
 	app.audit(r, "auth.session.witness", "allowed", session.Subject, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"witness":        witness,
 		"capture":        capture,
-		"request_id":     requestID(r),
+		"receipt":        receipt,
+		"request_id":     reqID,
 		"value_returned": false,
 	})
 }
@@ -6492,6 +6501,7 @@ func mustTemplates() *template.Template {
 	        <span>Schema<strong>{{ .Capture.Schema }}</strong></span>
 	        <span>Body field<strong>{{ .Capture.BodyField }}</strong></span>
 	        <span>Signal<strong>{{ .AuthenticatedBrowser.EvidenceSignal }}</strong></span>
+	        <span>Proof hash<strong class="mono">{{ .Receipt.Hash }}</strong></span>
 	      </div>
 	      <div class="receipt-copy" aria-label="Copy-safe session witness fields">
 	        <label>State<input readonly value="state={{ .AuthenticatedBrowser.State }}"></label>
@@ -6499,7 +6509,7 @@ func mustTemplates() *template.Template {
 	        <label>Request<input readonly value="request_id={{ .RequestID }}"></label>
 	      </div>
 	      <p class="capture-line mono">{{ .CaptureLine }}</p>
-	      <p><span class="pill ok">copy_safe={{ .Capture.CopySafe }}</span> <span class="pill ok">replay_safe={{ .Capture.ReplaySafe }}</span> <span class="pill ok">value_returned=false</span></p>
+	      <p><span class="pill info">{{ .Receipt.Algorithm }}</span> <span class="pill ok">hash_header={{ .Receipt.HashHeader }}</span> <span class="pill ok">hash_body_field={{ .Receipt.BodyField }}</span> <span class="pill ok">copy_safe={{ .Capture.CopySafe }}</span> <span class="pill ok">replay_safe={{ .Capture.ReplaySafe }}</span> <span class="pill ok">value_returned=false</span></p>
 	    </div>
 	  </div>
 	</section>

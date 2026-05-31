@@ -1,5 +1,10 @@
 package main
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+)
+
 type AuthenticatedBrowserWitness struct {
 	Label                   string                     `json:"label"`
 	Summary                 string                     `json:"summary"`
@@ -51,6 +56,15 @@ type AuthenticatedBrowserCapture struct {
 type AuthenticatedBrowserCaptureHeader struct {
 	Name          string `json:"name"`
 	Value         string `json:"value"`
+	ValueReturned bool   `json:"value_returned"`
+}
+
+type AuthenticatedBrowserCaptureReceipt struct {
+	Algorithm     string `json:"algorithm"`
+	Hash          string `json:"hash"`
+	HashHeader    string `json:"hash_header"`
+	BodyField     string `json:"body_field"`
+	Input         string `json:"input"`
 	ValueReturned bool   `json:"value_returned"`
 }
 
@@ -148,6 +162,9 @@ func AuthenticatedBrowserCaptureFor() AuthenticatedBrowserCapture {
 			"X-Janus-Witness-Flow",
 			"X-Janus-Witness-Signal",
 			"X-Janus-Witness-Body-Field",
+			"X-Janus-Witness-Algorithm",
+			"X-Janus-Witness-Hash",
+			"X-Janus-Witness-Hash-Body-Field",
 			"X-Janus-Value-Returned",
 		},
 		Proof:                  "signed_session_browser_proof_no_identity_values",
@@ -160,7 +177,7 @@ func AuthenticatedBrowserCaptureFor() AuthenticatedBrowserCapture {
 	}
 }
 
-func AuthenticatedBrowserCaptureHeadersFor(witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, requestID string) []AuthenticatedBrowserCaptureHeader {
+func AuthenticatedBrowserCaptureHeadersFor(witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, requestID string, receipt AuthenticatedBrowserCaptureReceipt) []AuthenticatedBrowserCaptureHeader {
 	return []AuthenticatedBrowserCaptureHeader{
 		authenticatedBrowserCaptureHeader("X-Request-Id", requestID),
 		authenticatedBrowserCaptureHeader("X-Janus-Witness-Schema", capture.Schema),
@@ -168,6 +185,9 @@ func AuthenticatedBrowserCaptureHeadersFor(witness AuthenticatedBrowserWitness, 
 		authenticatedBrowserCaptureHeader("X-Janus-Witness-Flow", witness.Flow),
 		authenticatedBrowserCaptureHeader("X-Janus-Witness-Signal", witness.EvidenceSignal),
 		authenticatedBrowserCaptureHeader("X-Janus-Witness-Body-Field", capture.BodyField),
+		authenticatedBrowserCaptureHeader("X-Janus-Witness-Algorithm", receipt.Algorithm),
+		authenticatedBrowserCaptureHeader("X-Janus-Witness-Hash", receipt.Hash),
+		authenticatedBrowserCaptureHeader("X-Janus-Witness-Hash-Body-Field", receipt.BodyField),
 		authenticatedBrowserCaptureHeader("X-Janus-Value-Returned", "false"),
 	}
 }
@@ -182,7 +202,20 @@ func AuthenticatedBrowserCaptureLineFor(witness AuthenticatedBrowserWitness, cap
 		" value_returned=false"
 }
 
-func AuthenticatedBrowserCaptureTextFor(witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, requestID string) string {
+func AuthenticatedBrowserCaptureReceiptFor(witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, requestID string) AuthenticatedBrowserCaptureReceipt {
+	input := AuthenticatedBrowserCaptureLineFor(witness, capture, requestID)
+	sum := sha256.Sum256([]byte(input))
+	return AuthenticatedBrowserCaptureReceipt{
+		Algorithm:     "sha256-witness-v1",
+		Hash:          hex.EncodeToString(sum[:]),
+		HashHeader:    "X-Janus-Witness-Hash",
+		BodyField:     "receipt.hash",
+		Input:         input,
+		ValueReturned: false,
+	}
+}
+
+func AuthenticatedBrowserCaptureTextFor(witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, requestID string, receipt AuthenticatedBrowserCaptureReceipt) string {
 	return "janus_session_witness\n" +
 		"schema=" + capture.Schema + "\n" +
 		"state=" + witness.State + "\n" +
@@ -190,6 +223,11 @@ func AuthenticatedBrowserCaptureTextFor(witness AuthenticatedBrowserWitness, cap
 		"signal=" + witness.EvidenceSignal + "\n" +
 		"body_field=" + capture.BodyField + "\n" +
 		"request_id=" + requestID + "\n" +
+		"proof_line=" + receipt.Input + "\n" +
+		"proof_algorithm=" + receipt.Algorithm + "\n" +
+		"proof_hash=" + receipt.Hash + "\n" +
+		"proof_hash_header=" + receipt.HashHeader + "\n" +
+		"proof_hash_body_field=" + receipt.BodyField + "\n" +
 		"copy_safe=true\n" +
 		"replay_safe=true\n" +
 		"identity_values_returned=false\n" +
