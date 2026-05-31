@@ -5861,6 +5861,46 @@ func mustTemplates() *template.Template {
       <h2>Warden descriptors</h2>
       <span class="pill ok">values never returned</span>
     </div>
+    <div class="panel-body stack">
+      <div class="witness-grid" aria-label="Warden descriptor catalog witness">
+        <div class="witness-card ok">
+          <span>Visible metadata</span>
+          <strong>{{ len .Descriptors }} descriptors</strong>
+          <p>Catalog rows describe ownership, scope, lifecycle, and use posture without exposing secret material.</p>
+        </div>
+        <div class="witness-card {{ if .Scope.Gates }}warn{{ else }}ok{{ end }}">
+          <span>Scope boundary</span>
+          <strong>{{ if .Scope.Strict }}strict{{ else }}open{{ end }}</strong>
+          <p>Broker-filtered descriptors stay inside the configured scope before any handle or permit is offered.</p>
+        </div>
+        <div class="witness-card {{ if .ApprovedUse.BlockedCount }}warn{{ else }}ok{{ end }}">
+          <span>Use profile</span>
+          <strong>{{ .ApprovedUse.ProfiledCount }} profiled</strong>
+          <p>{{ .ApprovedUse.BlockedCount }} descriptors still need an approved metadata-only use profile.</p>
+        </div>
+        <div class="witness-card ok">
+          <span>Value boundary</span>
+          <strong>reveal disabled</strong>
+          <p>Secret values, backend paths, source files, request bodies, and env data are not returned here.</p>
+        </div>
+      </div>
+      <details class="evidence-flags">
+        <summary>Warden catalog evidence flags</summary>
+        <div class="flag-cloud" aria-label="Warden catalog value-free evidence flags">
+          <span class="pill ok">descriptor_count={{ len .Descriptors }}</span>
+          <span class="pill {{ if .Scope.Strict }}ok{{ else }}warn{{ end }}">scope_strict={{ .Scope.Strict }}</span>
+          <span class="pill ok">profiled_count={{ .ApprovedUse.ProfiledCount }}</span>
+          <span class="pill {{ if .ApprovedUse.BlockedCount }}warn{{ else }}ok{{ end }}">unprofiled_count={{ .ApprovedUse.BlockedCount }}</span>
+          <span class="pill ok">reveal_allowed=false</span>
+          <span class="pill ok">secret_value_returned=false</span>
+          <span class="pill ok">backend_path_returned=false</span>
+          <span class="pill ok">source_path_returned=false</span>
+          <span class="pill ok">request_body_returned=false</span>
+          <span class="pill ok">env_returned=false</span>
+          <span class="pill ok">value_returned=false</span>
+        </div>
+      </details>
+    </div>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Name</th><th>Provider</th><th>Scope</th><th>Owner</th><th>Class</th><th>Lifecycle</th><th>Status</th><th>Consumers</th><th>Rotation</th><th>Use</th><th>Reveal</th><th>Inspect</th></tr></thead>
