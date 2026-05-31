@@ -1072,9 +1072,18 @@ func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request)
 	session := currentSession(r.Context())
 	_, ready := app.readinessBody()
 	roleEvidence := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
+	witness := app.authenticatedBrowserWitness(session, roleEvidence, ready)
+	capture := AuthenticatedBrowserCaptureFor()
+	w.Header().Set("X-Janus-Witness-Schema", capture.Schema)
+	w.Header().Set("X-Janus-Witness-State", witness.State)
+	w.Header().Set("X-Janus-Witness-Flow", witness.Flow)
+	w.Header().Set("X-Janus-Witness-Signal", witness.EvidenceSignal)
+	w.Header().Set("X-Janus-Witness-Body-Field", capture.BodyField)
+	w.Header().Set("X-Janus-Value-Returned", "false")
 	app.audit(r, "auth.session.witness", "allowed", session.Subject, "")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"witness":        app.authenticatedBrowserWitness(session, roleEvidence, ready),
+		"witness":        witness,
+		"capture":        capture,
 		"request_id":     requestID(r),
 		"value_returned": false,
 	})

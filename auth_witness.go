@@ -35,6 +35,19 @@ type AuthenticatedBrowserWitness struct {
 	ValueReturned           bool                       `json:"value_returned"`
 }
 
+type AuthenticatedBrowserCapture struct {
+	Schema                 string   `json:"schema"`
+	BodyField              string   `json:"body_field"`
+	Headers                []string `json:"headers"`
+	Proof                  string   `json:"proof"`
+	ReplaySafe             bool     `json:"replay_safe"`
+	CopySafe               bool     `json:"copy_safe"`
+	IdentityValuesReturned bool     `json:"identity_values_returned"`
+	CookieValueReturned    bool     `json:"cookie_value_returned"`
+	TokenReturned          bool     `json:"token_returned"`
+	ValueReturned          bool     `json:"value_returned"`
+}
+
 type AuthenticatedBrowserGate struct {
 	Key           string `json:"key"`
 	Label         string `json:"label"`
@@ -116,6 +129,29 @@ func AuthenticatedBrowserWitnessFor(session Session, roleEvidence SessionRoleEvi
 		authenticatedBrowserGate("value_boundary", "Value boundary", "values_withheld", "Subject, email, name, groups, claims, tokens, cookies, request bodies, env, backend paths, connector output, permit payloads, and secret values are not returned.", true),
 	}
 	return witness
+}
+
+func AuthenticatedBrowserCaptureFor() AuthenticatedBrowserCapture {
+	return AuthenticatedBrowserCapture{
+		Schema:    "janus-auth-session-witness-v1",
+		BodyField: "witness",
+		Headers: []string{
+			"X-Request-Id",
+			"X-Janus-Witness-Schema",
+			"X-Janus-Witness-State",
+			"X-Janus-Witness-Flow",
+			"X-Janus-Witness-Signal",
+			"X-Janus-Witness-Body-Field",
+			"X-Janus-Value-Returned",
+		},
+		Proof:                  "signed_session_browser_proof_no_identity_values",
+		ReplaySafe:             true,
+		CopySafe:               true,
+		IdentityValuesReturned: false,
+		CookieValueReturned:    false,
+		TokenReturned:          false,
+		ValueReturned:          false,
+	}
 }
 
 func authenticatedBrowserGate(key, label, state, detail string, ok bool) AuthenticatedBrowserGate {

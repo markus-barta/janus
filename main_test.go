@@ -522,8 +522,20 @@ func TestAuthenticatedBrowserWitnessAPIIsAuthenticatedAndValueFree(t *testing.T)
 	if out.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
+	for header, want := range map[string]string{
+		"X-Janus-Witness-Schema":     "janus-auth-session-witness-v1",
+		"X-Janus-Witness-State":      "authenticated",
+		"X-Janus-Witness-Flow":       "zitadel_oidc_pkce_to_signed_session",
+		"X-Janus-Witness-Signal":     "signed_session_browser_proof_no_identity_values",
+		"X-Janus-Witness-Body-Field": "witness",
+		"X-Janus-Value-Returned":     "false",
+	} {
+		if got := out.Header().Get(header); got != want {
+			t.Fatalf("browser witness API should set %s=%q, got %q", header, want, got)
+		}
+	}
 	body := out.Body.String()
-	for _, want := range []string{`"witness"`, `"label":"Authenticated browser witness"`, `"state":"authenticated"`, `"flow":"zitadel_oidc_pkce_to_signed_session"`, `"session_cookie_policy":"host_prefixed_strict_signed"`, `"csrf_boundary":"bound_to_signed_session"`, `"csp_boundary":"script_src_none"`, `"evidence_signal":"signed_session_browser_proof_no_identity_values"`, `"key":"login_completed"`, `"key":"value_boundary"`, `"request_id":"browser-witness-123"`, `"identity_values_returned":false`, `"subject_returned":false`, `"email_returned":false`, `"name_returned":false`, `"claim_values_returned":false`, `"group_values_returned":false`, `"token_returned":false`, `"cookie_value_returned":false`, `"request_body_returned":false`, `"env_values_returned":false`, `"backend_path_returned":false`, `"connector_output_returned":false`, `"permit_payload_returned":false`, `"secret_value_returned":false`, `"value_returned":false`} {
+	for _, want := range []string{`"witness"`, `"capture"`, `"schema":"janus-auth-session-witness-v1"`, `"body_field":"witness"`, `"proof":"signed_session_browser_proof_no_identity_values"`, `"replay_safe":true`, `"copy_safe":true`, `"label":"Authenticated browser witness"`, `"state":"authenticated"`, `"flow":"zitadel_oidc_pkce_to_signed_session"`, `"session_cookie_policy":"host_prefixed_strict_signed"`, `"csrf_boundary":"bound_to_signed_session"`, `"csp_boundary":"script_src_none"`, `"evidence_signal":"signed_session_browser_proof_no_identity_values"`, `"key":"login_completed"`, `"key":"value_boundary"`, `"request_id":"browser-witness-123"`, `"identity_values_returned":false`, `"subject_returned":false`, `"email_returned":false`, `"name_returned":false`, `"claim_values_returned":false`, `"group_values_returned":false`, `"token_returned":false`, `"cookie_value_returned":false`, `"request_body_returned":false`, `"env_values_returned":false`, `"backend_path_returned":false`, `"connector_output_returned":false`, `"permit_payload_returned":false`, `"secret_value_returned":false`, `"value_returned":false`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("browser witness API should include %s: %s", want, body)
 		}
