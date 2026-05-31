@@ -3462,6 +3462,32 @@ func mustTemplates() *template.Template {
     .session-proof-item p { font-size: 12px; line-height: 1.25; }
     .session-proof-item.action { width: 184px; align-content: center; justify-items: stretch; }
     .session-proof-item.action .button { width: 100%; }
+    .reviewer-flow {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      align-items: stretch;
+      min-width: 0;
+    }
+    .reviewer-step {
+      min-height: 88px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      padding: 10px 11px;
+      display: grid;
+      align-content: space-between;
+      gap: 7px;
+      min-width: 0;
+    }
+    .reviewer-step span { color: var(--muted); font-size: 12px; line-height: 1.15; }
+    .reviewer-step strong { font-size: 15px; line-height: 1.15; overflow-wrap: anywhere; }
+    .reviewer-step p { font-size: 12px; line-height: 1.25; }
+    .reviewer-step.ok strong { color: var(--accent); }
+    .reviewer-step.info strong { color: var(--blue); }
+    .reviewer-step.action { align-content: center; justify-items: stretch; }
+    .reviewer-step.action form { display: grid; }
+    .reviewer-step.action .button { width: 100%; }
     .ops-strip {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3985,6 +4011,8 @@ func mustTemplates() *template.Template {
       .session-proof { grid-template-columns: 1fr; }
       .session-proof-item { min-height: auto; }
       .session-proof-item.action { grid-column: auto; }
+      .reviewer-flow { grid-template-columns: 1fr; }
+      .reviewer-step { min-height: auto; }
       .command-grid { grid-template-columns: 1fr; }
       .command-actions { display: grid; grid-template-columns: 1fr; }
       .command-actions .button { width: 100%; }
@@ -4110,9 +4138,27 @@ func mustTemplates() *template.Template {
         <p>{{ .AuthenticatedBrowser.CSRFBoundary }}; {{ .AuthenticatedBrowser.CSPBoundary }}</p>
 	      </div>
 	      <div class="session-proof-item action">
-	        <a class="button quiet" href="/session-witness">Open witness proof</a>
+	        <a class="button quiet" href="/session-witness/proof.txt">Open proof pack</a>
 	      </div>
 	    </div>
+    <div class="reviewer-flow" aria-label="Signed-browser reviewer handoff">
+      <div class="reviewer-step ok">
+        <span>Reviewer handoff</span>
+        <strong>browser proof ready</strong>
+        <p>signed_browser_capture=true</p>
+      </div>
+      <div class="reviewer-step action">
+        <a class="button primary" href="/session-witness/proof.txt">Proof pack</a>
+      </div>
+      <div class="reviewer-step action">
+        <a class="button quiet" href="/session-witness">Inspect witness</a>
+      </div>
+      <div class="reviewer-step ok">
+        <span>Boundary</span>
+        <strong>values withheld</strong>
+        <p>proof_pack_contains_verification=true</p>
+      </div>
+    </div>
     <p><span class="pill {{ if eq .OperationalStatus.Verdict "operational" }}ok{{ else }}warn{{ end }}">{{ .OperationalStatus.Verdict }}</span> {{ .OperationalStatus.Summary }}</p>
     <div class="ops-strip" aria-label="Operational status">
       {{ range .OperationalStatus.Items }}
@@ -6755,6 +6801,27 @@ func mustTemplates() *template.Template {
 	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
 	        <button class="button quiet" type="submit">Verify current session</button>
 	      </form>
+	    </div>
+	    <div class="reviewer-flow" aria-label="Signed-browser reviewer handoff">
+	      <div class="reviewer-step ok">
+	        <span>Reviewer handoff</span>
+	        <strong>browser proof ready</strong>
+	        <p>signed_browser_capture=true</p>
+	      </div>
+	      <div class="reviewer-step action">
+	        <a class="button primary" href="/session-witness/proof.txt">Open proof pack</a>
+	      </div>
+	      <div class="reviewer-step action">
+	        <form method="post" action="/session-witness/verify-current">
+	          <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+	          <button class="button quiet" type="submit">Verify now</button>
+	        </form>
+	      </div>
+	      <div class="reviewer-step ok">
+	        <span>Boundary</span>
+	        <strong>values withheld</strong>
+	        <p>proof_pack_contains_verification=true</p>
+	      </div>
 	    </div>
 	    <div class="safety-ribbon" aria-label="Session witness posture">
 	      <div class="safety-chip {{ if eq .AuthenticatedBrowser.State "authenticated" }}ok{{ else if eq .AuthenticatedBrowser.State "local_smoke" }}info{{ else }}warn{{ end }}">

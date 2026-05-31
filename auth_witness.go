@@ -635,6 +635,10 @@ func CurrentSessionWitnessProofTextFor(witness AuthenticatedBrowserWitness, capt
 		verificationReceiptInput = verification.Receipt.Input
 	}
 	return "janus_current_session_witness_proof\n" +
+		"handoff=reviewer_ready\n" +
+		"signed_browser_capture=true\n" +
+		"proof_pack_contains_verification=true\n" +
+		"current_session_verified=" + strconv.FormatBool(verification.Verified) + "\n" +
 		"schema=" + capture.Schema + "\n" +
 		"state=" + witness.State + "\n" +
 		"flow=" + witness.Flow + "\n" +
