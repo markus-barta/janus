@@ -594,16 +594,62 @@ func TestSessionWitnessPageRendersCopySafeCapture(t *testing.T) {
 	assertRouteResponseValueFree(t, "session witness page", out)
 }
 
-func TestSessionWitnessPageRequiresAuthentication(t *testing.T) {
+func TestSessionWitnessTextRendersCopySafeCapture(t *testing.T) {
 	app := newTestApp(t)
-	req := httptest.NewRequest(http.MethodGet, "/session-witness", nil)
-	req.Header.Set("X-Request-Id", "session-witness-auth-required")
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodGet, "/session-witness.txt", nil)
+	req.Header.Set("X-Request-Id", "session-witness-text-123")
+	req.AddCookie(rr.Result().Cookies()[0])
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
-	if out.Code != http.StatusFound || out.Header().Get("Location") != "/login" {
-		t.Fatalf("expected browser auth redirect, got %d location=%q body=%s", out.Code, out.Header().Get("Location"), out.Body.String())
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
-	assertRouteResponseValueFree(t, "session witness auth redirect", out)
+	for header, want := range map[string]string{
+		"Content-Type":                 "text/plain; charset=utf-8",
+		"Content-Disposition":          `inline; filename="janus-session-witness.txt"`,
+		"X-Janus-Witness-Schema":       "janus-auth-session-witness-v1",
+		"X-Janus-Witness-State":        "authenticated",
+		"X-Janus-Witness-Flow":         "zitadel_oidc_pkce_to_signed_session",
+		"X-Janus-Witness-Signal":       "signed_session_browser_proof_no_identity_values",
+		"X-Janus-Witness-Body-Field":   "witness",
+		"X-Janus-Value-Returned":       "false",
+		"X-Content-Type-Options":       "nosniff",
+		"Cross-Origin-Resource-Policy": "same-origin",
+	} {
+		if got := out.Header().Get(header); got != want {
+			t.Fatalf("session witness text should set %s=%q, got %q", header, want, got)
+		}
+	}
+	body := out.Body.String()
+	for _, want := range []string{"janus_session_witness", "schema=janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signal=signed_session_browser_proof_no_identity_values", "body_field=witness", "request_id=session-witness-text-123", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "request_body_returned=false", "env_values_returned=false", "backend_path_returned=false", "connector_output_returned=false", "permit_payload_returned=false", "secret_value_returned=false", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("session witness text should include %s: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("session witness text leaked value %q: %s", forbidden, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "session witness text", out)
+}
+
+func TestSessionWitnessPageRequiresAuthentication(t *testing.T) {
+	app := newTestApp(t)
+	for _, path := range []string{"/session-witness", "/session-witness.txt"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-Request-Id", "session-witness-auth-required")
+		out := httptest.NewRecorder()
+		app.routes().ServeHTTP(out, req)
+		if out.Code != http.StatusFound || out.Header().Get("Location") != "/login" {
+			t.Fatalf("%s expected browser auth redirect, got %d location=%q body=%s", path, out.Code, out.Header().Get("Location"), out.Body.String())
+		}
+		assertRouteResponseValueFree(t, "session witness auth redirect", out)
+	}
 }
 
 func TestConfigUsesHostPrefixedNonceCookieForHTTPS(t *testing.T) {
@@ -3281,7 +3327,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Signed in", "identity values withheld", "admin", "Live posture", "Operational status", "Command center", "Skip to command center", "Current safety posture", "Service", "values withheld", "Actions", "Session proof", "Witness JSON", "Browser session witness", "Session witness", "Cookie and CSRF", "Open witness proof", "local_dev_signed_session", "Command center status", "Safe quick actions", "Safety state", "Role access", "Enterprise review", "Now", "metadata_only", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Signed-in role receipt", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Enterprise dry run", "Enterprise dry-run checklist", "self_hosted now", "enterprise target", "blockers", "required=true", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Integration conformance workflow", "Mark integration conformance present", "connector_config_returned=false", "endpoint_returned=false", "payload_returned=false", "Identity mapping", "Audit shipping", "Ticketing link", "SIEM custody", "Evidence handoff", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill workflow", "Mark restore drill present", "review cadence", "Metadata inventory", "Policy and identity", "Release provenance workflow", "Mark release provenance present", "artifact_returned=false", "Build identity", "SBOM review", "Channel trust", "Privacy and retention workflow", "Mark privacy policy present", "policy_doc_returned=false", "raw_metadata_returned=false", "Data classes", "Retention window", "Access boundary", "Payload exclusions", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Evidence export witness", "Audit proof", "Download gate", "Value boundary", "Retention posture", "local_evidence_until_operator_cleanup", "Evidence export evidence flags", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Role workbench witness", "Available controls", "Hidden controls", "Least privilege", "Role workbench evidence flags", "role_boundary_enforced=true", "identity_values_returned=false", "claim_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "Evidence JSON", "Request metadata handle", "Request handle witness", "Intent boundary", "Metadata receipt", "Request handle evidence flags", "Request permit", "Request permit witness", "Permit intent", "Reason and destination", "Request permit evidence flags", "Create metadata permit", "Access policy", "bootstrap owner", "claim policy", "subject bindings", "group bindings", "Role policy proof", "Implicit elevated claims", "disabled", "Claim names are not trusted by convention", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture", "Lifecycle posture witness", "Normal-use gate", "Blocked lifecycle", "Freshness review", "Lifecycle posture evidence flags", "normal_use_fail_closed=true", "backend_path_returned=false", "request_body_returned=false", "Warden descriptors", "Warden descriptor catalog witness", "Visible metadata", "Scope boundary", "Use profile", "Warden catalog evidence flags", "descriptor_count=", "scope_strict=true", "profiled_count=", "unprofiled_count=", "reveal_allowed=false", "source_path_returned=false"} {
+	for _, want := range []string{"Session identity", "Signed in", "identity values withheld", "admin", "Live posture", "Operational status", "Command center", "Skip to command center", "Current safety posture", "Service", "values withheld", "Actions", "Session proof", "Proof text", "Witness JSON", "Browser session witness", "Session witness", "Cookie and CSRF", "Open witness proof", "local_dev_signed_session", "Command center status", "Safe quick actions", "Safety state", "Role access", "Enterprise review", "Now", "metadata_only", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Signed-in role receipt", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Enterprise dry run", "Enterprise dry-run checklist", "self_hosted now", "enterprise target", "blockers", "required=true", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Integration conformance workflow", "Mark integration conformance present", "connector_config_returned=false", "endpoint_returned=false", "payload_returned=false", "Identity mapping", "Audit shipping", "Ticketing link", "SIEM custody", "Evidence handoff", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill workflow", "Mark restore drill present", "review cadence", "Metadata inventory", "Policy and identity", "Release provenance workflow", "Mark release provenance present", "artifact_returned=false", "Build identity", "SBOM review", "Channel trust", "Privacy and retention workflow", "Mark privacy policy present", "policy_doc_returned=false", "raw_metadata_returned=false", "Data classes", "Retention window", "Access boundary", "Payload exclusions", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Evidence export witness", "Audit proof", "Download gate", "Value boundary", "Retention posture", "local_evidence_until_operator_cleanup", "Evidence export evidence flags", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Role workbench witness", "Available controls", "Hidden controls", "Least privilege", "Role workbench evidence flags", "role_boundary_enforced=true", "identity_values_returned=false", "claim_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "Evidence JSON", "Request metadata handle", "Request handle witness", "Intent boundary", "Metadata receipt", "Request handle evidence flags", "Request permit", "Request permit witness", "Permit intent", "Reason and destination", "Request permit evidence flags", "Create metadata permit", "Access policy", "bootstrap owner", "claim policy", "subject bindings", "group bindings", "Role policy proof", "Implicit elevated claims", "disabled", "Claim names are not trusted by convention", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture", "Lifecycle posture witness", "Normal-use gate", "Blocked lifecycle", "Freshness review", "Lifecycle posture evidence flags", "normal_use_fail_closed=true", "backend_path_returned=false", "request_body_returned=false", "Warden descriptors", "Warden descriptor catalog witness", "Visible metadata", "Scope boundary", "Use profile", "Warden catalog evidence flags", "descriptor_count=", "scope_strict=true", "profiled_count=", "unprofiled_count=", "reveal_allowed=false", "source_path_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
@@ -3759,6 +3805,9 @@ func TestSecurityHeadersAcrossCoreRoutes(t *testing.T) {
 		{name: "dashboard", method: http.MethodGet, path: "/", status: http.StatusOK, expectBodyNonce: true, setup: func(app *App, _ *http.Request) {
 			app.cfg.RequireAuth = false
 		}},
+		{name: "session witness text", method: http.MethodGet, path: "/session-witness.txt", status: http.StatusOK, setup: func(app *App, _ *http.Request) {
+			app.cfg.RequireAuth = false
+		}},
 		{name: "session witness page", method: http.MethodGet, path: "/session-witness", status: http.StatusOK, expectBodyNonce: true, setup: func(app *App, _ *http.Request) {
 			app.cfg.RequireAuth = false
 		}},
@@ -4014,6 +4063,7 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "posture", method: http.MethodGet, path: "/api/posture", status: http.StatusOK},
 		{name: "auth witness", method: http.MethodGet, path: "/api/auth/session-witness", status: http.StatusOK},
 		{name: "session witness page", method: http.MethodGet, path: "/session-witness", status: http.StatusOK},
+		{name: "session witness text", method: http.MethodGet, path: "/session-witness.txt", status: http.StatusOK},
 		{name: "descriptors", method: http.MethodGet, path: "/api/warden/descriptors", status: http.StatusOK},
 		{name: "audit", method: http.MethodGet, path: "/api/audit/recent", status: http.StatusOK},
 		{name: "evidence", method: http.MethodGet, path: "/api/evidence", status: http.StatusOK},

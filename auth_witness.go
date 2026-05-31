@@ -182,6 +182,33 @@ func AuthenticatedBrowserCaptureLineFor(witness AuthenticatedBrowserWitness, cap
 		" value_returned=false"
 }
 
+func AuthenticatedBrowserCaptureTextFor(witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, requestID string) string {
+	return "janus_session_witness\n" +
+		"schema=" + capture.Schema + "\n" +
+		"state=" + witness.State + "\n" +
+		"flow=" + witness.Flow + "\n" +
+		"signal=" + witness.EvidenceSignal + "\n" +
+		"body_field=" + capture.BodyField + "\n" +
+		"request_id=" + requestID + "\n" +
+		"copy_safe=true\n" +
+		"replay_safe=true\n" +
+		"identity_values_returned=false\n" +
+		"subject_returned=false\n" +
+		"email_returned=false\n" +
+		"name_returned=false\n" +
+		"claim_values_returned=false\n" +
+		"group_values_returned=false\n" +
+		"token_returned=false\n" +
+		"cookie_value_returned=false\n" +
+		"request_body_returned=false\n" +
+		"env_values_returned=false\n" +
+		"backend_path_returned=false\n" +
+		"connector_output_returned=false\n" +
+		"permit_payload_returned=false\n" +
+		"secret_value_returned=false\n" +
+		"value_returned=false\n"
+}
+
 func authenticatedBrowserCaptureHeader(name, value string) AuthenticatedBrowserCaptureHeader {
 	return AuthenticatedBrowserCaptureHeader{
 		Name:          name,

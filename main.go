@@ -531,6 +531,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /oidc/callback", app.handleCallback)
 	mux.HandleFunc("POST /logout", app.withAuth(app.handleLogout))
 	mux.HandleFunc("GET /session-witness", app.withAuth(app.handleSessionWitnessPage))
+	mux.HandleFunc("GET /session-witness.txt", app.withAuth(app.handleSessionWitnessText))
 	mux.HandleFunc("GET /api/warden/descriptors", app.withAuth(app.handleDescriptors))
 	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle)))
 	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit)))
@@ -566,7 +567,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/session-witness", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/session-witness", "/session-witness.txt", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/logout", "/api/warden/resolve", "/api/evidence/attachments", "/api/permits", "/ui/warden/resolve", "/ui/evidence/attachments", "/ui/permits":
 		return []string{http.MethodPost}, true
@@ -1104,6 +1105,18 @@ func (app *App) handleSessionWitnessPage(w http.ResponseWriter, r *http.Request)
 		"CaptureLine":          AuthenticatedBrowserCaptureLineFor(witness, capture, reqID),
 		"RequestID":            reqID,
 	})
+}
+
+func (app *App) handleSessionWitnessText(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	witness, capture := app.authenticatedBrowserWitnessCapture(session)
+	reqID := requestID(r)
+	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture)
+	w.Header().Set("Content-Disposition", `inline; filename="janus-session-witness.txt"`)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	app.audit(r, "auth.session.witness.text", "allowed", session.Subject, "")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(AuthenticatedBrowserCaptureTextFor(witness, capture, reqID)))
 }
 
 func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request) {
@@ -3825,6 +3838,7 @@ func mustTemplates() *template.Template {
 		      {{ if .WitnessPage }}
 		      <a href="/">Dashboard</a>
 		      <a href="/session-witness">Witness</a>
+		      <a href="/session-witness.txt">Text</a>
 		      <a href="/api/auth/session-witness">JSON</a>
 		      {{ else }}
 		      <a href="#overview">Overview</a>
@@ -3895,6 +3909,7 @@ func mustTemplates() *template.Template {
 	    <div class="toolbar">
 	      {{ if .CanExportEvidence }}<a class="button primary" href="/api/evidence">Evidence JSON</a>{{ end }}
 	      <a class="button quiet" href="/session-witness">Session proof</a>
+	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
 	      <a class="button quiet" href="/api/posture">Posture JSON</a>
 	      <a class="button quiet" href="/api/warden/descriptors">Descriptors JSON</a>
@@ -6448,6 +6463,7 @@ func mustTemplates() *template.Template {
 	    </div>
 	    <div class="toolbar">
 	      <a class="button primary" href="/">Dashboard</a>
+	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
 	    </div>
 	    <div class="safety-ribbon" aria-label="Session witness posture">
