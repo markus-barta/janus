@@ -1432,7 +1432,7 @@ func TestSessionWitnessBrowserSmokeReceiptHTMLIsValueFree(t *testing.T) {
 	assertRouteResponseValueFree(t, "session witness browser smoke receipt HTML", out)
 }
 
-func TestSessionWitnessBrowserSmokeReceiptHTMLAllowsSameOriginBrowserNavigation(t *testing.T) {
+func TestSessionWitnessBrowserSmokeReceiptHTMLCSRFRedirectsToFreshSmokePage(t *testing.T) {
 	app := newTestApp(t)
 	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
 	rr := httptest.NewRecorder()
@@ -1448,21 +1448,19 @@ func TestSessionWitnessBrowserSmokeReceiptHTMLAllowsSameOriginBrowserNavigation(
 	req.AddCookie(rr.Result().Cookies()[0])
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
-	if out.Code != http.StatusOK {
-		t.Fatalf("expected same-origin browser navigation smoke receipt 200, got %d body=%s", out.Code, out.Body.String())
+	if out.Code != http.StatusSeeOther {
+		t.Fatalf("expected same-origin browser navigation smoke receipt csrf refresh redirect, got %d body=%s", out.Code, out.Body.String())
+	}
+	if got := out.Header().Get("Location"); got != "/auth/smoke?retry=csrf" {
+		t.Fatalf("same-origin browser navigation csrf refresh should redirect to fresh auth smoke page, got %q", got)
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Browser smoke receipt", "Smoke verified", "csrf_source=same_origin_browser_navigation", "request_id=browser-smoke-navigation-123", "record_request_id=browser-smoke-navigation-123", "record_returned=false", "value_returned=false"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("same-origin browser navigation receipt should include %q: %s", want, body)
-		}
-	}
-	for _, forbidden := range []string{"janus_authenticated_browser_smoke", "janus_current_session_evidence_record", "witness_proof_line=", "proof_line=", "proof_pack_input=", "subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+	for _, forbidden := range []string{"Browser smoke receipt", "Smoke verified", "janus_authenticated_browser_smoke", "janus_current_session_evidence_record", "witness_proof_line=", "proof_line=", "proof_pack_input=", "subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
 		if strings.Contains(body, forbidden) {
-			t.Fatalf("same-origin browser navigation receipt leaked forbidden value %q: %s", forbidden, body)
+			t.Fatalf("same-origin browser navigation csrf refresh leaked forbidden value %q: %s", forbidden, body)
 		}
 	}
-	assertRouteResponseValueFree(t, "session witness browser smoke receipt same-origin navigation", out)
+	assertRouteResponseValueFree(t, "session witness browser smoke receipt same-origin navigation csrf refresh", out)
 }
 
 func TestSessionWitnessBrowserSmokeReceiptRejectsCrossSiteNavigationWithoutCSRF(t *testing.T) {

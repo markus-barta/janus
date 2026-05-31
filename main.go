@@ -1323,8 +1323,10 @@ func (app *App) handleSessionWitnessBrowserSmokeReceiptText(w http.ResponseWrite
 	session := currentSession(r.Context())
 	csrfSource := "form_token"
 	if !app.csrfAllowed(r, session) {
-		if app.browserSmokeReceiptNavigationAllowed(r) {
-			csrfSource = "same_origin_browser_navigation"
+		if app.browserSmokeReceiptCSRFRefreshAllowed(r) {
+			app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", "denied", session.Subject, "csrf refresh redirect")
+			http.Redirect(w, r, "/auth/smoke?retry=csrf", http.StatusSeeOther)
+			return
 		} else {
 			app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", "denied", session.Subject, "csrf failed")
 			writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
@@ -3835,18 +3837,23 @@ func wantsHTMLResponse(r *http.Request) bool {
 	return strings.Contains(accept, "text/html") && !strings.Contains(accept, "text/plain")
 }
 
-func (app *App) browserSmokeReceiptNavigationAllowed(r *http.Request) bool {
-	if r.Method != http.MethodPost || !wantsHTMLResponse(r) {
+func (app *App) browserSmokeReceiptCSRFRefreshAllowed(r *http.Request) bool {
+	if r.Method != http.MethodPost || r.Form.Get("format") == "text" {
 		return false
 	}
 	if !app.sameOriginMutation(r) {
 		return false
 	}
-	if !strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "same-origin") {
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	mode := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Mode")))
+	if !strings.Contains(accept, "text/html") && mode != "navigate" {
 		return false
 	}
-	mode := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Mode")))
-	if mode != "" && mode != "navigate" {
+	if strings.Contains(accept, "application/json") || strings.Contains(accept, "text/plain") {
+		return false
+	}
+	site := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")))
+	if site == "cross-site" {
 		return false
 	}
 	dest := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")))
