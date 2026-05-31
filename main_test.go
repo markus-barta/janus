@@ -120,6 +120,15 @@ func assertWitnessFreshnessHeaders(t *testing.T, out *httptest.ResponseRecorder)
 	return capturedAt, freshUntil
 }
 
+func testWitnessVerificationRequest(t *testing.T, app *App, session Session, requestID string, capturedAt time.Time) WitnessReceiptVerificationRequest {
+	t.Helper()
+	roleEvidence := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), true)
+	witness := app.authenticatedBrowserWitness(session, roleEvidence, true)
+	capture := AuthenticatedBrowserCaptureFor()
+	receipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, requestID, capturedAt)
+	return WitnessReceiptVerificationRequest{ProofLine: receipt.Input, ProofHash: receipt.Hash}
+}
+
 func cookieByName(t *testing.T, cookies []*http.Cookie, name string) *http.Cookie {
 	t.Helper()
 	for _, cookie := range cookies {
@@ -688,7 +697,7 @@ func TestSessionWitnessTextRendersCopySafeCapture(t *testing.T) {
 
 func TestSessionWitnessPageRequiresAuthentication(t *testing.T) {
 	app := newTestApp(t)
-	for _, path := range []string{"/session-witness", "/session-witness.txt"} {
+	for _, path := range []string{"/session-witness", "/session-witness.txt", "/session-witness/verify"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("X-Request-Id", "session-witness-auth-required")
 		out := httptest.NewRecorder()
@@ -697,6 +706,150 @@ func TestSessionWitnessPageRequiresAuthentication(t *testing.T) {
 			t.Fatalf("%s expected browser auth redirect, got %d location=%q body=%s", path, out.Code, out.Header().Get("Location"), out.Body.String())
 		}
 		assertRouteResponseValueFree(t, "session witness auth redirect", out)
+	}
+}
+
+func TestWitnessReceiptVerifierVerifiesCopySafeProof(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	capturedAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	req := testWitnessVerificationRequest(t, app, session, "verify-proof-123", capturedAt)
+
+	verification := VerifyAuthenticatedBrowserCaptureReceipt(req, capturedAt.Add(2*time.Minute))
+	if !verification.Verified || verification.Status != "verified" || !verification.HashMatch || !verification.Fresh {
+		t.Fatalf("expected verified fresh witness receipt: %#v", verification)
+	}
+	if verification.State != "authenticated" || verification.Flow != "zitadel_oidc_pkce_to_signed_session" || verification.RequestID != "verify-proof-123" || verification.FreshnessSeconds != 300 {
+		t.Fatalf("verification should expose normalized safe proof fields: %#v", verification)
+	}
+	if verification.InputReturned || verification.RequestBodyReturned || verification.ValueReturned {
+		t.Fatalf("verification must not return pasted input or values: %#v", verification)
+	}
+	raw, err := json.Marshal(verification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"subject-123", "person@example.test", "Person Name", "secret-cookie-secret", req.ProofLine} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("verification leaked forbidden value %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestWitnessReceiptVerifierRejectsBadInputWithoutEcho(t *testing.T) {
+	bad := WitnessReceiptVerificationRequest{
+		ProofLine: "token=secret-cookie-secret subject=person@example.test value_returned=true",
+		ProofHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	verification := VerifyAuthenticatedBrowserCaptureReceipt(bad, time.Now().UTC())
+	if verification.Verified || verification.HashMatch || verification.ExpectedHash != "" || verification.Status == "verified" {
+		t.Fatalf("bad witness receipt should not verify or expose expected hash: %#v", verification)
+	}
+	raw, err := json.Marshal(verification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"secret-cookie-secret", "person@example.test", bad.ProofLine, "token=", "subject="} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("bad verification leaked forbidden input %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestSessionWitnessVerifierUIAndAPIAreValueFree(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+	cookie := rr.Result().Cookies()[0]
+	verifyReq := testWitnessVerificationRequest(t, app, session, "verify-ui-api-123", time.Now().UTC().Add(-time.Minute))
+
+	pageReq := httptest.NewRequest(http.MethodGet, "/session-witness/verify", nil)
+	pageReq.AddCookie(cookie)
+	pageOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(pageOut, pageReq)
+	if pageOut.Code != http.StatusOK {
+		t.Fatalf("expected verifier page 200, got %d body=%s", pageOut.Code, pageOut.Body.String())
+	}
+	pageBody := pageOut.Body.String()
+	for _, want := range []string{"Witness receipt verifier", "Verify witness receipt", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+		if !strings.Contains(pageBody, want) {
+			t.Fatalf("verifier page should include %q: %s", want, pageBody)
+		}
+	}
+	assertRouteResponseValueFree(t, "session witness verifier page", pageOut)
+
+	form := url.Values{}
+	form.Set("csrf_token", app.csrfToken(session))
+	form.Set("proof_line", verifyReq.ProofLine)
+	form.Set("proof_hash", verifyReq.ProofHash)
+	uiReq := httptest.NewRequest(http.MethodPost, "/session-witness/verify", strings.NewReader(form.Encode()))
+	uiReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	uiReq.Header.Set("Origin", "https://vault.barta.cm")
+	uiReq.AddCookie(cookie)
+	uiOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(uiOut, uiReq)
+	if uiOut.Code != http.StatusOK {
+		t.Fatalf("expected verifier UI 200, got %d body=%s", uiOut.Code, uiOut.Body.String())
+	}
+	uiBody := uiOut.Body.String()
+	for _, want := range []string{"Verification result", "verified", "Hash match", "true", "verify-ui-api-123", verifyReq.ProofHash, "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+		if !strings.Contains(uiBody, want) {
+			t.Fatalf("verifier UI should include %q: %s", want, uiBody)
+		}
+	}
+	for _, forbidden := range []string{"proof_line=", verifyReq.ProofLine, "subject-123", "person@example.test", "Person Name", "secret-cookie-secret"} {
+		if strings.Contains(uiBody, forbidden) {
+			t.Fatalf("verifier UI leaked forbidden value %q: %s", forbidden, uiBody)
+		}
+	}
+	assertRouteResponseValueFree(t, "session witness verifier UI", uiOut)
+
+	rawReq, err := json.Marshal(verifyReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiReq := httptest.NewRequest(http.MethodPost, "/api/auth/session-witness/verify", strings.NewReader(string(rawReq)))
+	apiReq.Header.Set("Content-Type", "application/json")
+	apiReq.Header.Set("Origin", "https://vault.barta.cm")
+	apiReq.Header.Set("X-CSRF-Token", app.csrfToken(session))
+	apiReq.AddCookie(cookie)
+	apiOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(apiOut, apiReq)
+	if apiOut.Code != http.StatusOK {
+		t.Fatalf("expected verifier API 200, got %d body=%s", apiOut.Code, apiOut.Body.String())
+	}
+	apiBody := apiOut.Body.String()
+	for _, want := range []string{`"verification"`, `"status":"verified"`, `"hash_match":true`, `"fresh":true`, `"verified":true`, `"request_id":"verify-ui-api-123"`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
+		if !strings.Contains(apiBody, want) {
+			t.Fatalf("verifier API should include %q: %s", want, apiBody)
+		}
+	}
+	for _, forbidden := range []string{`"proof_line"`, verifyReq.ProofLine, "subject-123", "person@example.test", "Person Name", "secret-cookie-secret"} {
+		if strings.Contains(apiBody, forbidden) {
+			t.Fatalf("verifier API leaked forbidden value %q: %s", forbidden, apiBody)
+		}
+	}
+	assertRouteResponseValueFree(t, "session witness verifier API", apiOut)
+}
+
+func TestWitnessVerifierAPIRequiresCSRF(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session-witness/verify", strings.NewReader(`{"proof_line":"secret-cookie-secret","proof_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://vault.barta.cm")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", out.Code, out.Body.String())
+	}
+	if strings.Contains(out.Body.String(), "secret-cookie-secret") || !strings.Contains(out.Body.String(), `"csrf_failed"`) {
+		t.Fatalf("csrf failure should stay value-free: %s", out.Body.String())
 	}
 }
 
@@ -3859,6 +4012,9 @@ func TestSecurityHeadersAcrossCoreRoutes(t *testing.T) {
 		{name: "session witness page", method: http.MethodGet, path: "/session-witness", status: http.StatusOK, expectBodyNonce: true, setup: func(app *App, _ *http.Request) {
 			app.cfg.RequireAuth = false
 		}},
+		{name: "session witness verifier", method: http.MethodGet, path: "/session-witness/verify", status: http.StatusOK, expectBodyNonce: true, setup: func(app *App, _ *http.Request) {
+			app.cfg.RequireAuth = false
+		}},
 	}
 
 	for _, tc := range cases {
@@ -4112,6 +4268,9 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "auth witness", method: http.MethodGet, path: "/api/auth/session-witness", status: http.StatusOK},
 		{name: "session witness page", method: http.MethodGet, path: "/session-witness", status: http.StatusOK},
 		{name: "session witness text", method: http.MethodGet, path: "/session-witness.txt", status: http.StatusOK},
+		{name: "session witness verifier", method: http.MethodGet, path: "/session-witness/verify", status: http.StatusOK},
+		{name: "session witness verifier bad post", method: http.MethodPost, path: "/session-witness/verify", body: "proof_line=secret-cookie-secret&proof_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", contentType: "application/x-www-form-urlencoded", status: http.StatusUnprocessableEntity},
+		{name: "auth witness verifier bad post", method: http.MethodPost, path: "/api/auth/session-witness/verify", body: `{"proof_line":"secret-cookie-secret","proof_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, contentType: "application/json", status: http.StatusUnprocessableEntity},
 		{name: "descriptors", method: http.MethodGet, path: "/api/warden/descriptors", status: http.StatusOK},
 		{name: "audit", method: http.MethodGet, path: "/api/audit/recent", status: http.StatusOK},
 		{name: "evidence", method: http.MethodGet, path: "/api/evidence", status: http.StatusOK},
@@ -4160,6 +4319,7 @@ func TestJSONErrorResponsesAreRequestCorrelated(t *testing.T) {
 	}{
 		{name: "auth required posture", method: http.MethodGet, path: "/api/posture", status: http.StatusUnauthorized},
 		{name: "auth required browser witness", method: http.MethodGet, path: "/api/auth/session-witness", status: http.StatusUnauthorized},
+		{name: "auth required witness verifier", method: http.MethodPost, path: "/api/auth/session-witness/verify", status: http.StatusUnauthorized},
 		{name: "auth required resolve", method: http.MethodPost, path: "/api/warden/resolve", status: http.StatusUnauthorized},
 		{name: "auth required evidence", method: http.MethodGet, path: "/api/evidence", status: http.StatusUnauthorized},
 		{name: "auth required evidence attach", method: http.MethodPost, path: "/api/evidence/attachments", status: http.StatusUnauthorized},

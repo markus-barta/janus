@@ -532,10 +532,13 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /logout", app.withAuth(app.handleLogout))
 	mux.HandleFunc("GET /session-witness", app.withAuth(app.handleSessionWitnessPage))
 	mux.HandleFunc("GET /session-witness.txt", app.withAuth(app.handleSessionWitnessText))
+	mux.HandleFunc("GET /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPage))
+	mux.HandleFunc("POST /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPost))
 	mux.HandleFunc("GET /api/warden/descriptors", app.withAuth(app.handleDescriptors))
 	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle)))
 	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit)))
 	mux.HandleFunc("GET /api/auth/session-witness", app.withAuth(app.handleAuthSessionWitness))
+	mux.HandleFunc("POST /api/auth/session-witness/verify", app.withAuth(app.handleAuthSessionWitnessVerify))
 	mux.HandleFunc("GET /api/posture", app.withAuth(app.handlePosture))
 	mux.HandleFunc("GET /api/evidence", app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence)))
 	mux.HandleFunc("POST /api/evidence/attachments", app.withAuth(app.handleAttachEvidence))
@@ -569,7 +572,11 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
 	case "/", "/session-witness", "/session-witness.txt", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
+	case "/session-witness/verify":
+		return []string{http.MethodGet, http.MethodPost}, true
 	case "/logout", "/api/warden/resolve", "/api/evidence/attachments", "/api/permits", "/ui/warden/resolve", "/ui/evidence/attachments", "/ui/permits":
+		return []string{http.MethodPost}, true
+	case "/api/auth/session-witness/verify":
 		return []string{http.MethodPost}, true
 	}
 	switch {
@@ -1143,6 +1150,87 @@ func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request)
 		"capture":        capture,
 		"receipt":        receipt,
 		"request_id":     reqID,
+		"value_returned": false,
+	})
+}
+
+func (app *App) sessionWitnessVerifyData(r *http.Request, session Session, verification *WitnessReceiptVerification) map[string]any {
+	witness, capture := app.authenticatedBrowserWitnessCapture(session)
+	return map[string]any{
+		"Title":                "Janus Witness Verifier",
+		"CSPNonce":             cspNonceFromContext(r.Context()),
+		"WitnessPage":          true,
+		"WitnessVerifyPage":    true,
+		"Session":              session,
+		"CSRF":                 app.csrfToken(session),
+		"Mode":                 app.cfg.ProductMode,
+		"AuthenticatedRole":    SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), witness.Ready),
+		"AuthenticatedBrowser": witness,
+		"Capture":              capture,
+		"Verification":         verification,
+		"RequestID":            requestID(r),
+	}
+}
+
+func (app *App) handleSessionWitnessVerifyPage(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	app.audit(r, "auth.session.witness.verify.page", "allowed", session.Subject, "")
+	renderTemplate(w, app.templates, "session_witness_verify", app.sessionWitnessVerifyData(r, session, nil))
+}
+
+func (app *App) handleSessionWitnessVerifyPost(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "auth.session.witness.verify.ui", "denied", session.Subject, "csrf failed")
+		verification := VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{}, time.Now().UTC())
+		verification.Status = "blocked"
+		verification.Summary = "CSRF token required."
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification))
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		app.audit(r, "auth.session.witness.verify.ui", "denied", session.Subject, "bad form")
+		verification := VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{}, time.Now().UTC())
+		verification.Status = "blocked"
+		verification.Summary = "Verification form could not be read."
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusBadRequest, app.sessionWitnessVerifyData(r, session, &verification))
+		return
+	}
+	req := WitnessReceiptVerificationRequest{
+		ProofLine: r.Form.Get("proof_line"),
+		ProofHash: r.Form.Get("proof_hash"),
+	}
+	verification := VerifyAuthenticatedBrowserCaptureReceipt(req, time.Now().UTC())
+	status := http.StatusOK
+	if !verification.Verified {
+		status = http.StatusUnprocessableEntity
+	}
+	app.audit(r, "auth.session.witness.verify.ui", verification.Status, session.Subject, "")
+	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification))
+}
+
+func (app *App) handleAuthSessionWitnessVerify(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "auth.session.witness.verify", "denied", session.Subject, "csrf failed")
+		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		return
+	}
+	var req WitnessReceiptVerificationRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		app.audit(r, "auth.session.witness.verify", "denied", session.Subject, "bad json")
+		writeJSONError(w, r, http.StatusBadRequest, "bad_json", "Request body must be JSON")
+		return
+	}
+	verification := VerifyAuthenticatedBrowserCaptureReceipt(req, time.Now().UTC())
+	status := http.StatusOK
+	if !verification.Verified {
+		status = http.StatusUnprocessableEntity
+	}
+	app.audit(r, "auth.session.witness.verify", verification.Status, session.Subject, "")
+	writeJSON(w, status, map[string]any{
+		"verification":   verification,
+		"request_id":     requestID(r),
 		"value_returned": false,
 	})
 }
@@ -3492,7 +3580,7 @@ func mustTemplates() *template.Template {
       align-items: end;
     }
     label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
-    select, input {
+    select, input, textarea {
       width: 100%;
       min-height: 38px;
       border: 1px solid var(--line);
@@ -3502,7 +3590,14 @@ func mustTemplates() *template.Template {
       font: inherit;
       padding: 8px 10px;
     }
-    select:focus, input:focus, button:focus, .button:focus, .nav a:focus {
+    textarea {
+      min-height: 112px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    select:focus, input:focus, textarea:focus, button:focus, .button:focus, .nav a:focus {
       outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
       outline-offset: 2px;
     }
@@ -3854,6 +3949,7 @@ func mustTemplates() *template.Template {
 		      <a href="/">Dashboard</a>
 		      <a href="/session-witness">Witness</a>
 		      <a href="/session-witness.txt">Text</a>
+		      <a href="/session-witness/verify">Verify</a>
 		      <a href="/api/auth/session-witness">JSON</a>
 		      {{ else }}
 		      <a href="#overview">Overview</a>
@@ -6463,7 +6559,96 @@ func mustTemplates() *template.Template {
       </table>
     </div>
   </div>
-</section>
+	</section>
+	{{ template "base_bottom" . }}
+	{{- end }}
+
+	{{ define "session_witness_verify" -}}
+	{{ template "base_top" . }}
+	<section class="overview" id="witness-verifier">
+	  <div class="intro">
+	    <div class="intro-copy">
+	      <div class="eyebrow">{{ .Mode }} / {{ .Capture.Schema }} / verifier</div>
+	      <h1>Witness receipt verifier</h1>
+	      <p>Checks a copy-safe witness proof line and hash. Pasted input is not echoed, stored, or returned.</p>
+	    </div>
+	    <div class="toolbar">
+	      <a class="button primary" href="/session-witness">Witness</a>
+	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
+	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
+	      <a class="button quiet" href="/">Dashboard</a>
+	    </div>
+	    <div class="safety-ribbon" aria-label="Witness verifier posture">
+	      <div class="safety-chip {{ if and .Verification .Verification.Verified }}ok{{ else if .Verification }}warn{{ else }}info{{ end }}">
+	        <span>Status</span>
+	        <strong>{{ if .Verification }}{{ .Verification.Status }}{{ else }}ready{{ end }}</strong>
+	      </div>
+	      <div class="safety-chip {{ if and .Verification .Verification.HashMatch }}ok{{ else if .Verification }}warn{{ else }}info{{ end }}">
+	        <span>Hash</span>
+	        <strong>{{ if .Verification }}{{ .Verification.HashMatch }}{{ else }}not checked{{ end }}</strong>
+	      </div>
+	      <div class="safety-chip {{ if and .Verification .Verification.Fresh }}ok{{ else if .Verification }}warn{{ else }}info{{ end }}">
+	        <span>Fresh</span>
+	        <strong>{{ if .Verification }}{{ .Verification.Fresh }}{{ else }}not checked{{ end }}</strong>
+	      </div>
+	      <div class="safety-chip ok">
+	        <span>Values</span>
+	        <strong>withheld</strong>
+	      </div>
+	    </div>
+	  </div>
+	  <div class="status">
+	    <div class="status-head"><h2>Verify proof</h2><span class="pill ok">input not returned</span></div>
+	    <div class="panel-body stack">
+	      <form class="stack" method="post" action="/session-witness/verify">
+	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+	        <label>Proof line<textarea name="proof_line" required spellcheck="false" autocomplete="off"></textarea></label>
+	        <label>Proof hash<input name="proof_hash" required autocomplete="off" spellcheck="false"></label>
+	        <button class="button primary" type="submit">Verify witness receipt</button>
+	      </form>
+	      <p><span class="pill ok">request_body_returned=false</span> <span class="pill ok">input_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+	    </div>
+	  </div>
+	</section>
+	{{ if .Verification }}
+	<section class="panel" style="margin-bottom:16px" id="verification-result">
+	  <div class="panel-head">
+	    <h2>Verification result</h2>
+	    <span class="pill {{ if .Verification.Verified }}ok{{ else }}warn{{ end }}">{{ .Verification.Status }}</span>
+	  </div>
+	  <div class="panel-body stack">
+	    <p>{{ .Verification.Summary }}</p>
+	    <div class="receipt-proof" aria-label="Normalized witness verification fields">
+	      <span>State<strong>{{ .Verification.State }}</strong></span>
+	      <span>Flow<strong>{{ .Verification.Flow }}</strong></span>
+	      <span>Request<strong>{{ .Verification.RequestID }}</strong></span>
+	      <span>Captured<strong>{{ .Verification.CapturedAt }}</strong></span>
+	      <span>Fresh until<strong>{{ .Verification.FreshUntil }}</strong></span>
+	      <span>Hash match<strong>{{ .Verification.HashMatch }}</strong></span>
+	      <span>Fresh<strong>{{ .Verification.Fresh }}</strong></span>
+	      <span>Expected hash<strong class="mono">{{ .Verification.ExpectedHash }}</strong></span>
+	    </div>
+	    <p><span class="pill info">freshness_seconds={{ .Verification.FreshnessSeconds }}</span> <span class="pill ok">input_returned={{ .Verification.InputReturned }}</span> <span class="pill ok">request_body_returned={{ .Verification.RequestBodyReturned }}</span> <span class="pill ok">value_returned={{ .Verification.ValueReturned }}</span></p>
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="verification-checks">
+	  <div class="panel-head">
+	    <h2>Verification checks</h2>
+	    <span class="pill info">{{ len .Verification.Checks }} checks</span>
+	  </div>
+	  <div class="panel-body">
+	    <div class="witness-grid" aria-label="Witness receipt verification checks">
+	      {{ range .Verification.Checks }}
+	      <div class="witness-card {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Detail }}</p>
+	      </div>
+	      {{ end }}
+	    </div>
+	  </div>
+	</section>
+	{{ end }}
 	{{ template "base_bottom" . }}
 	{{- end }}
 
@@ -6479,6 +6664,7 @@ func mustTemplates() *template.Template {
 	    <div class="toolbar">
 	      <a class="button primary" href="/">Dashboard</a>
 	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
+	      <a class="button quiet" href="/session-witness/verify">Verify proof</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
 	    </div>
 	    <div class="safety-ribbon" aria-label="Session witness posture">
