@@ -3205,6 +3205,36 @@ func mustTemplates() *template.Template {
     .safety-chip.ok strong { color: var(--accent); }
     .safety-chip.info strong { color: var(--blue); }
     .safety-chip.warn strong { color: var(--amber); }
+    .session-proof {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: stretch;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--accent) 4%, var(--panel-soft));
+      padding: 8px;
+      min-width: 0;
+    }
+    .session-proof-item {
+      min-height: 70px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 9px 10px;
+      display: grid;
+      align-content: space-between;
+      gap: 5px;
+      min-width: 0;
+    }
+    .session-proof-item span { color: var(--muted); font-size: 12px; line-height: 1.15; }
+    .session-proof-item strong { font-size: 16px; line-height: 1.15; overflow-wrap: anywhere; }
+    .session-proof-item.ok strong { color: var(--accent); }
+    .session-proof-item.info strong { color: var(--blue); }
+    .session-proof-item.warn strong { color: var(--amber); }
+    .session-proof-item p { font-size: 12px; line-height: 1.25; }
+    .session-proof-item.action { width: 184px; align-content: center; justify-items: stretch; }
+    .session-proof-item.action .button { width: 100%; }
     .ops-strip {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3654,6 +3684,8 @@ func mustTemplates() *template.Template {
       .verdict { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .role-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .safety-ribbon { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .session-proof { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .session-proof-item.action { width: auto; grid-column: 1 / -1; }
       .ops-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .command-top { grid-template-columns: 1fr; }
       .command-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -3684,6 +3716,9 @@ func mustTemplates() *template.Template {
       .role-matrix { grid-template-columns: 1fr; }
       .ops-strip { grid-template-columns: 1fr; }
       .safety-ribbon { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .session-proof { grid-template-columns: 1fr; }
+      .session-proof-item { min-height: auto; }
+      .session-proof-item.action { grid-column: auto; }
       .command-grid { grid-template-columns: 1fr; }
       .command-actions { display: grid; grid-template-columns: 1fr; }
       .command-actions .button { width: 100%; }
@@ -3722,6 +3757,7 @@ func mustTemplates() *template.Template {
       <a href="#permit">Permit</a>
       {{ if .Permits }}<a href="#permits">Permits</a>{{ end }}
       {{ end }}
+      <a href="#authenticated-role-evidence">Session</a>
       <a href="#posture">Posture</a>
       {{ if .CanViewAudit }}
       <a href="#audit">Audit</a>
@@ -3780,8 +3816,24 @@ func mustTemplates() *template.Template {
     </div>
     <div class="toolbar">
       {{ if .CanExportEvidence }}<a class="button primary" href="/api/evidence">Evidence JSON</a>{{ end }}
+      <a class="button quiet" href="/api/auth/session-witness">Session witness JSON</a>
       <a class="button quiet" href="/api/posture">Posture JSON</a>
       <a class="button quiet" href="/api/warden/descriptors">Descriptors JSON</a>
+    </div>
+    <div class="session-proof" aria-label="Browser session witness">
+      <div class="session-proof-item {{ if eq .AuthenticatedBrowser.State "authenticated" }}ok{{ else if eq .AuthenticatedBrowser.State "local_smoke" }}info{{ else }}warn{{ end }}">
+        <span>Session witness</span>
+        <strong>{{ .AuthenticatedBrowser.State }}</strong>
+        <p>{{ .AuthenticatedBrowser.Flow }}</p>
+      </div>
+      <div class="session-proof-item ok">
+        <span>Cookie and CSRF</span>
+        <strong>{{ .AuthenticatedBrowser.SessionCookiePolicy }}</strong>
+        <p>{{ .AuthenticatedBrowser.CSRFBoundary }}; {{ .AuthenticatedBrowser.CSPBoundary }}</p>
+      </div>
+      <div class="session-proof-item action">
+        <a class="button quiet" href="/api/auth/session-witness">Open witness JSON</a>
+      </div>
     </div>
     <p><span class="pill {{ if eq .OperationalStatus.Verdict "operational" }}ok{{ else }}warn{{ end }}">{{ .OperationalStatus.Verdict }}</span> {{ .OperationalStatus.Summary }}</p>
     <div class="ops-strip" aria-label="Operational status">
