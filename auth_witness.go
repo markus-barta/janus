@@ -48,6 +48,12 @@ type AuthenticatedBrowserCapture struct {
 	ValueReturned          bool     `json:"value_returned"`
 }
 
+type AuthenticatedBrowserCaptureHeader struct {
+	Name          string `json:"name"`
+	Value         string `json:"value"`
+	ValueReturned bool   `json:"value_returned"`
+}
+
 type AuthenticatedBrowserGate struct {
 	Key           string `json:"key"`
 	Label         string `json:"label"`
@@ -151,6 +157,36 @@ func AuthenticatedBrowserCaptureFor() AuthenticatedBrowserCapture {
 		CookieValueReturned:    false,
 		TokenReturned:          false,
 		ValueReturned:          false,
+	}
+}
+
+func AuthenticatedBrowserCaptureHeadersFor(witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, requestID string) []AuthenticatedBrowserCaptureHeader {
+	return []AuthenticatedBrowserCaptureHeader{
+		authenticatedBrowserCaptureHeader("X-Request-Id", requestID),
+		authenticatedBrowserCaptureHeader("X-Janus-Witness-Schema", capture.Schema),
+		authenticatedBrowserCaptureHeader("X-Janus-Witness-State", witness.State),
+		authenticatedBrowserCaptureHeader("X-Janus-Witness-Flow", witness.Flow),
+		authenticatedBrowserCaptureHeader("X-Janus-Witness-Signal", witness.EvidenceSignal),
+		authenticatedBrowserCaptureHeader("X-Janus-Witness-Body-Field", capture.BodyField),
+		authenticatedBrowserCaptureHeader("X-Janus-Value-Returned", "false"),
+	}
+}
+
+func AuthenticatedBrowserCaptureLineFor(witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, requestID string) string {
+	return "schema=" + capture.Schema +
+		" state=" + witness.State +
+		" flow=" + witness.Flow +
+		" signal=" + witness.EvidenceSignal +
+		" body_field=" + capture.BodyField +
+		" request_id=" + requestID +
+		" value_returned=false"
+}
+
+func authenticatedBrowserCaptureHeader(name, value string) AuthenticatedBrowserCaptureHeader {
+	return AuthenticatedBrowserCaptureHeader{
+		Name:          name,
+		Value:         value,
+		ValueReturned: false,
 	}
 }
 

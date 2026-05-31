@@ -530,6 +530,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /login", app.handleLogin)
 	mux.HandleFunc("GET /oidc/callback", app.handleCallback)
 	mux.HandleFunc("POST /logout", app.withAuth(app.handleLogout))
+	mux.HandleFunc("GET /session-witness", app.withAuth(app.handleSessionWitnessPage))
 	mux.HandleFunc("GET /api/warden/descriptors", app.withAuth(app.handleDescriptors))
 	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle)))
 	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit)))
@@ -565,7 +566,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/session-witness", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/logout", "/api/warden/resolve", "/api/evidence/attachments", "/api/permits", "/ui/warden/resolve", "/ui/evidence/attachments", "/ui/permits":
 		return []string{http.MethodPost}, true
@@ -1012,6 +1013,21 @@ func (app *App) authenticatedBrowserWitness(session Session, roleEvidence Sessio
 	return AuthenticatedBrowserWitnessFor(session, roleEvidence, app.sessionPosture(session), app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
 }
 
+func (app *App) authenticatedBrowserWitnessCapture(session Session) (AuthenticatedBrowserWitness, AuthenticatedBrowserCapture) {
+	_, ready := app.readinessBody()
+	roleEvidence := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
+	return app.authenticatedBrowserWitness(session, roleEvidence, ready), AuthenticatedBrowserCaptureFor()
+}
+
+func applyAuthenticatedBrowserWitnessHeaders(w http.ResponseWriter, witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture) {
+	w.Header().Set("X-Janus-Witness-Schema", capture.Schema)
+	w.Header().Set("X-Janus-Witness-State", witness.State)
+	w.Header().Set("X-Janus-Witness-Flow", witness.Flow)
+	w.Header().Set("X-Janus-Witness-Signal", witness.EvidenceSignal)
+	w.Header().Set("X-Janus-Witness-Body-Field", capture.BodyField)
+	w.Header().Set("X-Janus-Value-Returned", "false")
+}
+
 func focusDescriptor(descriptors []SecretDescriptor, selectedRef string) DescriptorFocus {
 	if len(descriptors) == 0 {
 		return DescriptorFocus{}
@@ -1068,18 +1084,32 @@ func (app *App) handlePosture(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, app.postureBody(session))
 }
 
+func (app *App) handleSessionWitnessPage(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	witness, capture := app.authenticatedBrowserWitnessCapture(session)
+	reqID := requestID(r)
+	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture)
+	app.audit(r, "auth.session.witness.page", "allowed", session.Subject, "")
+	renderTemplate(w, app.templates, "session_witness", map[string]any{
+		"Title":                "Janus Session Witness",
+		"CSPNonce":             cspNonceFromContext(r.Context()),
+		"WitnessPage":          true,
+		"Session":              session,
+		"CSRF":                 app.csrfToken(session),
+		"Mode":                 app.cfg.ProductMode,
+		"AuthenticatedRole":    SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), witness.Ready),
+		"AuthenticatedBrowser": witness,
+		"Capture":              capture,
+		"CaptureHeaders":       AuthenticatedBrowserCaptureHeadersFor(witness, capture, reqID),
+		"CaptureLine":          AuthenticatedBrowserCaptureLineFor(witness, capture, reqID),
+		"RequestID":            reqID,
+	})
+}
+
 func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
-	_, ready := app.readinessBody()
-	roleEvidence := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
-	witness := app.authenticatedBrowserWitness(session, roleEvidence, ready)
-	capture := AuthenticatedBrowserCaptureFor()
-	w.Header().Set("X-Janus-Witness-Schema", capture.Schema)
-	w.Header().Set("X-Janus-Witness-State", witness.State)
-	w.Header().Set("X-Janus-Witness-Flow", witness.Flow)
-	w.Header().Set("X-Janus-Witness-Signal", witness.EvidenceSignal)
-	w.Header().Set("X-Janus-Witness-Body-Field", capture.BodyField)
-	w.Header().Set("X-Janus-Value-Returned", "false")
+	witness, capture := app.authenticatedBrowserWitnessCapture(session)
+	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture)
 	app.audit(r, "auth.session.witness", "allowed", session.Subject, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"witness":        witness,
@@ -3191,7 +3221,7 @@ func mustTemplates() *template.Template {
     }
     .intro { padding: 22px; display: grid; gap: 16px; align-content: center; min-width: 0; }
     .intro-copy { max-width: 720px; display: grid; gap: 10px; min-width: 0; }
-    .eyebrow { color: var(--accent); font-weight: 720; font-size: 13px; letter-spacing: 0; }
+    .eyebrow { color: var(--accent); font-weight: 720; font-size: 13px; letter-spacing: 0; overflow-wrap: anywhere; }
     .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
     .safety-ribbon {
       display: grid;
@@ -3589,13 +3619,43 @@ func mustTemplates() *template.Template {
       color: var(--muted);
       font-size: 12px;
     }
-    .receipt-copy input {
-      min-height: 34px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11px;
-      color: var(--ink);
-      background: var(--panel);
-    }
+	    .receipt-copy input {
+	      width: 100%;
+	      min-height: 34px;
+	      border: 1px solid var(--line);
+	      border-radius: 8px;
+	      padding: 6px 8px;
+	      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	      font-size: 11px;
+	      color: var(--ink);
+	      background: var(--panel);
+	    }
+	    .capture-headers {
+	      display: grid;
+	      gap: 8px;
+	    }
+	    .capture-header {
+	      display: grid;
+	      grid-template-columns: minmax(180px, .6fr) minmax(0, 1fr) auto;
+	      gap: 8px;
+	      align-items: center;
+	      border: 1px solid var(--line);
+	      border-radius: 8px;
+	      background: var(--panel-soft);
+	      padding: 9px 10px;
+	      min-width: 0;
+	    }
+	    .capture-header span { color: var(--muted); font-size: 12px; line-height: 1.2; overflow-wrap: anywhere; }
+	    .capture-header strong { font-size: 12px; line-height: 1.2; overflow-wrap: anywhere; }
+	    .capture-line {
+	      border: 1px solid var(--line);
+	      border-radius: 8px;
+	      background: color-mix(in srgb, var(--accent) 5%, var(--panel-soft));
+	      padding: 9px 10px;
+	      font-size: 12px;
+	      line-height: 1.35;
+	      overflow-wrap: anywhere;
+	    }
 	    .hash-copy input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
 	    .audit-timeline {
 	      display: grid;
@@ -3705,6 +3765,7 @@ func mustTemplates() *template.Template {
 	      .receipt-copy { grid-template-columns: 1fr; }
 	      .audit-event { grid-template-columns: 1fr; }
 	      .audit-proof { grid-template-columns: minmax(0, .3fr) minmax(0, .7fr); }
+	      .capture-header { grid-template-columns: 1fr; align-items: start; }
 	      .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-step:nth-child(2n) { border-right: 0; }
@@ -3715,6 +3776,7 @@ func mustTemplates() *template.Template {
       section { scroll-margin-top: 232px; }
       .bar, main { width: calc(100% - 22px); max-width: 1180px; }
       main { padding-top: 14px; }
+      h1 { font-size: 28px; line-height: 1.08; }
       .intro { padding: 16px; gap: 12px; }
       .panel-body { padding: 13px; }
       .status-head, .panel-head { padding: 13px; align-items: flex-start; }
@@ -3724,7 +3786,7 @@ func mustTemplates() *template.Template {
       .verdict { grid-template-columns: 1fr; }
       .role-matrix { grid-template-columns: 1fr; }
       .ops-strip { grid-template-columns: 1fr; }
-      .safety-ribbon { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .safety-ribbon { grid-template-columns: 1fr; }
       .session-proof { grid-template-columns: 1fr; }
       .session-proof-item { min-height: auto; }
       .session-proof-item.action { grid-column: auto; }
@@ -3738,7 +3800,8 @@ func mustTemplates() *template.Template {
 	      .receipt-copy { grid-template-columns: 1fr; }
 	      .audit-event { grid-template-columns: 1fr; }
 	      .audit-proof { grid-template-columns: minmax(0, .32fr) minmax(0, .68fr); }
-		      .assurance-flow { grid-template-columns: 1fr; }
+	      .capture-header { grid-template-columns: 1fr; }
+	      .assurance-flow { grid-template-columns: 1fr; }
       .trust-rail { grid-template-columns: 1fr; }
       .trust-step { border-right: 0; border-bottom: 1px solid var(--line); }
       .trust-step:last-child { border-bottom: 0; }
@@ -3757,22 +3820,28 @@ func mustTemplates() *template.Template {
 <header>
   <div class="bar">
     <div class="brand"><div class="mark">J</div><div>Janus</div></div>
-	    {{ if .Session.Subject }}
-	    <nav class="nav" aria-label="Primary">
-	      <a href="#overview">Overview</a>
-	      <a href="#command-center">Command</a>
+		    {{ if .Session.Subject }}
+		    <nav class="nav" aria-label="Primary">
+		      {{ if .WitnessPage }}
+		      <a href="/">Dashboard</a>
+		      <a href="/session-witness">Witness</a>
+		      <a href="/api/auth/session-witness">JSON</a>
+		      {{ else }}
+		      <a href="#overview">Overview</a>
+		      <a href="#command-center">Command</a>
 	      {{ if .CanOperate }}
 	      <a href="#warden">Warden</a>
       <a href="#permit">Permit</a>
       {{ if .Permits }}<a href="#permits">Permits</a>{{ end }}
-      {{ end }}
-      <a href="#authenticated-role-evidence">Session</a>
+	      {{ end }}
+	      <a href="#authenticated-role-evidence">Session</a>
       <a href="#posture">Posture</a>
       {{ if .CanViewAudit }}
       <a href="#audit">Audit</a>
-      {{ end }}
-      <a href="#catalog">Catalog</a>
-    </nav>
+	      {{ end }}
+	      <a href="#catalog">Catalog</a>
+	      {{ end }}
+	    </nav>
     {{ else }}
     <div></div>
 	    {{ end }}
@@ -3823,12 +3892,13 @@ func mustTemplates() *template.Template {
         <strong>{{ .CommandCenter.AvailableActions }} safe</strong>
       </div>
     </div>
-    <div class="toolbar">
-      {{ if .CanExportEvidence }}<a class="button primary" href="/api/evidence">Evidence JSON</a>{{ end }}
-      <a class="button quiet" href="/api/auth/session-witness">Session witness JSON</a>
-      <a class="button quiet" href="/api/posture">Posture JSON</a>
-      <a class="button quiet" href="/api/warden/descriptors">Descriptors JSON</a>
-    </div>
+	    <div class="toolbar">
+	      {{ if .CanExportEvidence }}<a class="button primary" href="/api/evidence">Evidence JSON</a>{{ end }}
+	      <a class="button quiet" href="/session-witness">Session proof</a>
+	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
+	      <a class="button quiet" href="/api/posture">Posture JSON</a>
+	      <a class="button quiet" href="/api/warden/descriptors">Descriptors JSON</a>
+	    </div>
     <div class="session-proof" aria-label="Browser session witness">
       <div class="session-proof-item {{ if eq .AuthenticatedBrowser.State "authenticated" }}ok{{ else if eq .AuthenticatedBrowser.State "local_smoke" }}info{{ else }}warn{{ end }}">
         <span>Session witness</span>
@@ -3839,11 +3909,11 @@ func mustTemplates() *template.Template {
         <span>Cookie and CSRF</span>
         <strong>{{ .AuthenticatedBrowser.SessionCookiePolicy }}</strong>
         <p>{{ .AuthenticatedBrowser.CSRFBoundary }}; {{ .AuthenticatedBrowser.CSPBoundary }}</p>
-      </div>
-      <div class="session-proof-item action">
-        <a class="button quiet" href="/api/auth/session-witness">Open witness JSON</a>
-      </div>
-    </div>
+	      </div>
+	      <div class="session-proof-item action">
+	        <a class="button quiet" href="/session-witness">Open witness proof</a>
+	      </div>
+	    </div>
     <p><span class="pill {{ if eq .OperationalStatus.Verdict "operational" }}ok{{ else }}warn{{ end }}">{{ .OperationalStatus.Verdict }}</span> {{ .OperationalStatus.Summary }}</p>
     <div class="ops-strip" aria-label="Operational status">
       {{ range .OperationalStatus.Items }}
@@ -6364,10 +6434,121 @@ func mustTemplates() *template.Template {
     </div>
   </div>
 </section>
-{{ template "base_bottom" . }}
-{{- end }}
+	{{ template "base_bottom" . }}
+	{{- end }}
 
-{{ define "setup" -}}
+	{{ define "session_witness" -}}
+	{{ template "base_top" . }}
+	<section class="overview" id="witness-capture">
+	  <div class="intro">
+	    <div class="intro-copy">
+	      <div class="eyebrow">{{ .Mode }} / {{ .Capture.Schema }} / value-free</div>
+	      <h1>Session witness capture</h1>
+	      <p>{{ .AuthenticatedBrowser.Summary }}</p>
+	    </div>
+	    <div class="toolbar">
+	      <a class="button primary" href="/">Dashboard</a>
+	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
+	    </div>
+	    <div class="safety-ribbon" aria-label="Session witness posture">
+	      <div class="safety-chip {{ if eq .AuthenticatedBrowser.State "authenticated" }}ok{{ else if eq .AuthenticatedBrowser.State "local_smoke" }}info{{ else }}warn{{ end }}">
+	        <span>State</span>
+	        <strong>{{ .AuthenticatedBrowser.State }}</strong>
+	      </div>
+	      <div class="safety-chip info">
+	        <span>Flow</span>
+	        <strong>{{ .AuthenticatedBrowser.Flow }}</strong>
+	      </div>
+	      <div class="safety-chip ok">
+	        <span>Values</span>
+	        <strong>withheld</strong>
+	      </div>
+	      <div class="safety-chip info">
+	        <span>Request</span>
+	        <strong>{{ .RequestID }}</strong>
+	      </div>
+	    </div>
+	  </div>
+	  <div class="status">
+	    <div class="status-head"><h2>Capture proof</h2><span class="pill ok">copy-safe</span></div>
+	    <div class="panel-body stack">
+	      <div class="receipt-proof" aria-label="Session witness capture proof">
+	        <span>Schema<strong>{{ .Capture.Schema }}</strong></span>
+	        <span>Body field<strong>{{ .Capture.BodyField }}</strong></span>
+	        <span>Signal<strong>{{ .AuthenticatedBrowser.EvidenceSignal }}</strong></span>
+	      </div>
+	      <div class="receipt-copy" aria-label="Copy-safe session witness fields">
+	        <label>State<input readonly value="state={{ .AuthenticatedBrowser.State }}"></label>
+	        <label>Flow<input readonly value="flow={{ .AuthenticatedBrowser.Flow }}"></label>
+	        <label>Request<input readonly value="request_id={{ .RequestID }}"></label>
+	      </div>
+	      <p class="capture-line mono">{{ .CaptureLine }}</p>
+	      <p><span class="pill ok">copy_safe={{ .Capture.CopySafe }}</span> <span class="pill ok">replay_safe={{ .Capture.ReplaySafe }}</span> <span class="pill ok">value_returned=false</span></p>
+	    </div>
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="capture-headers">
+	  <div class="panel-head">
+	    <h2>Witness headers</h2>
+	    <span class="pill info">{{ len .CaptureHeaders }} headers</span>
+	  </div>
+	  <div class="panel-body stack">
+	    <div class="capture-headers" aria-label="Copy-safe witness response headers">
+	      {{ range .CaptureHeaders }}
+	      <div class="capture-header">
+	        <span>{{ .Name }}</span>
+	        <strong class="mono">{{ .Value }}</strong>
+	        <span class="pill ok">value_returned={{ .ValueReturned }}</span>
+	      </div>
+	      {{ end }}
+	    </div>
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="value-boundary">
+	  <div class="panel-head">
+	    <h2>Value boundary</h2>
+	    <span class="pill ok">metadata only</span>
+	  </div>
+	  <div class="panel-body stack">
+	    <div class="witness-grid" aria-label="Session witness value boundary">
+	      {{ range .AuthenticatedBrowser.Gates }}
+	      <div class="witness-card {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Detail }}</p>
+	      </div>
+	      {{ end }}
+	    </div>
+	    <details class="evidence-flags">
+	      <summary>Session witness evidence flags</summary>
+	      <div class="flag-cloud" aria-label="Session witness value-free evidence flags">
+	        <span class="pill info">{{ .AuthenticatedBrowser.AuthMode }}</span>
+	        <span class="pill info">{{ .AuthenticatedBrowser.SessionCookiePolicy }}</span>
+	        <span class="pill info">{{ .AuthenticatedBrowser.CSRFBoundary }}</span>
+	        <span class="pill info">{{ .AuthenticatedBrowser.CSPBoundary }}</span>
+	        <span class="pill ok">identity_values_returned=false</span>
+	        <span class="pill ok">subject_returned=false</span>
+	        <span class="pill ok">email_returned=false</span>
+	        <span class="pill ok">name_returned=false</span>
+	        <span class="pill ok">claim_values_returned=false</span>
+	        <span class="pill ok">group_values_returned=false</span>
+	        <span class="pill ok">token_returned=false</span>
+	        <span class="pill ok">cookie_value_returned=false</span>
+	        <span class="pill ok">request_body_returned=false</span>
+	        <span class="pill ok">env_values_returned=false</span>
+	        <span class="pill ok">backend_path_returned=false</span>
+	        <span class="pill ok">connector_output_returned=false</span>
+	        <span class="pill ok">permit_payload_returned=false</span>
+	        <span class="pill ok">secret_value_returned=false</span>
+	        <span class="pill ok">value_returned=false</span>
+	      </div>
+	    </details>
+	  </div>
+	</section>
+	{{ template "base_bottom" . }}
+	{{- end }}
+
+	{{ define "setup" -}}
 {{ template "base_top" . }}
 <section class="overview">
   <div class="intro">
