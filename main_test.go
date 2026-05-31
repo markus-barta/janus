@@ -1416,7 +1416,7 @@ func TestSessionWitnessBrowserSmokeReceiptHTMLIsValueFree(t *testing.T) {
 		t.Fatalf("browser smoke receipt HTML should set receipt hash header, got %q", receiptHash)
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Browser smoke receipt", "Smoke verified", "Receipt facts", "Text artifact", "Auth smoke", "Verifier", "Full witness", "Dashboard", "browser_smoke_receipt_html=true", "copy_safe=true", "record_returned=false", "smoke_status=verified", "verified=true", "request_id=browser-smoke-html-123", "record_request_id=browser-smoke-html-123", "verification_hash=" + receiptHash, "verification_hash_header=X-Janus-Evidence-Record-Verification-Hash", "verification_hash_body_field=verification.receipt.hash", "sha256-evidence-record-verification-v1", "audit_recorded=true", "audit_row_found=true", "audit_chain_verified=true", "hash_shape_valid=true", "chain_link_match=true", "action_match=true", "request_id_match=true", "severity_match=true", "reason_match=true", "value_boundary_valid=true", "input_returned=false", "request_body_returned=false", "proof_pack_returned=false", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "env_values_returned=false", "backend_path_returned=false", "connector_output_returned=false", "permit_payload_returned=false", "secret_value_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Browser smoke receipt", "Smoke verified", "Receipt facts", "Text artifact", "Auth smoke", "Verifier", "Full witness", "Dashboard", "browser_smoke_receipt_html=true", "copy_safe=true", "record_returned=false", "smoke_status=verified", "verified=true", "request_id=browser-smoke-html-123", "record_request_id=browser-smoke-html-123", "verification_hash=" + receiptHash, "verification_hash_header=X-Janus-Evidence-Record-Verification-Hash", "verification_hash_body_field=verification.receipt.hash", "sha256-evidence-record-verification-v1", "audit_recorded=true", "audit_row_found=true", "audit_chain_verified=true", "hash_shape_valid=true", "chain_link_match=true", "action_match=true", "request_id_match=true", "severity_match=true", "reason_match=true", "value_boundary_valid=true", "csrf_source=form_token", "input_returned=false", "request_body_returned=false", "proof_pack_returned=false", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "env_values_returned=false", "backend_path_returned=false", "connector_output_returned=false", "permit_payload_returned=false", "secret_value_returned=false", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("browser smoke receipt HTML should include %q: %s", want, body)
 		}
@@ -1430,6 +1430,72 @@ func TestSessionWitnessBrowserSmokeReceiptHTMLIsValueFree(t *testing.T) {
 		}
 	}
 	assertRouteResponseValueFree(t, "session witness browser smoke receipt HTML", out)
+}
+
+func TestSessionWitnessBrowserSmokeReceiptHTMLAllowsSameOriginBrowserNavigation(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodPost, "/session-witness/evidence/browser-smoke-receipt", nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	req.Header.Set("Origin", "https://vault.barta.cm")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("X-Request-Id", "browser-smoke-navigation-123")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected same-origin browser navigation smoke receipt 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Browser smoke receipt", "Smoke verified", "csrf_source=same_origin_browser_navigation", "request_id=browser-smoke-navigation-123", "record_request_id=browser-smoke-navigation-123", "record_returned=false", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("same-origin browser navigation receipt should include %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"janus_authenticated_browser_smoke", "janus_current_session_evidence_record", "witness_proof_line=", "proof_line=", "proof_pack_input=", "subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("same-origin browser navigation receipt leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "session witness browser smoke receipt same-origin navigation", out)
+}
+
+func TestSessionWitnessBrowserSmokeReceiptRejectsCrossSiteNavigationWithoutCSRF(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodPost, "/session-witness/evidence/browser-smoke-receipt", nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	req.Header.Set("Origin", "https://evil.example")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("X-Request-Id", "browser-smoke-cross-site-123")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusForbidden {
+		t.Fatalf("expected cross-site browser navigation smoke receipt 403, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{`"error":"csrf_failed"`, `"request_id":"browser-smoke-cross-site-123"`, `"value_returned":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("cross-site browser navigation csrf response should include %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"Browser smoke receipt", "Smoke verified", "subject-123", "person@example.test", "Person Name", "secret-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("cross-site browser navigation csrf response leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "session witness browser smoke receipt cross-site navigation csrf", out)
 }
 
 func TestSessionWitnessBrowserSmokeReceiptTextFormatOverridesHTMLAccept(t *testing.T) {

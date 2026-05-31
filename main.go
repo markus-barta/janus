@@ -1321,10 +1321,15 @@ func (app *App) handleSessionWitnessEvidenceRecord(w http.ResponseWriter, r *htt
 
 func (app *App) handleSessionWitnessBrowserSmokeReceiptText(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
+	csrfSource := "form_token"
 	if !app.csrfAllowed(r, session) {
-		app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", "denied", session.Subject, "csrf failed")
-		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
-		return
+		if app.browserSmokeReceiptNavigationAllowed(r) {
+			csrfSource = "same_origin_browser_navigation"
+		} else {
+			app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", "denied", session.Subject, "csrf failed")
+			writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
+			return
+		}
 	}
 	_ = r.ParseForm()
 	result, recordVerification := app.verifyCurrentSessionEvidenceRecord(r, session)
@@ -1351,6 +1356,7 @@ func (app *App) handleSessionWitnessBrowserSmokeReceiptText(w http.ResponseWrite
 			"AuthenticatedBrowser": witness,
 			"Verification":         recordVerification,
 			"RequestID":            requestID(r),
+			"CSRFSource":           csrfSource,
 		})
 		return
 	}
@@ -3827,6 +3833,27 @@ func renderTemplateStatus(w http.ResponseWriter, templates *template.Template, n
 func wantsHTMLResponse(r *http.Request) bool {
 	accept := strings.ToLower(r.Header.Get("Accept"))
 	return strings.Contains(accept, "text/html") && !strings.Contains(accept, "text/plain")
+}
+
+func (app *App) browserSmokeReceiptNavigationAllowed(r *http.Request) bool {
+	if r.Method != http.MethodPost || !wantsHTMLResponse(r) {
+		return false
+	}
+	if !app.sameOriginMutation(r) {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "same-origin") {
+		return false
+	}
+	mode := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Mode")))
+	if mode != "" && mode != "navigate" {
+		return false
+	}
+	dest := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")))
+	if dest != "" && dest != "document" {
+		return false
+	}
+	return true
 }
 
 func mustTemplates() *template.Template {
@@ -7497,6 +7524,7 @@ func mustTemplates() *template.Template {
 		          <span class="pill {{ if .Verification.SeverityMatch }}ok{{ else }}warn{{ end }}">severity_match={{ .Verification.SeverityMatch }}</span>
 		          <span class="pill {{ if .Verification.ReasonMatch }}ok{{ else }}warn{{ end }}">reason_match={{ .Verification.ReasonMatch }}</span>
 		          <span class="pill {{ if .Verification.ValueBoundaryValid }}ok{{ else }}warn{{ end }}">value_boundary_valid={{ .Verification.ValueBoundaryValid }}</span>
+		          <span class="pill ok">csrf_source={{ .CSRFSource }}</span>
 		          {{ if .Verification.Receipt }}
 		          <span class="pill ok">verification_hash_header={{ .Verification.Receipt.HashHeader }}</span>
 		          <span class="pill ok">verification_hash_body_field={{ .Verification.Receipt.BodyField }}</span>
