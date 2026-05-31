@@ -1043,9 +1043,13 @@ func (app *App) handleDescriptors(w http.ResponseWriter, r *http.Request) {
 func (app *App) handleRecentAudit(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	app.audit(r, "audit.recent", "allowed", session.Subject, "")
+	recentAudit := app.store.RecentAudit(50)
+	auditPosture := app.store.AuditPosture()
+	auditTrail := AuditTrailFor(recentAudit, auditPosture, true)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"audit":          app.store.RecentAudit(50),
-		"posture":        app.store.AuditPosture(),
+		"audit":          auditTrail.Rows,
+		"audit_trail":    auditTrail,
+		"posture":        auditPosture,
 		"value_returned": false,
 	})
 }
@@ -2712,6 +2716,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"csrf_guarded_mutations",
 			"rate_limited_runtime",
 			"role_gated_audit_evidence",
+			"safe_audit_trail_export",
 			"scope_bound_metadata",
 			"lifecycle_gated_normal_use",
 			"persistent_permit_records",
@@ -2822,6 +2827,8 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	scopePosture := app.scopePosture(allDescriptors)
 	auditPosture := app.store.AuditPosture()
 	canExportEvidence := HasRole(session, RoleAuditor)
+	recentAudit := app.store.RecentAudit(50)
+	auditTrail := AuditTrailFor(recentAudit, auditPosture, canExportEvidence)
 	evidenceBoundary := EvidenceBoundaryFor(canExportEvidence, canExportEvidence)
 	supplyChain := SupplyChainPostureFor(evidenceBoundary)
 	authFailure := AuthFailurePostureFor(app.cfg)
@@ -2886,7 +2893,8 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		PermitPosture:       PermitPosture{ValueReturned: false},
 		AccessPosture:       accessPosture,
 		AuditPosture:        auditPosture,
-		RecentAudit:         app.store.RecentAudit(50),
+		AuditTrail:          auditTrail,
+		RecentAudit:         auditTrail.Rows,
 		ValueReturned:       false,
 		RedactionModel:      "metadata-only; secret values are not stored, read, rendered, logged, or exported by Janus V1.x",
 	}

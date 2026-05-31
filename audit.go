@@ -32,14 +32,31 @@ type AuditSeverityCount struct {
 }
 
 type AuditTrailWitness struct {
-	EntryCount    int             `json:"entry_count"`
-	VisibleCount  int             `json:"visible_count"`
-	ChainState    string          `json:"chain_state"`
-	ChainTone     string          `json:"chain_tone"`
-	Summary       string          `json:"summary"`
-	LastHashShort string          `json:"last_hash_short"`
-	Rows          []AuditTrailRow `json:"rows"`
-	ValueReturned bool            `json:"value_returned"`
+	EntryCount                 int             `json:"entry_count"`
+	VisibleCount               int             `json:"visible_count"`
+	ChainState                 string          `json:"chain_state"`
+	ChainTone                  string          `json:"chain_tone"`
+	Summary                    string          `json:"summary"`
+	LastHashShort              string          `json:"last_hash_short"`
+	Rows                       []AuditTrailRow `json:"rows"`
+	ChronologicalHistory       bool            `json:"chronological_history"`
+	ReceiptHashLinkage         bool            `json:"receipt_hash_linkage"`
+	RawPathReturned            bool            `json:"raw_path_returned"`
+	RawReasonReturned          bool            `json:"raw_reason_returned"`
+	SubjectReturned            bool            `json:"subject_returned"`
+	EmailReturned              bool            `json:"email_returned"`
+	NameReturned               bool            `json:"name_returned"`
+	GroupClaimReturned         bool            `json:"group_claim_returned"`
+	TokenReturned              bool            `json:"token_returned"`
+	CookieValueReturned        bool            `json:"cookie_value_returned"`
+	RequestBodyReturned        bool            `json:"request_body_returned"`
+	EnvReturned                bool            `json:"env_returned"`
+	BackendPathReturned        bool            `json:"backend_path_returned"`
+	SourcePathReturned         bool            `json:"source_path_returned"`
+	ConnectorOutputReturned    bool            `json:"connector_output_returned"`
+	PermitPayloadValueReturned bool            `json:"permit_payload_value_returned"`
+	SecretValueReturned        bool            `json:"secret_value_returned"`
+	ValueReturned              bool            `json:"value_returned"`
 }
 
 type AuditTrailRow struct {
@@ -245,12 +262,14 @@ func AuditTrailFor(entries []AuditEntry, posture AuditPosture, canView bool) Aud
 		entryCount = len(entries)
 	}
 	trail := AuditTrailWitness{
-		EntryCount:    entryCount,
-		ChainState:    "restricted",
-		ChainTone:     "warn",
-		Summary:       "Auditor role required before recent audit rows or hash receipts are rendered.",
-		LastHashShort: "restricted",
-		ValueReturned: false,
+		EntryCount:           entryCount,
+		ChainState:           "restricted",
+		ChainTone:            "warn",
+		Summary:              "Auditor role required before recent audit rows or hash receipts are rendered.",
+		LastHashShort:        "restricted",
+		ChronologicalHistory: true,
+		ReceiptHashLinkage:   true,
+		ValueReturned:        false,
 	}
 	if !canView {
 		return trail

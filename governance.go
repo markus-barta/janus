@@ -62,7 +62,8 @@ type EvidencePack struct {
 	PermitPosture       PermitPosture                  `json:"permit_posture"`
 	AccessPosture       AccessPosture                  `json:"access_posture"`
 	AuditPosture        AuditPosture                   `json:"audit_posture"`
-	RecentAudit         []AuditEntry                   `json:"recent_audit"`
+	AuditTrail          AuditTrailWitness              `json:"audit_trail"`
+	RecentAudit         []AuditTrailRow                `json:"recent_audit"`
 	Integrity           *EvidenceIntegrity             `json:"integrity,omitempty"`
 	Receipt             *EvidenceReceipt               `json:"evidence_receipt,omitempty"`
 	ValueReturned       bool                           `json:"value_returned"`
@@ -435,7 +436,8 @@ func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
 			"break_glass_review_workflow",
 			"supply_chain_posture",
 			"audit_posture",
-			"recent_audit_refs",
+			"audit_trail_witness",
+			"safe_recent_audit_rows",
 			"integrity_hash",
 			"evidence_receipt",
 		},

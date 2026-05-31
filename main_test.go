@@ -308,6 +308,37 @@ func TestAuditTrailWitnessScrubsRawPathAndReason(t *testing.T) {
 	}
 }
 
+func TestRecentAuditAPIUsesSanitizedWitnessRows(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	app.store.AppendAudit(AuditEntry{
+		Action:    "warden.resolve.ui",
+		Outcome:   "allowed",
+		Method:    http.MethodPost,
+		Path:      "/ui/warden/resolve/backend_path=/tmp/source_path=/src",
+		SecretRef: "zitadel-janus-oidc",
+		Reason:    "operator reason request_body=raw-secret env=SECRET connector_output=secret",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/audit/recent", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{`"audit_trail"`, `"audit"`, `"channel":"POST browser action"`, `"reason_class":"allowed_recorded"`, `"raw_path_returned":false`, `"raw_reason_returned":false`, `"request_body_returned":false`, `"env_returned":false`, `"backend_path_returned":false`, `"source_path_returned":false`, `"connector_output_returned":false`, `"secret_value_returned":false`, `"value_returned":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("recent audit API should include safe witness %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"/ui/warden", "operator reason", "request_body=raw-secret", "env=SECRET", "connector_output=secret", "backend_path=/tmp", "source_path=/src"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("recent audit API leaked raw marker %q: %s", forbidden, body)
+		}
+	}
+}
+
 func auditSeverityCount(posture AuditPosture, severity string) int {
 	for _, count := range posture.SeverityCounts {
 		if count.Severity == severity {
@@ -1150,6 +1181,14 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 func TestEvidenceExportIsValueFree(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
+	app.store.AppendAudit(AuditEntry{
+		Action:    "permit.run.ui",
+		Outcome:   "not_executed",
+		Method:    http.MethodPost,
+		Path:      "/ui/permits/p_secret/run/backend_path=/tmp/source_path=/src",
+		SecretRef: "zitadel-janus-oidc",
+		Reason:    "no execution connector configured in V1.1 request_body=raw-secret env=SECRET connector_output=secret",
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/evidence", nil)
 	out := httptest.NewRecorder()
@@ -1177,6 +1216,22 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	}
 	if pack.Receipt == nil || pack.Receipt.PackHash != headerHash || pack.Receipt.HashHeader != "X-Janus-Evidence-Hash" || pack.Receipt.BodyField != "integrity.pack_hash" || pack.Receipt.ValueReturned {
 		t.Fatalf("evidence response should include exact value-free receipt: %#v", pack.Receipt)
+	}
+	if pack.AuditTrail.ValueReturned || !pack.AuditTrail.ChronologicalHistory || !pack.AuditTrail.ReceiptHashLinkage || pack.AuditTrail.RawPathReturned || pack.AuditTrail.RawReasonReturned || pack.AuditTrail.RequestBodyReturned || pack.AuditTrail.EnvReturned || pack.AuditTrail.BackendPathReturned || pack.AuditTrail.SourcePathReturned || pack.AuditTrail.ConnectorOutputReturned || pack.AuditTrail.PermitPayloadValueReturned || pack.AuditTrail.SecretValueReturned {
+		t.Fatalf("evidence audit trail should expose explicit value-free flags: %#v", pack.AuditTrail)
+	}
+	if len(pack.RecentAudit) == 0 || pack.RecentAudit[0].Channel != "POST browser action" || pack.RecentAudit[0].ReasonClass != "no_connector" || pack.RecentAudit[0].Scope != "zitadel-janus-oidc" {
+		t.Fatalf("evidence recent audit should use sanitized witness rows: %#v", pack.RecentAudit)
+	}
+	for _, want := range []string{`"audit_trail"`, `"recent_audit"`, `"channel":"POST browser action"`, `"reason_class":"no_connector"`, `"chronological_history":true`, `"receipt_hash_linkage":true`, `"raw_path_returned":false`, `"raw_reason_returned":false`, `"request_body_returned":false`, `"env_returned":false`, `"backend_path_returned":false`, `"source_path_returned":false`, `"connector_output_returned":false`, `"permit_payload_value_returned":false`, `"secret_value_returned":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("evidence response should include safe audit witness %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"/ui/permits", "request_body=raw-secret", "env=SECRET", "connector_output=secret", "backend_path=/tmp", "source_path=/src"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("evidence response leaked raw audit marker %q: %s", forbidden, body)
+		}
 	}
 	if !strings.Contains(body, `"redaction_model"`) {
 		t.Fatalf("evidence response should explain redaction model: %s", body)
