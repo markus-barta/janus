@@ -1942,6 +1942,96 @@ func TestLoginRedirectUsesNoStoreHeaders(t *testing.T) {
 	}
 }
 
+func TestAuthResetClearsAllJanusCookiesAndRendersValueFreeRecovery(t *testing.T) {
+	app := newTestApp(t)
+	app.oauth = testOAuthConfig()
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/reset", nil)
+	req.Header.Set("X-Request-Id", "auth-reset-123")
+	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostAttemptCookie, attemptCookie} {
+		req.AddCookie(&http.Cookie{Name: name, Value: name + "-secret-cookie-secret"})
+	}
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected reset page 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Clean sign-in reset", "Auth recovery", "reset_complete", "Sign in cleanly", "session_cookie_cleared=true", "oidc_cookies_cleared=true", "attempt_cookie_cleared=true", "cookie_value_returned=false", "value_returned=false", "request_id=auth-reset-123"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("auth reset page should include %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"secret-cookie-secret", "state-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret", "attempt-cookie-secret", "raw-secret-value", "token_returned=true", "value_returned=true"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("auth reset page leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+	cleared := map[string]bool{}
+	for _, cookie := range out.Result().Cookies() {
+		if cookie.MaxAge < 0 {
+			cleared[cookie.Name] = true
+		}
+		if cookie.Value != "" {
+			t.Fatalf("auth reset clearing cookie should not carry a value: %#v", cookie)
+		}
+	}
+	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostAttemptCookie, attemptCookie} {
+		if !cleared[name] {
+			t.Fatalf("expected auth reset to clear %s; cleared=%#v cookies=%#v", name, cleared, out.Result().Cookies())
+		}
+	}
+	for header, want := range map[string]string{
+		"Content-Type":                      "text/html; charset=utf-8",
+		"Cache-Control":                     "no-store",
+		"X-Content-Type-Options":            "nosniff",
+		"Cross-Origin-Resource-Policy":      "same-origin",
+		"Cross-Origin-Opener-Policy":        "same-origin",
+		"Cross-Origin-Embedder-Policy":      "credentialless",
+		"X-Frame-Options":                   "DENY",
+		"Strict-Transport-Security":         "max-age=31536000; includeSubDomains",
+		"X-Permitted-Cross-Domain-Policies": "none",
+	} {
+		if got := out.Header().Get(header); got != want {
+			t.Fatalf("auth reset should set %s=%q, got %q", header, want, got)
+		}
+	}
+	if got := out.Header().Get("Content-Security-Policy"); !strings.Contains(got, "script-src 'none'") || !strings.Contains(got, "form-action 'self'") {
+		t.Fatalf("auth reset page should keep strict CSP, got %q", got)
+	}
+	recent := app.store.RecentAudit(1)
+	if len(recent) != 1 || recent[0].Action != "auth.login.clean_reset" || recent[0].Outcome != "allowed" || recent[0].RequestID != "auth-reset-123" {
+		t.Fatalf("auth reset should write a correlated audit event, got %#v", recent)
+	}
+	assertRouteResponseValueFree(t, "auth reset", out)
+}
+
+func TestLoginResetQueryUsesCleanResetPage(t *testing.T) {
+	app := newTestApp(t)
+	app.oauth = testOAuthConfig()
+
+	req := httptest.NewRequest(http.MethodGet, "/login?reset=1", nil)
+	req.Header.Set("X-Request-Id", "login-reset-query-123")
+	req.AddCookie(&http.Cookie{Name: hostSessionCookie, Value: "session-cookie-secret"})
+	req.AddCookie(&http.Cookie{Name: hostAttemptCookie, Value: "attempt-cookie-secret"})
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected clean reset page, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Clean sign-in reset", "request_id=login-reset-query-123", "session_cookie_cleared=true", "attempt_cookie_cleared=true", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("login reset query should render clean reset page with %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"session-cookie-secret", "attempt-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("login reset query leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+}
+
 func TestCallbackBadStateRendersValueFreeAuthError(t *testing.T) {
 	app := newTestApp(t)
 	app.oauth = testOAuthConfig()
@@ -4996,6 +5086,9 @@ func TestSecurityHeadersAcrossCoreRoutes(t *testing.T) {
 		{name: "login", method: http.MethodGet, path: "/login", status: http.StatusFound, setup: func(app *App, _ *http.Request) {
 			app.oauth = testOAuthConfig()
 		}},
+		{name: "auth reset", method: http.MethodGet, path: "/auth/reset", status: http.StatusOK, expectBodyNonce: true, setup: func(app *App, _ *http.Request) {
+			app.oauth = testOAuthConfig()
+		}},
 		{name: "auth callback failure", method: http.MethodGet, path: "/oidc/callback?state=bad", status: http.StatusBadRequest, setup: func(app *App, req *http.Request) {
 			app.oauth = testOAuthConfig()
 			app.verifier = &oidc.IDTokenVerifier{}
@@ -5262,6 +5355,7 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "ready", method: http.MethodGet, path: "/readyz", status: http.StatusOK},
 		{name: "favicon", method: http.MethodGet, path: "/favicon.ico", status: http.StatusNoContent},
 		{name: "login", method: http.MethodGet, path: "/login", status: http.StatusFound},
+		{name: "auth reset", method: http.MethodGet, path: "/auth/reset", status: http.StatusOK},
 		{
 			name:   "bad callback",
 			method: http.MethodGet,

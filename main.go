@@ -399,6 +399,17 @@ type AuthErrorView struct {
 	ValueReturned bool
 }
 
+type AuthResetView struct {
+	Title         string
+	CSPNonce      string
+	Mode          string
+	Session       Session
+	CSRF          string
+	RequestID     string
+	Posture       AuthFailurePosture
+	ValueReturned bool
+}
+
 type SafeFailureView struct {
 	Title          string
 	CSPNonce       string
@@ -528,6 +539,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /readyz", app.handleReady)
 	mux.HandleFunc("GET /favicon.ico", app.handleFavicon)
 	mux.HandleFunc("GET /login", app.handleLogin)
+	mux.HandleFunc("GET /auth/reset", app.handleAuthReset)
 	mux.HandleFunc("GET /oidc/callback", app.handleCallback)
 	mux.HandleFunc("POST /logout", app.withAuth(app.handleLogout))
 	mux.HandleFunc("GET /session-witness", app.withAuth(app.handleSessionWitnessPage))
@@ -584,7 +596,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
@@ -2162,10 +2174,7 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Query().Get("reset") == "1" {
-		app.clearOIDCLoginCookies(w)
-		app.clearOIDCLoginAttemptCookie(w)
-		app.audit(r, "auth.login.reset", "allowed", "", "")
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		app.handleAuthReset(w, r)
 		return
 	}
 	attempt := app.bumpOIDCLoginAttempt(w, r)
@@ -2208,6 +2217,21 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 	app.audit(r, "auth.login.start", "allowed", "", "")
 	http.Redirect(w, r, app.oauth.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce), oauth2.S256ChallengeOption(verifier)), http.StatusFound)
+}
+
+func (app *App) handleAuthReset(w http.ResponseWriter, r *http.Request) {
+	app.clearAllAuthCookies(w)
+	app.audit(r, "auth.login.clean_reset", "allowed", "", "first party auth cookies cleared")
+	renderTemplateStatus(w, app.templates, "auth_reset", http.StatusOK, AuthResetView{
+		Title:         "Janus login",
+		CSPNonce:      cspNonceFromContext(r.Context()),
+		Mode:          app.cfg.ProductMode,
+		Session:       Session{},
+		CSRF:          "",
+		RequestID:     requestID(r),
+		Posture:       AuthFailurePostureFor(app.cfg),
+		ValueReturned: false,
+	})
 }
 
 func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
@@ -2326,10 +2350,7 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app.audit(r, "auth.logout", "allowed", session.Subject, "")
-	app.clearCookie(w, app.cfg.SessionCookieName())
-	if app.cfg.SessionCookieName() != sessionCookie {
-		app.clearCookie(w, sessionCookie)
-	}
+	app.clearSessionCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -2352,10 +2373,10 @@ func (app *App) renderAuthError(w http.ResponseWriter, r *http.Request, status i
 	headline, nextAction := authErrorCopy(reasonCode)
 	primaryHref := "/login"
 	primaryLabel := "Try again"
-	secondaryHref := "/login?reset=1"
+	secondaryHref := "/auth/reset"
 	secondaryText := "Reset login session"
 	if reasonCode == "login_loop_paused" {
-		primaryHref = "/login?reset=1"
+		primaryHref = "/auth/reset"
 		primaryLabel = "Reset login session"
 		secondaryHref = "/"
 		secondaryText = "Back to Janus"
@@ -2510,6 +2531,19 @@ func (app *App) clearOIDCLoginCookies(w http.ResponseWriter) {
 	if app.cfg.PKCECookieName() != pkceCookie {
 		app.clearCookie(w, pkceCookie)
 	}
+}
+
+func (app *App) clearSessionCookies(w http.ResponseWriter) {
+	app.clearCookie(w, app.cfg.SessionCookieName())
+	if app.cfg.SessionCookieName() != sessionCookie {
+		app.clearCookie(w, sessionCookie)
+	}
+}
+
+func (app *App) clearAllAuthCookies(w http.ResponseWriter) {
+	app.clearSessionCookies(w)
+	app.clearOIDCLoginCookies(w)
+	app.clearOIDCLoginAttemptCookie(w)
 }
 
 func (app *App) bumpOIDCLoginAttempt(w http.ResponseWriter, r *http.Request) OIDCLoginAttempt {
@@ -7668,23 +7702,68 @@ func mustTemplates() *template.Template {
     </div>
   </div>
 </section>
-{{ template "base_bottom" . }}
-{{- end }}
+	{{ template "base_bottom" . }}
+	{{- end }}
 
-{{ define "safe_error" -}}
-{{ template "base_top" . }}
-<section class="overview">
+	{{ define "auth_reset" -}}
+	{{ template "base_top" . }}
+	<section class="overview">
+	  <div class="intro">
+	    <div class="intro-copy">
+	      <div class="eyebrow">{{ .Mode }} / login recovery</div>
+	      <h1>Clean sign-in reset</h1>
+	      <p>Janus cleared its own session and temporary login cookies. Start sign-in again from a clean Janus page.</p>
+	      <p>If the identity provider itself still loops, use a fresh browser profile or clear that provider session outside Janus.</p>
+	    </div>
+	    <div class="toolbar">
+	      <a class="button primary" href="/login">Sign in cleanly</a>
+	      <a class="button quiet" href="/">Return to Janus</a>
+	    </div>
+	  </div>
+	  <div class="status">
+	    <div class="status-head"><h2>Auth recovery</h2><span class="pill ok">reset_complete</span></div>
+	    <div class="panel-body stack">
+	      <p>Only first-party Janus cookies were cleared. No token, cookie value, provider detail, or identity value is returned.</p>
+	      <p><span class="pill ok">session_cookie_cleared=true</span> <span class="pill ok">oidc_cookies_cleared=true</span> <span class="pill ok">attempt_cookie_cleared=true</span> <span class="pill ok">cookie_value_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+	      <p class="mono">request_id={{ .RequestID }}</p>
+	      <div class="mode-grid" aria-label="Clean sign-in reset posture">
+	        <div class="mode-item ok">
+	          <span>Session</span>
+	          <strong>cleared</strong>
+	          <p>Janus session cookies are expired before the next login starts.</p>
+	        </div>
+	        <div class="mode-item ok">
+	          <span>Login attempt</span>
+	          <strong>fresh</strong>
+	          <p>State, nonce, PKCE, and loop-guard cookies are expired.</p>
+	        </div>
+	        <div class="mode-item info">
+	          <span>Boundary</span>
+	          <strong>first party</strong>
+	          <p>Provider cookies are not read or shown by Janus.</p>
+	        </div>
+	      </div>
+	    </div>
+	  </div>
+	</section>
+	{{ template "base_bottom" . }}
+	{{- end }}
+
+	{{ define "safe_error" -}}
+	{{ template "base_top" . }}
+	<section class="overview">
   <div class="intro">
     <div class="intro-copy">
       <div class="eyebrow">{{ .Mode }} / boundary</div>
       <h1>Janus stopped at the edge</h1>
       <p>{{ .Message }}</p>
     </div>
-    <div class="toolbar">
-      <a class="button primary" href="/">Return to Janus</a>
-      <a class="button quiet" href="/login">Sign in</a>
-    </div>
-  </div>
+	    <div class="toolbar">
+	      <a class="button primary" href="/">Return to Janus</a>
+	      <a class="button quiet" href="/login">Sign in</a>
+	      <a class="button quiet" href="/auth/reset">Reset sign-in</a>
+	    </div>
+	  </div>
   <div class="status">
     <div class="status-head"><h2>Safe boundary</h2><span class="pill warn">{{ .ReasonCode }}</span></div>
     <div class="panel-body stack">
