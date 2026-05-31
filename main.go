@@ -532,6 +532,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /logout", app.withAuth(app.handleLogout))
 	mux.HandleFunc("GET /session-witness", app.withAuth(app.handleSessionWitnessPage))
 	mux.HandleFunc("GET /session-witness.txt", app.withAuth(app.handleSessionWitnessText))
+	mux.HandleFunc("GET /session-witness/proof.txt", app.withAuth(app.handleSessionWitnessProofText))
 	mux.HandleFunc("GET /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPage))
 	mux.HandleFunc("POST /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPost))
 	mux.HandleFunc("POST /session-witness/verify-current", app.withAuth(app.handleSessionWitnessVerifyCurrent))
@@ -571,7 +572,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/session-witness", "/session-witness.txt", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/healthz", "/readyz", "/favicon.ico", "/login", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
@@ -1146,6 +1147,27 @@ func (app *App) handleSessionWitnessText(w http.ResponseWriter, r *http.Request)
 	app.audit(r, "auth.session.witness.text", "allowed", session.Subject, "")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(AuthenticatedBrowserCaptureTextFor(witness, capture, reqID, receipt)))
+}
+
+func (app *App) handleSessionWitnessProofText(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	witness, capture := app.authenticatedBrowserWitnessCapture(session)
+	reqID := requestID(r)
+	capturedAt := time.Now().UTC()
+	witnessReceipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID, capturedAt)
+	verification := VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{
+		ProofLine: witnessReceipt.Input,
+		ProofHash: witnessReceipt.Hash,
+	}, capturedAt)
+	verificationReceipt := WitnessReceiptVerificationReceiptFor(verification, reqID)
+	verification.Receipt = &verificationReceipt
+	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture, witnessReceipt)
+	applyWitnessVerificationHeaders(w, verificationReceipt)
+	w.Header().Set("Content-Disposition", `inline; filename="janus-current-session-witness-proof.txt"`)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	app.audit(r, "auth.session.witness.proof_text", "allowed", session.Subject, "")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(CurrentSessionWitnessProofTextFor(witness, capture, reqID, witnessReceipt, verification)))
 }
 
 func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request) {
@@ -3999,6 +4021,7 @@ func mustTemplates() *template.Template {
 		      <a href="/">Dashboard</a>
 		      <a href="/session-witness">Witness</a>
 		      <a href="/session-witness.txt">Text</a>
+		      <a href="/session-witness/proof.txt">Proof pack</a>
 		      <a href="/session-witness/verify">Verify</a>
 		      <a href="/api/auth/session-witness">JSON</a>
 		      {{ else }}
@@ -6625,6 +6648,7 @@ func mustTemplates() *template.Template {
 	    <div class="toolbar">
 	      <a class="button primary" href="/session-witness">Witness</a>
 	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
+	      <a class="button quiet" href="/session-witness/proof.txt">Proof pack</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
 	      <form method="post" action="/session-witness/verify-current">
 	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
@@ -6724,6 +6748,7 @@ func mustTemplates() *template.Template {
 	    <div class="toolbar">
 	      <a class="button primary" href="/">Dashboard</a>
 	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
+	      <a class="button quiet" href="/session-witness/proof.txt">Proof pack</a>
 	      <a class="button quiet" href="/session-witness/verify">Verify proof</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
 	      <form method="post" action="/session-witness/verify-current">

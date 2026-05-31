@@ -621,6 +621,62 @@ func AuthenticatedBrowserCaptureTextFor(witness AuthenticatedBrowserWitness, cap
 		"value_returned=false\n"
 }
 
+func CurrentSessionWitnessProofTextFor(witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, requestID string, witnessReceipt AuthenticatedBrowserCaptureReceipt, verification WitnessReceiptVerification) string {
+	verificationReceiptHash := ""
+	verificationReceiptAlgorithm := ""
+	verificationReceiptHashHeader := ""
+	verificationReceiptBodyField := ""
+	verificationReceiptInput := ""
+	if verification.Receipt != nil {
+		verificationReceiptHash = verification.Receipt.Hash
+		verificationReceiptAlgorithm = verification.Receipt.Algorithm
+		verificationReceiptHashHeader = verification.Receipt.HashHeader
+		verificationReceiptBodyField = verification.Receipt.BodyField
+		verificationReceiptInput = verification.Receipt.Input
+	}
+	return "janus_current_session_witness_proof\n" +
+		"schema=" + capture.Schema + "\n" +
+		"state=" + witness.State + "\n" +
+		"flow=" + witness.Flow + "\n" +
+		"signal=" + witness.EvidenceSignal + "\n" +
+		"body_field=" + capture.BodyField + "\n" +
+		"request_id=" + requestID + "\n" +
+		"captured_at=" + witnessReceipt.CapturedAt + "\n" +
+		"fresh_until=" + witnessReceipt.FreshUntil + "\n" +
+		"freshness_seconds=" + strconv.Itoa(witnessReceipt.FreshnessSeconds) + "\n" +
+		"witness_proof_line=" + witnessReceipt.Input + "\n" +
+		"witness_algorithm=" + witnessReceipt.Algorithm + "\n" +
+		"witness_hash=" + witnessReceipt.Hash + "\n" +
+		"witness_hash_header=" + witnessReceipt.HashHeader + "\n" +
+		"witness_hash_body_field=" + witnessReceipt.BodyField + "\n" +
+		"verification_status=" + verification.Status + "\n" +
+		"verification_verified=" + strconv.FormatBool(verification.Verified) + "\n" +
+		"verification_hash_match=" + strconv.FormatBool(verification.HashMatch) + "\n" +
+		"verification_fresh=" + strconv.FormatBool(verification.Fresh) + "\n" +
+		"verification_algorithm=" + verificationReceiptAlgorithm + "\n" +
+		"verification_hash=" + verificationReceiptHash + "\n" +
+		"verification_hash_header=" + verificationReceiptHashHeader + "\n" +
+		"verification_hash_body_field=" + verificationReceiptBodyField + "\n" +
+		"verification_receipt_line=" + verificationReceiptInput + "\n" +
+		"copy_safe=true\n" +
+		"input_returned=false\n" +
+		"request_body_returned=false\n" +
+		"identity_values_returned=false\n" +
+		"subject_returned=false\n" +
+		"email_returned=false\n" +
+		"name_returned=false\n" +
+		"claim_values_returned=false\n" +
+		"group_values_returned=false\n" +
+		"token_returned=false\n" +
+		"cookie_value_returned=false\n" +
+		"env_values_returned=false\n" +
+		"backend_path_returned=false\n" +
+		"connector_output_returned=false\n" +
+		"permit_payload_returned=false\n" +
+		"secret_value_returned=false\n" +
+		"value_returned=false\n"
+}
+
 func authenticatedBrowserCaptureHeader(name, value string) AuthenticatedBrowserCaptureHeader {
 	return AuthenticatedBrowserCaptureHeader{
 		Name:          name,
