@@ -1042,6 +1042,14 @@ func applyAuthenticatedBrowserWitnessHeaders(w http.ResponseWriter, witness Auth
 	w.Header().Set("X-Janus-Value-Returned", "false")
 }
 
+func applyWitnessVerificationHeaders(w http.ResponseWriter, receipt WitnessVerificationReceipt) {
+	w.Header().Set("X-Janus-Witness-Verification-Schema", receipt.Schema)
+	w.Header().Set("X-Janus-Witness-Verification-Algorithm", receipt.Algorithm)
+	w.Header().Set("X-Janus-Witness-Verification-Hash", receipt.Hash)
+	w.Header().Set("X-Janus-Witness-Verification-Hash-Body-Field", receipt.BodyField)
+	w.Header().Set("X-Janus-Value-Returned", "false")
+}
+
 func focusDescriptor(descriptors []SecretDescriptor, selectedRef string) DescriptorFocus {
 	if len(descriptors) == 0 {
 		return DescriptorFocus{}
@@ -1201,6 +1209,9 @@ func (app *App) handleSessionWitnessVerifyPost(w http.ResponseWriter, r *http.Re
 		ProofHash: r.Form.Get("proof_hash"),
 	}
 	verification := VerifyAuthenticatedBrowserCaptureReceipt(req, time.Now().UTC())
+	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
+	verification.Receipt = &receipt
+	applyWitnessVerificationHeaders(w, receipt)
 	status := http.StatusOK
 	if !verification.Verified {
 		status = http.StatusUnprocessableEntity
@@ -1223,6 +1234,9 @@ func (app *App) handleAuthSessionWitnessVerify(w http.ResponseWriter, r *http.Re
 		return
 	}
 	verification := VerifyAuthenticatedBrowserCaptureReceipt(req, time.Now().UTC())
+	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
+	verification.Receipt = &receipt
+	applyWitnessVerificationHeaders(w, receipt)
 	status := http.StatusOK
 	if !verification.Verified {
 		status = http.StatusUnprocessableEntity
@@ -6627,8 +6641,14 @@ func mustTemplates() *template.Template {
 	      <span>Hash match<strong>{{ .Verification.HashMatch }}</strong></span>
 	      <span>Fresh<strong>{{ .Verification.Fresh }}</strong></span>
 	      <span>Expected hash<strong class="mono">{{ .Verification.ExpectedHash }}</strong></span>
+	      {{ if .Verification.Receipt }}
+	      <span>Verification hash<strong class="mono">{{ .Verification.Receipt.Hash }}</strong></span>
+	      {{ end }}
 	    </div>
-	    <p><span class="pill info">freshness_seconds={{ .Verification.FreshnessSeconds }}</span> <span class="pill ok">input_returned={{ .Verification.InputReturned }}</span> <span class="pill ok">request_body_returned={{ .Verification.RequestBodyReturned }}</span> <span class="pill ok">value_returned={{ .Verification.ValueReturned }}</span></p>
+	    <p><span class="pill info">freshness_seconds={{ .Verification.FreshnessSeconds }}</span>{{ if .Verification.Receipt }} <span class="pill info">{{ .Verification.Receipt.Algorithm }}</span> <span class="pill ok">verification_hash_header={{ .Verification.Receipt.HashHeader }}</span> <span class="pill ok">verification_hash_body_field={{ .Verification.Receipt.BodyField }}</span>{{ end }} <span class="pill ok">input_returned={{ .Verification.InputReturned }}</span> <span class="pill ok">request_body_returned={{ .Verification.RequestBodyReturned }}</span> <span class="pill ok">value_returned={{ .Verification.ValueReturned }}</span></p>
+	    {{ if .Verification.Receipt }}
+	    <p class="capture-line mono">{{ .Verification.Receipt.Input }}</p>
+	    {{ end }}
 	  </div>
 	</section>
 	<section class="panel" style="margin-bottom:16px" id="verification-checks">

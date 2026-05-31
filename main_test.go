@@ -725,6 +725,14 @@ func TestWitnessReceiptVerifierVerifiesCopySafeProof(t *testing.T) {
 	if verification.InputReturned || verification.RequestBodyReturned || verification.ValueReturned {
 		t.Fatalf("verification must not return pasted input or values: %#v", verification)
 	}
+	receipt := WitnessReceiptVerificationReceiptFor(verification, "verify-receipt-123")
+	if receipt.Schema != "janus-witness-verification-v1" || receipt.Algorithm != "sha256-witness-verification-v1" || receipt.HashHeader != "X-Janus-Witness-Verification-Hash" || receipt.BodyField != "verification.receipt.hash" {
+		t.Fatalf("verification receipt should describe its proof: %#v", receipt)
+	}
+	if len(receipt.Hash) != 64 || !isLowerHex(receipt.Hash) || !strings.Contains(receipt.Input, "status=verified") || !strings.Contains(receipt.Input, "source_request_id=verify-proof-123") || !strings.Contains(receipt.Input, "hash_match=true") || !strings.Contains(receipt.Input, "fresh=true") || !strings.Contains(receipt.Input, "value_returned=false") {
+		t.Fatalf("verification receipt should hash normalized safe fields: %#v", receipt)
+	}
+	verification.Receipt = &receipt
 	raw, err := json.Marshal(verification)
 	if err != nil {
 		t.Fatal(err)
@@ -792,8 +800,22 @@ func TestSessionWitnessVerifierUIAndAPIAreValueFree(t *testing.T) {
 	if uiOut.Code != http.StatusOK {
 		t.Fatalf("expected verifier UI 200, got %d body=%s", uiOut.Code, uiOut.Body.String())
 	}
+	uiVerificationHash := uiOut.Header().Get("X-Janus-Witness-Verification-Hash")
+	if len(uiVerificationHash) != 64 || !isLowerHex(uiVerificationHash) {
+		t.Fatalf("verifier UI should set verification hash header, got %q", uiVerificationHash)
+	}
+	for header, want := range map[string]string{
+		"X-Janus-Witness-Verification-Schema":          "janus-witness-verification-v1",
+		"X-Janus-Witness-Verification-Algorithm":       "sha256-witness-verification-v1",
+		"X-Janus-Witness-Verification-Hash-Body-Field": "verification.receipt.hash",
+		"X-Janus-Value-Returned":                       "false",
+	} {
+		if got := uiOut.Header().Get(header); got != want {
+			t.Fatalf("verifier UI should set %s=%q, got %q", header, want, got)
+		}
+	}
 	uiBody := uiOut.Body.String()
-	for _, want := range []string{"Verification result", "verified", "Hash match", "true", "verify-ui-api-123", verifyReq.ProofHash, "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Verification result", "Verification hash", uiVerificationHash, "sha256-witness-verification-v1", "verification_hash_header=X-Janus-Witness-Verification-Hash", "verification_hash_body_field=verification.receipt.hash", "schema=janus-witness-verification-v1", "verifier_request_id=", "status=verified", "source_request_id=verify-ui-api-123", "hash_match=true", "fresh=true", "verified=true", "verified", "Hash match", "true", "verify-ui-api-123", verifyReq.ProofHash, "input_returned=false", "request_body_returned=false", "value_returned=false"} {
 		if !strings.Contains(uiBody, want) {
 			t.Fatalf("verifier UI should include %q: %s", want, uiBody)
 		}
@@ -819,8 +841,22 @@ func TestSessionWitnessVerifierUIAndAPIAreValueFree(t *testing.T) {
 	if apiOut.Code != http.StatusOK {
 		t.Fatalf("expected verifier API 200, got %d body=%s", apiOut.Code, apiOut.Body.String())
 	}
+	apiVerificationHash := apiOut.Header().Get("X-Janus-Witness-Verification-Hash")
+	if len(apiVerificationHash) != 64 || !isLowerHex(apiVerificationHash) {
+		t.Fatalf("verifier API should set verification hash header, got %q", apiVerificationHash)
+	}
+	for header, want := range map[string]string{
+		"X-Janus-Witness-Verification-Schema":          "janus-witness-verification-v1",
+		"X-Janus-Witness-Verification-Algorithm":       "sha256-witness-verification-v1",
+		"X-Janus-Witness-Verification-Hash-Body-Field": "verification.receipt.hash",
+		"X-Janus-Value-Returned":                       "false",
+	} {
+		if got := apiOut.Header().Get(header); got != want {
+			t.Fatalf("verifier API should set %s=%q, got %q", header, want, got)
+		}
+	}
 	apiBody := apiOut.Body.String()
-	for _, want := range []string{`"verification"`, `"status":"verified"`, `"hash_match":true`, `"fresh":true`, `"verified":true`, `"request_id":"verify-ui-api-123"`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
+	for _, want := range []string{`"verification"`, `"receipt"`, `"schema":"janus-witness-verification-v1"`, `"algorithm":"sha256-witness-verification-v1"`, `"hash_header":"X-Janus-Witness-Verification-Hash"`, `"body_field":"verification.receipt.hash"`, `"hash":"` + apiVerificationHash + `"`, `"input":"schema=janus-witness-verification-v1`, `"status":"verified"`, `"hash_match":true`, `"fresh":true`, `"verified":true`, `"request_id":"verify-ui-api-123"`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
 		if !strings.Contains(apiBody, want) {
 			t.Fatalf("verifier API should include %q: %s", want, apiBody)
 		}

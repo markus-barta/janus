@@ -13,6 +13,7 @@ const authenticatedBrowserCaptureFreshness = 5 * time.Minute
 const (
 	authenticatedBrowserCaptureSchema = "janus-auth-session-witness-v1"
 	authenticatedBrowserCaptureSignal = "signed_session_browser_proof_no_identity_values"
+	witnessVerificationReceiptSchema  = "janus-witness-verification-v1"
 )
 
 type AuthenticatedBrowserWitness struct {
@@ -91,6 +92,7 @@ type WitnessReceiptVerification struct {
 	Label               string                            `json:"label"`
 	Status              string                            `json:"status"`
 	Summary             string                            `json:"summary"`
+	Receipt             *WitnessVerificationReceipt       `json:"receipt,omitempty"`
 	Schema              string                            `json:"schema,omitempty"`
 	State               string                            `json:"state,omitempty"`
 	Flow                string                            `json:"flow,omitempty"`
@@ -109,6 +111,23 @@ type WitnessReceiptVerification struct {
 	InputReturned       bool                              `json:"input_returned"`
 	RequestBodyReturned bool                              `json:"request_body_returned"`
 	ValueReturned       bool                              `json:"value_returned"`
+}
+
+type WitnessVerificationReceipt struct {
+	Schema              string `json:"schema"`
+	Algorithm           string `json:"algorithm"`
+	Hash                string `json:"hash"`
+	HashHeader          string `json:"hash_header"`
+	BodyField           string `json:"body_field"`
+	Input               string `json:"input"`
+	RequestID           string `json:"request_id"`
+	Status              string `json:"status"`
+	HashMatch           bool   `json:"hash_match"`
+	Fresh               bool   `json:"fresh"`
+	Verified            bool   `json:"verified"`
+	InputReturned       bool   `json:"input_returned"`
+	RequestBodyReturned bool   `json:"request_body_returned"`
+	ValueReturned       bool   `json:"value_returned"`
 }
 
 type WitnessReceiptVerificationCheck struct {
@@ -346,6 +365,48 @@ func VerifyAuthenticatedBrowserCaptureReceipt(req WitnessReceiptVerificationRequ
 		verification.Summary = "The witness receipt has the right shape, but the hash does not match."
 	}
 	return verification
+}
+
+func WitnessReceiptVerificationReceiptFor(verification WitnessReceiptVerification, requestID string) WitnessVerificationReceipt {
+	requestID = sanitizeRequestID(requestID)
+	input := WitnessReceiptVerificationLineFor(verification, requestID)
+	sum := sha256.Sum256([]byte(input))
+	return WitnessVerificationReceipt{
+		Schema:              witnessVerificationReceiptSchema,
+		Algorithm:           "sha256-witness-verification-v1",
+		Hash:                hex.EncodeToString(sum[:]),
+		HashHeader:          "X-Janus-Witness-Verification-Hash",
+		BodyField:           "verification.receipt.hash",
+		Input:               input,
+		RequestID:           requestID,
+		Status:              safeDisplayState(verification.Status),
+		HashMatch:           verification.HashMatch,
+		Fresh:               verification.Fresh,
+		Verified:            verification.Verified,
+		InputReturned:       false,
+		RequestBodyReturned: false,
+		ValueReturned:       false,
+	}
+}
+
+func WitnessReceiptVerificationLineFor(verification WitnessReceiptVerification, requestID string) string {
+	return "schema=" + witnessVerificationReceiptSchema +
+		" verifier_request_id=" + safeDisplayState(requestID) +
+		" status=" + safeDisplayState(verification.Status) +
+		" source_schema=" + safeDisplayState(verification.Schema) +
+		" source_state=" + safeDisplayState(verification.State) +
+		" source_flow=" + safeDisplayState(verification.Flow) +
+		" source_request_id=" + safeDisplayState(verification.RequestID) +
+		" captured_at=" + safeDisplayState(verification.CapturedAt) +
+		" fresh_until=" + safeDisplayState(verification.FreshUntil) +
+		" freshness_seconds=" + strconv.Itoa(verification.FreshnessSeconds) +
+		" expected_hash=" + safeDisplayState(verification.ExpectedHash) +
+		" hash_match=" + strconv.FormatBool(verification.HashMatch) +
+		" fresh=" + strconv.FormatBool(verification.Fresh) +
+		" verified=" + strconv.FormatBool(verification.Verified) +
+		" input_returned=false" +
+		" request_body_returned=false" +
+		" value_returned=false"
 }
 
 func parseWitnessProofLine(proofLine string) (map[string]string, []WitnessReceiptVerificationCheck, bool) {
