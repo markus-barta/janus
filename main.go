@@ -534,6 +534,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /session-witness.txt", app.withAuth(app.handleSessionWitnessText))
 	mux.HandleFunc("GET /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPage))
 	mux.HandleFunc("POST /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPost))
+	mux.HandleFunc("POST /session-witness/verify-current", app.withAuth(app.handleSessionWitnessVerifyCurrent))
 	mux.HandleFunc("GET /api/warden/descriptors", app.withAuth(app.handleDescriptors))
 	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle)))
 	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit)))
@@ -574,6 +575,8 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
+	case "/session-witness/verify-current":
+		return []string{http.MethodPost}, true
 	case "/logout", "/api/warden/resolve", "/api/evidence/attachments", "/api/permits", "/ui/warden/resolve", "/ui/evidence/attachments", "/ui/permits":
 		return []string{http.MethodPost}, true
 	case "/api/auth/session-witness/verify":
@@ -1180,6 +1183,17 @@ func (app *App) sessionWitnessVerifyData(r *http.Request, session Session, verif
 	}
 }
 
+func (app *App) currentSessionWitnessVerification(r *http.Request, session Session) WitnessReceiptVerification {
+	witness, capture := app.authenticatedBrowserWitnessCapture(session)
+	reqID := requestID(r)
+	capturedAt := time.Now().UTC()
+	receipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID, capturedAt)
+	return VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{
+		ProofLine: receipt.Input,
+		ProofHash: receipt.Hash,
+	}, capturedAt)
+}
+
 func (app *App) handleSessionWitnessVerifyPage(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	app.audit(r, "auth.session.witness.verify.page", "allowed", session.Subject, "")
@@ -1217,6 +1231,28 @@ func (app *App) handleSessionWitnessVerifyPost(w http.ResponseWriter, r *http.Re
 		status = http.StatusUnprocessableEntity
 	}
 	app.audit(r, "auth.session.witness.verify.ui", verification.Status, session.Subject, "")
+	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification))
+}
+
+func (app *App) handleSessionWitnessVerifyCurrent(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "auth.session.witness.verify.current", "denied", session.Subject, "csrf failed")
+		verification := VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{}, time.Now().UTC())
+		verification.Status = "blocked"
+		verification.Summary = "CSRF token required."
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification))
+		return
+	}
+	verification := app.currentSessionWitnessVerification(r, session)
+	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
+	verification.Receipt = &receipt
+	applyWitnessVerificationHeaders(w, receipt)
+	status := http.StatusOK
+	if !verification.Verified {
+		status = http.StatusUnprocessableEntity
+	}
+	app.audit(r, "auth.session.witness.verify.current", verification.Status, session.Subject, "")
 	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification))
 }
 
@@ -6590,6 +6626,10 @@ func mustTemplates() *template.Template {
 	      <a class="button primary" href="/session-witness">Witness</a>
 	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
+	      <form method="post" action="/session-witness/verify-current">
+	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+	        <button class="button quiet" type="submit">Verify current session</button>
+	      </form>
 	      <a class="button quiet" href="/">Dashboard</a>
 	    </div>
 	    <div class="safety-ribbon" aria-label="Witness verifier posture">
@@ -6686,6 +6726,10 @@ func mustTemplates() *template.Template {
 	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
 	      <a class="button quiet" href="/session-witness/verify">Verify proof</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
+	      <form method="post" action="/session-witness/verify-current">
+	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+	        <button class="button quiet" type="submit">Verify current session</button>
+	      </form>
 	    </div>
 	    <div class="safety-ribbon" aria-label="Session witness posture">
 	      <div class="safety-chip {{ if eq .AuthenticatedBrowser.State "authenticated" }}ok{{ else if eq .AuthenticatedBrowser.State "local_smoke" }}info{{ else }}warn{{ end }}">

@@ -635,6 +635,9 @@ func TestSessionWitnessPageRendersCopySafeCapture(t *testing.T) {
 			t.Fatalf("session witness page should include %s: %s", want, body)
 		}
 	}
+	if !strings.Contains(body, `action="/session-witness/verify-current"`) || !strings.Contains(body, "Verify current session") {
+		t.Fatalf("session witness page should include one-click verifier action: %s", body)
+	}
 	for _, forbidden := range []string{"subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("session witness page leaked value %q: %s", forbidden, body)
@@ -707,6 +710,52 @@ func TestSessionWitnessPageRequiresAuthentication(t *testing.T) {
 		}
 		assertRouteResponseValueFree(t, "session witness auth redirect", out)
 	}
+}
+
+func TestSessionWitnessVerifyCurrentUsesCurrentBrowserSession(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	form := url.Values{}
+	form.Set("csrf_token", app.csrfToken(session))
+	req := httptest.NewRequest(http.MethodPost, "/session-witness/verify-current", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://vault.barta.cm")
+	req.Header.Set("X-Request-Id", "verify-current-123")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected current-session verifier 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	verificationHash := out.Header().Get("X-Janus-Witness-Verification-Hash")
+	if len(verificationHash) != 64 || !isLowerHex(verificationHash) {
+		t.Fatalf("current-session verifier should set verification hash header, got %q", verificationHash)
+	}
+	for header, want := range map[string]string{
+		"X-Janus-Witness-Verification-Schema":          "janus-witness-verification-v1",
+		"X-Janus-Witness-Verification-Algorithm":       "sha256-witness-verification-v1",
+		"X-Janus-Witness-Verification-Hash-Body-Field": "verification.receipt.hash",
+		"X-Janus-Value-Returned":                       "false",
+	} {
+		if got := out.Header().Get(header); got != want {
+			t.Fatalf("current-session verifier should set %s=%q, got %q", header, want, got)
+		}
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Verification result", "verified", "Verification hash", verificationHash, "schema=janus-witness-verification-v1", "source_request_id=verify-current-123", "hash_match=true", "fresh=true", "verified=true", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("current-session verifier should include %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"proof_line=", "subject-123", "person@example.test", "Person Name", "secret-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("current-session verifier leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "current-session verifier", out)
 }
 
 func TestWitnessReceiptVerifierVerifiesCopySafeProof(t *testing.T) {
@@ -4306,6 +4355,7 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "session witness text", method: http.MethodGet, path: "/session-witness.txt", status: http.StatusOK},
 		{name: "session witness verifier", method: http.MethodGet, path: "/session-witness/verify", status: http.StatusOK},
 		{name: "session witness verifier bad post", method: http.MethodPost, path: "/session-witness/verify", body: "proof_line=secret-cookie-secret&proof_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", contentType: "application/x-www-form-urlencoded", status: http.StatusUnprocessableEntity},
+		{name: "session witness verify current", method: http.MethodPost, path: "/session-witness/verify-current", status: http.StatusOK},
 		{name: "auth witness verifier bad post", method: http.MethodPost, path: "/api/auth/session-witness/verify", body: `{"proof_line":"secret-cookie-secret","proof_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, contentType: "application/json", status: http.StatusUnprocessableEntity},
 		{name: "descriptors", method: http.MethodGet, path: "/api/warden/descriptors", status: http.StatusOK},
 		{name: "audit", method: http.MethodGet, path: "/api/audit/recent", status: http.StatusOK},
