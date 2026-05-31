@@ -879,6 +879,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	if canViewAudit {
 		recentAudit = app.store.RecentAudit(8)
 	}
+	auditTrail := AuditTrailFor(recentAudit, auditPosture, canViewAudit)
 	catalogGates := ValidateCatalog(descriptors)
 	accessPosture := app.accessPosture()
 	rolePolicyReadiness := RolePolicyReadinessFor(app.cfg.RolePolicy, accessPosture)
@@ -946,6 +947,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Issues":              issues,
 		"Mode":                app.cfg.ProductMode,
 		"Audit":               recentAudit,
+		"AuditTrail":          auditTrail,
 		"Posture":             auditPosture,
 		"CatalogGates":        catalogGates,
 		"Access":              accessPosture,
@@ -2727,6 +2729,7 @@ func (app *App) postureBody(session Session) map[string]any {
 			"auth_failure_posture",
 			"oidc_redirect_loop_guard",
 			"audit_event_severity",
+			"audit_trail_witness",
 			"strict_session_cookie",
 			"request_body_size_limit",
 			"browser_isolation_headers",
@@ -3518,9 +3521,62 @@ func mustTemplates() *template.Template {
       color: var(--ink);
       background: var(--panel);
     }
-    .hash-copy input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
-    .table-wrap { overflow-x: auto; }
-    table { width: 100%; border-collapse: collapse; min-width: 1040px; }
+	    .hash-copy input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+	    .audit-timeline {
+	      display: grid;
+	      gap: 10px;
+	    }
+	    .audit-event {
+	      display: grid;
+	      grid-template-columns: 92px minmax(0, 1fr) minmax(180px, .34fr);
+	      gap: 12px;
+	      align-items: stretch;
+	      border: 1px solid var(--line);
+	      border-radius: 8px;
+	      background: var(--panel-soft);
+	      padding: 12px;
+	      min-width: 0;
+	    }
+	    .audit-event.ok { border-color: color-mix(in srgb, var(--accent) 34%, var(--line)); }
+	    .audit-event.warn { border-color: color-mix(in srgb, var(--amber) 38%, var(--line)); }
+	    .audit-event.info { border-color: color-mix(in srgb, var(--blue) 30%, var(--line)); }
+	    .audit-index {
+	      display: grid;
+	      align-content: space-between;
+	      gap: 8px;
+	      min-width: 0;
+	    }
+	    .audit-index span { color: var(--muted); font-size: 12px; }
+	    .audit-index strong { font-size: 15px; line-height: 1.15; overflow-wrap: anywhere; }
+	    .audit-main {
+	      display: grid;
+	      gap: 8px;
+	      align-content: start;
+	      min-width: 0;
+	    }
+	    .audit-title {
+	      display: flex;
+	      flex-wrap: wrap;
+	      gap: 7px;
+	      align-items: center;
+	      min-width: 0;
+	    }
+	    .audit-title strong { font-size: 16px; line-height: 1.15; overflow-wrap: anywhere; }
+	    .audit-proof {
+	      display: grid;
+	      grid-template-columns: auto minmax(0, 1fr);
+	      align-content: center;
+	      gap: 5px 8px;
+	      border: 1px solid var(--line);
+	      border-radius: 8px;
+	      background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+	      padding: 9px 10px;
+	      min-width: 0;
+	    }
+	    .audit-proof span { color: var(--muted); font-size: 12px; }
+	    .audit-proof strong { font-size: 12px; line-height: 1.15; overflow-wrap: anywhere; }
+	    .table-wrap { overflow-x: auto; }
+	    table { width: 100%; border-collapse: collapse; min-width: 1040px; }
     th, td { padding: 12px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
     th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0; }
     tr:hover td { background: var(--panel-soft); }
@@ -3567,10 +3623,12 @@ func mustTemplates() *template.Template {
       .command-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .witness-grid { grid-template-columns: 1fr; }
-      .receipt { grid-template-columns: 1fr; }
-      .receipt-proof { grid-template-columns: 1fr; }
-      .receipt-copy { grid-template-columns: 1fr; }
-      .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	      .receipt { grid-template-columns: 1fr; }
+	      .receipt-proof { grid-template-columns: 1fr; }
+	      .receipt-copy { grid-template-columns: 1fr; }
+	      .audit-event { grid-template-columns: 1fr; }
+	      .audit-proof { grid-template-columns: minmax(0, .3fr) minmax(0, .7fr); }
+	      .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-step:nth-child(2n) { border-right: 0; }
       .trust-step:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
@@ -3595,10 +3653,12 @@ func mustTemplates() *template.Template {
       .command-actions .button { width: 100%; }
       .mode-grid { grid-template-columns: 1fr; }
       .witness-grid { grid-template-columns: 1fr; }
-      .receipt { grid-template-columns: 1fr; }
-      .receipt-proof { grid-template-columns: 1fr; }
-      .receipt-copy { grid-template-columns: 1fr; }
-	      .assurance-flow { grid-template-columns: 1fr; }
+	      .receipt { grid-template-columns: 1fr; }
+	      .receipt-proof { grid-template-columns: 1fr; }
+	      .receipt-copy { grid-template-columns: 1fr; }
+	      .audit-event { grid-template-columns: 1fr; }
+	      .audit-proof { grid-template-columns: minmax(0, .32fr) minmax(0, .68fr); }
+		      .assurance-flow { grid-template-columns: 1fr; }
       .trust-rail { grid-template-columns: 1fr; }
       .trust-step { border-right: 0; border-bottom: 1px solid var(--line); }
       .trust-step:last-child { border-bottom: 0; }
@@ -5106,8 +5166,9 @@ func mustTemplates() *template.Template {
     <details class="evidence-flags">
       <summary>Privacy and retention evidence flags</summary>
       <div class="flag-cloud" aria-label="Privacy and retention value-free evidence flags">
-        <span class="pill info">owner {{ .PrivacyWorkflow.OwnerRole }}</span>
-        <span class="pill {{ if .PrivacyWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .PrivacyWorkflow.Required }}</span>
+	        <span class="pill info">owner {{ .PrivacyWorkflow.OwnerRole }}</span>
+	        <span class="pill info">control_key={{ .PrivacyWorkflow.ControlKey }}</span>
+	        <span class="pill {{ if .PrivacyWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .PrivacyWorkflow.Required }}</span>
         <span class="pill {{ if .PrivacyWorkflow.Attached }}ok{{ else if .PrivacyWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .PrivacyWorkflow.Attachment }}</span>
         <span class="pill info">{{ .PrivacyWorkflow.EvidenceSignal }}</span>
         <span class="pill info">review cadence</span>
@@ -5955,51 +6016,138 @@ func mustTemplates() *template.Template {
     </div>
   </div>
 </section>
-<section class="grid" id="audit">
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Audit posture</h2>
-      {{ if .CanViewAudit }}
-      {{ if .Posture.LegacyEntries }}<span class="pill warn">chain partial</span>{{ else if .Posture.ChainVerified }}<span class="pill ok">chain verified</span>{{ else }}<span class="pill warn">chain needs review</span>{{ end }}
-      {{ else }}
-      <span class="pill warn">auditor required</span>
-      {{ end }}
-    </div>
-    {{ if .CanViewAudit }}
-    <div class="panel-body stack">
-      <p>
-      {{ range .Posture.SeverityCounts }}
-        <span class="pill {{ if or (eq .Severity "critical") (eq .Severity "warning") }}warn{{ else }}info{{ end }}">{{ .Severity }} {{ .Count }}</span>
-      {{ end }}
-      </p>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Time</th><th>Severity</th><th>Action</th><th>Outcome</th><th>Method</th><th>Path</th><th>Secret ref</th><th>Reason</th></tr></thead>
-        <tbody>
-        {{ range .Audit }}
-          <tr>
-            <td>{{ .Time.Format "15:04:05" }}</td>
-            <td>{{ if .Severity }}<span class="pill {{ if or (eq .Severity "critical") (eq .Severity "warning") }}warn{{ else }}info{{ end }}">{{ .Severity }}</span>{{ else }}<span class="pill warn">unknown</span>{{ end }}</td>
-            <td>{{ .Action }}</td>
-            <td>{{ .Outcome }}</td>
-            <td>{{ .Method }}</td>
-            <td>{{ .Path }}</td>
-            <td>{{ if .SecretRef }}{{ .SecretRef }}{{ else }}<span class="muted">none</span>{{ end }}</td>
-            <td>{{ if .Reason }}{{ .Reason }}{{ else }}<span class="muted">none</span>{{ end }}</td>
-          </tr>
-        {{ end }}
-        </tbody>
-      </table>
-    </div>
-    {{ else }}
-    <div class="panel-body stack">
-      <p class="warn">Auditor role required.</p>
-      <p>Audit rows and evidence hashes are restricted to auditor sessions.</p>
-    </div>
-    {{ end }}
-  </div>
-</section>
+	<section class="grid" id="audit">
+	  <div class="panel">
+	    <div class="panel-head">
+	      <h2>Audit trail</h2>
+	      {{ if .CanViewAudit }}
+	      <span class="pill {{ .AuditTrail.ChainTone }}">{{ .AuditTrail.ChainState }}</span>
+	      {{ else }}
+	      <span class="pill warn">auditor required</span>
+	      {{ end }}
+	    </div>
+	    <div class="panel-body stack">
+	      <p>{{ .AuditTrail.Summary }}</p>
+	      {{ if .CanViewAudit }}
+	      <p>
+	      {{ range .Posture.SeverityCounts }}
+	        <span class="pill {{ if or (eq .Severity "critical") (eq .Severity "warning") }}warn{{ else }}info{{ end }}">{{ .Severity }} {{ .Count }}</span>
+	      {{ end }}
+	      <span class="pill info">visible {{ .AuditTrail.VisibleCount }}</span>
+	      <span class="pill ok">value_returned=false</span>
+	      </p>
+	      <div class="witness-grid" aria-label="Recent audit trail witness">
+	        <div class="witness-card ok">
+	          <span>Chronological history</span>
+	          <strong>{{ .AuditTrail.VisibleCount }} visible</strong>
+	          <p>Rows show safe action labels in event order with raw route paths and raw reasons withheld.</p>
+	        </div>
+	        <div class="witness-card {{ .AuditTrail.ChainTone }}">
+	          <span>Hash chain</span>
+	          <strong>{{ .AuditTrail.ChainState }}</strong>
+	          <p>Each chained event keeps a previous hash and event hash for tamper review.</p>
+	        </div>
+	        <div class="witness-card info">
+	          <span>Receipt linkage</span>
+	          <strong>request id</strong>
+	          <p>Request ids connect browser actions, action receipts, and audit events without identity values.</p>
+	        </div>
+	        <div class="witness-card ok">
+	          <span>Value boundary</span>
+	          <strong>metadata only</strong>
+	          <p>Subjects, claims, tokens, cookies, request bodies, env data, backend paths, and secret values stay out.</p>
+	        </div>
+	      </div>
+	      <details class="evidence-flags">
+	        <summary>Recent audit evidence flags</summary>
+	        <div class="flag-cloud" aria-label="Recent audit value-free evidence flags">
+	          <span class="pill ok">audit_entries={{ .AuditTrail.EntryCount }}</span>
+	          <span class="pill ok">visible_audit_rows={{ .AuditTrail.VisibleCount }}</span>
+	          <span class="pill ok">chronological_history=true</span>
+	          <span class="pill {{ if .Posture.ChainVerified }}ok{{ else }}warn{{ end }}">hash_chain_verified={{ .Posture.ChainVerified }}</span>
+	          <span class="pill ok">receipt_hash_linkage=true</span>
+	          <span class="pill ok">raw_path_returned=false</span>
+	          <span class="pill ok">raw_reason_returned=false</span>
+	          <span class="pill ok">subject_returned=false</span>
+	          <span class="pill ok">email_returned=false</span>
+	          <span class="pill ok">name_returned=false</span>
+	          <span class="pill ok">group_claim_returned=false</span>
+	          <span class="pill ok">token_returned=false</span>
+	          <span class="pill ok">cookie_value_returned=false</span>
+	          <span class="pill ok">request_body_returned=false</span>
+	          <span class="pill ok">env_returned=false</span>
+	          <span class="pill ok">backend_path_returned=false</span>
+	          <span class="pill ok">source_path_returned=false</span>
+	          <span class="pill ok">connector_output_returned=false</span>
+	          <span class="pill ok">permit_payload_value_returned=false</span>
+	          <span class="pill ok">secret_value_returned=false</span>
+	          <span class="pill ok">value_returned=false</span>
+	        </div>
+	      </details>
+	      {{ if .AuditTrail.Rows }}
+	      <div class="audit-timeline" aria-label="Recent audit action history">
+	        {{ range .AuditTrail.Rows }}
+	        <div class="audit-event {{ .OutcomeTone }}">
+	          <div class="audit-index">
+	            <span>event {{ .Step }}</span>
+	            <strong>{{ .TimeLabel }}</strong>
+	          </div>
+	          <div class="audit-main">
+	            <div class="audit-title">
+	              <strong>{{ .Action }}</strong>
+	              <span class="pill {{ .OutcomeTone }}">{{ .Outcome }}</span>
+	              <span class="pill {{ .SeverityTone }}">{{ .Severity }}</span>
+	            </div>
+	            <p><span class="pill info">{{ .Channel }}</span> <span class="pill ok">scope {{ .Scope }}</span> <span class="pill info">{{ .ReasonClass }}</span></p>
+	            <p class="mono">request_id={{ .RequestID }}</p>
+	          </div>
+	          <div class="audit-proof" aria-label="Audit hash link">
+	            <span>prev</span><strong class="mono">{{ .PrevHashShort }}</strong>
+	            <span>event</span><strong class="mono">{{ .EventHashShort }}</strong>
+	          </div>
+	        </div>
+	        {{ end }}
+	      </div>
+	      {{ end }}
+	      {{ else }}
+	      <div class="witness-grid" aria-label="Restricted audit trail witness">
+	        <div class="witness-card warn">
+	          <span>Audit rows</span>
+	          <strong>restricted</strong>
+	          <p>Auditor role required before Janus renders recent audit rows.</p>
+	        </div>
+	        <div class="witness-card warn">
+	          <span>Evidence hash</span>
+	          <strong>auditor only</strong>
+	          <p>Exact audit and evidence hashes are withheld from this session.</p>
+	        </div>
+	        <div class="witness-card ok">
+	          <span>Value boundary</span>
+	          <strong>protected</strong>
+	          <p>Restricted sessions do not receive audit refs, request ids, subjects, claims, tokens, cookies, or values.</p>
+	        </div>
+	      </div>
+	      <p class="warn">Auditor role required.</p>
+	      <p>Audit rows and evidence hashes are restricted to auditor sessions.</p>
+	      <details class="evidence-flags">
+	        <summary>Restricted audit evidence flags</summary>
+	        <div class="flag-cloud" aria-label="Restricted audit value-free evidence flags">
+	          <span class="pill warn">auditor_required=true</span>
+	          <span class="pill ok">audit_rows_rendered=false</span>
+	          <span class="pill ok">request_id_returned=false</span>
+	          <span class="pill ok">subject_returned=false</span>
+	          <span class="pill ok">group_claim_returned=false</span>
+	          <span class="pill ok">token_returned=false</span>
+	          <span class="pill ok">cookie_value_returned=false</span>
+	          <span class="pill ok">secret_ref_returned=false</span>
+	          <span class="pill ok">secret_value_returned=false</span>
+	          <span class="pill ok">value_returned=false</span>
+	        </div>
+	      </details>
+	      {{ end }}
+	    </div>
+	  </div>
+	</section>
 {{ if .CatalogGates }}
 <section class="grid" id="catalog-gates">
   <div class="panel">

@@ -276,6 +276,38 @@ func TestAuditPostureAcceptsPreSeverityHashChain(t *testing.T) {
 	}
 }
 
+func TestAuditTrailWitnessScrubsRawPathAndReason(t *testing.T) {
+	entry := AuditEntry{
+		Time:      time.Now().UTC(),
+		Action:    "permit.run.ui",
+		Outcome:   "not_executed",
+		Severity:  "notice",
+		RequestID: "req-safe_123",
+		Method:    http.MethodPost,
+		Path:      "/ui/permits/p_secret/run/backend_path=/tmp/source_path=/src",
+		SecretRef: "zitadel-janus-oidc",
+		Reason:    "no execution connector configured in V1.1 request_body=secret env=TOKEN connector_output=secret",
+	}
+	entry.EventHash = hashAuditEntry(entry)
+
+	trail := AuditTrailFor([]AuditEntry{entry}, AuditPosture{Entries: 1, ChainedEntries: 1, ChainVerified: true, SinkWritable: true, LastHash: entry.EventHash}, true)
+	if trail.ValueReturned || trail.VisibleCount != 1 || trail.ChainState != "verified" || trail.LastHashShort == "" {
+		t.Fatalf("unexpected audit trail witness: %#v", trail)
+	}
+	row := trail.Rows[0]
+	for _, want := range []string{"POST browser action", "no_connector", "zitadel-janus-oidc", "req-safe_123"} {
+		if !strings.Contains(row.Channel+" "+row.ReasonClass+" "+row.Scope+" "+row.RequestID, want) {
+			t.Fatalf("audit trail row should include safe witness %q: %#v", want, row)
+		}
+	}
+	joined := row.Channel + " " + row.ReasonClass + " " + row.ChainLink
+	for _, forbidden := range []string{"/ui/permits", "request_body=secret", "env=TOKEN", "connector_output=secret", "backend_path=/tmp", "source_path=/src"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("audit trail row leaked raw field %q: %#v", forbidden, row)
+		}
+	}
+}
+
 func auditSeverityCount(posture AuditPosture, severity string) int {
 	for _, count := range posture.SeverityCounts {
 		if count.Severity == severity {
@@ -4184,9 +4216,9 @@ func TestDashboardAuditRowsRequireAuditorRole(t *testing.T) {
 		Action:    "secret.review",
 		Outcome:   "allowed",
 		Method:    http.MethodPost,
-		Path:      "/api/example",
+		Path:      "/api/example/backend_path=/tmp/source_path=/src",
 		SecretRef: "private-ref",
-		Reason:    "audit seed",
+		Reason:    "audit seed request_body=raw-secret-value env=SECRET connector_output=secret",
 	})
 
 	viewer := Session{Subject: "viewer", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
@@ -4200,7 +4232,7 @@ func TestDashboardAuditRowsRequireAuditorRole(t *testing.T) {
 		t.Fatalf("expected viewer dashboard 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	viewerBody := out.Body.String()
-	if !strings.Contains(viewerBody, "Auditor role required") || !strings.Contains(viewerBody, "restricted") || !strings.Contains(viewerBody, "auditor_required") || !strings.Contains(viewerBody, "Evidence JSON is gated") || !strings.Contains(viewerBody, "exact receipt") || !strings.Contains(viewerBody, "Use an auditor session to download evidence") {
+	if !strings.Contains(viewerBody, "Auditor role required") || !strings.Contains(viewerBody, "restricted") || !strings.Contains(viewerBody, "auditor_required") || !strings.Contains(viewerBody, "audit_rows_rendered=false") || !strings.Contains(viewerBody, "Evidence JSON is gated") || !strings.Contains(viewerBody, "exact receipt") || !strings.Contains(viewerBody, "Use an auditor session to download evidence") {
 		t.Fatalf("viewer dashboard should gate audit rows: %s", viewerBody)
 	}
 	if strings.Contains(viewerBody, "private-ref") {
@@ -4218,7 +4250,17 @@ func TestDashboardAuditRowsRequireAuditorRole(t *testing.T) {
 		t.Fatalf("expected auditor dashboard 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	auditorBody := out.Body.String()
-	if !strings.Contains(auditorBody, "private-ref") || !strings.Contains(auditorBody, "<th>Severity</th>") || !strings.Contains(auditorBody, ">info<") || !strings.Contains(auditorBody, "export_ready") || !strings.Contains(auditorBody, "hash ready") {
+	for _, want := range []string{"Recent audit trail witness", "Chronological history", "Hash chain", "Receipt linkage", "Value boundary", "Recent audit evidence flags", "audit_entries=3", "visible_audit_rows=3", "chronological_history=true", "hash_chain_verified=true", "receipt_hash_linkage=true", "raw_path_returned=false", "raw_reason_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "group_claim_returned=false", "token_returned=false", "cookie_value_returned=false", "request_body_returned=false", "env_returned=false", "backend_path_returned=false", "source_path_returned=false", "connector_output_returned=false", "permit_payload_value_returned=false", "secret_value_returned=false", "value_returned=false", "Recent audit action history", "event 1", "POST api request", "allowed_recorded", "private-ref", "export_ready", "hash ready"} {
+		if !strings.Contains(auditorBody, want) {
+			t.Fatalf("auditor dashboard should include audit witness %q: %s", want, auditorBody)
+		}
+	}
+	for _, forbidden := range []string{"/api/example", "audit seed", "request_body=raw-secret-value", "env=SECRET", "connector_output=secret", "backend_path=/tmp", "source_path=/src"} {
+		if strings.Contains(auditorBody, forbidden) {
+			t.Fatalf("auditor dashboard leaked raw audit field %q: %s", forbidden, auditorBody)
+		}
+	}
+	if !strings.Contains(auditorBody, "private-ref") || !strings.Contains(auditorBody, "info") || !strings.Contains(auditorBody, "export_ready") || !strings.Contains(auditorBody, "hash ready") {
 		t.Fatalf("auditor dashboard should include audit rows and severity posture: %s", auditorBody)
 	}
 }

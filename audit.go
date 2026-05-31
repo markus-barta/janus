@@ -31,6 +31,35 @@ type AuditSeverityCount struct {
 	Count    int    `json:"count"`
 }
 
+type AuditTrailWitness struct {
+	EntryCount    int             `json:"entry_count"`
+	VisibleCount  int             `json:"visible_count"`
+	ChainState    string          `json:"chain_state"`
+	ChainTone     string          `json:"chain_tone"`
+	Summary       string          `json:"summary"`
+	LastHashShort string          `json:"last_hash_short"`
+	Rows          []AuditTrailRow `json:"rows"`
+	ValueReturned bool            `json:"value_returned"`
+}
+
+type AuditTrailRow struct {
+	Step           int    `json:"step"`
+	TimeLabel      string `json:"time_label"`
+	Severity       string `json:"severity"`
+	SeverityTone   string `json:"severity_tone"`
+	Action         string `json:"action"`
+	Outcome        string `json:"outcome"`
+	OutcomeTone    string `json:"outcome_tone"`
+	Channel        string `json:"channel"`
+	Scope          string `json:"scope"`
+	ReasonClass    string `json:"reason_class"`
+	RequestID      string `json:"request_id"`
+	EventHashShort string `json:"event_hash_short"`
+	PrevHashShort  string `json:"prev_hash_short"`
+	ChainLink      string `json:"chain_link"`
+	HashLocked     bool   `json:"hash_locked"`
+}
+
 func (s *Store) AppendAudit(entry AuditEntry) {
 	entry.Time = time.Now().UTC()
 	entry.Severity = normalizeAuditSeverity(entry.Severity)
@@ -208,4 +237,192 @@ func auditSeverityCounts(counts map[string]int) []AuditSeverityCount {
 		}
 	}
 	return out
+}
+
+func AuditTrailFor(entries []AuditEntry, posture AuditPosture, canView bool) AuditTrailWitness {
+	entryCount := posture.Entries
+	if entryCount == 0 && len(entries) > 0 {
+		entryCount = len(entries)
+	}
+	trail := AuditTrailWitness{
+		EntryCount:    entryCount,
+		ChainState:    "restricted",
+		ChainTone:     "warn",
+		Summary:       "Auditor role required before recent audit rows or hash receipts are rendered.",
+		LastHashShort: "restricted",
+		ValueReturned: false,
+	}
+	if !canView {
+		return trail
+	}
+
+	trail.ChainState = "verified"
+	trail.ChainTone = "ok"
+	trail.Summary = "Recent audit events are shown as safe labels with request ids and hash links."
+	trail.LastHashShort = shortAuditHash(posture.LastHash, "pending")
+	if !posture.ChainVerified {
+		trail.ChainState = "review"
+		trail.ChainTone = "warn"
+		trail.Summary = "Recent audit events are visible, but the local hash chain needs review."
+	}
+	if posture.LegacyEntries > 0 {
+		trail.ChainState = "partial"
+		trail.ChainTone = "warn"
+		trail.Summary = "Recent audit events are visible; older legacy events still need hash-chain migration."
+	}
+	if !posture.SinkWritable {
+		trail.ChainState = "sink blocked"
+		trail.ChainTone = "warn"
+		trail.Summary = "Audit storage is not writable, so stronger audit claims are blocked."
+	}
+	if len(entries) == 0 && trail.ChainTone != "warn" {
+		trail.Summary = "Audit sink is ready; no recent action rows are present yet."
+	}
+
+	for i, entry := range entries {
+		trail.Rows = append(trail.Rows, auditTrailRow(entry, i+1))
+	}
+	trail.VisibleCount = len(trail.Rows)
+	return trail
+}
+
+func auditTrailRow(entry AuditEntry, step int) AuditTrailRow {
+	timeLabel := "pending"
+	if !entry.Time.IsZero() {
+		timeLabel = entry.Time.UTC().Format("15:04:05")
+	}
+	severity := strings.ToLower(strings.TrimSpace(entry.Severity))
+	if severity == "" {
+		severity = "unknown"
+	}
+	requestID := strings.TrimSpace(entry.RequestID)
+	if requestID == "" {
+		requestID = "generated"
+	}
+	scope := strings.TrimSpace(entry.SecretRef)
+	if scope == "" {
+		scope = "none"
+	}
+	eventHash := shortAuditHash(entry.EventHash, "legacy")
+	prevHash := shortAuditHash(entry.PrevHash, "genesis")
+	return AuditTrailRow{
+		Step:           step,
+		TimeLabel:      timeLabel,
+		Severity:       severity,
+		SeverityTone:   auditSeverityTone(severity),
+		Action:         safeAuditToken(entry.Action, "event"),
+		Outcome:        safeAuditToken(entry.Outcome, "recorded"),
+		OutcomeTone:    auditOutcomeTone(entry.Outcome),
+		Channel:        auditChannelLabel(entry.Method, entry.Path),
+		Scope:          scope,
+		ReasonClass:    auditReasonClass(entry),
+		RequestID:      requestID,
+		EventHashShort: eventHash,
+		PrevHashShort:  prevHash,
+		ChainLink:      prevHash + " -> " + eventHash,
+		HashLocked:     entry.EventHash != "",
+	}
+}
+
+func shortAuditHash(hash, fallback string) string {
+	hash = strings.TrimSpace(hash)
+	if hash == "" {
+		return fallback
+	}
+	if len(hash) > 12 {
+		return hash[:12]
+	}
+	return hash
+}
+
+func safeAuditToken(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func auditSeverityTone(severity string) string {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "critical", "warning", "unknown":
+		return "warn"
+	default:
+		return "info"
+	}
+}
+
+func auditOutcomeTone(outcome string) string {
+	outcome = strings.ToLower(strings.TrimSpace(outcome))
+	if outcome == "allowed" || strings.HasPrefix(outcome, "approved") {
+		return "ok"
+	}
+	if outcome == "denied" || strings.Contains(outcome, "failed") {
+		return "warn"
+	}
+	return "info"
+}
+
+func auditChannelLabel(method, path string) string {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if method == "" {
+		method = "EVENT"
+	}
+	path = strings.TrimSpace(path)
+	channel := "http route"
+	switch {
+	case path == "":
+		channel = "internal event"
+	case path == "/":
+		channel = "dashboard view"
+	case path == "/login" || path == "/logout" || strings.HasPrefix(path, "/oidc/"):
+		channel = "auth flow"
+	case strings.HasPrefix(path, "/ui/"):
+		channel = "browser action"
+	case strings.HasPrefix(path, "/api/evidence"):
+		channel = "evidence api"
+	case strings.HasPrefix(path, "/api/audit"):
+		channel = "audit api"
+	case strings.HasPrefix(path, "/api/permits"):
+		channel = "permit api"
+	case strings.HasPrefix(path, "/api/warden"):
+		channel = "warden api"
+	case strings.HasPrefix(path, "/api/"):
+		channel = "api request"
+	}
+	return method + " " + channel
+}
+
+func auditReasonClass(entry AuditEntry) string {
+	reason := strings.ToLower(strings.TrimSpace(entry.Reason))
+	outcome := strings.ToLower(strings.TrimSpace(entry.Outcome))
+	action := strings.ToLower(strings.TrimSpace(entry.Action))
+	switch {
+	case strings.Contains(reason, "csrf"):
+		return "csrf_guard"
+	case strings.Contains(reason, "system degraded") || strings.Contains(reason, "readiness"):
+		return "readiness_guard"
+	case strings.Contains(reason, "role") && strings.Contains(reason, "required"):
+		return "role_guard"
+	case strings.Contains(reason, "auth") || strings.Contains(action, "auth."):
+		return "auth_guard"
+	case strings.Contains(reason, "not found"):
+		return "lookup_guard"
+	case strings.Contains(reason, "broker"):
+		return "broker_guard"
+	case strings.Contains(reason, "persistence") || strings.Contains(reason, "store"):
+		return "persistence_guard"
+	case strings.Contains(outcome, "not_executed") || (strings.Contains(action, "permit.run") && strings.Contains(reason, "no execution connector")):
+		return "no_connector"
+	case strings.Contains(outcome, "approved"):
+		return "metadata_approved"
+	case strings.Contains(reason, "no execution connector"):
+		return "no_connector"
+	case outcome == "denied" || strings.Contains(outcome, "failed"):
+		return "denial_recorded"
+	case outcome == "allowed":
+		return "allowed_recorded"
+	default:
+		return "recorded"
+	}
 }
