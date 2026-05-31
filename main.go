@@ -535,12 +535,14 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /session-witness/proof.txt", app.withAuth(app.handleSessionWitnessProofText))
 	mux.HandleFunc("GET /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPage))
 	mux.HandleFunc("POST /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPost))
+	mux.HandleFunc("POST /session-witness/verify-pack", app.withAuth(app.handleSessionWitnessVerifyPackPost))
 	mux.HandleFunc("POST /session-witness/verify-current", app.withAuth(app.handleSessionWitnessVerifyCurrent))
 	mux.HandleFunc("GET /api/warden/descriptors", app.withAuth(app.handleDescriptors))
 	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle)))
 	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit)))
 	mux.HandleFunc("GET /api/auth/session-witness", app.withAuth(app.handleAuthSessionWitness))
 	mux.HandleFunc("POST /api/auth/session-witness/verify", app.withAuth(app.handleAuthSessionWitnessVerify))
+	mux.HandleFunc("POST /api/auth/session-witness/verify-pack", app.withAuth(app.handleAuthSessionWitnessVerifyPack))
 	mux.HandleFunc("GET /api/posture", app.withAuth(app.handlePosture))
 	mux.HandleFunc("GET /api/evidence", app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence)))
 	mux.HandleFunc("POST /api/evidence/attachments", app.withAuth(app.handleAttachEvidence))
@@ -576,11 +578,11 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
-	case "/session-witness/verify-current":
+	case "/session-witness/verify-current", "/session-witness/verify-pack":
 		return []string{http.MethodPost}, true
 	case "/logout", "/api/warden/resolve", "/api/evidence/attachments", "/api/permits", "/ui/warden/resolve", "/ui/evidence/attachments", "/ui/permits":
 		return []string{http.MethodPost}, true
-	case "/api/auth/session-witness/verify":
+	case "/api/auth/session-witness/verify", "/api/auth/session-witness/verify-pack":
 		return []string{http.MethodPost}, true
 	}
 	switch {
@@ -1256,6 +1258,36 @@ func (app *App) handleSessionWitnessVerifyPost(w http.ResponseWriter, r *http.Re
 	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification))
 }
 
+func (app *App) handleSessionWitnessVerifyPackPost(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "auth.session.witness.verify_pack.ui", "denied", session.Subject, "csrf failed")
+		verification := VerifyAuthenticatedBrowserProofPack("", time.Now().UTC())
+		verification.Status = "blocked"
+		verification.Summary = "CSRF token required."
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification))
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		app.audit(r, "auth.session.witness.verify_pack.ui", "denied", session.Subject, "bad form")
+		verification := VerifyAuthenticatedBrowserProofPack("", time.Now().UTC())
+		verification.Status = "blocked"
+		verification.Summary = "Verification form could not be read."
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusBadRequest, app.sessionWitnessVerifyData(r, session, &verification))
+		return
+	}
+	verification := VerifyAuthenticatedBrowserProofPack(r.Form.Get("proof_pack"), time.Now().UTC())
+	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
+	verification.Receipt = &receipt
+	applyWitnessVerificationHeaders(w, receipt)
+	status := http.StatusOK
+	if !verification.Verified {
+		status = http.StatusUnprocessableEntity
+	}
+	app.audit(r, "auth.session.witness.verify_pack.ui", verification.Status, session.Subject, "")
+	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification))
+}
+
 func (app *App) handleSessionWitnessVerifyCurrent(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	if !app.csrfAllowed(r, session) {
@@ -1300,6 +1332,35 @@ func (app *App) handleAuthSessionWitnessVerify(w http.ResponseWriter, r *http.Re
 		status = http.StatusUnprocessableEntity
 	}
 	app.audit(r, "auth.session.witness.verify", verification.Status, session.Subject, "")
+	writeJSON(w, status, map[string]any{
+		"verification":   verification,
+		"request_id":     requestID(r),
+		"value_returned": false,
+	})
+}
+
+func (app *App) handleAuthSessionWitnessVerifyPack(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "auth.session.witness.verify_pack", "denied", session.Subject, "csrf failed")
+		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		return
+	}
+	var req WitnessProofPackVerificationRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&req); err != nil {
+		app.audit(r, "auth.session.witness.verify_pack", "denied", session.Subject, "bad json")
+		writeJSONError(w, r, http.StatusBadRequest, "bad_json", "Request body must be JSON")
+		return
+	}
+	verification := VerifyAuthenticatedBrowserProofPack(req.ProofPack, time.Now().UTC())
+	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID(r))
+	verification.Receipt = &receipt
+	applyWitnessVerificationHeaders(w, receipt)
+	status := http.StatusOK
+	if !verification.Verified {
+		status = http.StatusUnprocessableEntity
+	}
+	app.audit(r, "auth.session.witness.verify_pack", verification.Status, session.Subject, "")
 	writeJSON(w, status, map[string]any{
 		"verification":   verification,
 		"request_id":     requestID(r),
@@ -6722,7 +6783,18 @@ func mustTemplates() *template.Template {
 	    </div>
 	  </div>
 	  <div class="status">
-	    <div class="status-head"><h2>Verify proof</h2><span class="pill ok">input not returned</span></div>
+	    <div class="status-head"><h2>Verify proof pack</h2><span class="pill ok">input not returned</span></div>
+	    <div class="panel-body stack">
+	      <form class="stack" method="post" action="/session-witness/verify-pack">
+	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+	        <label>Proof pack<textarea name="proof_pack" required spellcheck="false" autocomplete="off"></textarea></label>
+	        <button class="button primary" type="submit">Verify proof pack</button>
+	      </form>
+	      <p><span class="pill ok">proof_pack_returned=false</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+	    </div>
+	  </div>
+	  <div class="status">
+	    <div class="status-head"><h2>Verify proof line</h2><span class="pill ok">input not returned</span></div>
 	    <div class="panel-body stack">
 	      <form class="stack" method="post" action="/session-witness/verify">
 	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">

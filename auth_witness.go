@@ -88,6 +88,10 @@ type WitnessReceiptVerificationRequest struct {
 	Hash      string `json:"hash"`
 }
 
+type WitnessProofPackVerificationRequest struct {
+	ProofPack string `json:"proof_pack"`
+}
+
 type WitnessReceiptVerification struct {
 	Label               string                            `json:"label"`
 	Status              string                            `json:"status"`
@@ -365,6 +369,160 @@ func VerifyAuthenticatedBrowserCaptureReceipt(req WitnessReceiptVerificationRequ
 		verification.Summary = "The witness receipt has the right shape, but the hash does not match."
 	}
 	return verification
+}
+
+func VerifyAuthenticatedBrowserProofPack(proofPack string, now time.Time) WitnessReceiptVerification {
+	req, packChecks, packOK := WitnessReceiptVerificationRequestFromProofPack(proofPack)
+	verification := VerifyAuthenticatedBrowserCaptureReceipt(req, now)
+	verification.Checks = append(packChecks, verification.Checks...)
+	if !packOK {
+		verification.Status = "blocked"
+		verification.Summary = "The proof pack could not be verified."
+		verification.Verified = false
+	}
+	return verification
+}
+
+func WitnessReceiptVerificationRequestFromProofPack(proofPack string) (WitnessReceiptVerificationRequest, []WitnessReceiptVerificationCheck, bool) {
+	fields := map[string]string{}
+	checks := []WitnessReceiptVerificationCheck{}
+	ok := true
+	proofPack = strings.ReplaceAll(proofPack, "\r\n", "\n")
+	proofPack = strings.TrimSpace(proofPack)
+	if proofPack == "" {
+		return WitnessReceiptVerificationRequest{}, []WitnessReceiptVerificationCheck{
+			witnessVerificationCheck("proof_pack_input", "Proof pack", "missing", "Paste a Janus current-session proof pack.", false),
+		}, false
+	}
+	if len(proofPack) > 8192 {
+		return WitnessReceiptVerificationRequest{}, []WitnessReceiptVerificationCheck{
+			witnessVerificationCheck("proof_pack_size", "Proof pack size", "invalid", "Proof pack input is larger than the Janus verifier accepts.", false),
+		}, false
+	}
+
+	allowed := map[string]bool{
+		"handoff":                          true,
+		"signed_browser_capture":           true,
+		"proof_pack_contains_verification": true,
+		"current_session_verified":         true,
+		"schema":                           true,
+		"state":                            true,
+		"flow":                             true,
+		"signal":                           true,
+		"body_field":                       true,
+		"request_id":                       true,
+		"captured_at":                      true,
+		"fresh_until":                      true,
+		"freshness_seconds":                true,
+		"witness_proof_line":               true,
+		"witness_algorithm":                true,
+		"witness_hash":                     true,
+		"witness_hash_header":              true,
+		"witness_hash_body_field":          true,
+		"verification_status":              true,
+		"verification_verified":            true,
+		"verification_hash_match":          true,
+		"verification_fresh":               true,
+		"verification_algorithm":           true,
+		"verification_hash":                true,
+		"verification_hash_header":         true,
+		"verification_hash_body_field":     true,
+		"verification_receipt_line":        true,
+		"copy_safe":                        true,
+		"input_returned":                   true,
+		"request_body_returned":            true,
+		"identity_values_returned":         true,
+		"subject_returned":                 true,
+		"email_returned":                   true,
+		"name_returned":                    true,
+		"claim_values_returned":            true,
+		"group_values_returned":            true,
+		"token_returned":                   true,
+		"cookie_value_returned":            true,
+		"env_values_returned":              true,
+		"backend_path_returned":            true,
+		"connector_output_returned":        true,
+		"permit_payload_returned":          true,
+		"secret_value_returned":            true,
+		"value_returned":                   true,
+	}
+	lines := strings.Split(proofPack, "\n")
+	headerSeen := false
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		if !headerSeen {
+			headerSeen = true
+			if line != "janus_current_session_witness_proof" {
+				checks = append(checks, witnessVerificationCheck("proof_pack_header", "Proof pack", "invalid", "Expected a Janus current-session proof pack.", false))
+				ok = false
+			}
+			continue
+		}
+		key, value, found := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if !found || key == "" {
+			checks = append(checks, witnessVerificationCheck("proof_pack_shape", "Proof pack shape", "invalid", "Every proof-pack line must use key=value.", false))
+			ok = false
+			continue
+		}
+		if !allowed[key] {
+			checks = append(checks, witnessVerificationCheck("proof_pack_unexpected_field", "Proof pack field", safeDisplayState(key), "Only Janus proof-pack fields are accepted.", false))
+			ok = false
+			continue
+		}
+		if _, exists := fields[key]; exists {
+			checks = append(checks, witnessVerificationCheck("proof_pack_duplicate_field", "Proof pack duplicate", safeDisplayState(key), "Each proof-pack field may appear once.", false))
+			ok = false
+			continue
+		}
+		fields[key] = value
+	}
+	if !headerSeen {
+		checks = append(checks, witnessVerificationCheck("proof_pack_header", "Proof pack", "missing", "Expected a Janus current-session proof pack.", false))
+		ok = false
+	}
+
+	required := []string{"handoff", "signed_browser_capture", "proof_pack_contains_verification", "witness_proof_line", "witness_hash", "copy_safe", "input_returned", "request_body_returned", "value_returned"}
+	for _, key := range required {
+		if fields[key] == "" {
+			checks = append(checks, witnessVerificationCheck("proof_pack_missing_"+key, "Proof pack field", key, "The proof pack is missing a required copy-safe field.", false))
+			ok = false
+		}
+	}
+	for key, want := range map[string]string{
+		"handoff":                          "reviewer_ready",
+		"signed_browser_capture":           "true",
+		"proof_pack_contains_verification": "true",
+		"copy_safe":                        "true",
+		"input_returned":                   "false",
+		"request_body_returned":            "false",
+		"value_returned":                   "false",
+	} {
+		if fields[key] == "" {
+			continue
+		}
+		match := fields[key] == want
+		displayKey := strings.TrimPrefix(key, "proof_pack_")
+		checkKey := "proof_pack_" + displayKey
+		checks = append(checks, witnessVerificationCheck(checkKey, "Proof pack "+strings.ReplaceAll(displayKey, "_", " "), fields[key], "Expected "+key+"="+want+".", match))
+		ok = ok && match
+	}
+	if fields["witness_hash"] != "" {
+		hashOK := isLowerHexString(fields["witness_hash"], 64)
+		checks = append(checks, witnessVerificationCheck("proof_pack_witness_hash", "Proof pack hash", fields["witness_hash"], "Expected a 64-character lowercase witness hash.", hashOK))
+		ok = ok && hashOK
+	}
+	if ok {
+		checks = append(checks, witnessVerificationCheck("proof_pack_shape", "Proof pack shape", "valid", "The proof pack contains the expected Janus field set.", true))
+	}
+	return WitnessReceiptVerificationRequest{
+		ProofLine: fields["witness_proof_line"],
+		ProofHash: fields["witness_hash"],
+	}, checks, ok
 }
 
 func WitnessReceiptVerificationReceiptFor(verification WitnessReceiptVerification, requestID string) WitnessVerificationReceipt {
