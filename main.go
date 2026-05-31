@@ -1140,6 +1140,7 @@ func (app *App) handleSessionWitnessPage(w http.ResponseWriter, r *http.Request)
 		"Mode":                 app.cfg.ProductMode,
 		"AuthenticatedRole":    SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), witness.Ready),
 		"AuthenticatedBrowser": witness,
+		"LaunchChecklist":      ReviewerLaunchChecklistFor(witness, nil),
 		"Capture":              capture,
 		"CaptureHeaders":       AuthenticatedBrowserCaptureHeadersFor(witness, capture, reqID, receipt),
 		"CaptureLine":          receipt.Input,
@@ -1212,6 +1213,7 @@ func (app *App) sessionWitnessVerifyData(r *http.Request, session Session, verif
 		"Mode":                 app.cfg.ProductMode,
 		"AuthenticatedRole":    SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), witness.Ready),
 		"AuthenticatedBrowser": witness,
+		"LaunchChecklist":      ReviewerLaunchChecklistFor(witness, verification),
 		"Capture":              capture,
 		"Verification":         verification,
 		"RequestID":            requestID(r),
@@ -3603,6 +3605,7 @@ func mustTemplates() *template.Template {
     .reviewer-step p { font-size: 12px; line-height: 1.25; }
     .reviewer-step.ok strong { color: var(--accent); }
     .reviewer-step.info strong { color: var(--blue); }
+    .reviewer-step.warn strong { color: var(--amber); }
     .reviewer-step.action { align-content: center; justify-items: stretch; }
     .reviewer-step.action form { display: grid; }
     .reviewer-step.action .button { width: 100%; }
@@ -6838,6 +6841,15 @@ func mustTemplates() *template.Template {
 	        <strong>withheld</strong>
 	      </div>
 	    </div>
+	    <div class="reviewer-flow" aria-label="Reviewer launch checklist">
+	      {{ range .LaunchChecklist }}
+	      <div class="reviewer-step {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Detail }}</p>
+	      </div>
+	      {{ end }}
+	    </div>
 	  </div>
 	  <div class="status">
 	    <div class="status-head"><h2>Verify proof pack</h2><span class="pill ok">input not returned</span></div>
@@ -6981,6 +6993,15 @@ func mustTemplates() *template.Template {
 	        <strong>values withheld</strong>
 	        <p>proof_pack_contains_verification=true</p>
 	      </div>
+	    </div>
+	    <div class="reviewer-flow" aria-label="Reviewer launch checklist">
+	      {{ range .LaunchChecklist }}
+	      <div class="reviewer-step {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Detail }}</p>
+	      </div>
+	      {{ end }}
 	    </div>
 	    <div class="safety-ribbon" aria-label="Session witness posture">
 	      <div class="safety-chip {{ if eq .AuthenticatedBrowser.State "authenticated" }}ok{{ else if eq .AuthenticatedBrowser.State "local_smoke" }}info{{ else }}warn{{ end }}">

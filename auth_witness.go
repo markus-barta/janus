@@ -165,6 +165,15 @@ type WitnessReceiptVerificationCheck struct {
 	Tone   string `json:"tone"`
 }
 
+type ReviewerLaunchCheck struct {
+	Key           string `json:"key"`
+	Label         string `json:"label"`
+	State         string `json:"state"`
+	Detail        string `json:"detail"`
+	Tone          string `json:"tone"`
+	ValueReturned bool   `json:"value_returned"`
+}
+
 type AuthenticatedBrowserGate struct {
 	Key           string `json:"key"`
 	Label         string `json:"label"`
@@ -809,6 +818,62 @@ func WitnessEvidenceLineFor(evidence WitnessEvidenceReceipt) string {
 		" input_returned=false" +
 		" request_body_returned=false" +
 		" value_returned=false"
+}
+
+func ReviewerLaunchChecklistFor(witness AuthenticatedBrowserWitness, verification *WitnessReceiptVerification) []ReviewerLaunchCheck {
+	sessionTone := "ok"
+	if witness.State == "local_smoke" {
+		sessionTone = "info"
+	} else if !witness.Authenticated {
+		sessionTone = "warn"
+	}
+	proofState := "ready"
+	proofTone := "info"
+	proofDetail := "Current browser proof pack can be verified."
+	evidenceState := "pending"
+	evidenceTone := "info"
+	evidenceDetail := "Evidence receipt appears after verification."
+	if verification != nil {
+		proofState = safeDisplayState(verification.Status)
+		proofTone = "warn"
+		proofDetail = "Whole proof-pack checks need review."
+		if verification.Verified && witnessCheckPassed(verification.Checks, "proof_pack_shape") {
+			proofState = "verified"
+			proofTone = "ok"
+			proofDetail = "Whole proof-pack checks passed."
+		} else if verification.Verified {
+			proofState = "line_verified"
+			proofTone = "info"
+			proofDetail = "Witness line is verified; full-pack check is not present."
+		}
+		if verification.Evidence != nil {
+			evidenceState = "copy_safe"
+			evidenceTone = "ok"
+			evidenceDetail = "Reviewer evidence line is ready."
+			if !verification.Evidence.Verified {
+				evidenceState = safeDisplayState(verification.Evidence.Status)
+				evidenceTone = "warn"
+				evidenceDetail = "Evidence receipt records a blocked or stale check."
+			}
+		}
+	}
+	return []ReviewerLaunchCheck{
+		reviewerLaunchCheck("browser_session", "Browser session", witness.State, "Signed browser state; identity values withheld.", sessionTone),
+		reviewerLaunchCheck("current_proof_pack", "Current proof pack", proofState, proofDetail, proofTone),
+		reviewerLaunchCheck("evidence_receipt", "Evidence receipt", evidenceState, evidenceDetail, evidenceTone),
+		reviewerLaunchCheck("human_capture", "Human capture", "pending", "JANUS-195 real browser proof remains.", "info"),
+	}
+}
+
+func reviewerLaunchCheck(key, label, state, detail, tone string) ReviewerLaunchCheck {
+	return ReviewerLaunchCheck{
+		Key:           key,
+		Label:         label,
+		State:         safeDisplayState(state),
+		Detail:        detail,
+		Tone:          tone,
+		ValueReturned: false,
+	}
 }
 
 func witnessCheckPassed(checks []WitnessReceiptVerificationCheck, key string) bool {
