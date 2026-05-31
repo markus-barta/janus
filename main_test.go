@@ -890,6 +890,99 @@ func TestSessionWitnessEvidenceRecordWritesCopySafeAuditReceipt(t *testing.T) {
 	assertRouteResponseValueFree(t, "session witness evidence record", out)
 }
 
+func TestSessionWitnessEvidenceRecordVerifierMatchesAuditChain(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+	cookie := rr.Result().Cookies()[0]
+
+	recordForm := url.Values{}
+	recordForm.Set("csrf_token", app.csrfToken(session))
+	recordReq := httptest.NewRequest(http.MethodPost, "/session-witness/evidence/record", strings.NewReader(recordForm.Encode()))
+	recordReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recordReq.Header.Set("Origin", "https://vault.barta.cm")
+	recordReq.Header.Set("X-Request-Id", "session-witness-record-verify-123")
+	recordReq.AddCookie(cookie)
+	recordOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(recordOut, recordReq)
+	if recordOut.Code != http.StatusOK {
+		t.Fatalf("expected evidence record 200, got %d body=%s", recordOut.Code, recordOut.Body.String())
+	}
+	recordBody := recordOut.Body.String()
+	recent := app.store.RecentAudit(1)
+	if len(recent) != 1 || recent[0].EventHash == "" {
+		t.Fatalf("expected evidence record audit row, got %#v", recent)
+	}
+
+	verifyForm := url.Values{}
+	verifyForm.Set("csrf_token", app.csrfToken(session))
+	verifyForm.Set("evidence_record", recordBody)
+	verifyReq := httptest.NewRequest(http.MethodPost, "/session-witness/evidence/verify-record", strings.NewReader(verifyForm.Encode()))
+	verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	verifyReq.Header.Set("Origin", "https://vault.barta.cm")
+	verifyReq.Header.Set("X-Request-Id", "session-witness-record-verifier-123")
+	verifyReq.AddCookie(cookie)
+	verifyOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(verifyOut, verifyReq)
+	if verifyOut.Code != http.StatusOK {
+		t.Fatalf("expected evidence record verifier 200, got %d body=%s", verifyOut.Code, verifyOut.Body.String())
+	}
+	body := verifyOut.Body.String()
+	for _, want := range []string{"Evidence record verification", "verified", "The evidence record links to a persisted Janus audit row", "session-witness-record-verify-123", recent[0].EventHash, "sha256-audit-entry-v1", "audit_recorded=true", "audit_row_found=true", "audit_chain_verified=true", "hash_shape_valid=true", "chain_link_match=true", "value_boundary_valid=true", "action_match=true", "request_id_match=true", "severity_match=true", "reason_match=true", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("evidence record verifier should include %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"janus_current_session_evidence_record", "evidence_line=janus_signed_browser_evidence", "verification_hash_header=X-Janus-Witness-Verification-Hash", "subject-123", "person@example.test", "Person Name", "secret-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("evidence record verifier leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "session witness evidence record verifier", verifyOut)
+}
+
+func TestSessionWitnessEvidenceRecordVerifierRejectsBadInputWithoutEcho(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+	badRecord := strings.Join([]string{
+		"janus_current_session_evidence_record",
+		"record_status=secret-cookie-secret",
+		"audit_action=secret-cookie-secret",
+		"audit_event_hash=secret-cookie-secret",
+		"source_request_id=secret-cookie-secret",
+		"value_returned=true",
+	}, "\n")
+
+	form := url.Values{}
+	form.Set("csrf_token", app.csrfToken(session))
+	form.Set("evidence_record", badRecord)
+	req := httptest.NewRequest(http.MethodPost, "/session-witness/evidence/verify-record", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://vault.barta.cm")
+	req.Header.Set("X-Request-Id", "session-witness-record-bad-input")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected evidence record verifier 422, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Evidence record verification", "mismatch", "Audit hash shape", "audit_row_found=false", "hash_shape_valid=false", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("bad evidence record verifier should include %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"secret-cookie-secret", "janus_current_session_evidence_record", "value_returned=true", "subject-123", "person@example.test", "Person Name"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("bad evidence record verifier echoed forbidden value %q: %s", forbidden, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "session witness evidence record verifier bad input", out)
+}
+
 func TestSessionWitnessEvidenceRecordDoesNotClaimAuditWhenStoreMissing(t *testing.T) {
 	app := newTestApp(t)
 	app.store = nil
@@ -968,14 +1061,16 @@ func TestSessionWitnessPageRequiresAuthentication(t *testing.T) {
 
 func TestSessionWitnessEvidenceRecordRequiresAuthentication(t *testing.T) {
 	app := newTestApp(t)
-	req := httptest.NewRequest(http.MethodPost, "/session-witness/evidence/record", nil)
-	req.Header.Set("X-Request-Id", "session-witness-record-auth-required")
-	out := httptest.NewRecorder()
-	app.routes().ServeHTTP(out, req)
-	if out.Code != http.StatusFound || out.Header().Get("Location") != "/login" {
-		t.Fatalf("expected browser auth redirect, got %d location=%q body=%s", out.Code, out.Header().Get("Location"), out.Body.String())
+	for _, path := range []string{"/session-witness/evidence/record", "/session-witness/evidence/verify-record"} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("X-Request-Id", "session-witness-record-auth-required")
+		out := httptest.NewRecorder()
+		app.routes().ServeHTTP(out, req)
+		if out.Code != http.StatusFound || out.Header().Get("Location") != "/login" {
+			t.Fatalf("%s expected browser auth redirect, got %d location=%q body=%s", path, out.Code, out.Header().Get("Location"), out.Body.String())
+		}
+		assertRouteResponseValueFree(t, "session witness evidence record auth redirect", out)
 	}
-	assertRouteResponseValueFree(t, "session witness evidence record auth redirect", out)
 }
 
 func TestSessionWitnessVerifyCurrentUsesCurrentBrowserSession(t *testing.T) {
@@ -1202,7 +1297,7 @@ func TestSessionWitnessVerifierUIAndAPIAreValueFree(t *testing.T) {
 		t.Fatalf("expected verifier page 200, got %d body=%s", pageOut.Code, pageOut.Body.String())
 	}
 	pageBody := pageOut.Body.String()
-	for _, want := range []string{"Witness receipt verifier", "Verify proof pack", "Verify proof line", "Proof pack", "Evidence text", "Verify witness receipt", "proof_pack_returned=false", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Witness receipt verifier", "Verify evidence record", "Verify proof pack", "Verify proof line", "Proof pack", "Evidence record", "Evidence text", "Verify witness receipt", `action="/session-witness/evidence/verify-record"`, "proof_pack_returned=false", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
 		if !strings.Contains(pageBody, want) {
 			t.Fatalf("verifier page should include %q: %s", want, pageBody)
 		}
@@ -4845,6 +4940,7 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "session witness evidence text", method: http.MethodGet, path: "/session-witness/evidence.txt", status: http.StatusOK},
 		{name: "session witness evidence record", method: http.MethodPost, path: "/session-witness/evidence/record", status: http.StatusOK},
 		{name: "session witness verifier", method: http.MethodGet, path: "/session-witness/verify", status: http.StatusOK},
+		{name: "session witness evidence record verifier bad post", method: http.MethodPost, path: "/session-witness/evidence/verify-record", body: "evidence_record=secret-cookie-secret", contentType: "application/x-www-form-urlencoded", status: http.StatusUnprocessableEntity},
 		{name: "session witness verifier bad post", method: http.MethodPost, path: "/session-witness/verify", body: "proof_line=secret-cookie-secret&proof_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", contentType: "application/x-www-form-urlencoded", status: http.StatusUnprocessableEntity},
 		{name: "session witness proof pack verifier bad post", method: http.MethodPost, path: "/session-witness/verify-pack", body: "proof_pack=secret-cookie-secret", contentType: "application/x-www-form-urlencoded", status: http.StatusUnprocessableEntity},
 		{name: "session witness verify current", method: http.MethodPost, path: "/session-witness/verify-current", status: http.StatusOK},

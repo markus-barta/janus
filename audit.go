@@ -128,6 +128,21 @@ func (s *Store) RecentAudit(limit int) []AuditEntry {
 	return entries[len(entries)-limit:]
 }
 
+func (s *Store) AuditEntryByHash(hash string) (AuditEntry, bool) {
+	hash = strings.TrimSpace(hash)
+	if hash == "" {
+		return AuditEntry{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, entry := range s.readAuditLocked() {
+		if entry.EventHash == hash {
+			return entry, true
+		}
+	}
+	return AuditEntry{}, false
+}
+
 func (s *Store) AuditPosture() AuditPosture {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

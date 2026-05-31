@@ -535,6 +535,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /session-witness/proof.txt", app.withAuth(app.handleSessionWitnessProofText))
 	mux.HandleFunc("GET /session-witness/evidence.txt", app.withAuth(app.handleSessionWitnessEvidenceText))
 	mux.HandleFunc("POST /session-witness/evidence/record", app.withAuth(app.handleSessionWitnessEvidenceRecord))
+	mux.HandleFunc("POST /session-witness/evidence/verify-record", app.withAuth(app.handleSessionWitnessEvidenceRecordVerifyPost))
 	mux.HandleFunc("GET /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPage))
 	mux.HandleFunc("POST /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPost))
 	mux.HandleFunc("POST /session-witness/verify-pack", app.withAuth(app.handleSessionWitnessVerifyPackPost))
@@ -582,7 +583,7 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
-	case "/session-witness/verify-current", "/session-witness/verify-current-pack", "/session-witness/verify-pack", "/session-witness/evidence/record":
+	case "/session-witness/verify-current", "/session-witness/verify-current-pack", "/session-witness/verify-pack", "/session-witness/evidence/record", "/session-witness/evidence/verify-record":
 		return []string{http.MethodPost}, true
 	case "/logout", "/api/warden/resolve", "/api/evidence/attachments", "/api/permits", "/ui/warden/resolve", "/ui/evidence/attachments", "/ui/permits":
 		return []string{http.MethodPost}, true
@@ -1247,23 +1248,36 @@ func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-func (app *App) sessionWitnessVerifyData(r *http.Request, session Session, verification *WitnessReceiptVerification) map[string]any {
+func (app *App) sessionWitnessVerifyData(r *http.Request, session Session, verification *WitnessReceiptVerification, recordVerification *WitnessEvidenceRecordVerification) map[string]any {
 	witness, capture := app.authenticatedBrowserWitnessCapture(session)
 	return map[string]any{
-		"Title":                "Janus Witness Verifier",
-		"CSPNonce":             cspNonceFromContext(r.Context()),
-		"WitnessPage":          true,
-		"WitnessVerifyPage":    true,
-		"Session":              session,
-		"CSRF":                 app.csrfToken(session),
-		"Mode":                 app.cfg.ProductMode,
-		"AuthenticatedRole":    SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), witness.Ready),
-		"AuthenticatedBrowser": witness,
-		"LaunchChecklist":      ReviewerLaunchChecklistFor(witness, verification),
-		"Capture":              capture,
-		"Verification":         verification,
-		"RequestID":            requestID(r),
+		"Title":                      "Janus Witness Verifier",
+		"CSPNonce":                   cspNonceFromContext(r.Context()),
+		"WitnessPage":                true,
+		"WitnessVerifyPage":          true,
+		"Session":                    session,
+		"CSRF":                       app.csrfToken(session),
+		"Mode":                       app.cfg.ProductMode,
+		"AuthenticatedRole":          SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), witness.Ready),
+		"AuthenticatedBrowser":       witness,
+		"LaunchChecklist":            ReviewerLaunchChecklistFor(witness, verification),
+		"Capture":                    capture,
+		"Verification":               verification,
+		"EvidenceRecordVerification": recordVerification,
+		"RequestID":                  requestID(r),
 	}
+}
+
+func (app *App) verifySessionWitnessEvidenceRecordText(recordText string) WitnessEvidenceRecordVerification {
+	fields, _, _ := CurrentSessionEvidenceRecordFields(recordText)
+	var auditEntry AuditEntry
+	auditFound := false
+	auditPosture := AuditPosture{}
+	if app.store != nil {
+		auditPosture = app.store.AuditPosture()
+		auditEntry, auditFound = app.store.AuditEntryByHash(fields["audit_event_hash"])
+	}
+	return VerifyCurrentSessionEvidenceRecordText(recordText, auditPosture, auditEntry, auditFound)
 }
 
 func (app *App) currentSessionWitnessVerification(r *http.Request, session Session) WitnessReceiptVerification {
@@ -1295,7 +1309,7 @@ func (app *App) currentSessionWitnessProofPackVerification(r *http.Request, sess
 func (app *App) handleSessionWitnessVerifyPage(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	app.audit(r, "auth.session.witness.verify.page", "allowed", session.Subject, "")
-	renderTemplate(w, app.templates, "session_witness_verify", app.sessionWitnessVerifyData(r, session, nil))
+	renderTemplate(w, app.templates, "session_witness_verify", app.sessionWitnessVerifyData(r, session, nil, nil))
 }
 
 func (app *App) handleSessionWitnessVerifyPost(w http.ResponseWriter, r *http.Request) {
@@ -1305,7 +1319,7 @@ func (app *App) handleSessionWitnessVerifyPost(w http.ResponseWriter, r *http.Re
 		verification := VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{}, time.Now().UTC())
 		verification.Status = "blocked"
 		verification.Summary = "CSRF token required."
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification))
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification, nil))
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -1313,7 +1327,7 @@ func (app *App) handleSessionWitnessVerifyPost(w http.ResponseWriter, r *http.Re
 		verification := VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{}, time.Now().UTC())
 		verification.Status = "blocked"
 		verification.Summary = "Verification form could not be read."
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusBadRequest, app.sessionWitnessVerifyData(r, session, &verification))
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusBadRequest, app.sessionWitnessVerifyData(r, session, &verification, nil))
 		return
 	}
 	req := WitnessReceiptVerificationRequest{
@@ -1327,7 +1341,7 @@ func (app *App) handleSessionWitnessVerifyPost(w http.ResponseWriter, r *http.Re
 		status = http.StatusUnprocessableEntity
 	}
 	app.audit(r, "auth.session.witness.verify.ui", verification.Status, session.Subject, "")
-	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification))
+	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification, nil))
 }
 
 func (app *App) handleSessionWitnessVerifyPackPost(w http.ResponseWriter, r *http.Request) {
@@ -1337,7 +1351,7 @@ func (app *App) handleSessionWitnessVerifyPackPost(w http.ResponseWriter, r *htt
 		verification := VerifyAuthenticatedBrowserProofPack("", time.Now().UTC())
 		verification.Status = "blocked"
 		verification.Summary = "CSRF token required."
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification))
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification, nil))
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -1345,7 +1359,7 @@ func (app *App) handleSessionWitnessVerifyPackPost(w http.ResponseWriter, r *htt
 		verification := VerifyAuthenticatedBrowserProofPack("", time.Now().UTC())
 		verification.Status = "blocked"
 		verification.Summary = "Verification form could not be read."
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusBadRequest, app.sessionWitnessVerifyData(r, session, &verification))
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusBadRequest, app.sessionWitnessVerifyData(r, session, &verification, nil))
 		return
 	}
 	verification := VerifyAuthenticatedBrowserProofPack(r.Form.Get("proof_pack"), time.Now().UTC())
@@ -1355,7 +1369,44 @@ func (app *App) handleSessionWitnessVerifyPackPost(w http.ResponseWriter, r *htt
 		status = http.StatusUnprocessableEntity
 	}
 	app.audit(r, "auth.session.witness.verify_pack.ui", verification.Status, session.Subject, "")
-	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification))
+	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification, nil))
+}
+
+func (app *App) handleSessionWitnessEvidenceRecordVerifyPost(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "auth.session.witness.evidence.verify_record", "denied", session.Subject, "csrf failed")
+		recordVerification := WitnessEvidenceRecordVerification{
+			Label:               "Evidence record verification",
+			Status:              "blocked",
+			Summary:             "CSRF token required.",
+			InputReturned:       false,
+			RequestBodyReturned: false,
+			ValueReturned:       false,
+		}
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, nil, &recordVerification))
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		app.audit(r, "auth.session.witness.evidence.verify_record", "denied", session.Subject, "bad form")
+		recordVerification := WitnessEvidenceRecordVerification{
+			Label:               "Evidence record verification",
+			Status:              "blocked",
+			Summary:             "Evidence record form could not be read.",
+			InputReturned:       false,
+			RequestBodyReturned: false,
+			ValueReturned:       false,
+		}
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusBadRequest, app.sessionWitnessVerifyData(r, session, nil, &recordVerification))
+		return
+	}
+	recordVerification := app.verifySessionWitnessEvidenceRecordText(r.Form.Get("evidence_record"))
+	status := http.StatusOK
+	if !recordVerification.Verified {
+		status = http.StatusUnprocessableEntity
+	}
+	app.audit(r, "auth.session.witness.evidence.verify_record", recordVerification.Status, session.Subject, "input_not_returned")
+	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, nil, &recordVerification))
 }
 
 func (app *App) handleSessionWitnessVerifyCurrent(w http.ResponseWriter, r *http.Request) {
@@ -1365,7 +1416,7 @@ func (app *App) handleSessionWitnessVerifyCurrent(w http.ResponseWriter, r *http
 		verification := VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{}, time.Now().UTC())
 		verification.Status = "blocked"
 		verification.Summary = "CSRF token required."
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification))
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification, nil))
 		return
 	}
 	verification := app.currentSessionWitnessVerification(r, session)
@@ -1375,7 +1426,7 @@ func (app *App) handleSessionWitnessVerifyCurrent(w http.ResponseWriter, r *http
 		status = http.StatusUnprocessableEntity
 	}
 	app.audit(r, "auth.session.witness.verify.current", verification.Status, session.Subject, "")
-	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification))
+	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification, nil))
 }
 
 func (app *App) handleSessionWitnessVerifyCurrentPack(w http.ResponseWriter, r *http.Request) {
@@ -1385,7 +1436,7 @@ func (app *App) handleSessionWitnessVerifyCurrentPack(w http.ResponseWriter, r *
 		verification := VerifyAuthenticatedBrowserProofPack("", time.Now().UTC())
 		verification.Status = "blocked"
 		verification.Summary = "CSRF token required."
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification))
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification, nil))
 		return
 	}
 	verification := app.currentSessionWitnessProofPackVerification(r, session)
@@ -1395,7 +1446,7 @@ func (app *App) handleSessionWitnessVerifyCurrentPack(w http.ResponseWriter, r *
 		status = http.StatusUnprocessableEntity
 	}
 	app.audit(r, "auth.session.witness.verify.current_pack", verification.Status, session.Subject, "")
-	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification))
+	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification, nil))
 }
 
 func (app *App) handleAuthSessionWitnessVerify(w http.ResponseWriter, r *http.Request) {
@@ -6900,6 +6951,17 @@ func mustTemplates() *template.Template {
 	    </div>
 	  </div>
 	  <div class="status">
+	    <div class="status-head"><h2>Verify evidence record</h2><span class="pill ok">input not returned</span></div>
+	    <div class="panel-body stack">
+	      <form class="stack" method="post" action="/session-witness/evidence/verify-record">
+	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+	        <label>Evidence record<textarea name="evidence_record" required spellcheck="false" autocomplete="off"></textarea></label>
+	        <button class="button primary" type="submit">Verify evidence record</button>
+	      </form>
+	      <p><span class="pill ok">input_returned=false</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+	    </div>
+	  </div>
+	  <div class="status">
 	    <div class="status-head"><h2>Verify proof pack</h2><span class="pill ok">input not returned</span></div>
 	    <div class="panel-body stack">
 	      <form class="stack" method="post" action="/session-witness/verify-pack">
@@ -6923,6 +6985,44 @@ func mustTemplates() *template.Template {
 	    </div>
 	  </div>
 	</section>
+	{{ if .EvidenceRecordVerification }}
+	<section class="panel" style="margin-bottom:16px" id="evidence-record-verification">
+	  <div class="panel-head">
+	    <h2>Evidence record verification</h2>
+	    <span class="pill {{ if .EvidenceRecordVerification.Verified }}ok{{ else }}warn{{ end }}">{{ .EvidenceRecordVerification.Status }}</span>
+	  </div>
+	  <div class="panel-body stack">
+	    <p>{{ .EvidenceRecordVerification.Summary }}</p>
+	    <div class="receipt-proof" aria-label="Normalized evidence record verification fields">
+	      <span>Record request<strong>{{ .EvidenceRecordVerification.RecordRequestID }}</strong></span>
+	      <span>Audit hash<strong class="mono">{{ .EvidenceRecordVerification.AuditEventHash }}</strong></span>
+	      <span>Previous hash<strong class="mono">{{ .EvidenceRecordVerification.AuditPrevHash }}</strong></span>
+	      <span>Chain link<strong>{{ .EvidenceRecordVerification.AuditChainLink }}</strong></span>
+	      <span>Severity<strong>{{ .EvidenceRecordVerification.AuditSeverity }}</strong></span>
+	      <span>Algorithm<strong>{{ .EvidenceRecordVerification.AuditHashAlgorithm }}</strong></span>
+	    </div>
+	    <p><span class="pill {{ if .EvidenceRecordVerification.AuditRecorded }}ok{{ else }}warn{{ end }}">audit_recorded={{ .EvidenceRecordVerification.AuditRecorded }}</span> <span class="pill {{ if .EvidenceRecordVerification.AuditRowFound }}ok{{ else }}warn{{ end }}">audit_row_found={{ .EvidenceRecordVerification.AuditRowFound }}</span> <span class="pill {{ if .EvidenceRecordVerification.AuditChainVerified }}ok{{ else }}warn{{ end }}">audit_chain_verified={{ .EvidenceRecordVerification.AuditChainVerified }}</span> <span class="pill {{ if .EvidenceRecordVerification.HashShapeValid }}ok{{ else }}warn{{ end }}">hash_shape_valid={{ .EvidenceRecordVerification.HashShapeValid }}</span> <span class="pill {{ if .EvidenceRecordVerification.ChainLinkMatch }}ok{{ else }}warn{{ end }}">chain_link_match={{ .EvidenceRecordVerification.ChainLinkMatch }}</span> <span class="pill {{ if .EvidenceRecordVerification.ValueBoundaryValid }}ok{{ else }}warn{{ end }}">value_boundary_valid={{ .EvidenceRecordVerification.ValueBoundaryValid }}</span></p>
+	    <p><span class="pill {{ if .EvidenceRecordVerification.ActionMatch }}ok{{ else }}warn{{ end }}">action_match={{ .EvidenceRecordVerification.ActionMatch }}</span> <span class="pill {{ if .EvidenceRecordVerification.RequestIDMatch }}ok{{ else }}warn{{ end }}">request_id_match={{ .EvidenceRecordVerification.RequestIDMatch }}</span> <span class="pill {{ if .EvidenceRecordVerification.SeverityMatch }}ok{{ else }}warn{{ end }}">severity_match={{ .EvidenceRecordVerification.SeverityMatch }}</span> <span class="pill {{ if .EvidenceRecordVerification.ReasonMatch }}ok{{ else }}warn{{ end }}">reason_match={{ .EvidenceRecordVerification.ReasonMatch }}</span> <span class="pill ok">input_returned={{ .EvidenceRecordVerification.InputReturned }}</span> <span class="pill ok">request_body_returned={{ .EvidenceRecordVerification.RequestBodyReturned }}</span> <span class="pill ok">value_returned={{ .EvidenceRecordVerification.ValueReturned }}</span></p>
+	  </div>
+	</section>
+	<section class="panel" style="margin-bottom:16px" id="evidence-record-checks">
+	  <div class="panel-head">
+	    <h2>Evidence record checks</h2>
+	    <span class="pill info">{{ len .EvidenceRecordVerification.Checks }} checks</span>
+	  </div>
+	  <div class="panel-body">
+	    <div class="witness-grid" aria-label="Evidence record verification checks">
+	      {{ range .EvidenceRecordVerification.Checks }}
+	      <div class="witness-card {{ .Tone }}">
+	        <span>{{ .Label }}</span>
+	        <strong>{{ .State }}</strong>
+	        <p>{{ .Detail }}</p>
+	      </div>
+	      {{ end }}
+	    </div>
+	  </div>
+	</section>
+	{{ end }}
 	{{ if .Verification }}
 	<section class="panel" style="margin-bottom:16px" id="verification-result">
 	  <div class="panel-head">

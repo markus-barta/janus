@@ -174,6 +174,33 @@ type ReviewerLaunchCheck struct {
 	ValueReturned bool   `json:"value_returned"`
 }
 
+type WitnessEvidenceRecordVerification struct {
+	Label               string                            `json:"label"`
+	Status              string                            `json:"status"`
+	Summary             string                            `json:"summary"`
+	RecordRequestID     string                            `json:"record_request_id"`
+	AuditEventHash      string                            `json:"audit_event_hash"`
+	AuditPrevHash       string                            `json:"audit_prev_hash"`
+	AuditChainLink      string                            `json:"audit_chain_link"`
+	AuditSeverity       string                            `json:"audit_severity"`
+	AuditHashAlgorithm  string                            `json:"audit_hash_algorithm"`
+	Verified            bool                              `json:"verified"`
+	AuditRecorded       bool                              `json:"audit_recorded"`
+	AuditRowFound       bool                              `json:"audit_row_found"`
+	AuditChainVerified  bool                              `json:"audit_chain_verified"`
+	HashShapeValid      bool                              `json:"hash_shape_valid"`
+	ChainLinkMatch      bool                              `json:"chain_link_match"`
+	ActionMatch         bool                              `json:"action_match"`
+	RequestIDMatch      bool                              `json:"request_id_match"`
+	SeverityMatch       bool                              `json:"severity_match"`
+	ReasonMatch         bool                              `json:"reason_match"`
+	ValueBoundaryValid  bool                              `json:"value_boundary_valid"`
+	Checks              []WitnessReceiptVerificationCheck `json:"checks"`
+	InputReturned       bool                              `json:"input_returned"`
+	RequestBodyReturned bool                              `json:"request_body_returned"`
+	ValueReturned       bool                              `json:"value_returned"`
+}
+
 type AuthenticatedBrowserGate struct {
 	Key           string `json:"key"`
 	Label         string `json:"label"`
@@ -902,6 +929,237 @@ func auditChainLinkField(chainLink string) string {
 		return "missing"
 	}
 	return chainLink
+}
+
+func CurrentSessionEvidenceRecordFields(recordText string) (map[string]string, []WitnessReceiptVerificationCheck, bool) {
+	fields := map[string]string{}
+	checks := []WitnessReceiptVerificationCheck{}
+	ok := true
+	recordText = strings.ReplaceAll(recordText, "\r\n", "\n")
+	recordText = strings.TrimSpace(recordText)
+	if recordText == "" {
+		return fields, []WitnessReceiptVerificationCheck{
+			witnessVerificationCheck("record_input", "Evidence record", "missing", "Paste a Janus current-session evidence record.", false),
+		}, false
+	}
+	if len(recordText) > 12000 {
+		return fields, []WitnessReceiptVerificationCheck{
+			witnessVerificationCheck("record_size", "Evidence record size", "invalid", "Evidence record input is larger than Janus accepts.", false),
+		}, false
+	}
+	allowed := map[string]bool{
+		"record_status":                   true,
+		"record_request_id":               true,
+		"audit_action":                    true,
+		"audit_recorded":                  true,
+		"audit_hash_algorithm":            true,
+		"audit_event_hash":                true,
+		"audit_prev_hash":                 true,
+		"audit_chain_link":                true,
+		"audit_severity":                  true,
+		"evidence_line":                   true,
+		"evidence_status":                 true,
+		"source_request_id":               true,
+		"captured_at":                     true,
+		"fresh_until":                     true,
+		"freshness_seconds":               true,
+		"hash_match":                      true,
+		"fresh":                           true,
+		"verified":                        true,
+		"proof_pack_verified":             true,
+		"verification_hash":               true,
+		"verification_hash_header":        true,
+		"verification_hash_body_field":    true,
+		"launch_check_browser_session":    true,
+		"launch_check_current_proof_pack": true,
+		"launch_check_evidence_receipt":   true,
+		"launch_check_human_capture":      true,
+		"copy_safe":                       true,
+		"input_returned":                  true,
+		"request_body_returned":           true,
+		"proof_pack_returned":             true,
+		"identity_values_returned":        true,
+		"subject_returned":                true,
+		"email_returned":                  true,
+		"name_returned":                   true,
+		"claim_values_returned":           true,
+		"group_values_returned":           true,
+		"token_returned":                  true,
+		"cookie_value_returned":           true,
+		"env_values_returned":             true,
+		"backend_path_returned":           true,
+		"connector_output_returned":       true,
+		"permit_payload_returned":         true,
+		"secret_value_returned":           true,
+		"value_returned":                  true,
+	}
+	lines := strings.Split(recordText, "\n")
+	headerSeen := false
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		if !headerSeen {
+			headerSeen = true
+			if line != "janus_current_session_evidence_record" {
+				checks = append(checks, witnessVerificationCheck("record_header", "Evidence record", "invalid", "Expected a Janus current-session evidence record.", false))
+				ok = false
+			}
+			continue
+		}
+		key, value, found := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if !found || key == "" {
+			checks = append(checks, witnessVerificationCheck("record_shape", "Evidence record shape", "invalid", "Every evidence-record line must use key=value.", false))
+			ok = false
+			continue
+		}
+		if !allowed[key] {
+			checks = append(checks, witnessVerificationCheck("record_unexpected_field", "Evidence record field", "rejected", "Only Janus evidence-record fields are accepted.", false))
+			ok = false
+			continue
+		}
+		if _, exists := fields[key]; exists {
+			checks = append(checks, witnessVerificationCheck("record_duplicate_field", "Evidence record duplicate", "duplicate", "Each evidence-record field may appear once.", false))
+			ok = false
+			continue
+		}
+		fields[key] = value
+	}
+	if !headerSeen {
+		checks = append(checks, witnessVerificationCheck("record_header", "Evidence record", "missing", "Expected a Janus current-session evidence record.", false))
+		ok = false
+	}
+	return fields, checks, ok
+}
+
+func VerifyCurrentSessionEvidenceRecordText(recordText string, auditPosture AuditPosture, auditEntry AuditEntry, auditFound bool) WitnessEvidenceRecordVerification {
+	fields, checks, parseOK := CurrentSessionEvidenceRecordFields(recordText)
+	verification := WitnessEvidenceRecordVerification{
+		Label:               "Evidence record verification",
+		Status:              "blocked",
+		Summary:             "The evidence record could not be verified.",
+		RecordRequestID:     "withheld",
+		AuditEventHash:      "withheld",
+		AuditPrevHash:       "withheld",
+		AuditChainLink:      "not_checked",
+		AuditSeverity:       "withheld",
+		AuditHashAlgorithm:  "withheld",
+		Checks:              checks,
+		InputReturned:       false,
+		RequestBodyReturned: false,
+		ValueReturned:       false,
+	}
+	verification.Checks = append(verification.Checks, witnessVerificationCheck("record_parse", "Record parse", proofPackMatchState(parseOK), "Evidence record must use the expected Janus shape.", parseOK))
+	recordStatusOK := fields["record_status"] == "recorded"
+	auditRecordedOK := fields["audit_recorded"] == "true"
+	algorithmOK := fields["audit_hash_algorithm"] == "sha256-audit-entry-v1"
+	hashOK := isLowerHexString(fields["audit_event_hash"], 64)
+	prevHashOK := fields["audit_prev_hash"] == "genesis" || isLowerHexString(fields["audit_prev_hash"], 64)
+	chainLinkOK := fields["audit_chain_link"] != "" && fields["audit_chain_link"] == fields["audit_prev_hash"]+"-"+fields["audit_event_hash"]
+	actionOK := fields["audit_action"] == "auth.session.witness.evidence.record"
+	requestIDOK := fields["record_request_id"] != "" && fields["record_request_id"] == fields["source_request_id"]
+	evidenceOK := fields["evidence_status"] == "verified" && fields["hash_match"] == "true" && fields["fresh"] == "true" && fields["verified"] == "true" && fields["proof_pack_verified"] == "true"
+	boundaryOK := evidenceRecordValueBoundaryOK(fields)
+	verification.HashShapeValid = hashOK && prevHashOK
+	verification.ChainLinkMatch = chainLinkOK
+	verification.AuditChainLink = proofPackMatchState(chainLinkOK)
+	verification.AuditRecorded = auditRecordedOK
+	verification.AuditRowFound = auditFound
+	verification.AuditChainVerified = auditPosture.ChainVerified
+	verification.ValueBoundaryValid = boundaryOK
+	verification.Checks = append(verification.Checks,
+		witnessVerificationCheck("record_status", "Record status", proofPackMatchState(recordStatusOK), "Expected record_status=recorded.", recordStatusOK),
+		witnessVerificationCheck("record_audit_recorded", "Audit recorded", proofPackMatchState(auditRecordedOK), "Expected audit_recorded=true.", auditRecordedOK),
+		witnessVerificationCheck("record_algorithm", "Audit hash algorithm", proofPackMatchState(algorithmOK), "Expected sha256-audit-entry-v1.", algorithmOK),
+		witnessVerificationCheck("record_hash_shape", "Audit hash shape", proofPackMatchState(hashOK), "Audit event hash must be 64 lowercase hex characters.", hashOK),
+		witnessVerificationCheck("record_prev_hash_shape", "Previous hash shape", proofPackMatchState(prevHashOK), "Previous hash must be genesis or 64 lowercase hex characters.", prevHashOK),
+		witnessVerificationCheck("record_chain_link", "Audit chain link", proofPackMatchState(chainLinkOK), "Chain link must join previous and event hash.", chainLinkOK),
+		witnessVerificationCheck("record_action", "Audit action", proofPackMatchState(actionOK), "Expected the Janus evidence-record action.", actionOK),
+		witnessVerificationCheck("record_request", "Record request", proofPackMatchState(requestIDOK), "Record request id must match the evidence source request id.", requestIDOK),
+		witnessVerificationCheck("record_evidence", "Evidence state", proofPackMatchState(evidenceOK), "Evidence state must be verified, fresh, hash-matched, and proof-pack verified.", evidenceOK),
+		witnessVerificationCheck("record_value_boundary", "Value boundary", proofPackMatchState(boundaryOK), "All value-bearing fields must be marked returned=false.", boundaryOK),
+	)
+	entryHashOK := auditFound && auditEntry.EventHash == fields["audit_event_hash"]
+	entryPrevOK := auditFound && ((auditEntry.PrevHash == "" && fields["audit_prev_hash"] == "genesis") || auditEntry.PrevHash == fields["audit_prev_hash"])
+	entryActionOK := auditFound && auditEntry.Action == "auth.session.witness.evidence.record"
+	entryRequestOK := auditFound && auditEntry.RequestID == fields["record_request_id"]
+	entrySeverityOK := auditFound && auditEntry.Severity == fields["audit_severity"] && auditEntry.Severity == "notice"
+	entryReasonOK := auditFound && auditEntry.Reason == "copy_safe_evidence_recorded"
+	verification.ActionMatch = entryActionOK
+	verification.RequestIDMatch = entryRequestOK
+	verification.SeverityMatch = entrySeverityOK
+	verification.ReasonMatch = entryReasonOK
+	if algorithmOK {
+		verification.AuditHashAlgorithm = fields["audit_hash_algorithm"]
+	}
+	if entryHashOK {
+		verification.AuditEventHash = auditEntry.EventHash
+	}
+	if entryPrevOK {
+		verification.AuditPrevHash = fields["audit_prev_hash"]
+	}
+	if entryRequestOK {
+		verification.RecordRequestID = safeDisplayState(auditEntry.RequestID)
+	}
+	if entrySeverityOK {
+		verification.AuditSeverity = auditEntry.Severity
+	}
+	verification.Checks = append(verification.Checks,
+		witnessVerificationCheck("record_audit_row_found", "Audit row", proofPackMatchState(auditFound), "Audit row must exist locally for the supplied event hash.", auditFound),
+		witnessVerificationCheck("record_audit_hash_match", "Audit row hash", proofPackMatchState(entryHashOK), "Stored audit row hash must match the receipt.", entryHashOK),
+		witnessVerificationCheck("record_audit_prev_match", "Audit previous hash", proofPackMatchState(entryPrevOK), "Stored previous hash must match the receipt.", entryPrevOK),
+		witnessVerificationCheck("record_audit_action_match", "Audit action match", proofPackMatchState(entryActionOK), "Stored audit action must match the evidence-record action.", entryActionOK),
+		witnessVerificationCheck("record_audit_request_match", "Audit request match", proofPackMatchState(entryRequestOK), "Stored request id must match the receipt.", entryRequestOK),
+		witnessVerificationCheck("record_audit_severity_match", "Audit severity match", proofPackMatchState(entrySeverityOK), "Stored audit severity must be notice and match the receipt.", entrySeverityOK),
+		witnessVerificationCheck("record_audit_reason_match", "Audit reason match", proofPackMatchState(entryReasonOK), "Stored audit reason must show copy-safe evidence was recorded.", entryReasonOK),
+		witnessVerificationCheck("record_audit_chain_verified", "Audit chain verified", proofPackMatchState(auditPosture.ChainVerified), "Local audit chain must verify.", auditPosture.ChainVerified),
+	)
+	verification.Verified = parseOK && recordStatusOK && auditRecordedOK && algorithmOK && hashOK && prevHashOK && chainLinkOK && actionOK && requestIDOK && evidenceOK && boundaryOK && entryHashOK && entryPrevOK && entryActionOK && entryRequestOK && entrySeverityOK && entryReasonOK && auditPosture.ChainVerified
+	if verification.Verified {
+		verification.Status = "verified"
+		verification.Summary = "The evidence record links to a persisted Janus audit row and the local audit chain verifies."
+	} else if parseOK {
+		verification.Status = "mismatch"
+		verification.Summary = "The evidence record shape was readable, but one or more audit-chain checks failed."
+	}
+	return verification
+}
+
+func evidenceRecordValueBoundaryOK(fields map[string]string) bool {
+	for _, key := range []string{
+		"copy_safe",
+	} {
+		if fields[key] != "true" {
+			return false
+		}
+	}
+	for _, key := range []string{
+		"input_returned",
+		"request_body_returned",
+		"proof_pack_returned",
+		"identity_values_returned",
+		"subject_returned",
+		"email_returned",
+		"name_returned",
+		"claim_values_returned",
+		"group_values_returned",
+		"token_returned",
+		"cookie_value_returned",
+		"env_values_returned",
+		"backend_path_returned",
+		"connector_output_returned",
+		"permit_payload_returned",
+		"secret_value_returned",
+		"value_returned",
+	} {
+		if fields[key] != "false" {
+			return false
+		}
+	}
+	return true
 }
 
 func reviewerLaunchChecklistState(checklist []ReviewerLaunchCheck, key string) string {
