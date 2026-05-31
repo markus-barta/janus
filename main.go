@@ -4678,11 +4678,12 @@ func mustTemplates() *template.Template {
         <strong>{{ .CommandCenter.AvailableActions }} safe</strong>
       </div>
     </div>
-	    <div class="toolbar">
-	      {{ if .CanExportEvidence }}<a class="button primary" href="/api/evidence">Evidence JSON</a>{{ end }}
-	      <a class="button quiet" href="/session-witness">Session proof</a>
-	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
-	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
+		    <div class="toolbar">
+		      {{ if .CanExportEvidence }}<a class="button primary" href="/api/evidence">Evidence JSON</a>{{ end }}
+		      <a class="button primary" href="/auth/smoke">Auth smoke</a>
+		      <a class="button quiet" href="/session-witness">Session proof</a>
+		      <a class="button quiet" href="/session-witness.txt">Proof text</a>
+		      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
 	      <a class="button quiet" href="/api/posture">Posture JSON</a>
 	      <a class="button quiet" href="/api/warden/descriptors">Descriptors JSON</a>
 	    </div>
