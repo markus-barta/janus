@@ -1445,7 +1445,16 @@ func TestSessionWitnessPageRequiresAuthentication(t *testing.T) {
 		req.Header.Set("X-Request-Id", "session-witness-auth-required")
 		out := httptest.NewRecorder()
 		app.routes().ServeHTTP(out, req)
-		if out.Code != http.StatusFound || out.Header().Get("Location") != "/login" {
+		wantLocation := "/login"
+		switch path {
+		case "/auth/smoke":
+			wantLocation = "/login?next=%2Fauth%2Fsmoke"
+		case "/session-witness":
+			wantLocation = "/login?next=%2Fsession-witness"
+		case "/session-witness/verify":
+			wantLocation = "/login?next=%2Fsession-witness%2Fverify"
+		}
+		if out.Code != http.StatusFound || out.Header().Get("Location") != wantLocation {
 			t.Fatalf("%s expected browser auth redirect, got %d location=%q body=%s", path, out.Code, out.Header().Get("Location"), out.Body.String())
 		}
 		assertRouteResponseValueFree(t, "session witness auth redirect", out)
@@ -1927,6 +1936,14 @@ func TestConfigUsesHostPrefixedPKCECookieForHTTPS(t *testing.T) {
 	}
 }
 
+func TestConfigUsesHostPrefixedReturnCookieForHTTPS(t *testing.T) {
+	app := newTestApp(t)
+
+	if app.cfg.ReturnCookieName() != hostReturnCookie {
+		t.Fatalf("secure deployments should use host-prefixed return cookie, got %s", app.cfg.ReturnCookieName())
+	}
+}
+
 func TestLoginRedirectBindsOIDCStateNonceAndPKCE(t *testing.T) {
 	app := newTestApp(t)
 	app.oauth = testOAuthConfig()
@@ -1976,6 +1993,128 @@ func TestLoginRedirectBindsOIDCStateNonceAndPKCE(t *testing.T) {
 	}
 }
 
+func TestAuthRequiredRedirectCarriesSafeReturnPath(t *testing.T) {
+	app := newTestApp(t)
+	app.oauth = testOAuthConfig()
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/smoke", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusFound {
+		t.Fatalf("expected redirect, got %d body=%s", out.Code, out.Body.String())
+	}
+	if got := out.Header().Get("Location"); got != "/login?next=%2Fauth%2Fsmoke" {
+		t.Fatalf("auth smoke redirect should carry safe return path, got %q", got)
+	}
+	assertRouteResponseValueFree(t, "auth smoke auth-required return redirect", out)
+}
+
+func TestLoginRedirectStoresSafeReturnPathWithoutLeakingToProvider(t *testing.T) {
+	app := newTestApp(t)
+	app.oauth = testOAuthConfig()
+
+	req := httptest.NewRequest(http.MethodGet, "/login?next=%2Fauth%2Fsmoke", nil)
+	out := httptest.NewRecorder()
+	app.handleLogin(out, req)
+	if out.Code != http.StatusFound {
+		t.Fatalf("expected redirect, got %d body=%s", out.Code, out.Body.String())
+	}
+
+	returnCookie := cookieByName(t, out.Result().Cookies(), hostReturnCookie)
+	if returnCookie.Value == "" || !returnCookie.Secure || !returnCookie.HttpOnly || returnCookie.SameSite != http.SameSiteLaxMode || returnCookie.MaxAge != 300 {
+		t.Fatalf("return cookie should be short-lived, secure, httponly, lax: %#v", returnCookie)
+	}
+	if strings.Contains(returnCookie.Value, "/auth/smoke") {
+		t.Fatalf("return cookie should be signed/encoded, got %#v", returnCookie)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/oidc/callback", nil)
+	req.AddCookie(returnCookie)
+	if got, ok := app.readOIDCLoginReturnPath(req); !ok || got != "/auth/smoke" {
+		t.Fatalf("return cookie should recover /auth/smoke, got %q ok=%v", got, ok)
+	}
+
+	redirectURL, err := url.Parse(out.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"next", "return", "redirect_uri_return"} {
+		if got := redirectURL.Query().Get(forbidden); got != "" {
+			t.Fatalf("provider redirect must not receive %s=%q", forbidden, got)
+		}
+	}
+	if strings.Contains(out.Header().Get("Location"), "/auth/smoke") {
+		t.Fatalf("provider redirect should not expose return path: %s", out.Header().Get("Location"))
+	}
+}
+
+func TestSafeLoginReturnPathRejectsOpenRedirectAndUnsafeRoutes(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+		ok   bool
+	}{
+		{raw: "/auth/smoke", want: "/auth/smoke", ok: true},
+		{raw: "/auth/smoke?ref=secret-cookie-secret", want: "/auth/smoke", ok: true},
+		{raw: "/session-witness", want: "/session-witness", ok: true},
+		{raw: "/session-witness/verify", want: "/session-witness/verify", ok: true},
+		{raw: "/", want: "/", ok: true},
+		{raw: "https://evil.example/auth/smoke", want: "/", ok: false},
+		{raw: "//evil.example/auth/smoke", want: "/", ok: false},
+		{raw: "/\\evil.example", want: "/", ok: false},
+		{raw: "/oidc/callback", want: "/", ok: false},
+		{raw: "/login", want: "/", ok: false},
+		{raw: "/auth/reset", want: "/", ok: false},
+		{raw: "/api/posture", want: "/", ok: false},
+		{raw: "/session-witness.txt", want: "/", ok: false},
+		{raw: "/session-witness/evidence/record", want: "/", ok: false},
+		{raw: "/logout", want: "/", ok: false},
+		{raw: "?next=/auth/smoke", want: "/", ok: false},
+		{raw: "/auth/smoke\r\nLocation:https://evil.example", want: "/", ok: false},
+	}
+	for _, tc := range cases {
+		got, ok := safeLoginReturnPath(tc.raw)
+		if got != tc.want || ok != tc.ok {
+			t.Fatalf("safeLoginReturnPath(%q) got %q ok=%v, want %q ok=%v", tc.raw, got, ok, tc.want, tc.ok)
+		}
+		if strings.Contains(got, "secret-cookie-secret") || strings.Contains(got, "evil.example") {
+			t.Fatalf("safe return path retained unsafe value from %q: %q", tc.raw, got)
+		}
+	}
+}
+
+func TestLoginRedirectClearsUnsafeReturnCookie(t *testing.T) {
+	app := newTestApp(t)
+	app.oauth = testOAuthConfig()
+	rr := httptest.NewRecorder()
+	app.writeOIDCLoginReturnPath(rr, "/auth/smoke")
+	staleReturn := cookieByName(t, rr.Result().Cookies(), hostReturnCookie)
+
+	req := httptest.NewRequest(http.MethodGet, "/login?next=https%3A%2F%2Fevil.example%2Fauth%2Fsmoke", nil)
+	req.AddCookie(staleReturn)
+	out := httptest.NewRecorder()
+	app.handleLogin(out, req)
+	if out.Code != http.StatusFound {
+		t.Fatalf("expected redirect, got %d body=%s", out.Code, out.Body.String())
+	}
+	if strings.Contains(out.Header().Get("Location"), "evil.example") {
+		t.Fatalf("login redirect leaked unsafe return path: %s", out.Header().Get("Location"))
+	}
+	cleared := map[string]bool{}
+	for _, cookie := range out.Result().Cookies() {
+		if cookie.MaxAge < 0 {
+			cleared[cookie.Name] = true
+			if cookie.Value != "" {
+				t.Fatalf("return clear cookie should not carry a value: %#v", cookie)
+			}
+		}
+	}
+	for _, name := range []string{hostReturnCookie, returnCookie} {
+		if !cleared[name] {
+			t.Fatalf("unsafe next should clear %s; cleared=%#v cookies=%#v", name, cleared, out.Result().Cookies())
+		}
+	}
+}
+
 func TestLoginRedirectUsesNoStoreHeaders(t *testing.T) {
 	app := newTestApp(t)
 	app.oauth = testOAuthConfig()
@@ -2003,7 +2142,7 @@ func TestAuthResetClearsAllJanusCookiesAndRendersValueFreeRecovery(t *testing.T)
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/reset", nil)
 	req.Header.Set("X-Request-Id", "auth-reset-123")
-	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostAttemptCookie, attemptCookie} {
+	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie} {
 		req.AddCookie(&http.Cookie{Name: name, Value: name + "-secret-cookie-secret"})
 	}
 	out := httptest.NewRecorder()
@@ -2031,7 +2170,7 @@ func TestAuthResetClearsAllJanusCookiesAndRendersValueFreeRecovery(t *testing.T)
 			t.Fatalf("auth reset clearing cookie should not carry a value: %#v", cookie)
 		}
 	}
-	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostAttemptCookie, attemptCookie} {
+	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie} {
 		if !cleared[name] {
 			t.Fatalf("expected auth reset to clear %s; cleared=%#v cookies=%#v", name, cleared, out.Result().Cookies())
 		}
@@ -2133,7 +2272,7 @@ func TestCallbackBadStateRendersValueFreeAuthError(t *testing.T) {
 			cleared[cookie.Name] = true
 		}
 	}
-	for _, name := range []string{hostStateCookie, hostNonceCookie, hostPKCECookie, stateCookie, nonceCookie, pkceCookie} {
+	for _, name := range []string{hostStateCookie, hostNonceCookie, hostPKCECookie, hostReturnCookie, stateCookie, nonceCookie, pkceCookie, returnCookie} {
 		if !cleared[name] {
 			t.Fatalf("expected callback failure to clear %s; cleared=%#v cookies=%#v", name, cleared, out.Result().Cookies())
 		}

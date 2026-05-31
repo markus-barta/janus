@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -34,6 +35,8 @@ const (
 	hostNonceCookie   = "__Host-janus_oidc_nonce"
 	pkceCookie        = "janus_oidc_pkce"
 	hostPKCECookie    = "__Host-janus_oidc_pkce"
+	returnCookie      = "janus_oidc_return"
+	hostReturnCookie  = "__Host-janus_oidc_return"
 	attemptCookie     = "janus_oidc_attempt"
 	hostAttemptCookie = "__Host-janus_oidc_attempt"
 	defaultSessionTTL = 12 * time.Hour
@@ -92,6 +95,13 @@ func (c Config) PKCECookieName() string {
 		return hostPKCECookie
 	}
 	return pkceCookie
+}
+
+func (c Config) ReturnCookieName() string {
+	if c.SecureCookies() {
+		return hostReturnCookie
+	}
+	return returnCookie
 }
 
 func (c Config) AttemptCookieName() string {
@@ -759,7 +769,7 @@ func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 				writeJSONError(w, r, http.StatusUnauthorized, "auth_required", "Authentication required")
 				return
 			}
-			http.Redirect(w, r, "/login", http.StatusFound)
+			http.Redirect(w, r, loginRedirectTarget(r), http.StatusFound)
 			return
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, session)))
@@ -2201,6 +2211,15 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		app.handleAuthReset(w, r)
 		return
 	}
+	if rawNext := r.URL.Query().Get("next"); rawNext != "" {
+		if returnPath, ok := safeLoginReturnPath(rawNext); ok {
+			app.writeOIDCLoginReturnPath(w, returnPath)
+		} else {
+			app.clearOIDCLoginReturnCookie(w)
+		}
+	} else if _, err := firstCookie(r, app.cfg.ReturnCookieName(), returnCookie); err == nil {
+		app.clearOIDCLoginReturnCookie(w)
+	}
 	attempt := app.bumpOIDCLoginAttempt(w, r)
 	if attempt.Count > maxLoginAttempts {
 		app.clearOIDCLoginCookies(w)
@@ -2360,10 +2379,14 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Expiry:  time.Now().UTC().Add(defaultSessionTTL),
 	}
 	app.writeSession(w, session)
+	returnPath, ok := app.readOIDCLoginReturnPath(r)
+	if !ok {
+		returnPath = "/"
+	}
 	app.clearOIDCLoginCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
 	app.audit(r, "auth.login.complete", "allowed", session.Subject, "")
-	http.Redirect(w, r, "/", http.StatusFound)
+	http.Redirect(w, r, returnPath, http.StatusFound)
 }
 
 func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -2481,6 +2504,79 @@ func (app *App) readSession(r *http.Request) (Session, bool) {
 	return session, true
 }
 
+func loginRedirectTarget(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return "/login"
+	}
+	returnPath, ok := safeLoginReturnPath(r.URL.RequestURI())
+	if !ok || returnPath == "/" {
+		return "/login"
+	}
+	return "/login?next=" + url.QueryEscape(returnPath)
+}
+
+func safeLoginReturnPath(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.ContainsAny(raw, "\r\n\t") || strings.HasPrefix(raw, "//") {
+		return "/", false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.IsAbs() || u.Host != "" {
+		return "/", false
+	}
+	if u.Path == "" {
+		return "/", false
+	}
+	cleanPath := path.Clean("/" + strings.TrimPrefix(u.Path, "/"))
+	if !loginReturnPathAllowed(cleanPath) {
+		return "/", false
+	}
+	return cleanPath, true
+}
+
+func loginReturnPathAllowed(returnPath string) bool {
+	switch returnPath {
+	case "/", "/auth/smoke", "/session-witness", "/session-witness/verify":
+		return true
+	default:
+		return false
+	}
+}
+
+func (app *App) writeOIDCLoginReturnPath(w http.ResponseWriter, returnPath string) {
+	returnPath, ok := safeLoginReturnPath(returnPath)
+	if !ok {
+		app.clearOIDCLoginReturnCookie(w)
+		return
+	}
+	payload := base64.RawURLEncoding.EncodeToString([]byte(returnPath))
+	http.SetCookie(w, &http.Cookie{
+		Name:     app.cfg.ReturnCookieName(),
+		Value:    payload + "." + sign(app.cfg.CookieKey, payload),
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   app.cfg.SecureCookies(),
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   300,
+	})
+}
+
+func (app *App) readOIDCLoginReturnPath(r *http.Request) (string, bool) {
+	cookie, err := firstCookie(r, app.cfg.ReturnCookieName(), returnCookie)
+	if err != nil || cookie.Value == "" {
+		return "/", false
+	}
+	parts := strings.Split(cookie.Value, ".")
+	if len(parts) != 2 || !verify(app.cfg.CookieKey, parts[0], parts[1]) {
+		return "/", false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return "/", false
+	}
+	return safeLoginReturnPath(string(raw))
+}
+
 func (app *App) sessionPosture(session Session) SessionPosture {
 	posture := SessionPosture{
 		AbsoluteTTLSeconds: int(defaultSessionTTL.Seconds()),
@@ -2555,6 +2651,7 @@ func (app *App) clearOIDCLoginCookies(w http.ResponseWriter) {
 	if app.cfg.PKCECookieName() != pkceCookie {
 		app.clearCookie(w, pkceCookie)
 	}
+	app.clearOIDCLoginReturnCookie(w)
 }
 
 func (app *App) clearSessionCookies(w http.ResponseWriter) {
@@ -2568,6 +2665,13 @@ func (app *App) clearAllAuthCookies(w http.ResponseWriter) {
 	app.clearSessionCookies(w)
 	app.clearOIDCLoginCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
+}
+
+func (app *App) clearOIDCLoginReturnCookie(w http.ResponseWriter) {
+	app.clearCookie(w, app.cfg.ReturnCookieName())
+	if app.cfg.ReturnCookieName() != returnCookie {
+		app.clearCookie(w, returnCookie)
+	}
 }
 
 func (app *App) bumpOIDCLoginAttempt(w http.ResponseWriter, r *http.Request) OIDCLoginAttempt {
