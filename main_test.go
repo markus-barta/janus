@@ -1463,6 +1463,39 @@ func TestSessionWitnessBrowserSmokeReceiptHTMLCSRFRedirectsToFreshSmokePage(t *t
 	assertRouteResponseValueFree(t, "session witness browser smoke receipt same-origin navigation csrf refresh", out)
 }
 
+func TestSessionWitnessBrowserSmokeReceiptHTMLAcceptsValidTokenWhenOriginIsOdd(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	form := url.Values{}
+	form.Set("csrf_token", app.csrfToken(session))
+	req := httptest.NewRequest(http.MethodPost, "/session-witness/evidence/browser-smoke-receipt", strings.NewReader(form.Encode()))
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "null")
+	req.Header.Set("X-Request-Id", "browser-smoke-origin-null-123")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected origin-odd valid-token smoke receipt 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Browser smoke receipt", "Smoke verified", "csrf_source=form_token_origin_fallback", "request_id=browser-smoke-origin-null-123", "record_request_id=browser-smoke-origin-null-123", "record_returned=false", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("origin-odd valid-token receipt should include %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"janus_authenticated_browser_smoke", "janus_current_session_evidence_record", "witness_proof_line=", "proof_line=", "proof_pack_input=", "subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("origin-odd valid-token receipt leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "session witness browser smoke receipt origin odd valid token", out)
+}
+
 func TestSessionWitnessBrowserSmokeReceiptRejectsCrossSiteNavigationWithoutCSRF(t *testing.T) {
 	app := newTestApp(t)
 	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}

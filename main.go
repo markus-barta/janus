@@ -1325,7 +1325,9 @@ func (app *App) handleSessionWitnessBrowserSmokeReceiptText(w http.ResponseWrite
 	session := currentSession(r.Context())
 	csrfSource := "form_token"
 	if !app.csrfAllowed(r, session) {
-		if app.browserSmokeReceiptCSRFRefreshAllowed(r) {
+		if app.validCSRFToken(r, session) {
+			csrfSource = "form_token_origin_fallback"
+		} else if app.browserSmokeReceiptCSRFRefreshAllowed(r) {
 			app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", "denied", session.Subject, "csrf refresh redirect")
 			http.Redirect(w, r, "/auth/smoke?retry=csrf", http.StatusSeeOther)
 			return
@@ -2818,11 +2820,15 @@ func (app *App) csrfToken(session Session) string {
 }
 
 func (app *App) verifyCSRF(r *http.Request, session Session) bool {
-	want := app.csrfToken(session)
-	if want == "" {
+	if !app.sameOriginMutation(r) {
 		return false
 	}
-	if !app.sameOriginMutation(r) {
+	return app.validCSRFToken(r, session)
+}
+
+func (app *App) validCSRFToken(r *http.Request, session Session) bool {
+	want := app.csrfToken(session)
+	if want == "" {
 		return false
 	}
 	got := r.Header.Get("X-CSRF-Token")
@@ -3841,9 +3847,6 @@ func wantsHTMLResponse(r *http.Request) bool {
 
 func (app *App) browserSmokeReceiptCSRFRefreshAllowed(r *http.Request) bool {
 	if r.Method != http.MethodPost || r.Form.Get("format") == "text" {
-		return false
-	}
-	if !app.sameOriginMutation(r) {
 		return false
 	}
 	accept := strings.ToLower(r.Header.Get("Accept"))
