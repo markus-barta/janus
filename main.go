@@ -3551,6 +3551,7 @@ func mustTemplates() *template.Template {
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
     form { margin: 0; }
     @media (max-width: 860px) {
+      section { scroll-margin-top: 154px; }
       .bar { grid-template-columns: 1fr auto; padding: 12px 0; }
       .nav { grid-column: 1 / -1; justify-content: flex-start; overflow-x: auto; padding-bottom: 2px; }
       .account { grid-column: 1 / -1; justify-self: stretch; max-width: none; }
@@ -3576,6 +3577,7 @@ func mustTemplates() *template.Template {
       h1 { font-size: 32px; }
     }
     @media (max-width: 560px) {
+      section { scroll-margin-top: 232px; }
       .bar, main { width: calc(100% - 22px); max-width: 1180px; }
       main { padding-top: 14px; }
       .intro { padding: 16px; gap: 12px; }
@@ -5525,8 +5527,54 @@ func mustTemplates() *template.Template {
       <h2>Request metadata handle</h2>
       <span class="pill ok">value-free</span>
     </div>
-    <div class="panel-body">
+    <div class="panel-body stack">
       {{ if .CanOperate }}
+      <div class="witness-grid" aria-label="Request handle witness">
+        <div class="witness-card ok">
+          <span>Intent boundary</span>
+          <strong>metadata handle</strong>
+          <p>This action creates a short-lived handle for the selected descriptor and never asks for a secret value.</p>
+        </div>
+        <div class="witness-card ok">
+          <span>Role and readiness</span>
+          <strong>checked first</strong>
+          <p>Operator role, CSRF, and readiness must pass before Janus issues anything.</p>
+        </div>
+        <div class="witness-card ok">
+          <span>No connector</span>
+          <strong>no execution</strong>
+          <p>The request does not run a connector, call a backend secret path, or return command output.</p>
+        </div>
+        <div class="witness-card info">
+          <span>Metadata receipt</span>
+          <strong>audit linked</strong>
+          <p>A successful request returns a copy-safe action receipt with request id, receipt id, and receipt hash.</p>
+        </div>
+      </div>
+      <div class="receipt" aria-label="Request metadata handle boundary">
+        <div>
+          <strong>Before you issue</strong>
+          <p>Form sends descriptor id and reason only. Result returns a handle id, descriptor ref, expiry, and receipt proof.</p>
+        </div>
+        <span class="pill ok">values withheld</span>
+      </div>
+      <details class="evidence-flags">
+        <summary>Request handle evidence flags</summary>
+        <div class="flag-cloud" aria-label="Request handle value-free evidence flags">
+          <span class="pill ok">will_create=metadata_handle</span>
+          <span class="pill ok">operator_role_required=true</span>
+          <span class="pill ok">csrf_required=true</span>
+          <span class="pill ok">readiness_required=true</span>
+          <span class="pill ok">audit_receipt_returned=true</span>
+          <span class="pill ok">connector_execution=false</span>
+          <span class="pill ok">secret_value_returned=false</span>
+          <span class="pill ok">backend_path_returned=false</span>
+          <span class="pill ok">source_path_returned=false</span>
+          <span class="pill ok">request_body_returned=false</span>
+          <span class="pill ok">env_returned=false</span>
+          <span class="pill ok">value_returned=false</span>
+        </div>
+      </details>
       <form class="flow" method="post" action="/ui/warden/resolve">
         <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
         <label>Descriptor
@@ -5537,7 +5585,7 @@ func mustTemplates() *template.Template {
         <label>Reason
           <input name="reason" maxlength="160" required placeholder="maintenance, audit, rotation">
         </label>
-        <button class="primary" type="submit">Issue handle</button>
+        <button class="primary" type="submit">Issue metadata handle</button>
       </form>
       {{ else }}
       <div class="stack">
