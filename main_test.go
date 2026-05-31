@@ -1374,6 +1374,99 @@ func TestSessionWitnessBrowserSmokeReceiptTextIsCopySafe(t *testing.T) {
 	assertRouteResponseValueFree(t, "session witness browser smoke receipt", out)
 }
 
+func TestSessionWitnessBrowserSmokeReceiptHTMLIsValueFree(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	form := url.Values{}
+	form.Set("csrf_token", app.csrfToken(session))
+	req := httptest.NewRequest(http.MethodPost, "/session-witness/evidence/browser-smoke-receipt", strings.NewReader(form.Encode()))
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://vault.barta.cm")
+	req.Header.Set("X-Request-Id", "browser-smoke-html-123")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected browser smoke receipt HTML 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	for header, want := range map[string]string{
+		"Content-Type":  "text/html; charset=utf-8",
+		"Cache-Control": "no-store",
+		"X-Janus-Evidence-Record-Verification-Schema":          "janus-evidence-record-verification-v1",
+		"X-Janus-Evidence-Record-Verification-Algorithm":       "sha256-evidence-record-verification-v1",
+		"X-Janus-Evidence-Record-Verification-Hash-Body-Field": "verification.receipt.hash",
+		"X-Janus-Value-Returned":                               "false",
+		"X-Content-Type-Options":                               "nosniff",
+		"Cross-Origin-Resource-Policy":                         "same-origin",
+	} {
+		if got := out.Header().Get(header); got != want {
+			t.Fatalf("browser smoke receipt HTML should set %s=%q, got %q", header, want, got)
+		}
+	}
+	if got := out.Header().Get("Content-Disposition"); got != "" {
+		t.Fatalf("browser smoke receipt HTML should not force a text download, got %q", got)
+	}
+	assertStyleNonceMatchesCSP(t, out)
+	receiptHash := out.Header().Get("X-Janus-Evidence-Record-Verification-Hash")
+	if len(receiptHash) != 64 || !isLowerHex(receiptHash) {
+		t.Fatalf("browser smoke receipt HTML should set receipt hash header, got %q", receiptHash)
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Browser smoke receipt", "Smoke verified", "Receipt facts", "Text artifact", "Auth smoke", "Verifier", "Full witness", "Dashboard", "browser_smoke_receipt_html=true", "copy_safe=true", "record_returned=false", "smoke_status=verified", "verified=true", "request_id=browser-smoke-html-123", "record_request_id=browser-smoke-html-123", "verification_hash=" + receiptHash, "verification_hash_header=X-Janus-Evidence-Record-Verification-Hash", "verification_hash_body_field=verification.receipt.hash", "sha256-evidence-record-verification-v1", "audit_recorded=true", "audit_row_found=true", "audit_chain_verified=true", "hash_shape_valid=true", "chain_link_match=true", "action_match=true", "request_id_match=true", "severity_match=true", "reason_match=true", "value_boundary_valid=true", "input_returned=false", "request_body_returned=false", "proof_pack_returned=false", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "env_values_returned=false", "backend_path_returned=false", "connector_output_returned=false", "permit_payload_returned=false", "secret_value_returned=false", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("browser smoke receipt HTML should include %q: %s", want, body)
+		}
+	}
+	if !strings.Contains(body, `action="/session-witness/evidence/browser-smoke-receipt"`) || !strings.Contains(body, `name="format" value="text"`) {
+		t.Fatalf("browser smoke receipt HTML should include text artifact form: %s", body)
+	}
+	for _, forbidden := range []string{"janus_authenticated_browser_smoke", "janus_current_session_evidence_record", "evidence_line=janus_signed_browser_evidence", "witness_proof_line=", "proof_line=", "proof_pack_input=", "schema=janus-evidence-record-verification-v1 status=", "subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("browser smoke receipt HTML leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "session witness browser smoke receipt HTML", out)
+}
+
+func TestSessionWitnessBrowserSmokeReceiptTextFormatOverridesHTMLAccept(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	form := url.Values{}
+	form.Set("csrf_token", app.csrfToken(session))
+	form.Set("format", "text")
+	req := httptest.NewRequest(http.MethodPost, "/session-witness/evidence/browser-smoke-receipt", strings.NewReader(form.Encode()))
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://vault.barta.cm")
+	req.Header.Set("X-Request-Id", "browser-smoke-text-format-123")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected browser smoke text override 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	if got := out.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Fatalf("text override should keep text artifact content type, got %q", got)
+	}
+	body := out.Body.String()
+	for _, want := range []string{"janus_authenticated_browser_smoke", "smoke_status=verified", "request_id=browser-smoke-text-format-123", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("text override should include %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "<!doctype html>") || strings.Contains(body, "Browser smoke receipt</h1>") {
+		t.Fatalf("text override should not render HTML: %s", body)
+	}
+	assertRouteResponseValueFree(t, "session witness browser smoke receipt text override", out)
+}
+
 func TestSessionWitnessEvidenceRecordDoesNotClaimAuditWhenStoreMissing(t *testing.T) {
 	app := newTestApp(t)
 	app.store = nil

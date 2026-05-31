@@ -1326,6 +1326,7 @@ func (app *App) handleSessionWitnessBrowserSmokeReceiptText(w http.ResponseWrite
 		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
 		return
 	}
+	_ = r.ParseForm()
 	result, recordVerification := app.verifyCurrentSessionEvidenceRecord(r, session)
 	recordVerification = attachEvidenceRecordVerificationReceipt(w, recordVerification, requestID(r))
 	status := result.Status
@@ -1336,6 +1337,22 @@ func (app *App) handleSessionWitnessBrowserSmokeReceiptText(w http.ResponseWrite
 		app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", "allowed", session.Subject, "copy_safe_browser_smoke_receipt")
 	} else {
 		app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", recordVerification.Status, session.Subject, "copy_safe_browser_smoke_receipt_blocked")
+	}
+	if wantsHTMLResponse(r) && r.Form.Get("format") != "text" {
+		witness, _ := app.authenticatedBrowserWitnessCapture(session)
+		renderTemplateStatus(w, app.templates, "browser_smoke_receipt", status, map[string]any{
+			"Title":                "Janus Browser Smoke Receipt",
+			"CSPNonce":             cspNonceFromContext(r.Context()),
+			"WitnessPage":          true,
+			"Session":              session,
+			"CSRF":                 app.csrfToken(session),
+			"Mode":                 app.cfg.ProductMode,
+			"AuthenticatedRole":    SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), witness.Ready),
+			"AuthenticatedBrowser": witness,
+			"Verification":         recordVerification,
+			"RequestID":            requestID(r),
+		})
+		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Disposition", `inline; filename="janus-authenticated-browser-smoke.txt"`)
@@ -3805,6 +3822,11 @@ func renderTemplateStatus(w http.ResponseWriter, templates *template.Template, n
 	if err := templates.ExecuteTemplate(w, name, data); err != nil {
 		http.Error(w, "render failed", http.StatusInternalServerError)
 	}
+}
+
+func wantsHTMLResponse(r *http.Request) bool {
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	return strings.Contains(accept, "text/html") && !strings.Contains(accept, "text/plain")
 }
 
 func mustTemplates() *template.Template {
@@ -7355,8 +7377,155 @@ func mustTemplates() *template.Template {
     </div>
   </div>
 	</section>
-	{{ template "base_bottom" . }}
-	{{- end }}
+		{{ template "base_bottom" . }}
+		{{- end }}
+
+		{{ define "browser_smoke_receipt" -}}
+		{{ template "base_top" . }}
+		<section class="overview" id="command-center">
+		  <div class="intro">
+		    <div class="intro-copy">
+		      <div class="eyebrow">{{ .Mode }} / browser smoke receipt / copy-safe</div>
+		      <h1>Browser smoke receipt</h1>
+		      <p>The signed browser action completed. Keep the request id and verification hash; Janus did not return identity, cookie, token, request body, proof body, backend, env, or secret values.</p>
+		    </div>
+		    <div class="toolbar">
+		      <a class="button primary" href="/auth/smoke">Auth smoke</a>
+		      <a class="button quiet" href="/session-witness/verify">Verifier</a>
+		      <a class="button quiet" href="/session-witness">Full witness</a>
+		      <a class="button quiet" href="/">Dashboard</a>
+		      <form method="post" action="/session-witness/evidence/browser-smoke-receipt">
+		        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+		        <input type="hidden" name="format" value="text">
+		        <button class="button quiet" type="submit">Text artifact</button>
+		      </form>
+		    </div>
+		    <div class="evidence-workstation" aria-label="Browser smoke receipt path">
+		      <div class="workstation-head">
+		        <span>Proof result</span>
+		        <strong>{{ if .Verification.Verified }}Smoke verified{{ else }}Review needed{{ end }}</strong>
+		        <p>Receipt fields below are safe to retain and compare with the audit chain. Raw evidence records and proof bodies are not rendered.</p>
+		      </div>
+		      <div class="handoff-path">
+		        <div class="handoff-step {{ if .Verification.Verified }}ok{{ else }}warn{{ end }}">
+		          <b>1</b>
+		          <strong>{{ .Verification.Status }}</strong>
+		          <p>The browser action produced a normalized verification receipt.</p>
+		          <a class="button quiet" href="/auth/smoke">Run again</a>
+		        </div>
+		        <div class="handoff-step {{ if .Verification.AuditRowFound }}ok{{ else }}warn{{ end }}">
+		          <b>2</b>
+		          <strong>Audit row</strong>
+		          <p>Janus checked the stored audit row, chain link, action, severity, reason, and request id.</p>
+		          <a class="button quiet" href="/session-witness/verify">Open verifier</a>
+		        </div>
+		        <div class="handoff-step ok">
+		          <b>3</b>
+		          <strong>Retain</strong>
+		          <p>Keep the request id and hash. Leave cookies, tokens, identity values, and secret material out.</p>
+		          <a class="button quiet" href="/">Dashboard</a>
+		        </div>
+		      </div>
+		      <p><span class="pill ok">browser_smoke_receipt_html=true</span> <span class="pill ok">copy_safe=true</span> <span class="pill ok">record_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+		    </div>
+		    <div class="safety-ribbon" aria-label="Browser smoke receipt posture">
+		      <div class="safety-chip {{ if .Verification.Verified }}ok{{ else }}warn{{ end }}">
+		        <span>Smoke</span>
+		        <strong>{{ .Verification.Status }}</strong>
+		      </div>
+		      <div class="safety-chip {{ if .Verification.AuditRowFound }}ok{{ else }}warn{{ end }}">
+		        <span>Audit row</span>
+		        <strong>{{ .Verification.AuditRowFound }}</strong>
+		      </div>
+		      <div class="safety-chip {{ if .Verification.ChainLinkMatch }}ok{{ else }}warn{{ end }}">
+		        <span>Chain</span>
+		        <strong>{{ .Verification.ChainLinkMatch }}</strong>
+		      </div>
+		      <div class="safety-chip ok">
+		        <span>Values</span>
+		        <strong>withheld</strong>
+		      </div>
+		    </div>
+		  </div>
+		  <div class="status">
+		    <div class="status-head"><h2>Receipt facts</h2><span class="pill {{ if .Verification.Verified }}ok{{ else }}warn{{ end }}">{{ .Verification.Status }}</span></div>
+		    <div class="panel-body stack">
+		      <div class="receipt-proof" aria-label="Copy-safe browser smoke receipt fields">
+		        {{ if .Verification.Receipt }}
+		        <span>Request<strong>{{ .Verification.Receipt.RequestID }}</strong></span>
+		        <span>Verification hash<strong class="mono">{{ .Verification.Receipt.Hash }}</strong></span>
+		        <span>Hash header<strong>{{ .Verification.Receipt.HashHeader }}</strong></span>
+		        <span>Body field<strong>{{ .Verification.Receipt.BodyField }}</strong></span>
+		        <span>Receipt algorithm<strong>{{ .Verification.Receipt.Algorithm }}</strong></span>
+		        {{ end }}
+		        <span>Record request<strong>{{ .Verification.RecordRequestID }}</strong></span>
+		        <span>Audit hash<strong class="mono">{{ .Verification.AuditEventHash }}</strong></span>
+		        <span>Previous hash<strong class="mono">{{ .Verification.AuditPrevHash }}</strong></span>
+		        <span>Chain link<strong>{{ .Verification.AuditChainLink }}</strong></span>
+		        <span>Audit severity<strong>{{ .Verification.AuditSeverity }}</strong></span>
+		        <span>Audit algorithm<strong>{{ .Verification.AuditHashAlgorithm }}</strong></span>
+		      </div>
+		      <div class="receipt-copy" aria-label="Browser smoke copy-safe retention fields">
+		        <label>Status<input readonly value="smoke_status={{ .Verification.Status }}"></label>
+		        <label>Verified<input readonly value="verified={{ .Verification.Verified }}"></label>
+		        {{ if .Verification.Receipt }}
+		        <label>Request<input readonly value="request_id={{ .Verification.Receipt.RequestID }}"></label>
+		        <label>Hash<input readonly value="verification_hash={{ .Verification.Receipt.Hash }}"></label>
+		        {{ end }}
+		      </div>
+		      <div class="witness-grid" aria-label="Browser smoke receipt checks">
+		        {{ range .Verification.Checks }}
+		        <div class="witness-card {{ .Tone }}">
+		          <span>{{ .Label }}</span>
+		          <strong>{{ .State }}</strong>
+		          <p>{{ .Detail }}</p>
+		        </div>
+		        {{ end }}
+		      </div>
+		      <details class="evidence-flags">
+		        <summary>Browser smoke receipt evidence flags</summary>
+		        <div class="flag-cloud" aria-label="Browser smoke receipt value-free flags">
+		          <span class="pill {{ if .Verification.Verified }}ok{{ else }}warn{{ end }}">verified={{ .Verification.Verified }}</span>
+		          <span class="pill ok">record_request_id={{ .Verification.RecordRequestID }}</span>
+		          <span class="pill {{ if .Verification.AuditRecorded }}ok{{ else }}warn{{ end }}">audit_recorded={{ .Verification.AuditRecorded }}</span>
+		          <span class="pill {{ if .Verification.AuditRowFound }}ok{{ else }}warn{{ end }}">audit_row_found={{ .Verification.AuditRowFound }}</span>
+		          <span class="pill {{ if .Verification.AuditChainVerified }}ok{{ else }}warn{{ end }}">audit_chain_verified={{ .Verification.AuditChainVerified }}</span>
+		          <span class="pill {{ if .Verification.HashShapeValid }}ok{{ else }}warn{{ end }}">hash_shape_valid={{ .Verification.HashShapeValid }}</span>
+		          <span class="pill {{ if .Verification.ChainLinkMatch }}ok{{ else }}warn{{ end }}">chain_link_match={{ .Verification.ChainLinkMatch }}</span>
+		          <span class="pill {{ if .Verification.ActionMatch }}ok{{ else }}warn{{ end }}">action_match={{ .Verification.ActionMatch }}</span>
+		          <span class="pill {{ if .Verification.RequestIDMatch }}ok{{ else }}warn{{ end }}">request_id_match={{ .Verification.RequestIDMatch }}</span>
+		          <span class="pill {{ if .Verification.SeverityMatch }}ok{{ else }}warn{{ end }}">severity_match={{ .Verification.SeverityMatch }}</span>
+		          <span class="pill {{ if .Verification.ReasonMatch }}ok{{ else }}warn{{ end }}">reason_match={{ .Verification.ReasonMatch }}</span>
+		          <span class="pill {{ if .Verification.ValueBoundaryValid }}ok{{ else }}warn{{ end }}">value_boundary_valid={{ .Verification.ValueBoundaryValid }}</span>
+		          {{ if .Verification.Receipt }}
+		          <span class="pill ok">verification_hash_header={{ .Verification.Receipt.HashHeader }}</span>
+		          <span class="pill ok">verification_hash_body_field={{ .Verification.Receipt.BodyField }}</span>
+		          {{ end }}
+		          <span class="pill ok">record_returned=false</span>
+		          <span class="pill ok">input_returned={{ .Verification.InputReturned }}</span>
+		          <span class="pill ok">request_body_returned={{ .Verification.RequestBodyReturned }}</span>
+		          <span class="pill ok">proof_pack_returned=false</span>
+		          <span class="pill ok">identity_values_returned=false</span>
+		          <span class="pill ok">subject_returned=false</span>
+		          <span class="pill ok">email_returned=false</span>
+		          <span class="pill ok">name_returned=false</span>
+		          <span class="pill ok">claim_values_returned=false</span>
+		          <span class="pill ok">group_values_returned=false</span>
+		          <span class="pill ok">token_returned=false</span>
+		          <span class="pill ok">cookie_value_returned=false</span>
+		          <span class="pill ok">env_values_returned=false</span>
+		          <span class="pill ok">backend_path_returned=false</span>
+		          <span class="pill ok">connector_output_returned=false</span>
+		          <span class="pill ok">permit_payload_returned=false</span>
+		          <span class="pill ok">secret_value_returned=false</span>
+		          <span class="pill ok">value_returned=false</span>
+		        </div>
+		      </details>
+		    </div>
+		  </div>
+		</section>
+		{{ template "base_bottom" . }}
+		{{- end }}
 
 		{{ define "auth_smoke" -}}
 		{{ template "base_top" . }}
