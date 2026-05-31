@@ -542,6 +542,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /auth/reset", app.handleAuthReset)
 	mux.HandleFunc("GET /oidc/callback", app.handleCallback)
 	mux.HandleFunc("POST /logout", app.withAuth(app.handleLogout))
+	mux.HandleFunc("GET /auth/smoke", app.withAuth(app.handleAuthSmokePage))
 	mux.HandleFunc("GET /session-witness", app.withAuth(app.handleSessionWitnessPage))
 	mux.HandleFunc("GET /session-witness.txt", app.withAuth(app.handleSessionWitnessText))
 	mux.HandleFunc("GET /session-witness/proof.txt", app.withAuth(app.handleSessionWitnessProofText))
@@ -596,7 +597,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/auth/smoke", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
@@ -1184,6 +1185,29 @@ func (app *App) handleSessionWitnessPage(w http.ResponseWriter, r *http.Request)
 		"Capture":              capture,
 		"CaptureHeaders":       AuthenticatedBrowserCaptureHeadersFor(witness, capture, reqID, receipt),
 		"CaptureLine":          receipt.Input,
+		"Receipt":              receipt,
+		"RequestID":            reqID,
+	})
+}
+
+func (app *App) handleAuthSmokePage(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	witness, capture := app.authenticatedBrowserWitnessCapture(session)
+	reqID := requestID(r)
+	capturedAt := time.Now().UTC()
+	receipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID, capturedAt)
+	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture, receipt)
+	app.audit(r, "auth.smoke.page", "allowed", session.Subject, "")
+	renderTemplate(w, app.templates, "auth_smoke", map[string]any{
+		"Title":                "Janus Auth Smoke",
+		"CSPNonce":             cspNonceFromContext(r.Context()),
+		"WitnessPage":          true,
+		"Session":              session,
+		"CSRF":                 app.csrfToken(session),
+		"Mode":                 app.cfg.ProductMode,
+		"AuthenticatedRole":    SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), witness.Ready),
+		"AuthenticatedBrowser": witness,
+		"Capture":              capture,
 		"Receipt":              receipt,
 		"RequestID":            reqID,
 	})
@@ -4580,10 +4604,11 @@ func mustTemplates() *template.Template {
     <div class="brand"><div class="mark">J</div><div>Janus</div></div>
 		    {{ if .Session.Subject }}
 		    <nav class="nav" aria-label="Primary">
-		      {{ if .WitnessPage }}
-		      <a href="/">Dashboard</a>
-		      <a href="/session-witness">Witness</a>
-		      <a href="/session-witness.txt">Text</a>
+			      {{ if .WitnessPage }}
+			      <a href="/">Dashboard</a>
+			      <a href="/auth/smoke">Smoke</a>
+			      <a href="/session-witness">Witness</a>
+			      <a href="/session-witness.txt">Text</a>
 		      <a href="/session-witness/proof.txt">Proof pack</a>
 		      <a href="/session-witness/verify">Verify</a>
 		      <a href="/api/auth/session-witness">JSON</a>
@@ -7228,7 +7253,143 @@ func mustTemplates() *template.Template {
 	{{ template "base_bottom" . }}
 	{{- end }}
 
-	{{ define "session_witness_verify" -}}
+		{{ define "auth_smoke" -}}
+		{{ template "base_top" . }}
+		<section class="overview" id="command-center">
+		  <div class="intro">
+		    <div class="intro-copy">
+		      <div class="eyebrow">{{ .Mode }} / browser smoke / value-free</div>
+		      <h1>Authenticated smoke</h1>
+		      <p>A short proof path for this browser: reset stale login state, prove the signed session, then keep one receipt hash. Identity and secret values stay out of the page.</p>
+		    </div>
+		    <div class="toolbar">
+		      <a class="button primary" href="/auth/reset">Clean sign-in reset</a>
+		      <a class="button quiet" href="/session-witness">Full witness</a>
+		      <a class="button quiet" href="/session-witness/verify">Verifier</a>
+		      <a class="button quiet" href="/">Dashboard</a>
+		    </div>
+		    <div class="evidence-workstation" aria-label="Authenticated browser smoke path">
+		      <div class="workstation-head">
+		        <span>Smoke path</span>
+		        <strong>Three checks, one receipt</strong>
+		        <p>Use this page after login. It keeps the browser flow simple and leaves the heavy witness tools one click away.</p>
+		      </div>
+		      <div class="handoff-path">
+		        <div class="handoff-step info">
+		          <b>1</b>
+		          <strong>Clean start</strong>
+		          <p>If the browser feels stale, clear Janus auth cookies and start a fresh Zitadel login.</p>
+		          <a class="button quiet" href="/auth/reset">Reset sign-in</a>
+		        </div>
+		        <div class="handoff-step ok">
+		          <b>2</b>
+		          <strong>Prove session</strong>
+		          <p>This browser reached an auth-only page and has a signed Janus session. The proof is the request id and witness hash.</p>
+		          <form method="post" action="/session-witness/evidence/browser-smoke-receipt">
+		            <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+		            <button class="button primary" type="submit">Browser smoke receipt</button>
+		          </form>
+		        </div>
+		        <div class="handoff-step ok">
+		          <b>3</b>
+		          <strong>Keep receipt</strong>
+		          <p>Keep the request id and hash. Do not copy identity values, cookies, tokens, request bodies, or secret material.</p>
+		          <a class="button quiet" href="/session-witness/verify">Open verifier</a>
+		        </div>
+		      </div>
+		      <p><span class="pill ok">auth_smoke_launchpad=true</span> <span class="pill ok">csrf_bound=true</span> <span class="pill ok">browser_smoke_receipt=true</span> <span class="pill ok">value_returned=false</span></p>
+		    </div>
+		    <div class="safety-ribbon" aria-label="Authenticated smoke posture">
+		      <div class="safety-chip {{ if eq .AuthenticatedBrowser.State "authenticated" }}ok{{ else if eq .AuthenticatedBrowser.State "local_smoke" }}info{{ else }}warn{{ end }}">
+		        <span>State</span>
+		        <strong>{{ .AuthenticatedBrowser.State }}</strong>
+		      </div>
+		      <div class="safety-chip info">
+		        <span>Flow</span>
+		        <strong>{{ .AuthenticatedBrowser.Flow }}</strong>
+		      </div>
+		      <div class="safety-chip ok">
+		        <span>Values</span>
+		        <strong>withheld</strong>
+		      </div>
+		      <div class="safety-chip info">
+		        <span>Request</span>
+		        <strong>{{ .RequestID }}</strong>
+		      </div>
+		    </div>
+		  </div>
+		  <div class="status">
+		    <div class="status-head"><h2>Receipt proof</h2><span class="pill ok">copy-safe</span></div>
+		    <div class="panel-body stack">
+		      <div class="receipt-proof" aria-label="Authenticated smoke receipt proof">
+		        <span>Schema<strong>{{ .Capture.Schema }}</strong></span>
+		        <span>Body field<strong>{{ .Capture.BodyField }}</strong></span>
+		        <span>Signal<strong>{{ .AuthenticatedBrowser.EvidenceSignal }}</strong></span>
+		        <span>Fresh until<strong>{{ .Receipt.FreshUntil }}</strong></span>
+		        <span>Hash header<strong>{{ .Receipt.HashHeader }}</strong></span>
+		        <span>Proof hash<strong class="mono">{{ .Receipt.Hash }}</strong></span>
+		      </div>
+		      <div class="receipt-copy" aria-label="Authenticated smoke copy-safe fields">
+		        <label>State<input readonly value="state={{ .AuthenticatedBrowser.State }}"></label>
+		        <label>Flow<input readonly value="flow={{ .AuthenticatedBrowser.Flow }}"></label>
+		        <label>Request<input readonly value="request_id={{ .RequestID }}"></label>
+		        <label>Hash<input readonly value="proof_hash={{ .Receipt.Hash }}"></label>
+		      </div>
+		      <div class="witness-grid" aria-label="Authenticated smoke guardrails">
+		        <div class="witness-card ok">
+		          <span>Login</span>
+		          <strong>{{ .AuthenticatedRole.IdentityLabel }}</strong>
+		          <p>{{ .AuthenticatedRole.IdentityBoundary }}</p>
+		        </div>
+		        <div class="witness-card ok">
+		          <span>Cookie</span>
+		          <strong>{{ .AuthenticatedBrowser.SessionCookiePolicy }}</strong>
+		          <p>Session proof is signed and cookie values are never rendered.</p>
+		        </div>
+		        <div class="witness-card ok">
+		          <span>CSRF</span>
+		          <strong>{{ .AuthenticatedBrowser.CSRFBoundary }}</strong>
+		          <p>The receipt action is bound to this signed browser session.</p>
+		        </div>
+		        <div class="witness-card ok">
+		          <span>Page</span>
+		          <strong>{{ .AuthenticatedBrowser.CSPBoundary }}</strong>
+		          <p>The smoke page renders without browser script and with hardened headers.</p>
+		        </div>
+		      </div>
+		      <details class="evidence-flags">
+		        <summary>Authenticated smoke evidence flags</summary>
+		        <div class="flag-cloud" aria-label="Authenticated smoke value-free evidence flags">
+		          <span class="pill ok">authenticated_smoke_launchpad=true</span>
+		          <span class="pill ok">state={{ .AuthenticatedBrowser.State }}</span>
+		          <span class="pill ok">flow={{ .AuthenticatedBrowser.Flow }}</span>
+		          <span class="pill ok">request_id={{ .RequestID }}</span>
+		          <span class="pill ok">proof_hash_header={{ .Receipt.HashHeader }}</span>
+		          <span class="pill ok">hash_body_field={{ .Receipt.BodyField }}</span>
+		          <span class="pill ok">freshness_seconds={{ .Receipt.FreshnessSeconds }}</span>
+		          <span class="pill ok">identity_values_returned=false</span>
+		          <span class="pill ok">subject_returned=false</span>
+		          <span class="pill ok">email_returned=false</span>
+		          <span class="pill ok">name_returned=false</span>
+		          <span class="pill ok">claim_values_returned=false</span>
+		          <span class="pill ok">group_values_returned=false</span>
+		          <span class="pill ok">token_returned=false</span>
+		          <span class="pill ok">cookie_value_returned=false</span>
+		          <span class="pill ok">request_body_returned=false</span>
+		          <span class="pill ok">proof_body_returned=false</span>
+		          <span class="pill ok">env_returned=false</span>
+		          <span class="pill ok">backend_path_returned=false</span>
+		          <span class="pill ok">secret_value_returned=false</span>
+		          <span class="pill ok">value_returned=false</span>
+		        </div>
+		      </details>
+		    </div>
+		  </div>
+		</section>
+		{{ template "base_bottom" . }}
+		{{- end }}
+
+		{{ define "session_witness_verify" -}}
 	{{ template "base_top" . }}
 	<section class="overview" id="witness-verifier">
 	  <div class="intro">

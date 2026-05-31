@@ -673,6 +673,61 @@ func TestSessionWitnessPageRendersCopySafeCapture(t *testing.T) {
 	assertRouteResponseValueFree(t, "session witness page", out)
 }
 
+func TestAuthSmokePageRendersValueFreeLaunchpad(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/smoke", nil)
+	req.Header.Set("X-Request-Id", "auth-smoke-page-123")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	for header, want := range map[string]string{
+		"Content-Type":                      "text/html; charset=utf-8",
+		"X-Janus-Witness-Schema":            "janus-auth-session-witness-v1",
+		"X-Janus-Witness-State":             "authenticated",
+		"X-Janus-Witness-Flow":              "zitadel_oidc_pkce_to_signed_session",
+		"X-Janus-Witness-Signal":            "signed_session_browser_proof_no_identity_values",
+		"X-Janus-Witness-Body-Field":        "witness",
+		"X-Janus-Witness-Algorithm":         "sha256-witness-v1",
+		"X-Janus-Witness-Hash-Body-Field":   "receipt.hash",
+		"X-Janus-Witness-Freshness-Seconds": "300",
+		"X-Janus-Value-Returned":            "false",
+		"X-Content-Type-Options":            "nosniff",
+		"Cross-Origin-Resource-Policy":      "same-origin",
+	} {
+		if got := out.Header().Get(header); got != want {
+			t.Fatalf("auth smoke page should set %s=%q, got %q", header, want, got)
+		}
+	}
+	if got := out.Header().Get("Content-Security-Policy"); !strings.Contains(got, "script-src 'none'") {
+		t.Fatalf("auth smoke page should keep script disabled: %s", got)
+	}
+	assertStyleNonceMatchesCSP(t, out)
+	receiptHash := out.Header().Get("X-Janus-Witness-Hash")
+	if len(receiptHash) != 64 {
+		t.Fatalf("auth smoke page should set 64-char witness hash, got %q", receiptHash)
+	}
+	_, freshUntil := assertWitnessFreshnessHeaders(t, out)
+	body := out.Body.String()
+	for _, want := range []string{"Authenticated smoke", "Clean sign-in reset", "Three checks, one receipt", "Clean start", "Prove session", "Keep receipt", "Browser smoke receipt", "Full witness", "Verifier", `href="/auth/reset"`, `href="/session-witness/verify"`, `action="/session-witness/evidence/browser-smoke-receipt"`, `name="csrf_token"`, `id="command-center"`, "auth_smoke_launchpad=true", "authenticated_smoke_launchpad=true", "csrf_bound=true", "browser_smoke_receipt=true", "janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signed_session_browser_proof_no_identity_values", "host_prefixed_strict_signed", "bound_to_signed_session", "script_src_none", "request_id=auth-smoke-page-123", "proof_hash_header=X-Janus-Witness-Hash", "hash_body_field=receipt.hash", "freshness_seconds=300", freshUntil, receiptHash, "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "request_body_returned=false", "proof_body_returned=false", "env_returned=false", "backend_path_returned=false", "secret_value_returned=false", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("auth smoke page should include %s: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret", "proof_line=", "witness_proof_line=", "proof_pack_input=", "janus_current_session_witness_proof", "janus_current_session_evidence_record"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("auth smoke page leaked value %q: %s", forbidden, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "auth smoke page", out)
+}
+
 func TestSessionWitnessTextRendersCopySafeCapture(t *testing.T) {
 	app := newTestApp(t)
 	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
@@ -1385,7 +1440,7 @@ func TestSessionWitnessEvidenceRecordRequiresCSRF(t *testing.T) {
 
 func TestSessionWitnessPageRequiresAuthentication(t *testing.T) {
 	app := newTestApp(t)
-	for _, path := range []string{"/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/session-witness/verify"} {
+	for _, path := range []string{"/auth/smoke", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/session-witness/verify"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("X-Request-Id", "session-witness-auth-required")
 		out := httptest.NewRecorder()
@@ -5138,6 +5193,9 @@ func TestSecurityHeadersAcrossCoreRoutes(t *testing.T) {
 		{name: "dashboard", method: http.MethodGet, path: "/", status: http.StatusOK, expectBodyNonce: true, setup: func(app *App, _ *http.Request) {
 			app.cfg.RequireAuth = false
 		}},
+		{name: "auth smoke", method: http.MethodGet, path: "/auth/smoke", status: http.StatusOK, expectBodyNonce: true, setup: func(app *App, _ *http.Request) {
+			app.cfg.RequireAuth = false
+		}},
 		{name: "session witness text", method: http.MethodGet, path: "/session-witness.txt", status: http.StatusOK, setup: func(app *App, _ *http.Request) {
 			app.cfg.RequireAuth = false
 		}},
@@ -5408,6 +5466,7 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "api method", method: http.MethodDelete, path: "/api/posture", status: http.StatusMethodNotAllowed},
 		{name: "posture", method: http.MethodGet, path: "/api/posture", status: http.StatusOK},
 		{name: "auth witness", method: http.MethodGet, path: "/api/auth/session-witness", status: http.StatusOK},
+		{name: "auth smoke", method: http.MethodGet, path: "/auth/smoke", status: http.StatusOK},
 		{name: "session witness page", method: http.MethodGet, path: "/session-witness", status: http.StatusOK},
 		{name: "session witness text", method: http.MethodGet, path: "/session-witness.txt", status: http.StatusOK},
 		{name: "session witness proof text", method: http.MethodGet, path: "/session-witness/proof.txt", status: http.StatusOK},
