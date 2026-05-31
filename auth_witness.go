@@ -873,6 +873,57 @@ func EvidenceRecordVerificationLineFor(verification WitnessEvidenceRecordVerific
 		" value_returned=false"
 }
 
+func AuthenticatedBrowserSmokeReceiptTextFor(verification WitnessEvidenceRecordVerification, requestID string) string {
+	receipt := verification.Receipt
+	if receipt == nil {
+		generated := EvidenceRecordVerificationReceiptFor(verification, requestID)
+		receipt = &generated
+	}
+	return "janus_authenticated_browser_smoke\n" +
+		"smoke_status=" + safeDisplayState(verification.Status) + "\n" +
+		"verified=" + strconv.FormatBool(verification.Verified) + "\n" +
+		"request_id=" + safeDisplayState(receipt.RequestID) + "\n" +
+		"record_request_id=" + safeDisplayState(verification.RecordRequestID) + "\n" +
+		"verification_hash=" + safeDisplayState(receipt.Hash) + "\n" +
+		"verification_hash_header=" + safeDisplayState(receipt.HashHeader) + "\n" +
+		"verification_hash_body_field=" + safeDisplayState(receipt.BodyField) + "\n" +
+		"receipt_algorithm=" + safeDisplayState(receipt.Algorithm) + "\n" +
+		"audit_hash_algorithm=" + safeDisplayState(verification.AuditHashAlgorithm) + "\n" +
+		"audit_event_hash=" + safeDisplayState(verification.AuditEventHash) + "\n" +
+		"audit_prev_hash=" + safeDisplayState(verification.AuditPrevHash) + "\n" +
+		"audit_chain_link=" + safeDisplayState(verification.AuditChainLink) + "\n" +
+		"audit_severity=" + safeDisplayState(verification.AuditSeverity) + "\n" +
+		"audit_recorded=" + strconv.FormatBool(verification.AuditRecorded) + "\n" +
+		"audit_row_found=" + strconv.FormatBool(verification.AuditRowFound) + "\n" +
+		"audit_chain_verified=" + strconv.FormatBool(verification.AuditChainVerified) + "\n" +
+		"hash_shape_valid=" + strconv.FormatBool(verification.HashShapeValid) + "\n" +
+		"chain_link_match=" + strconv.FormatBool(verification.ChainLinkMatch) + "\n" +
+		"action_match=" + strconv.FormatBool(verification.ActionMatch) + "\n" +
+		"request_id_match=" + strconv.FormatBool(verification.RequestIDMatch) + "\n" +
+		"severity_match=" + strconv.FormatBool(verification.SeverityMatch) + "\n" +
+		"reason_match=" + strconv.FormatBool(verification.ReasonMatch) + "\n" +
+		"value_boundary_valid=" + strconv.FormatBool(verification.ValueBoundaryValid) + "\n" +
+		"copy_safe=true\n" +
+		"record_returned=false\n" +
+		"input_returned=false\n" +
+		"request_body_returned=false\n" +
+		"proof_pack_returned=false\n" +
+		"identity_values_returned=false\n" +
+		"subject_returned=false\n" +
+		"email_returned=false\n" +
+		"name_returned=false\n" +
+		"claim_values_returned=false\n" +
+		"group_values_returned=false\n" +
+		"token_returned=false\n" +
+		"cookie_value_returned=false\n" +
+		"env_values_returned=false\n" +
+		"backend_path_returned=false\n" +
+		"connector_output_returned=false\n" +
+		"permit_payload_returned=false\n" +
+		"secret_value_returned=false\n" +
+		"value_returned=false\n"
+}
+
 func WitnessEvidenceReceiptFor(verification WitnessReceiptVerification) WitnessEvidenceReceipt {
 	verificationHash := ""
 	verificationHashHeader := ""

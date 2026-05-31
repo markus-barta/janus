@@ -535,6 +535,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /session-witness/proof.txt", app.withAuth(app.handleSessionWitnessProofText))
 	mux.HandleFunc("GET /session-witness/evidence.txt", app.withAuth(app.handleSessionWitnessEvidenceText))
 	mux.HandleFunc("POST /session-witness/evidence/record", app.withAuth(app.handleSessionWitnessEvidenceRecord))
+	mux.HandleFunc("POST /session-witness/evidence/browser-smoke-receipt", app.withAuth(app.handleSessionWitnessBrowserSmokeReceiptText))
 	mux.HandleFunc("POST /session-witness/evidence/verify-record", app.withAuth(app.handleSessionWitnessEvidenceRecordVerifyPost))
 	mux.HandleFunc("POST /session-witness/evidence/verify-current-record", app.withAuth(app.handleSessionWitnessEvidenceVerifyCurrentRecordPost))
 	mux.HandleFunc("GET /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPage))
@@ -587,7 +588,7 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
-	case "/session-witness/verify-current", "/session-witness/verify-current-pack", "/session-witness/verify-pack", "/session-witness/evidence/record", "/session-witness/evidence/verify-record", "/session-witness/evidence/verify-current-record":
+	case "/session-witness/verify-current", "/session-witness/verify-current-pack", "/session-witness/verify-pack", "/session-witness/evidence/record", "/session-witness/evidence/browser-smoke-receipt", "/session-witness/evidence/verify-record", "/session-witness/evidence/verify-current-record":
 		return []string{http.MethodPost}, true
 	case "/logout", "/api/warden/resolve", "/api/evidence/attachments", "/api/permits", "/ui/warden/resolve", "/ui/evidence/attachments", "/ui/permits":
 		return []string{http.MethodPost}, true
@@ -1270,6 +1271,31 @@ func (app *App) handleSessionWitnessEvidenceRecord(w http.ResponseWriter, r *htt
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(result.Status)
 	_, _ = w.Write([]byte(result.Record))
+}
+
+func (app *App) handleSessionWitnessBrowserSmokeReceiptText(w http.ResponseWriter, r *http.Request) {
+	session := currentSession(r.Context())
+	if !app.csrfAllowed(r, session) {
+		app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", "denied", session.Subject, "csrf failed")
+		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
+		return
+	}
+	result, recordVerification := app.verifyCurrentSessionEvidenceRecord(r, session)
+	recordVerification = attachEvidenceRecordVerificationReceipt(w, recordVerification, requestID(r))
+	status := result.Status
+	if !recordVerification.Verified && status == http.StatusOK {
+		status = http.StatusUnprocessableEntity
+	}
+	if recordVerification.Verified {
+		app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", "allowed", session.Subject, "copy_safe_browser_smoke_receipt")
+	} else {
+		app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", recordVerification.Status, session.Subject, "copy_safe_browser_smoke_receipt_blocked")
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Disposition", `inline; filename="janus-authenticated-browser-smoke.txt"`)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(AuthenticatedBrowserSmokeReceiptTextFor(recordVerification, requestID(r))))
 }
 
 func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request) {
@@ -7208,10 +7234,13 @@ func mustTemplates() *template.Template {
 	          <b>3</b>
 	          <strong>Keep the receipt</strong>
 	          <p>Verification returns normalized facts and a receipt hash, never the submitted record body.</p>
-	          <a class="button quiet" href="/session-witness/evidence.txt">Open evidence text</a>
+		          <form method="post" action="/session-witness/evidence/browser-smoke-receipt">
+		            <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+		            <button class="button primary" type="submit">Browser smoke receipt</button>
+		          </form>
 	        </div>
 	      </div>
-	      <p><span class="pill ok">input_not_returned=true</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+	      <p><span class="pill ok">browser_smoke_receipt=true</span> <span class="pill ok">input_not_returned=true</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">value_returned=false</span></p>
 	    </div>
 	    <div class="safety-ribbon" aria-label="Witness verifier posture">
 	      <div class="safety-chip {{ if and .Verification .Verification.Verified }}ok{{ else if .Verification }}warn{{ else }}info{{ end }}">
@@ -7451,12 +7480,16 @@ func mustTemplates() *template.Template {
 	          <strong>Keep the receipt</strong>
 	          <p>Evidence text is the safe handoff. Proof-pack details remain available for deeper review.</p>
 	          <div class="handoff-actions">
+		            <form method="post" action="/session-witness/evidence/browser-smoke-receipt">
+		              <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+		              <button class="button primary" type="submit">Browser smoke receipt</button>
+		            </form>
 	            <a class="button quiet" href="/session-witness/evidence.txt">Open evidence text</a>
 	            <a class="button quiet" href="/session-witness/verify">Open verifier</a>
 	          </div>
 	        </div>
 	      </div>
-	      <p><span class="pill ok">evidence_record_primary=true</span> <span class="pill ok">current_evidence_verifier=true</span> <span class="pill ok">value_returned=false</span></p>
+	      <p><span class="pill ok">evidence_record_primary=true</span> <span class="pill ok">current_evidence_verifier=true</span> <span class="pill ok">browser_smoke_receipt=true</span> <span class="pill ok">value_returned=false</span></p>
 	    </div>
 	    <div class="reviewer-flow" aria-label="Reviewer launch checklist">
 	      {{ range .LaunchChecklist }}

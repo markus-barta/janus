@@ -645,7 +645,7 @@ func TestSessionWitnessPageRendersCopySafeCapture(t *testing.T) {
 	}
 	capturedAt, freshUntil := assertWitnessFreshnessHeaders(t, out)
 	body := out.Body.String()
-	for _, want := range []string{"Session witness capture", "Evidence handoff", "Record, verify, retain", "Record evidence", "Verify current evidence", "Keep the receipt", "Open evidence text", "Open verifier", "Evidence text", "Verify current proof pack", "Reviewer launch checklist", "Browser session", "Current proof pack", "Evidence receipt", "Human capture", "JANUS-195 real browser proof remains.", "evidence_record_primary=true", "current_evidence_verifier=true", "Capture proof", "Proof hash", pageReceiptHash, "Captured", "Fresh until", capturedAt, freshUntil, "sha256-witness-v1", "freshness_seconds=300", "captured_at=" + capturedAt, "fresh_until=" + freshUntil, "hash_header=X-Janus-Witness-Hash", "hash_body_field=receipt.hash", "Witness headers", "Session witness value boundary", "janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signed_session_browser_proof_no_identity_values", "X-Janus-Witness-State", "X-Janus-Witness-Flow", "X-Janus-Witness-Signal", "X-Janus-Witness-Hash", "X-Janus-Witness-Captured-At", "X-Janus-Witness-Fresh-Until", "X-Janus-Witness-Freshness-Seconds", "request_id=session-witness-page-123", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Session witness capture", "Evidence handoff", "Record, verify, retain", "Record evidence", "Verify current evidence", "Keep the receipt", "Browser smoke receipt", "Open evidence text", "Open verifier", "Evidence text", "Verify current proof pack", "Reviewer launch checklist", "Browser session", "Current proof pack", "Evidence receipt", "Human capture", "JANUS-195 real browser proof remains.", "evidence_record_primary=true", "current_evidence_verifier=true", "browser_smoke_receipt=true", "Capture proof", "Proof hash", pageReceiptHash, "Captured", "Fresh until", capturedAt, freshUntil, "sha256-witness-v1", "freshness_seconds=300", "captured_at=" + capturedAt, "fresh_until=" + freshUntil, "hash_header=X-Janus-Witness-Hash", "hash_body_field=receipt.hash", "Witness headers", "Session witness value boundary", "janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signed_session_browser_proof_no_identity_values", "X-Janus-Witness-State", "X-Janus-Witness-Flow", "X-Janus-Witness-Signal", "X-Janus-Witness-Hash", "X-Janus-Witness-Captured-At", "X-Janus-Witness-Fresh-Until", "X-Janus-Witness-Freshness-Seconds", "request_id=session-witness-page-123", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("session witness page should include %s: %s", want, body)
 		}
@@ -661,6 +661,9 @@ func TestSessionWitnessPageRendersCopySafeCapture(t *testing.T) {
 	}
 	if !strings.Contains(body, `action="/session-witness/evidence/verify-current-record"`) || !strings.Contains(body, `<button class="button primary" type="submit">Verify current evidence</button>`) {
 		t.Fatalf("session witness page should include one-click current evidence verifier action: %s", body)
+	}
+	if !strings.Contains(body, `action="/session-witness/evidence/browser-smoke-receipt"`) {
+		t.Fatalf("session witness page should include browser smoke receipt action: %s", body)
 	}
 	for _, forbidden := range []string{"subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
 		if strings.Contains(body, forbidden) {
@@ -1251,6 +1254,71 @@ func TestSessionWitnessEvidenceVerifyCurrentRecordUIAndAPIAreValueFree(t *testin
 	assertRouteResponseValueFree(t, "session witness current evidence record API", apiOut)
 }
 
+func TestSessionWitnessBrowserSmokeReceiptTextIsCopySafe(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	form := url.Values{}
+	form.Set("csrf_token", app.csrfToken(session))
+	req := httptest.NewRequest(http.MethodPost, "/session-witness/evidence/browser-smoke-receipt", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://vault.barta.cm")
+	req.Header.Set("X-Request-Id", "browser-smoke-receipt-123")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected browser smoke receipt 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	for header, want := range map[string]string{
+		"Content-Type":        "text/plain; charset=utf-8",
+		"Content-Disposition": `inline; filename="janus-authenticated-browser-smoke.txt"`,
+		"Cache-Control":       "no-store",
+		"X-Janus-Evidence-Record-Verification-Schema":          "janus-evidence-record-verification-v1",
+		"X-Janus-Evidence-Record-Verification-Algorithm":       "sha256-evidence-record-verification-v1",
+		"X-Janus-Evidence-Record-Verification-Hash-Body-Field": "verification.receipt.hash",
+		"X-Janus-Value-Returned":                               "false",
+		"X-Content-Type-Options":                               "nosniff",
+		"Cross-Origin-Resource-Policy":                         "same-origin",
+	} {
+		if got := out.Header().Get(header); got != want {
+			t.Fatalf("browser smoke receipt should set %s=%q, got %q", header, want, got)
+		}
+	}
+	receiptHash := out.Header().Get("X-Janus-Evidence-Record-Verification-Hash")
+	if len(receiptHash) != 64 || !isLowerHex(receiptHash) {
+		t.Fatalf("browser smoke receipt should set receipt hash header, got %q", receiptHash)
+	}
+	body := out.Body.String()
+	for _, want := range []string{"janus_authenticated_browser_smoke", "smoke_status=verified", "verified=true", "request_id=browser-smoke-receipt-123", "record_request_id=browser-smoke-receipt-123", "verification_hash=" + receiptHash, "verification_hash_header=X-Janus-Evidence-Record-Verification-Hash", "verification_hash_body_field=verification.receipt.hash", "receipt_algorithm=sha256-evidence-record-verification-v1", "audit_hash_algorithm=sha256-audit-entry-v1", "audit_recorded=true", "audit_row_found=true", "audit_chain_verified=true", "hash_shape_valid=true", "chain_link_match=true", "action_match=true", "request_id_match=true", "severity_match=true", "reason_match=true", "value_boundary_valid=true", "copy_safe=true", "record_returned=false", "input_returned=false", "request_body_returned=false", "proof_pack_returned=false", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "env_values_returned=false", "backend_path_returned=false", "connector_output_returned=false", "permit_payload_returned=false", "secret_value_returned=false", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("browser smoke receipt should include %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"janus_current_session_evidence_record", "evidence_line=janus_signed_browser_evidence", "witness_proof_line=", "proof_line=", "proof_pack_input=", "subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("browser smoke receipt leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+	recent := app.store.RecentAudit(2)
+	foundRecord := false
+	foundReceipt := false
+	for _, entry := range recent {
+		if entry.Action == "auth.session.witness.evidence.record" && entry.Outcome == "allowed" && entry.RequestID == "browser-smoke-receipt-123" {
+			foundRecord = true
+		}
+		if entry.Action == "auth.session.witness.evidence.browser_smoke_receipt" && entry.Outcome == "allowed" && entry.RequestID == "browser-smoke-receipt-123" && entry.Reason == "copy_safe_browser_smoke_receipt" {
+			foundReceipt = true
+		}
+	}
+	if !foundRecord || !foundReceipt {
+		t.Fatalf("browser smoke receipt should write record and receipt audit events, got %#v", recent)
+	}
+	assertRouteResponseValueFree(t, "session witness browser smoke receipt", out)
+}
+
 func TestSessionWitnessEvidenceRecordDoesNotClaimAuditWhenStoreMissing(t *testing.T) {
 	app := newTestApp(t)
 	app.store = nil
@@ -1290,27 +1358,29 @@ func TestSessionWitnessEvidenceRecordRequiresCSRF(t *testing.T) {
 	rr := httptest.NewRecorder()
 	app.writeSession(rr, session)
 
-	req := httptest.NewRequest(http.MethodPost, "/session-witness/evidence/record", nil)
-	req.Header.Set("Origin", "https://vault.barta.cm")
-	req.Header.Set("X-Request-Id", "session-witness-record-csrf")
-	req.AddCookie(rr.Result().Cookies()[0])
-	out := httptest.NewRecorder()
-	app.routes().ServeHTTP(out, req)
-	if out.Code != http.StatusForbidden {
-		t.Fatalf("expected csrf 403, got %d body=%s", out.Code, out.Body.String())
-	}
-	body := out.Body.String()
-	for _, want := range []string{`"error":"csrf_failed"`, `"request_id":"session-witness-record-csrf"`, `"value_returned":false`} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("csrf response should include %q: %s", want, body)
+	for _, path := range []string{"/session-witness/evidence/record", "/session-witness/evidence/browser-smoke-receipt"} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("Origin", "https://vault.barta.cm")
+		req.Header.Set("X-Request-Id", "session-witness-record-csrf")
+		req.AddCookie(rr.Result().Cookies()[0])
+		out := httptest.NewRecorder()
+		app.routes().ServeHTTP(out, req)
+		if out.Code != http.StatusForbidden {
+			t.Fatalf("%s expected csrf 403, got %d body=%s", path, out.Code, out.Body.String())
 		}
-	}
-	for _, forbidden := range []string{"janus_signed_browser_evidence", "subject-123", "secret-cookie-secret", "proof_line="} {
-		if strings.Contains(body, forbidden) {
-			t.Fatalf("csrf response leaked forbidden value %q: %s", forbidden, body)
+		body := out.Body.String()
+		for _, want := range []string{`"error":"csrf_failed"`, `"request_id":"session-witness-record-csrf"`, `"value_returned":false`} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("%s csrf response should include %q: %s", path, want, body)
+			}
 		}
+		for _, forbidden := range []string{"janus_signed_browser_evidence", "subject-123", "secret-cookie-secret", "proof_line="} {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("%s csrf response leaked forbidden value %q: %s", path, forbidden, body)
+			}
+		}
+		assertRouteResponseValueFree(t, "session witness evidence record csrf", out)
 	}
-	assertRouteResponseValueFree(t, "session witness evidence record csrf", out)
 }
 
 func TestSessionWitnessPageRequiresAuthentication(t *testing.T) {
@@ -1329,7 +1399,7 @@ func TestSessionWitnessPageRequiresAuthentication(t *testing.T) {
 
 func TestSessionWitnessEvidenceRecordRequiresAuthentication(t *testing.T) {
 	app := newTestApp(t)
-	for _, path := range []string{"/session-witness/evidence/record", "/session-witness/evidence/verify-record", "/session-witness/evidence/verify-current-record"} {
+	for _, path := range []string{"/session-witness/evidence/record", "/session-witness/evidence/browser-smoke-receipt", "/session-witness/evidence/verify-record", "/session-witness/evidence/verify-current-record"} {
 		req := httptest.NewRequest(http.MethodPost, path, nil)
 		req.Header.Set("X-Request-Id", "session-witness-record-auth-required")
 		out := httptest.NewRecorder()
@@ -1565,7 +1635,7 @@ func TestSessionWitnessVerifierUIAndAPIAreValueFree(t *testing.T) {
 		t.Fatalf("expected verifier page 200, got %d body=%s", pageOut.Code, pageOut.Body.String())
 	}
 	pageBody := pageOut.Body.String()
-	for _, want := range []string{"Witness receipt verifier", "Evidence workstation", "Use current evidence first", "Verify this session", "Paste evidence record", "Keep the receipt", "Verify evidence record", "Verify current evidence", "Verify proof pack", "Verify proof line", "Proof pack", "Evidence record", "Evidence text", "Verify witness receipt", `id="evidence-record-form"`, `placeholder="Paste evidence record here"`, `action="/session-witness/evidence/verify-record"`, `action="/session-witness/evidence/verify-current-record"`, "proof_pack_returned=false", "input_not_returned=true", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Witness receipt verifier", "Evidence workstation", "Use current evidence first", "Verify this session", "Paste evidence record", "Keep the receipt", "Browser smoke receipt", "Verify evidence record", "Verify current evidence", "Verify proof pack", "Verify proof line", "Proof pack", "Evidence record", "Evidence text", "Verify witness receipt", `id="evidence-record-form"`, `placeholder="Paste evidence record here"`, `action="/session-witness/evidence/verify-record"`, `action="/session-witness/evidence/verify-current-record"`, `action="/session-witness/evidence/browser-smoke-receipt"`, "browser_smoke_receipt=true", "proof_pack_returned=false", "input_not_returned=true", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
 		if !strings.Contains(pageBody, want) {
 			t.Fatalf("verifier page should include %q: %s", want, pageBody)
 		}
@@ -4948,6 +5018,9 @@ func TestSecurityHeadersAcrossCoreRoutes(t *testing.T) {
 		{name: "session witness evidence text", method: http.MethodGet, path: "/session-witness/evidence.txt", status: http.StatusOK, setup: func(app *App, _ *http.Request) {
 			app.cfg.RequireAuth = false
 		}},
+		{name: "session witness browser smoke receipt", method: http.MethodPost, path: "/session-witness/evidence/browser-smoke-receipt", status: http.StatusOK, setup: func(app *App, _ *http.Request) {
+			app.cfg.RequireAuth = false
+		}},
 		{name: "session witness page", method: http.MethodGet, path: "/session-witness", status: http.StatusOK, expectBodyNonce: true, setup: func(app *App, _ *http.Request) {
 			app.cfg.RequireAuth = false
 		}},
@@ -5210,6 +5283,7 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "session witness proof text", method: http.MethodGet, path: "/session-witness/proof.txt", status: http.StatusOK},
 		{name: "session witness evidence text", method: http.MethodGet, path: "/session-witness/evidence.txt", status: http.StatusOK},
 		{name: "session witness evidence record", method: http.MethodPost, path: "/session-witness/evidence/record", status: http.StatusOK},
+		{name: "session witness browser smoke receipt", method: http.MethodPost, path: "/session-witness/evidence/browser-smoke-receipt", status: http.StatusOK},
 		{name: "session witness verifier", method: http.MethodGet, path: "/session-witness/verify", status: http.StatusOK},
 		{name: "session witness evidence record verifier bad post", method: http.MethodPost, path: "/session-witness/evidence/verify-record", body: "evidence_record=secret-cookie-secret", contentType: "application/x-www-form-urlencoded", status: http.StatusUnprocessableEntity},
 		{name: "session witness current evidence record verifier", method: http.MethodPost, path: "/session-witness/evidence/verify-current-record", status: http.StatusOK},
