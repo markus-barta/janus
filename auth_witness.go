@@ -3,7 +3,11 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
+	"time"
 )
+
+const authenticatedBrowserCaptureFreshness = 5 * time.Minute
 
 type AuthenticatedBrowserWitness struct {
 	Label                   string                     `json:"label"`
@@ -60,12 +64,15 @@ type AuthenticatedBrowserCaptureHeader struct {
 }
 
 type AuthenticatedBrowserCaptureReceipt struct {
-	Algorithm     string `json:"algorithm"`
-	Hash          string `json:"hash"`
-	HashHeader    string `json:"hash_header"`
-	BodyField     string `json:"body_field"`
-	Input         string `json:"input"`
-	ValueReturned bool   `json:"value_returned"`
+	Algorithm        string `json:"algorithm"`
+	Hash             string `json:"hash"`
+	HashHeader       string `json:"hash_header"`
+	BodyField        string `json:"body_field"`
+	Input            string `json:"input"`
+	CapturedAt       string `json:"captured_at"`
+	FreshUntil       string `json:"fresh_until"`
+	FreshnessSeconds int    `json:"freshness_seconds"`
+	ValueReturned    bool   `json:"value_returned"`
 }
 
 type AuthenticatedBrowserGate struct {
@@ -165,6 +172,9 @@ func AuthenticatedBrowserCaptureFor() AuthenticatedBrowserCapture {
 			"X-Janus-Witness-Algorithm",
 			"X-Janus-Witness-Hash",
 			"X-Janus-Witness-Hash-Body-Field",
+			"X-Janus-Witness-Captured-At",
+			"X-Janus-Witness-Fresh-Until",
+			"X-Janus-Witness-Freshness-Seconds",
 			"X-Janus-Value-Returned",
 		},
 		Proof:                  "signed_session_browser_proof_no_identity_values",
@@ -188,30 +198,43 @@ func AuthenticatedBrowserCaptureHeadersFor(witness AuthenticatedBrowserWitness, 
 		authenticatedBrowserCaptureHeader("X-Janus-Witness-Algorithm", receipt.Algorithm),
 		authenticatedBrowserCaptureHeader("X-Janus-Witness-Hash", receipt.Hash),
 		authenticatedBrowserCaptureHeader("X-Janus-Witness-Hash-Body-Field", receipt.BodyField),
+		authenticatedBrowserCaptureHeader("X-Janus-Witness-Captured-At", receipt.CapturedAt),
+		authenticatedBrowserCaptureHeader("X-Janus-Witness-Fresh-Until", receipt.FreshUntil),
+		authenticatedBrowserCaptureHeader("X-Janus-Witness-Freshness-Seconds", strconv.Itoa(receipt.FreshnessSeconds)),
 		authenticatedBrowserCaptureHeader("X-Janus-Value-Returned", "false"),
 	}
 }
 
-func AuthenticatedBrowserCaptureLineFor(witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, requestID string) string {
+func AuthenticatedBrowserCaptureLineFor(witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, requestID string, capturedAt time.Time) string {
+	capturedAt = capturedAt.UTC().Truncate(time.Second)
+	freshUntil := capturedAt.Add(authenticatedBrowserCaptureFreshness)
 	return "schema=" + capture.Schema +
 		" state=" + witness.State +
 		" flow=" + witness.Flow +
 		" signal=" + witness.EvidenceSignal +
 		" body_field=" + capture.BodyField +
 		" request_id=" + requestID +
+		" captured_at=" + capturedAt.Format(time.RFC3339) +
+		" fresh_until=" + freshUntil.Format(time.RFC3339) +
+		" freshness_seconds=" + strconv.Itoa(int(authenticatedBrowserCaptureFreshness.Seconds())) +
 		" value_returned=false"
 }
 
-func AuthenticatedBrowserCaptureReceiptFor(witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, requestID string) AuthenticatedBrowserCaptureReceipt {
-	input := AuthenticatedBrowserCaptureLineFor(witness, capture, requestID)
+func AuthenticatedBrowserCaptureReceiptFor(witness AuthenticatedBrowserWitness, capture AuthenticatedBrowserCapture, requestID string, capturedAt time.Time) AuthenticatedBrowserCaptureReceipt {
+	capturedAt = capturedAt.UTC().Truncate(time.Second)
+	freshUntil := capturedAt.Add(authenticatedBrowserCaptureFreshness)
+	input := AuthenticatedBrowserCaptureLineFor(witness, capture, requestID, capturedAt)
 	sum := sha256.Sum256([]byte(input))
 	return AuthenticatedBrowserCaptureReceipt{
-		Algorithm:     "sha256-witness-v1",
-		Hash:          hex.EncodeToString(sum[:]),
-		HashHeader:    "X-Janus-Witness-Hash",
-		BodyField:     "receipt.hash",
-		Input:         input,
-		ValueReturned: false,
+		Algorithm:        "sha256-witness-v1",
+		Hash:             hex.EncodeToString(sum[:]),
+		HashHeader:       "X-Janus-Witness-Hash",
+		BodyField:        "receipt.hash",
+		Input:            input,
+		CapturedAt:       capturedAt.Format(time.RFC3339),
+		FreshUntil:       freshUntil.Format(time.RFC3339),
+		FreshnessSeconds: int(authenticatedBrowserCaptureFreshness.Seconds()),
+		ValueReturned:    false,
 	}
 }
 
@@ -223,6 +246,9 @@ func AuthenticatedBrowserCaptureTextFor(witness AuthenticatedBrowserWitness, cap
 		"signal=" + witness.EvidenceSignal + "\n" +
 		"body_field=" + capture.BodyField + "\n" +
 		"request_id=" + requestID + "\n" +
+		"captured_at=" + receipt.CapturedAt + "\n" +
+		"fresh_until=" + receipt.FreshUntil + "\n" +
+		"freshness_seconds=" + strconv.Itoa(receipt.FreshnessSeconds) + "\n" +
 		"proof_line=" + receipt.Input + "\n" +
 		"proof_algorithm=" + receipt.Algorithm + "\n" +
 		"proof_hash=" + receipt.Hash + "\n" +

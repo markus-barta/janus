@@ -96,6 +96,30 @@ func isLowerHex(value string) bool {
 	return true
 }
 
+func assertWitnessFreshnessHeaders(t *testing.T, out *httptest.ResponseRecorder) (string, string) {
+	t.Helper()
+	capturedAt := out.Header().Get("X-Janus-Witness-Captured-At")
+	freshUntil := out.Header().Get("X-Janus-Witness-Fresh-Until")
+	if capturedAt == "" || freshUntil == "" {
+		t.Fatalf("witness freshness headers should be present: captured_at=%q fresh_until=%q", capturedAt, freshUntil)
+	}
+	if got := out.Header().Get("X-Janus-Witness-Freshness-Seconds"); got != "300" {
+		t.Fatalf("witness freshness header should be 300 seconds, got %q", got)
+	}
+	capturedTime, err := time.Parse(time.RFC3339, capturedAt)
+	if err != nil {
+		t.Fatalf("captured_at should be RFC3339, got %q: %v", capturedAt, err)
+	}
+	freshTime, err := time.Parse(time.RFC3339, freshUntil)
+	if err != nil {
+		t.Fatalf("fresh_until should be RFC3339, got %q: %v", freshUntil, err)
+	}
+	if !freshTime.Equal(capturedTime.Add(5 * time.Minute)) {
+		t.Fatalf("fresh_until should be 5 minutes after captured_at: captured=%s fresh=%s", capturedAt, freshUntil)
+	}
+	return capturedAt, freshUntil
+}
+
 func cookieByName(t *testing.T, cookies []*http.Cookie, name string) *http.Cookie {
 	t.Helper()
 	for _, cookie := range cookies {
@@ -523,14 +547,15 @@ func TestAuthenticatedBrowserWitnessAPIIsAuthenticatedAndValueFree(t *testing.T)
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	for header, want := range map[string]string{
-		"X-Janus-Witness-Schema":          "janus-auth-session-witness-v1",
-		"X-Janus-Witness-State":           "authenticated",
-		"X-Janus-Witness-Flow":            "zitadel_oidc_pkce_to_signed_session",
-		"X-Janus-Witness-Signal":          "signed_session_browser_proof_no_identity_values",
-		"X-Janus-Witness-Body-Field":      "witness",
-		"X-Janus-Witness-Algorithm":       "sha256-witness-v1",
-		"X-Janus-Witness-Hash-Body-Field": "receipt.hash",
-		"X-Janus-Value-Returned":          "false",
+		"X-Janus-Witness-Schema":            "janus-auth-session-witness-v1",
+		"X-Janus-Witness-State":             "authenticated",
+		"X-Janus-Witness-Flow":              "zitadel_oidc_pkce_to_signed_session",
+		"X-Janus-Witness-Signal":            "signed_session_browser_proof_no_identity_values",
+		"X-Janus-Witness-Body-Field":        "witness",
+		"X-Janus-Witness-Algorithm":         "sha256-witness-v1",
+		"X-Janus-Witness-Hash-Body-Field":   "receipt.hash",
+		"X-Janus-Witness-Freshness-Seconds": "300",
+		"X-Janus-Value-Returned":            "false",
 	} {
 		if got := out.Header().Get(header); got != want {
 			t.Fatalf("browser witness API should set %s=%q, got %q", header, want, got)
@@ -540,8 +565,9 @@ func TestAuthenticatedBrowserWitnessAPIIsAuthenticatedAndValueFree(t *testing.T)
 	if len(receiptHash) != 64 {
 		t.Fatalf("browser witness API should set 64-char proof hash, got %q", receiptHash)
 	}
+	capturedAt, freshUntil := assertWitnessFreshnessHeaders(t, out)
 	body := out.Body.String()
-	for _, want := range []string{`"witness"`, `"capture"`, `"receipt"`, `"schema":"janus-auth-session-witness-v1"`, `"body_field":"witness"`, `"body_field":"receipt.hash"`, `"algorithm":"sha256-witness-v1"`, `"hash_header":"X-Janus-Witness-Hash"`, `"hash":"` + receiptHash + `"`, `"proof":"signed_session_browser_proof_no_identity_values"`, `"replay_safe":true`, `"copy_safe":true`, `"label":"Authenticated browser witness"`, `"state":"authenticated"`, `"flow":"zitadel_oidc_pkce_to_signed_session"`, `"session_cookie_policy":"host_prefixed_strict_signed"`, `"csrf_boundary":"bound_to_signed_session"`, `"csp_boundary":"script_src_none"`, `"evidence_signal":"signed_session_browser_proof_no_identity_values"`, `"key":"login_completed"`, `"key":"value_boundary"`, `"request_id":"browser-witness-123"`, `"identity_values_returned":false`, `"subject_returned":false`, `"email_returned":false`, `"name_returned":false`, `"claim_values_returned":false`, `"group_values_returned":false`, `"token_returned":false`, `"cookie_value_returned":false`, `"request_body_returned":false`, `"env_values_returned":false`, `"backend_path_returned":false`, `"connector_output_returned":false`, `"permit_payload_returned":false`, `"secret_value_returned":false`, `"value_returned":false`} {
+	for _, want := range []string{`"witness"`, `"capture"`, `"receipt"`, `"schema":"janus-auth-session-witness-v1"`, `"body_field":"witness"`, `"body_field":"receipt.hash"`, `"algorithm":"sha256-witness-v1"`, `"hash_header":"X-Janus-Witness-Hash"`, `"hash":"` + receiptHash + `"`, `"captured_at":"` + capturedAt + `"`, `"fresh_until":"` + freshUntil + `"`, `"freshness_seconds":300`, `"X-Janus-Witness-Captured-At"`, `"X-Janus-Witness-Fresh-Until"`, `"X-Janus-Witness-Freshness-Seconds"`, `"proof":"signed_session_browser_proof_no_identity_values"`, `"replay_safe":true`, `"copy_safe":true`, `"label":"Authenticated browser witness"`, `"state":"authenticated"`, `"flow":"zitadel_oidc_pkce_to_signed_session"`, `"session_cookie_policy":"host_prefixed_strict_signed"`, `"csrf_boundary":"bound_to_signed_session"`, `"csp_boundary":"script_src_none"`, `"evidence_signal":"signed_session_browser_proof_no_identity_values"`, `"key":"login_completed"`, `"key":"value_boundary"`, `"request_id":"browser-witness-123"`, `"identity_values_returned":false`, `"subject_returned":false`, `"email_returned":false`, `"name_returned":false`, `"claim_values_returned":false`, `"group_values_returned":false`, `"token_returned":false`, `"cookie_value_returned":false`, `"request_body_returned":false`, `"env_values_returned":false`, `"backend_path_returned":false`, `"connector_output_returned":false`, `"permit_payload_returned":false`, `"secret_value_returned":false`, `"value_returned":false`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("browser witness API should include %s: %s", want, body)
 		}
@@ -569,17 +595,18 @@ func TestSessionWitnessPageRendersCopySafeCapture(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	for header, want := range map[string]string{
-		"Content-Type":                    "text/html; charset=utf-8",
-		"X-Janus-Witness-Schema":          "janus-auth-session-witness-v1",
-		"X-Janus-Witness-State":           "authenticated",
-		"X-Janus-Witness-Flow":            "zitadel_oidc_pkce_to_signed_session",
-		"X-Janus-Witness-Signal":          "signed_session_browser_proof_no_identity_values",
-		"X-Janus-Witness-Body-Field":      "witness",
-		"X-Janus-Witness-Algorithm":       "sha256-witness-v1",
-		"X-Janus-Witness-Hash-Body-Field": "receipt.hash",
-		"X-Janus-Value-Returned":          "false",
-		"X-Content-Type-Options":          "nosniff",
-		"Cross-Origin-Resource-Policy":    "same-origin",
+		"Content-Type":                      "text/html; charset=utf-8",
+		"X-Janus-Witness-Schema":            "janus-auth-session-witness-v1",
+		"X-Janus-Witness-State":             "authenticated",
+		"X-Janus-Witness-Flow":              "zitadel_oidc_pkce_to_signed_session",
+		"X-Janus-Witness-Signal":            "signed_session_browser_proof_no_identity_values",
+		"X-Janus-Witness-Body-Field":        "witness",
+		"X-Janus-Witness-Algorithm":         "sha256-witness-v1",
+		"X-Janus-Witness-Hash-Body-Field":   "receipt.hash",
+		"X-Janus-Witness-Freshness-Seconds": "300",
+		"X-Janus-Value-Returned":            "false",
+		"X-Content-Type-Options":            "nosniff",
+		"Cross-Origin-Resource-Policy":      "same-origin",
 	} {
 		if got := out.Header().Get(header); got != want {
 			t.Fatalf("session witness page should set %s=%q, got %q", header, want, got)
@@ -592,8 +619,9 @@ func TestSessionWitnessPageRendersCopySafeCapture(t *testing.T) {
 	if len(pageReceiptHash) != 64 {
 		t.Fatalf("session witness page should set 64-char proof hash, got %q", pageReceiptHash)
 	}
+	capturedAt, freshUntil := assertWitnessFreshnessHeaders(t, out)
 	body := out.Body.String()
-	for _, want := range []string{"Session witness capture", "Capture proof", "Proof hash", pageReceiptHash, "sha256-witness-v1", "hash_header=X-Janus-Witness-Hash", "hash_body_field=receipt.hash", "Witness headers", "Session witness value boundary", "janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signed_session_browser_proof_no_identity_values", "X-Janus-Witness-State", "X-Janus-Witness-Flow", "X-Janus-Witness-Signal", "X-Janus-Witness-Hash", "request_id=session-witness-page-123", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Session witness capture", "Capture proof", "Proof hash", pageReceiptHash, "Captured", "Fresh until", capturedAt, freshUntil, "sha256-witness-v1", "freshness_seconds=300", "captured_at=" + capturedAt, "fresh_until=" + freshUntil, "hash_header=X-Janus-Witness-Hash", "hash_body_field=receipt.hash", "Witness headers", "Session witness value boundary", "janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signed_session_browser_proof_no_identity_values", "X-Janus-Witness-State", "X-Janus-Witness-Flow", "X-Janus-Witness-Signal", "X-Janus-Witness-Hash", "X-Janus-Witness-Captured-At", "X-Janus-Witness-Fresh-Until", "X-Janus-Witness-Freshness-Seconds", "request_id=session-witness-page-123", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("session witness page should include %s: %s", want, body)
 		}
@@ -621,18 +649,19 @@ func TestSessionWitnessTextRendersCopySafeCapture(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	for header, want := range map[string]string{
-		"Content-Type":                    "text/plain; charset=utf-8",
-		"Content-Disposition":             `inline; filename="janus-session-witness.txt"`,
-		"X-Janus-Witness-Schema":          "janus-auth-session-witness-v1",
-		"X-Janus-Witness-State":           "authenticated",
-		"X-Janus-Witness-Flow":            "zitadel_oidc_pkce_to_signed_session",
-		"X-Janus-Witness-Signal":          "signed_session_browser_proof_no_identity_values",
-		"X-Janus-Witness-Body-Field":      "witness",
-		"X-Janus-Witness-Algorithm":       "sha256-witness-v1",
-		"X-Janus-Witness-Hash-Body-Field": "receipt.hash",
-		"X-Janus-Value-Returned":          "false",
-		"X-Content-Type-Options":          "nosniff",
-		"Cross-Origin-Resource-Policy":    "same-origin",
+		"Content-Type":                      "text/plain; charset=utf-8",
+		"Content-Disposition":               `inline; filename="janus-session-witness.txt"`,
+		"X-Janus-Witness-Schema":            "janus-auth-session-witness-v1",
+		"X-Janus-Witness-State":             "authenticated",
+		"X-Janus-Witness-Flow":              "zitadel_oidc_pkce_to_signed_session",
+		"X-Janus-Witness-Signal":            "signed_session_browser_proof_no_identity_values",
+		"X-Janus-Witness-Body-Field":        "witness",
+		"X-Janus-Witness-Algorithm":         "sha256-witness-v1",
+		"X-Janus-Witness-Hash-Body-Field":   "receipt.hash",
+		"X-Janus-Witness-Freshness-Seconds": "300",
+		"X-Janus-Value-Returned":            "false",
+		"X-Content-Type-Options":            "nosniff",
+		"Cross-Origin-Resource-Policy":      "same-origin",
 	} {
 		if got := out.Header().Get(header); got != want {
 			t.Fatalf("session witness text should set %s=%q, got %q", header, want, got)
@@ -642,8 +671,9 @@ func TestSessionWitnessTextRendersCopySafeCapture(t *testing.T) {
 	if len(textReceiptHash) != 64 {
 		t.Fatalf("session witness text should set 64-char proof hash, got %q", textReceiptHash)
 	}
+	capturedAt, freshUntil := assertWitnessFreshnessHeaders(t, out)
 	body := out.Body.String()
-	for _, want := range []string{"janus_session_witness", "schema=janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signal=signed_session_browser_proof_no_identity_values", "body_field=witness", "request_id=session-witness-text-123", "proof_line=schema=janus-auth-session-witness-v1 state=authenticated", "proof_algorithm=sha256-witness-v1", "proof_hash=" + textReceiptHash, "proof_hash_header=X-Janus-Witness-Hash", "proof_hash_body_field=receipt.hash", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "request_body_returned=false", "env_values_returned=false", "backend_path_returned=false", "connector_output_returned=false", "permit_payload_returned=false", "secret_value_returned=false", "value_returned=false"} {
+	for _, want := range []string{"janus_session_witness", "schema=janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signal=signed_session_browser_proof_no_identity_values", "body_field=witness", "request_id=session-witness-text-123", "captured_at=" + capturedAt, "fresh_until=" + freshUntil, "freshness_seconds=300", "proof_line=schema=janus-auth-session-witness-v1 state=authenticated", "fresh_until=" + freshUntil, "proof_algorithm=sha256-witness-v1", "proof_hash=" + textReceiptHash, "proof_hash_header=X-Janus-Witness-Hash", "proof_hash_body_field=receipt.hash", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "request_body_returned=false", "env_values_returned=false", "backend_path_returned=false", "connector_output_returned=false", "permit_payload_returned=false", "secret_value_returned=false", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("session witness text should include %s: %s", want, body)
 		}

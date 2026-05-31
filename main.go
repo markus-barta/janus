@@ -1029,6 +1029,9 @@ func applyAuthenticatedBrowserWitnessHeaders(w http.ResponseWriter, witness Auth
 	w.Header().Set("X-Janus-Witness-Algorithm", receipt.Algorithm)
 	w.Header().Set("X-Janus-Witness-Hash", receipt.Hash)
 	w.Header().Set("X-Janus-Witness-Hash-Body-Field", receipt.BodyField)
+	w.Header().Set("X-Janus-Witness-Captured-At", receipt.CapturedAt)
+	w.Header().Set("X-Janus-Witness-Fresh-Until", receipt.FreshUntil)
+	w.Header().Set("X-Janus-Witness-Freshness-Seconds", fmt.Sprintf("%d", receipt.FreshnessSeconds))
 	w.Header().Set("X-Janus-Value-Returned", "false")
 }
 
@@ -1092,7 +1095,8 @@ func (app *App) handleSessionWitnessPage(w http.ResponseWriter, r *http.Request)
 	session := currentSession(r.Context())
 	witness, capture := app.authenticatedBrowserWitnessCapture(session)
 	reqID := requestID(r)
-	receipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID)
+	capturedAt := time.Now().UTC()
+	receipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID, capturedAt)
 	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture, receipt)
 	app.audit(r, "auth.session.witness.page", "allowed", session.Subject, "")
 	renderTemplate(w, app.templates, "session_witness", map[string]any{
@@ -1106,7 +1110,7 @@ func (app *App) handleSessionWitnessPage(w http.ResponseWriter, r *http.Request)
 		"AuthenticatedBrowser": witness,
 		"Capture":              capture,
 		"CaptureHeaders":       AuthenticatedBrowserCaptureHeadersFor(witness, capture, reqID, receipt),
-		"CaptureLine":          AuthenticatedBrowserCaptureLineFor(witness, capture, reqID),
+		"CaptureLine":          receipt.Input,
 		"Receipt":              receipt,
 		"RequestID":            reqID,
 	})
@@ -1116,7 +1120,8 @@ func (app *App) handleSessionWitnessText(w http.ResponseWriter, r *http.Request)
 	session := currentSession(r.Context())
 	witness, capture := app.authenticatedBrowserWitnessCapture(session)
 	reqID := requestID(r)
-	receipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID)
+	capturedAt := time.Now().UTC()
+	receipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID, capturedAt)
 	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture, receipt)
 	w.Header().Set("Content-Disposition", `inline; filename="janus-session-witness.txt"`)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -1129,7 +1134,8 @@ func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request)
 	session := currentSession(r.Context())
 	witness, capture := app.authenticatedBrowserWitnessCapture(session)
 	reqID := requestID(r)
-	receipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID)
+	capturedAt := time.Now().UTC()
+	receipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID, capturedAt)
 	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture, receipt)
 	app.audit(r, "auth.session.witness", "allowed", session.Subject, "")
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -6492,6 +6498,10 @@ func mustTemplates() *template.Template {
 	        <span>Request</span>
 	        <strong>{{ .RequestID }}</strong>
 	      </div>
+	      <div class="safety-chip ok">
+	        <span>Fresh until</span>
+	        <strong>{{ .Receipt.FreshUntil }}</strong>
+	      </div>
 	    </div>
 	  </div>
 	  <div class="status">
@@ -6501,15 +6511,19 @@ func mustTemplates() *template.Template {
 	        <span>Schema<strong>{{ .Capture.Schema }}</strong></span>
 	        <span>Body field<strong>{{ .Capture.BodyField }}</strong></span>
 	        <span>Signal<strong>{{ .AuthenticatedBrowser.EvidenceSignal }}</strong></span>
+	        <span>Captured<strong>{{ .Receipt.CapturedAt }}</strong></span>
+	        <span>Fresh until<strong>{{ .Receipt.FreshUntil }}</strong></span>
 	        <span>Proof hash<strong class="mono">{{ .Receipt.Hash }}</strong></span>
 	      </div>
 	      <div class="receipt-copy" aria-label="Copy-safe session witness fields">
 	        <label>State<input readonly value="state={{ .AuthenticatedBrowser.State }}"></label>
 	        <label>Flow<input readonly value="flow={{ .AuthenticatedBrowser.Flow }}"></label>
 	        <label>Request<input readonly value="request_id={{ .RequestID }}"></label>
+	        <label>Captured<input readonly value="captured_at={{ .Receipt.CapturedAt }}"></label>
+	        <label>Fresh until<input readonly value="fresh_until={{ .Receipt.FreshUntil }}"></label>
 	      </div>
 	      <p class="capture-line mono">{{ .CaptureLine }}</p>
-	      <p><span class="pill info">{{ .Receipt.Algorithm }}</span> <span class="pill ok">hash_header={{ .Receipt.HashHeader }}</span> <span class="pill ok">hash_body_field={{ .Receipt.BodyField }}</span> <span class="pill ok">copy_safe={{ .Capture.CopySafe }}</span> <span class="pill ok">replay_safe={{ .Capture.ReplaySafe }}</span> <span class="pill ok">value_returned=false</span></p>
+	      <p><span class="pill info">{{ .Receipt.Algorithm }}</span> <span class="pill ok">freshness_seconds={{ .Receipt.FreshnessSeconds }}</span> <span class="pill ok">hash_header={{ .Receipt.HashHeader }}</span> <span class="pill ok">hash_body_field={{ .Receipt.BodyField }}</span> <span class="pill ok">copy_safe={{ .Capture.CopySafe }}</span> <span class="pill ok">replay_safe={{ .Capture.ReplaySafe }}</span> <span class="pill ok">value_returned=false</span></p>
 	    </div>
 	  </div>
 	</section>
