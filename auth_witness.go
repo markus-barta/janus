@@ -864,10 +864,24 @@ func CurrentSessionEvidenceTextFor(verification WitnessReceiptVerification, chec
 		"value_returned=false\n"
 }
 
-func CurrentSessionEvidenceRecordTextFor(verification WitnessReceiptVerification, checklist []ReviewerLaunchCheck, requestID string, auditRecorded bool) string {
+func CurrentSessionEvidenceRecordTextFor(verification WitnessReceiptVerification, checklist []ReviewerLaunchCheck, requestID string, auditEntry AuditEntry, auditRecorded bool) string {
 	recordStatus := "blocked"
 	if auditRecorded && verification.Evidence != nil && verification.Evidence.Verified && verification.Evidence.ProofPackVerified {
 		recordStatus = "recorded"
+	}
+	eventHash := ""
+	prevHash := "genesis"
+	chainLink := ""
+	severity := ""
+	if auditRecorded {
+		eventHash = auditEntry.EventHash
+		if auditEntry.PrevHash != "" {
+			prevHash = auditEntry.PrevHash
+		}
+		if eventHash != "" {
+			chainLink = prevHash + "-" + eventHash
+		}
+		severity = auditEntry.Severity
 	}
 	evidenceText := strings.TrimPrefix(CurrentSessionEvidenceTextFor(verification, checklist), "janus_current_session_evidence\n")
 	return "janus_current_session_evidence_record\n" +
@@ -875,7 +889,19 @@ func CurrentSessionEvidenceRecordTextFor(verification WitnessReceiptVerification
 		"record_request_id=" + safeDisplayState(requestID) + "\n" +
 		"audit_action=auth.session.witness.evidence.record\n" +
 		"audit_recorded=" + strconv.FormatBool(auditRecorded) + "\n" +
+		"audit_hash_algorithm=sha256-audit-entry-v1\n" +
+		"audit_event_hash=" + safeDisplayState(eventHash) + "\n" +
+		"audit_prev_hash=" + safeDisplayState(prevHash) + "\n" +
+		"audit_chain_link=" + auditChainLinkField(chainLink) + "\n" +
+		"audit_severity=" + safeDisplayState(severity) + "\n" +
 		evidenceText
+}
+
+func auditChainLinkField(chainLink string) string {
+	if chainLink == "" {
+		return "missing"
+	}
+	return chainLink
 }
 
 func reviewerLaunchChecklistState(checklist []ReviewerLaunchCheck, key string) string {

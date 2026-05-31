@@ -1210,12 +1210,16 @@ func (app *App) handleSessionWitnessEvidenceRecord(w http.ResponseWriter, r *htt
 	verification := app.currentSessionWitnessProofPackVerification(r, session)
 	verification = attachWitnessEvidence(w, verification, requestID(r))
 	checklist := ReviewerLaunchChecklistFor(witness, &verification)
+	auditEntry := AuditEntry{}
 	auditRecorded := false
 	status := http.StatusUnprocessableEntity
 	if verification.Verified && verification.Evidence != nil && verification.Evidence.ProofPackVerified {
-		app.audit(r, "auth.session.witness.evidence.record", "allowed", session.Subject, "copy_safe_evidence_recorded")
-		auditRecorded = true
-		status = http.StatusOK
+		auditEntry, auditRecorded = app.audit(r, "auth.session.witness.evidence.record", "allowed", session.Subject, "copy_safe_evidence_recorded")
+		if auditRecorded {
+			status = http.StatusOK
+		} else {
+			status = http.StatusServiceUnavailable
+		}
 	} else {
 		app.audit(r, "auth.session.witness.evidence.record", verification.Status, session.Subject, "copy_safe_evidence_not_recorded")
 	}
@@ -1223,7 +1227,7 @@ func (app *App) handleSessionWitnessEvidenceRecord(w http.ResponseWriter, r *htt
 	w.Header().Set("Content-Disposition", `inline; filename="janus-current-session-evidence-record.txt"`)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(status)
-	_, _ = w.Write([]byte(CurrentSessionEvidenceRecordTextFor(verification, checklist, requestID(r), auditRecorded)))
+	_, _ = w.Write([]byte(CurrentSessionEvidenceRecordTextFor(verification, checklist, requestID(r), auditEntry, auditRecorded)))
 }
 
 func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request) {
@@ -2331,15 +2335,12 @@ func (app *App) clearCookie(w http.ResponseWriter, name string) {
 	})
 }
 
-func (app *App) audit(r *http.Request, action, outcome, actor, reason string) {
-	app.auditWithRef(r, action, outcome, actor, "", reason)
+func (app *App) audit(r *http.Request, action, outcome, actor, reason string) (AuditEntry, bool) {
+	return app.auditWithRef(r, action, outcome, actor, "", reason)
 }
 
-func (app *App) auditWithRef(r *http.Request, action, outcome, actor, secretRef, reason string) {
-	if app.store == nil {
-		return
-	}
-	app.store.AppendAudit(AuditEntry{
+func (app *App) auditWithRef(r *http.Request, action, outcome, actor, secretRef, reason string) (AuditEntry, bool) {
+	entry := AuditEntry{
 		Action:    action,
 		Outcome:   outcome,
 		ActorHash: actorHash(actor),
@@ -2348,7 +2349,11 @@ func (app *App) auditWithRef(r *http.Request, action, outcome, actor, secretRef,
 		Path:      r.URL.Path,
 		SecretRef: secretRef,
 		Reason:    reason,
-	})
+	}
+	if app.store == nil {
+		return entry, false
+	}
+	return app.store.AppendAudit(entry)
 }
 
 type sessionKey struct{}

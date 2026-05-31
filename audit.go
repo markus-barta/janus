@@ -77,7 +77,7 @@ type AuditTrailRow struct {
 	HashLocked     bool   `json:"hash_locked"`
 }
 
-func (s *Store) AppendAudit(entry AuditEntry) {
+func (s *Store) AppendAudit(entry AuditEntry) (AuditEntry, bool) {
 	entry.Time = time.Now().UTC()
 	entry.Severity = normalizeAuditSeverity(entry.Severity)
 	if entry.Severity == "" {
@@ -93,22 +93,24 @@ func (s *Store) AppendAudit(entry AuditEntry) {
 	f, err := os.OpenFile(s.auditFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		log.Printf("audit open failed: %v", err)
-		return
+		return entry, false
 	}
 	defer f.Close()
 
 	raw, err := json.Marshal(entry)
 	if err != nil {
 		log.Printf("audit encode failed: %v", err)
-		return
+		return entry, false
 	}
 	if _, err := f.Write(append(raw, '\n')); err != nil {
 		log.Printf("audit write failed: %v", err)
-		return
+		return entry, false
 	}
 	if err := f.Sync(); err != nil {
 		log.Printf("audit sync failed: %v", err)
+		return entry, false
 	}
+	return entry, true
 }
 
 func (s *Store) RecentAudit(limit int) []AuditEntry {
@@ -239,7 +241,7 @@ func auditSeverityFor(action, outcome, reason string) string {
 	if outcome == "denied" || strings.Contains(outcome, "failed") || strings.Contains(reason, "failed") {
 		return "warning"
 	}
-	if strings.Contains(action, "permit.") || strings.Contains(action, "warden.resolve") || strings.HasPrefix(action, "evidence.") {
+	if strings.Contains(action, "permit.") || strings.Contains(action, "warden.resolve") || strings.HasPrefix(action, "evidence.") || strings.Contains(action, ".evidence.") {
 		return "notice"
 	}
 	return "info"

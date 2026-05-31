@@ -856,19 +856,27 @@ func TestSessionWitnessEvidenceRecordWritesCopySafeAuditReceipt(t *testing.T) {
 		t.Fatalf("evidence record should set verification hash header, got %q", verificationHash)
 	}
 	body := out.Body.String()
-	for _, want := range []string{"janus_current_session_evidence_record", "record_status=recorded", "record_request_id=session-witness-record-123", "audit_action=auth.session.witness.evidence.record", "audit_recorded=true", "evidence_line=janus_signed_browser_evidence", "evidence_status=verified", "source_request_id=session-witness-record-123", "hash_match=true", "fresh=true", "verified=true", "proof_pack_verified=true", "verification_hash=" + verificationHash, "verification_hash_header=X-Janus-Witness-Verification-Hash", "verification_hash_body_field=verification.receipt.hash", "launch_check_browser_session=authenticated", "launch_check_current_proof_pack=verified", "launch_check_evidence_receipt=copy_safe", "launch_check_human_capture=pending", "copy_safe=true", "input_returned=false", "request_body_returned=false", "proof_pack_returned=false", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "env_values_returned=false", "backend_path_returned=false", "connector_output_returned=false", "permit_payload_returned=false", "secret_value_returned=false", "value_returned=false"} {
+	for _, want := range []string{"janus_current_session_evidence_record", "record_status=recorded", "record_request_id=session-witness-record-123", "audit_action=auth.session.witness.evidence.record", "audit_recorded=true", "audit_hash_algorithm=sha256-audit-entry-v1", "audit_prev_hash=genesis", "audit_severity=notice", "evidence_line=janus_signed_browser_evidence", "evidence_status=verified", "source_request_id=session-witness-record-123", "hash_match=true", "fresh=true", "verified=true", "proof_pack_verified=true", "verification_hash=" + verificationHash, "verification_hash_header=X-Janus-Witness-Verification-Hash", "verification_hash_body_field=verification.receipt.hash", "launch_check_browser_session=authenticated", "launch_check_current_proof_pack=verified", "launch_check_evidence_receipt=copy_safe", "launch_check_human_capture=pending", "copy_safe=true", "input_returned=false", "request_body_returned=false", "proof_pack_returned=false", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "env_values_returned=false", "backend_path_returned=false", "connector_output_returned=false", "permit_payload_returned=false", "secret_value_returned=false", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("session witness evidence record should include %q: %s", want, body)
 		}
 	}
-	for _, forbidden := range []string{"janus_current_session_witness_proof", "witness_proof_line=", "proof_line=", "proof_pack_input=", "subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
+	for _, forbidden := range []string{"actor_hash", "janus_current_session_witness_proof", "witness_proof_line=", "proof_line=", "proof_pack_input=", "subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "nonce-cookie-secret", "pkce-cookie-secret"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("session witness evidence record leaked forbidden value %q: %s", forbidden, body)
 		}
 	}
 	recent := app.store.RecentAudit(1)
-	if len(recent) != 1 || recent[0].Action != "auth.session.witness.evidence.record" || recent[0].Outcome != "allowed" || recent[0].RequestID != "session-witness-record-123" || recent[0].Reason != "copy_safe_evidence_recorded" {
+	if len(recent) != 1 || recent[0].Action != "auth.session.witness.evidence.record" || recent[0].Outcome != "allowed" || recent[0].Severity != "notice" || recent[0].RequestID != "session-witness-record-123" || recent[0].Reason != "copy_safe_evidence_recorded" {
 		t.Fatalf("evidence record should write correlated audit event, got %#v", recent)
+	}
+	if len(recent[0].EventHash) != 64 || !isLowerHex(recent[0].EventHash) {
+		t.Fatalf("evidence record audit should have a stable event hash: %#v", recent[0])
+	}
+	for _, want := range []string{"audit_event_hash=" + recent[0].EventHash, "audit_chain_link=genesis-" + recent[0].EventHash} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("evidence record receipt should include audit chain linkage %q: %s", want, body)
+		}
 	}
 	rawAudit, err := json.Marshal(recent[0])
 	if err != nil {
@@ -880,6 +888,39 @@ func TestSessionWitnessEvidenceRecordWritesCopySafeAuditReceipt(t *testing.T) {
 		}
 	}
 	assertRouteResponseValueFree(t, "session witness evidence record", out)
+}
+
+func TestSessionWitnessEvidenceRecordDoesNotClaimAuditWhenStoreMissing(t *testing.T) {
+	app := newTestApp(t)
+	app.store = nil
+	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	form := url.Values{}
+	form.Set("csrf_token", app.csrfToken(session))
+	req := httptest.NewRequest(http.MethodPost, "/session-witness/evidence/record", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://vault.barta.cm")
+	req.Header.Set("X-Request-Id", "session-witness-record-no-store")
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when audit store is missing, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"janus_current_session_evidence_record", "record_status=blocked", "record_request_id=session-witness-record-no-store", "audit_recorded=false", "audit_hash_algorithm=sha256-audit-entry-v1", "audit_event_hash=missing", "audit_prev_hash=genesis", "audit_chain_link=missing", "audit_severity=missing", "evidence_status=verified", "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing-store evidence record should include %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"actor_hash", "subject-123", "person@example.test", "Person Name", "secret-cookie-secret", "proof_line=", "witness_proof_line="} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("missing-store evidence record leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+	assertRouteResponseValueFree(t, "session witness evidence record missing store", out)
 }
 
 func TestSessionWitnessEvidenceRecordRequiresCSRF(t *testing.T) {
