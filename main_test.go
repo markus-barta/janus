@@ -3042,7 +3042,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Session identity", "Signed in", "identity values withheld", "admin", "Live posture", "Operational status", "Command center", "Skip to command center", "Current safety posture", "Service", "values withheld", "Actions", "Command center status", "Safe quick actions", "Safety state", "Role access", "Enterprise review", "Now", "metadata_only", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Signed-in role receipt", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Enterprise dry run", "Enterprise dry-run checklist", "self_hosted now", "enterprise target", "blockers", "required=true", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Integration conformance workflow", "Mark integration conformance present", "connector_config_returned=false", "endpoint_returned=false", "payload_returned=false", "Identity mapping", "Audit shipping", "Ticketing link", "SIEM custody", "Evidence handoff", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill workflow", "Mark restore drill present", "review cadence", "Metadata inventory", "Policy and identity", "Release provenance workflow", "Mark release provenance present", "artifact_returned=false", "Build identity", "SBOM review", "Channel trust", "Privacy and retention workflow", "Mark privacy policy present", "policy_doc_returned=false", "raw_metadata_returned=false", "Data classes", "Retention window", "Access boundary", "Payload exclusions", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Evidence export witness", "Audit proof", "Download gate", "Value boundary", "Retention posture", "local_evidence_until_operator_cleanup", "Evidence export evidence flags", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Role workbench witness", "Available controls", "Hidden controls", "Least privilege", "Role workbench evidence flags", "role_boundary_enforced=true", "identity_values_returned=false", "claim_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "Evidence JSON", "Request metadata handle", "Request handle witness", "Intent boundary", "Metadata receipt", "Request handle evidence flags", "Request permit", "Access policy", "bootstrap owner", "claim policy", "subject bindings", "group bindings", "Role policy proof", "Implicit elevated claims", "disabled", "Claim names are not trusted by convention", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture", "Lifecycle posture witness", "Normal-use gate", "Blocked lifecycle", "Freshness review", "Lifecycle posture evidence flags", "normal_use_fail_closed=true", "backend_path_returned=false", "request_body_returned=false", "Warden descriptors", "Warden descriptor catalog witness", "Visible metadata", "Scope boundary", "Use profile", "Warden catalog evidence flags", "descriptor_count=", "scope_strict=true", "profiled_count=", "unprofiled_count=", "reveal_allowed=false", "source_path_returned=false"} {
+	for _, want := range []string{"Session identity", "Signed in", "identity values withheld", "admin", "Live posture", "Operational status", "Command center", "Skip to command center", "Current safety posture", "Service", "values withheld", "Actions", "Command center status", "Safe quick actions", "Safety state", "Role access", "Enterprise review", "Now", "metadata_only", "Assurance verdict", "Role duties", "Scope boundary", "Janus is serving value-free posture", "Assurance flow", "Signed-in role receipt", "Metadata only", "Use gate", "Audit trail", "Trust posture", "Catalog gates", "Approved use", "Next safe steps", "Audit storage", "Enterprise controls", "safe actions only", "Keep monitoring posture", "Audit failure drill", "audit_sink_or_chain_degraded", "Audit writes", "Audit chain", "Sensitive actions", "Public readiness", "Recovery path", "Fix audit storage first", "Assurance summary", "Proven controls", "Review items", "Assurance gates", "Role denial", "Catalog metadata", "Degraded actions", "Value leak sentinel", "abuse tested", "Blocked-path checks", "Wrong role", "Catalog gate", "Audit down", "Sensitive action", "Value leak check", "Request id", "Value boundary", "Browser and API boundary", "human readable evidence", "Available to you", "Posture", "Use actions", "Audit export", "Admin policy", "Handle and permit controls are available", "Audit rows and evidence export are available", "Admin policy review is available", "Action readiness", "Posture view", "Issue metadata handle", "Create permit", "Run permit check", "readiness blocked", "role operator", "Never reveals a secret value", "No connector executes and output is scrubbed", "Deployment mode", "Self-hosted baseline", "Enterprise evidence", "Enterprise validation", "Enterprise dry run", "Enterprise dry-run checklist", "self_hosted now", "enterprise target", "blockers", "required=true", "Attachment review", "Enterprise attachment owner review", "0 required", "0 attached", "0 missing", "Remote audit", "Break-glass review", "Restore drill", "Integration conformance", "Integration conformance workflow", "Mark integration conformance present", "connector_config_returned=false", "endpoint_returned=false", "payload_returned=false", "Identity mapping", "Audit shipping", "Ticketing link", "SIEM custody", "Evidence handoff", "Release provenance", "Privacy policy", "self-hosted safe", "enterprise required", "evidence_ref_returned=false", "presence only", "owner auditor", "presence_only_env_flag", "evidence ref not returned", "Switch to enterprise only after this external evidence exists", "Restore drill workflow", "Mark restore drill present", "review cadence", "Metadata inventory", "Policy and identity", "Release provenance workflow", "Mark release provenance present", "artifact_returned=false", "Build identity", "SBOM review", "Channel trust", "Privacy and retention workflow", "Mark privacy policy present", "policy_doc_returned=false", "raw_metadata_returned=false", "Data classes", "Retention window", "Access boundary", "Payload exclusions", "Restore drill proof", "Metadata restore", "Audit continuity", "Policy and scope", "Readiness after restore", "Evidence boundary", "Run and attach a restore drill record outside Janus", "Mode guardrails", "Secure local control plane", "No enterprise claim", "Switch to enterprise only after external controls exist", "Privacy and retention", "Audit events", "Request bodies", "Prompts, command output, env dumps", "Raw metadata", "Auth and cookie secrets", "Excluded from evidence", "not retained", "not_claimed", "Evidence export", "Evidence export witness", "Audit proof", "Download gate", "Value boundary", "Retention posture", "local_evidence_until_operator_cleanup", "Evidence export evidence flags", "Exact download receipt", "integrity.pack_hash", "X-Janus-Evidence-Hash", "Download JSON", "Current preview", "copy-safe metadata", "exact hash returned on download", "matches integrity.pack_hash", "evidence_json_without_integrity_or_receipt", "Included evidence", "Never exported", "export_ready", "secret_values", "backend_source_paths", "value_returned=false", "Role workbench witness", "Available controls", "Hidden controls", "Least privilege", "Role workbench evidence flags", "role_boundary_enforced=true", "identity_values_returned=false", "claim_values_returned=false", "token_returned=false", "cookie_value_returned=false", "secret_value_returned=false", "Evidence JSON", "Request metadata handle", "Request handle witness", "Intent boundary", "Metadata receipt", "Request handle evidence flags", "Request permit", "Request permit witness", "Permit intent", "Reason and destination", "Request permit evidence flags", "Create metadata permit", "Access policy", "bootstrap owner", "claim policy", "subject bindings", "group bindings", "Role policy proof", "Implicit elevated claims", "disabled", "Claim names are not trusted by convention", "session ttl", "session cookie", "Duty boundary", "role matrix", "Policy and ownership", "Evidence and audit", "Posture only", "Lifecycle posture", "Lifecycle posture witness", "Normal-use gate", "Blocked lifecycle", "Freshness review", "Lifecycle posture evidence flags", "normal_use_fail_closed=true", "backend_path_returned=false", "request_body_returned=false", "Warden descriptors", "Warden descriptor catalog witness", "Visible metadata", "Scope boundary", "Use profile", "Warden catalog evidence flags", "descriptor_count=", "scope_strict=true", "profiled_count=", "unprofiled_count=", "reveal_allowed=false", "source_path_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard should render %q: %s", want, body)
 		}
@@ -3195,6 +3195,69 @@ func TestDashboardRendersRequestHandleWitnessForOperator(t *testing.T) {
 	for _, forbidden := range []string{"plaintext", "secret-value", "backend_path=/", "source_path=/", "request_body=local smoke"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("request handle witness should remain value-free, found %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestDashboardRendersRequestPermitWitnessForOperator(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{
+		Subject: "operator-subject",
+		Email:   "operator@example.test",
+		Name:    "Operator",
+		Roles:   []string{RoleViewer, RoleOperator},
+		Expiry:  time.Now().UTC().Add(time.Hour),
+	}
+	rr := httptest.NewRecorder()
+	app.writeSession(rr, session)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(rr.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.withAuth(app.handleDashboard)(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{
+		"Request permit",
+		"Request permit witness",
+		"Permit intent",
+		"metadata only",
+		"No connector",
+		"run stays closed",
+		"Reason and destination",
+		"audit context",
+		"Short-lived status",
+		"10 minutes",
+		"Before you create",
+		"Form sends descriptor id, approved action, destination label, and reason only.",
+		"Result returns permit id, descriptor ref, status, expiry, and receipt proof.",
+		"Request permit evidence flags",
+		"will_create=metadata_permit",
+		"permit_intent=metadata_only",
+		"operator_role_required=true",
+		"csrf_required=true",
+		"readiness_required=true",
+		"audit_receipt_returned=true",
+		"connector_execution=false",
+		"connector_output_returned=false",
+		"permit_payload_returned=false",
+		"secret_value_returned=false",
+		"backend_path_returned=false",
+		"source_path_returned=false",
+		"request_body_returned=false",
+		"env_returned=false",
+		"value_returned=false",
+		"Create metadata permit",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("operator dashboard should render request permit witness %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"plaintext", "secret-value", "backend_path=/", "source_path=/", "request_body=local smoke", "connector_output=secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("request permit witness should remain value-free, found %q: %s", forbidden, body)
 		}
 	}
 }
@@ -3893,7 +3956,7 @@ func TestDashboardHidesOperatorActionsForViewer(t *testing.T) {
 			t.Fatalf("viewer dashboard should explain hidden operator controls %q: %s", want, body)
 		}
 	}
-	for _, forbidden := range []string{`href="#warden"`, `href="#permit"`, `action="/ui/warden/resolve"`, `action="/ui/permits"`, "Recent permits", "Request handle witness", "Issue handle</button>", "Issue metadata handle</button>", "Create permit</button>"} {
+	for _, forbidden := range []string{`href="#warden"`, `href="#permit"`, `action="/ui/warden/resolve"`, `action="/ui/permits"`, "Recent permits", "Request handle witness", "Request permit witness", "Issue handle</button>", "Issue metadata handle</button>", "Create permit</button>", "Create metadata permit</button>"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("viewer dashboard rendered operator action %q: %s", forbidden, body)
 		}
@@ -3926,6 +3989,7 @@ func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
 				"Audit rows and evidence export are available.",
 				"Admin policy review is available.",
 				"Request handle witness",
+				"Request permit witness",
 				`action="/ui/warden/resolve"`,
 				`action="/ui/permits"`,
 			},
@@ -3947,6 +4011,7 @@ func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
 				"Handle and permit controls are available.",
 				"Admin policy review is available.",
 				"Request handle witness",
+				"Request permit witness",
 				`action="/ui/warden/resolve"`,
 				`action="/ui/permits"`,
 			},
@@ -3965,6 +4030,7 @@ func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
 				"Request metadata handle",
 				"Request handle witness",
 				"Request permit",
+				"Request permit witness",
 			},
 			forbidden: []string{
 				"Audit rows and evidence export are available.",
@@ -3985,6 +4051,7 @@ func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
 				"Request metadata handle",
 				"Request handle witness",
 				"Request permit",
+				"Request permit witness",
 			},
 			navWant: []string{`href="#overview"`, `href="#command-center"`, `href="#warden"`, `href="#permit"`, `href="#posture"`, `href="#audit"`, `href="#catalog"`},
 		},

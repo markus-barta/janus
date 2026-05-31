@@ -5602,14 +5602,57 @@ func mustTemplates() *template.Template {
       <h2>Request permit</h2>
       <span class="pill warn">no execution connector</span>
     </div>
-    <div class="panel-body">
+    <div class="panel-body stack">
       {{ if .CanOperate }}
-      <div class="verdict" aria-label="Permit safety verdict">
-        <span><strong>Metadata only</strong> permit never reveals values</span>
-        <span><strong>No connector</strong> run check stays closed</span>
-        <span><strong>Reasoned</strong> request is audit-linked</span>
-        <span><strong>Short lived</strong> expires automatically</span>
+      <div class="witness-grid" aria-label="Request permit witness">
+        <div class="witness-card ok">
+          <span>Permit intent</span>
+          <strong>metadata only</strong>
+          <p>The permit records approved use for the selected descriptor without opening secret value access.</p>
+        </div>
+        <div class="witness-card ok">
+          <span>No connector</span>
+          <strong>run stays closed</strong>
+          <p>Permit creation does not execute a connector, call a backend secret path, or return command output.</p>
+        </div>
+        <div class="witness-card info">
+          <span>Reason and destination</span>
+          <strong>audit context</strong>
+          <p>Reason and destination are short labels for review; they are not used as payloads or instructions.</p>
+        </div>
+        <div class="witness-card ok">
+          <span>Short-lived status</span>
+          <strong>10 minutes</strong>
+          <p>Permit records expire automatically and return a copy-safe action receipt when created.</p>
+        </div>
       </div>
+      <div class="receipt" aria-label="Request permit boundary">
+        <div>
+          <strong>Before you create</strong>
+          <p>Form sends descriptor id, approved action, destination label, and reason only. Result returns permit id, descriptor ref, status, expiry, and receipt proof.</p>
+        </div>
+        <span class="pill ok">values withheld</span>
+      </div>
+      <details class="evidence-flags">
+        <summary>Request permit evidence flags</summary>
+        <div class="flag-cloud" aria-label="Request permit value-free evidence flags">
+          <span class="pill ok">will_create=metadata_permit</span>
+          <span class="pill ok">permit_intent=metadata_only</span>
+          <span class="pill ok">operator_role_required=true</span>
+          <span class="pill ok">csrf_required=true</span>
+          <span class="pill ok">readiness_required=true</span>
+          <span class="pill ok">audit_receipt_returned=true</span>
+          <span class="pill ok">connector_execution=false</span>
+          <span class="pill ok">connector_output_returned=false</span>
+          <span class="pill ok">permit_payload_returned=false</span>
+          <span class="pill ok">secret_value_returned=false</span>
+          <span class="pill ok">backend_path_returned=false</span>
+          <span class="pill ok">source_path_returned=false</span>
+          <span class="pill ok">request_body_returned=false</span>
+          <span class="pill ok">env_returned=false</span>
+          <span class="pill ok">value_returned=false</span>
+        </div>
+      </details>
       <form class="flow" method="post" action="/ui/permits">
         <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
         <label>Descriptor
@@ -5629,7 +5672,7 @@ func mustTemplates() *template.Template {
         <label>Reason
           <input name="reason" maxlength="160" required placeholder="audit, rotation, incident review">
         </label>
-        <button class="primary" type="submit">Create permit</button>
+        <button class="primary" type="submit">Create metadata permit</button>
       </form>
       {{ else }}
       <div class="stack">
