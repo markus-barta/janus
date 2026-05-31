@@ -1006,8 +1006,22 @@ func TestSessionWitnessEvidenceRecordVerifierMatchesAuditChain(t *testing.T) {
 	if verifyOut.Code != http.StatusOK {
 		t.Fatalf("expected evidence record verifier 200, got %d body=%s", verifyOut.Code, verifyOut.Body.String())
 	}
+	receiptHash := verifyOut.Header().Get("X-Janus-Evidence-Record-Verification-Hash")
+	if len(receiptHash) != 64 || !isLowerHex(receiptHash) {
+		t.Fatalf("evidence record verifier should set receipt hash header, got %q", receiptHash)
+	}
+	for header, want := range map[string]string{
+		"X-Janus-Evidence-Record-Verification-Schema":          "janus-evidence-record-verification-v1",
+		"X-Janus-Evidence-Record-Verification-Algorithm":       "sha256-evidence-record-verification-v1",
+		"X-Janus-Evidence-Record-Verification-Hash-Body-Field": "verification.receipt.hash",
+		"X-Janus-Value-Returned":                               "false",
+	} {
+		if got := verifyOut.Header().Get(header); got != want {
+			t.Fatalf("evidence record verifier should set %s=%q, got %q", header, want, got)
+		}
+	}
 	body := verifyOut.Body.String()
-	for _, want := range []string{"Evidence record verification", "verified", "The evidence record links to a persisted Janus audit row", "session-witness-record-verify-123", recent[0].EventHash, "sha256-audit-entry-v1", "audit_recorded=true", "audit_row_found=true", "audit_chain_verified=true", "hash_shape_valid=true", "chain_link_match=true", "value_boundary_valid=true", "action_match=true", "request_id_match=true", "severity_match=true", "reason_match=true", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Evidence record verification", "Verification hash", receiptHash, "schema=janus-evidence-record-verification-v1", "sha256-evidence-record-verification-v1", "verified", "The evidence record links to a persisted Janus audit row", "session-witness-record-verify-123", recent[0].EventHash, "sha256-audit-entry-v1", "audit_recorded=true", "audit_row_found=true", "audit_chain_verified=true", "hash_shape_valid=true", "chain_link_match=true", "value_boundary_valid=true", "action_match=true", "request_id_match=true", "severity_match=true", "reason_match=true", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("evidence record verifier should include %q: %s", want, body)
 		}
@@ -1047,8 +1061,11 @@ func TestSessionWitnessEvidenceRecordVerifierRejectsBadInputWithoutEcho(t *testi
 	if out.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected evidence record verifier 422, got %d body=%s", out.Code, out.Body.String())
 	}
+	if receiptHash := out.Header().Get("X-Janus-Evidence-Record-Verification-Hash"); len(receiptHash) != 64 || !isLowerHex(receiptHash) {
+		t.Fatalf("bad evidence record verifier should set receipt hash header, got %q", receiptHash)
+	}
 	body := out.Body.String()
-	for _, want := range []string{"Evidence record verification", "mismatch", "Audit hash shape", "audit_row_found=false", "hash_shape_valid=false", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Evidence record verification", "schema=janus-evidence-record-verification-v1", "mismatch", "Audit hash shape", "audit_row_found=false", "hash_shape_valid=false", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("bad evidence record verifier should include %q: %s", want, body)
 		}
@@ -1101,8 +1118,22 @@ func TestSessionWitnessEvidenceRecordVerifierAPIIsValueFree(t *testing.T) {
 	if apiOut.Code != http.StatusOK {
 		t.Fatalf("expected evidence record verifier API 200, got %d body=%s", apiOut.Code, apiOut.Body.String())
 	}
+	apiReceiptHash := apiOut.Header().Get("X-Janus-Evidence-Record-Verification-Hash")
+	if len(apiReceiptHash) != 64 || !isLowerHex(apiReceiptHash) {
+		t.Fatalf("evidence record verifier API should set receipt hash header, got %q", apiReceiptHash)
+	}
+	for header, want := range map[string]string{
+		"X-Janus-Evidence-Record-Verification-Schema":          "janus-evidence-record-verification-v1",
+		"X-Janus-Evidence-Record-Verification-Algorithm":       "sha256-evidence-record-verification-v1",
+		"X-Janus-Evidence-Record-Verification-Hash-Body-Field": "verification.receipt.hash",
+		"X-Janus-Value-Returned":                               "false",
+	} {
+		if got := apiOut.Header().Get(header); got != want {
+			t.Fatalf("evidence record verifier API should set %s=%q, got %q", header, want, got)
+		}
+	}
 	body := apiOut.Body.String()
-	for _, want := range []string{`"verification"`, `"status":"verified"`, `"verified":true`, `"record_request_id":"api-evidence-record-123"`, `"audit_event_hash":"` + recent[0].EventHash + `"`, `"audit_hash_algorithm":"sha256-audit-entry-v1"`, `"audit_recorded":true`, `"audit_row_found":true`, `"audit_chain_verified":true`, `"hash_shape_valid":true`, `"chain_link_match":true`, `"value_boundary_valid":true`, `"action_match":true`, `"request_id_match":true`, `"severity_match":true`, `"reason_match":true`, `"request_id":"api-evidence-record-verify-123"`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
+	for _, want := range []string{`"verification"`, `"receipt"`, `"schema":"janus-evidence-record-verification-v1"`, `"algorithm":"sha256-evidence-record-verification-v1"`, `"hash":"` + apiReceiptHash + `"`, `"hash_header":"X-Janus-Evidence-Record-Verification-Hash"`, `"body_field":"verification.receipt.hash"`, `"input":"schema=janus-evidence-record-verification-v1`, `"status":"verified"`, `"verified":true`, `"record_request_id":"api-evidence-record-123"`, `"audit_event_hash":"` + recent[0].EventHash + `"`, `"audit_hash_algorithm":"sha256-audit-entry-v1"`, `"audit_recorded":true`, `"audit_row_found":true`, `"audit_chain_verified":true`, `"hash_shape_valid":true`, `"chain_link_match":true`, `"value_boundary_valid":true`, `"action_match":true`, `"request_id_match":true`, `"severity_match":true`, `"reason_match":true`, `"request_id":"api-evidence-record-verify-123"`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("evidence record verifier API should include %q: %s", want, body)
 		}
@@ -1135,8 +1166,11 @@ func TestSessionWitnessEvidenceRecordVerifierAPIRejectsBadInputWithoutEcho(t *te
 	if out.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected evidence record verifier API 422, got %d body=%s", out.Code, out.Body.String())
 	}
+	if receiptHash := out.Header().Get("X-Janus-Evidence-Record-Verification-Hash"); len(receiptHash) != 64 || !isLowerHex(receiptHash) {
+		t.Fatalf("bad evidence record verifier API should set receipt hash header, got %q", receiptHash)
+	}
 	body := out.Body.String()
-	for _, want := range []string{`"verification"`, `"status":"mismatch"`, `"audit_row_found":false`, `"hash_shape_valid":false`, `"request_id":"api-evidence-record-bad-input"`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
+	for _, want := range []string{`"verification"`, `"receipt"`, `"schema":"janus-evidence-record-verification-v1"`, `"status":"mismatch"`, `"audit_row_found":false`, `"hash_shape_valid":false`, `"request_id":"api-evidence-record-bad-input"`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("bad evidence record verifier API should include %q: %s", want, body)
 		}
@@ -1168,8 +1202,12 @@ func TestSessionWitnessEvidenceVerifyCurrentRecordUIAndAPIAreValueFree(t *testin
 	if uiOut.Code != http.StatusOK {
 		t.Fatalf("expected current evidence record UI 200, got %d body=%s", uiOut.Code, uiOut.Body.String())
 	}
+	uiReceiptHash := uiOut.Header().Get("X-Janus-Evidence-Record-Verification-Hash")
+	if len(uiReceiptHash) != 64 || !isLowerHex(uiReceiptHash) {
+		t.Fatalf("current evidence record UI should set receipt hash header, got %q", uiReceiptHash)
+	}
 	uiBody := uiOut.Body.String()
-	for _, want := range []string{"Evidence record verification", "verified", "current-evidence-record-ui-123", "audit_recorded=true", "audit_row_found=true", "audit_chain_verified=true", "hash_shape_valid=true", "chain_link_match=true", "value_boundary_valid=true", "action_match=true", "request_id_match=true", "severity_match=true", "reason_match=true", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
+	for _, want := range []string{"Evidence record verification", "Verification hash", uiReceiptHash, "schema=janus-evidence-record-verification-v1", "verified", "current-evidence-record-ui-123", "audit_recorded=true", "audit_row_found=true", "audit_chain_verified=true", "hash_shape_valid=true", "chain_link_match=true", "value_boundary_valid=true", "action_match=true", "request_id_match=true", "severity_match=true", "reason_match=true", "input_returned=false", "request_body_returned=false", "value_returned=false"} {
 		if !strings.Contains(uiBody, want) {
 			t.Fatalf("current evidence record UI should include %q: %s", want, uiBody)
 		}
@@ -1192,8 +1230,12 @@ func TestSessionWitnessEvidenceVerifyCurrentRecordUIAndAPIAreValueFree(t *testin
 	if apiOut.Code != http.StatusOK {
 		t.Fatalf("expected current evidence record API 200, got %d body=%s", apiOut.Code, apiOut.Body.String())
 	}
+	apiReceiptHash := apiOut.Header().Get("X-Janus-Evidence-Record-Verification-Hash")
+	if len(apiReceiptHash) != 64 || !isLowerHex(apiReceiptHash) {
+		t.Fatalf("current evidence record API should set receipt hash header, got %q", apiReceiptHash)
+	}
 	apiBody := apiOut.Body.String()
-	for _, want := range []string{`"verification"`, `"status":"verified"`, `"record_returned":false`, `"record_status":"recorded"`, `"audit_recorded":true`, `"audit_row_found":true`, `"audit_chain_verified":true`, `"hash_shape_valid":true`, `"chain_link_match":true`, `"value_boundary_valid":true`, `"action_match":true`, `"request_id_match":true`, `"severity_match":true`, `"reason_match":true`, `"request_id":"current-evidence-record-api-123"`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
+	for _, want := range []string{`"verification"`, `"receipt"`, `"schema":"janus-evidence-record-verification-v1"`, `"hash":"` + apiReceiptHash + `"`, `"input":"schema=janus-evidence-record-verification-v1`, `"status":"verified"`, `"record_returned":false`, `"record_status":"recorded"`, `"audit_recorded":true`, `"audit_row_found":true`, `"audit_chain_verified":true`, `"hash_shape_valid":true`, `"chain_link_match":true`, `"value_boundary_valid":true`, `"action_match":true`, `"request_id_match":true`, `"severity_match":true`, `"reason_match":true`, `"request_id":"current-evidence-record-api-123"`, `"input_returned":false`, `"request_body_returned":false`, `"value_returned":false`} {
 		if !strings.Contains(apiBody, want) {
 			t.Fatalf("current evidence record API should include %q: %s", want, apiBody)
 		}

@@ -11,9 +11,12 @@ import (
 const authenticatedBrowserCaptureFreshness = 5 * time.Minute
 
 const (
-	authenticatedBrowserCaptureSchema = "janus-auth-session-witness-v1"
-	authenticatedBrowserCaptureSignal = "signed_session_browser_proof_no_identity_values"
-	witnessVerificationReceiptSchema  = "janus-witness-verification-v1"
+	authenticatedBrowserCaptureSchema        = "janus-auth-session-witness-v1"
+	authenticatedBrowserCaptureSignal        = "signed_session_browser_proof_no_identity_values"
+	witnessVerificationReceiptSchema         = "janus-witness-verification-v1"
+	evidenceRecordVerificationReceiptSchema  = "janus-evidence-record-verification-v1"
+	evidenceRecordVerificationHashAlgorithm  = "sha256-evidence-record-verification-v1"
+	evidenceRecordVerificationHashHeaderName = "X-Janus-Evidence-Record-Verification-Hash"
 )
 
 type AuthenticatedBrowserWitness struct {
@@ -182,6 +185,7 @@ type WitnessEvidenceRecordVerification struct {
 	Label               string                            `json:"label"`
 	Status              string                            `json:"status"`
 	Summary             string                            `json:"summary"`
+	Receipt             *WitnessEvidenceRecordReceipt     `json:"receipt,omitempty"`
 	RecordRequestID     string                            `json:"record_request_id"`
 	AuditEventHash      string                            `json:"audit_event_hash"`
 	AuditPrevHash       string                            `json:"audit_prev_hash"`
@@ -203,6 +207,31 @@ type WitnessEvidenceRecordVerification struct {
 	InputReturned       bool                              `json:"input_returned"`
 	RequestBodyReturned bool                              `json:"request_body_returned"`
 	ValueReturned       bool                              `json:"value_returned"`
+}
+
+type WitnessEvidenceRecordReceipt struct {
+	Schema              string `json:"schema"`
+	Algorithm           string `json:"algorithm"`
+	Hash                string `json:"hash"`
+	HashHeader          string `json:"hash_header"`
+	BodyField           string `json:"body_field"`
+	Input               string `json:"input"`
+	RequestID           string `json:"request_id"`
+	Status              string `json:"status"`
+	Verified            bool   `json:"verified"`
+	AuditRecorded       bool   `json:"audit_recorded"`
+	AuditRowFound       bool   `json:"audit_row_found"`
+	AuditChainVerified  bool   `json:"audit_chain_verified"`
+	HashShapeValid      bool   `json:"hash_shape_valid"`
+	ChainLinkMatch      bool   `json:"chain_link_match"`
+	ActionMatch         bool   `json:"action_match"`
+	RequestIDMatch      bool   `json:"request_id_match"`
+	SeverityMatch       bool   `json:"severity_match"`
+	ReasonMatch         bool   `json:"reason_match"`
+	ValueBoundaryValid  bool   `json:"value_boundary_valid"`
+	InputReturned       bool   `json:"input_returned"`
+	RequestBodyReturned bool   `json:"request_body_returned"`
+	ValueReturned       bool   `json:"value_returned"`
 }
 
 type AuthenticatedBrowserGate struct {
@@ -783,6 +812,62 @@ func WitnessReceiptVerificationLineFor(verification WitnessReceiptVerification, 
 		" hash_match=" + strconv.FormatBool(verification.HashMatch) +
 		" fresh=" + strconv.FormatBool(verification.Fresh) +
 		" verified=" + strconv.FormatBool(verification.Verified) +
+		" input_returned=false" +
+		" request_body_returned=false" +
+		" value_returned=false"
+}
+
+func EvidenceRecordVerificationReceiptFor(verification WitnessEvidenceRecordVerification, requestID string) WitnessEvidenceRecordReceipt {
+	requestID = sanitizeRequestID(requestID)
+	input := EvidenceRecordVerificationLineFor(verification, requestID)
+	sum := sha256.Sum256([]byte(input))
+	return WitnessEvidenceRecordReceipt{
+		Schema:              evidenceRecordVerificationReceiptSchema,
+		Algorithm:           evidenceRecordVerificationHashAlgorithm,
+		Hash:                hex.EncodeToString(sum[:]),
+		HashHeader:          evidenceRecordVerificationHashHeaderName,
+		BodyField:           "verification.receipt.hash",
+		Input:               input,
+		RequestID:           requestID,
+		Status:              safeDisplayState(verification.Status),
+		Verified:            verification.Verified,
+		AuditRecorded:       verification.AuditRecorded,
+		AuditRowFound:       verification.AuditRowFound,
+		AuditChainVerified:  verification.AuditChainVerified,
+		HashShapeValid:      verification.HashShapeValid,
+		ChainLinkMatch:      verification.ChainLinkMatch,
+		ActionMatch:         verification.ActionMatch,
+		RequestIDMatch:      verification.RequestIDMatch,
+		SeverityMatch:       verification.SeverityMatch,
+		ReasonMatch:         verification.ReasonMatch,
+		ValueBoundaryValid:  verification.ValueBoundaryValid,
+		InputReturned:       false,
+		RequestBodyReturned: false,
+		ValueReturned:       false,
+	}
+}
+
+func EvidenceRecordVerificationLineFor(verification WitnessEvidenceRecordVerification, requestID string) string {
+	return "schema=" + evidenceRecordVerificationReceiptSchema +
+		" verifier_request_id=" + safeDisplayState(requestID) +
+		" status=" + safeDisplayState(verification.Status) +
+		" verified=" + strconv.FormatBool(verification.Verified) +
+		" record_request_id=" + safeDisplayState(verification.RecordRequestID) +
+		" audit_hash_algorithm=" + safeDisplayState(verification.AuditHashAlgorithm) +
+		" audit_event_hash=" + safeDisplayState(verification.AuditEventHash) +
+		" audit_prev_hash=" + safeDisplayState(verification.AuditPrevHash) +
+		" audit_chain_link=" + safeDisplayState(verification.AuditChainLink) +
+		" audit_severity=" + safeDisplayState(verification.AuditSeverity) +
+		" audit_recorded=" + strconv.FormatBool(verification.AuditRecorded) +
+		" audit_row_found=" + strconv.FormatBool(verification.AuditRowFound) +
+		" audit_chain_verified=" + strconv.FormatBool(verification.AuditChainVerified) +
+		" hash_shape_valid=" + strconv.FormatBool(verification.HashShapeValid) +
+		" chain_link_match=" + strconv.FormatBool(verification.ChainLinkMatch) +
+		" action_match=" + strconv.FormatBool(verification.ActionMatch) +
+		" request_id_match=" + strconv.FormatBool(verification.RequestIDMatch) +
+		" severity_match=" + strconv.FormatBool(verification.SeverityMatch) +
+		" reason_match=" + strconv.FormatBool(verification.ReasonMatch) +
+		" value_boundary_valid=" + strconv.FormatBool(verification.ValueBoundaryValid) +
 		" input_returned=false" +
 		" request_body_returned=false" +
 		" value_returned=false"

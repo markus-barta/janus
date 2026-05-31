@@ -1065,6 +1065,17 @@ func applyWitnessVerificationHeaders(w http.ResponseWriter, receipt WitnessVerif
 	w.Header().Set("X-Janus-Value-Returned", "false")
 }
 
+func applyEvidenceRecordVerificationHeaders(w http.ResponseWriter, receipt WitnessEvidenceRecordReceipt) {
+	if w == nil {
+		return
+	}
+	w.Header().Set("X-Janus-Evidence-Record-Verification-Schema", receipt.Schema)
+	w.Header().Set("X-Janus-Evidence-Record-Verification-Algorithm", receipt.Algorithm)
+	w.Header().Set("X-Janus-Evidence-Record-Verification-Hash", receipt.Hash)
+	w.Header().Set("X-Janus-Evidence-Record-Verification-Hash-Body-Field", receipt.BodyField)
+	w.Header().Set("X-Janus-Value-Returned", "false")
+}
+
 func attachWitnessEvidence(w http.ResponseWriter, verification WitnessReceiptVerification, requestID string) WitnessReceiptVerification {
 	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID)
 	verification.Receipt = &receipt
@@ -1073,6 +1084,13 @@ func attachWitnessEvidence(w http.ResponseWriter, verification WitnessReceiptVer
 	if w != nil {
 		applyWitnessVerificationHeaders(w, receipt)
 	}
+	return verification
+}
+
+func attachEvidenceRecordVerificationReceipt(w http.ResponseWriter, verification WitnessEvidenceRecordVerification, requestID string) WitnessEvidenceRecordVerification {
+	receipt := EvidenceRecordVerificationReceiptFor(verification, requestID)
+	verification.Receipt = &receipt
+	applyEvidenceRecordVerificationHeaders(w, receipt)
 	return verification
 }
 
@@ -1468,6 +1486,7 @@ func (app *App) handleSessionWitnessEvidenceRecordVerifyPost(w http.ResponseWrit
 		return
 	}
 	recordVerification := app.verifySessionWitnessEvidenceRecordText(r.Form.Get("evidence_record"))
+	recordVerification = attachEvidenceRecordVerificationReceipt(w, recordVerification, requestID(r))
 	status := http.StatusOK
 	if !recordVerification.Verified {
 		status = http.StatusUnprocessableEntity
@@ -1492,6 +1511,7 @@ func (app *App) handleSessionWitnessEvidenceVerifyCurrentRecordPost(w http.Respo
 		return
 	}
 	result, recordVerification := app.verifyCurrentSessionEvidenceRecord(r, session)
+	recordVerification = attachEvidenceRecordVerificationReceipt(w, recordVerification, requestID(r))
 	status := result.Status
 	if status == http.StatusOK && !recordVerification.Verified {
 		status = http.StatusUnprocessableEntity
@@ -1629,6 +1649,7 @@ func (app *App) handleAuthSessionWitnessEvidenceRecordVerify(w http.ResponseWrit
 		return
 	}
 	verification := app.verifySessionWitnessEvidenceRecordText(req.EvidenceRecord)
+	verification = attachEvidenceRecordVerificationReceipt(w, verification, requestID(r))
 	status := http.StatusOK
 	if !verification.Verified {
 		status = http.StatusUnprocessableEntity
@@ -1649,6 +1670,7 @@ func (app *App) handleAuthSessionWitnessEvidenceVerifyCurrentRecord(w http.Respo
 		return
 	}
 	result, verification := app.verifyCurrentSessionEvidenceRecord(r, session)
+	verification = attachEvidenceRecordVerificationReceipt(w, verification, requestID(r))
 	status := result.Status
 	if status == http.StatusOK && !verification.Verified {
 		status = http.StatusUnprocessableEntity
@@ -7150,7 +7172,14 @@ func mustTemplates() *template.Template {
 	      <span>Chain link<strong>{{ .EvidenceRecordVerification.AuditChainLink }}</strong></span>
 	      <span>Severity<strong>{{ .EvidenceRecordVerification.AuditSeverity }}</strong></span>
 	      <span>Algorithm<strong>{{ .EvidenceRecordVerification.AuditHashAlgorithm }}</strong></span>
+	      {{ if .EvidenceRecordVerification.Receipt }}
+	      <span>Verification hash<strong class="mono">{{ .EvidenceRecordVerification.Receipt.Hash }}</strong></span>
+	      <span>Receipt algorithm<strong>{{ .EvidenceRecordVerification.Receipt.Algorithm }}</strong></span>
+	      {{ end }}
 	    </div>
+	    {{ if .EvidenceRecordVerification.Receipt }}
+	    <p class="capture-line mono">{{ .EvidenceRecordVerification.Receipt.Input }}</p>
+	    {{ end }}
 	    <p><span class="pill {{ if .EvidenceRecordVerification.AuditRecorded }}ok{{ else }}warn{{ end }}">audit_recorded={{ .EvidenceRecordVerification.AuditRecorded }}</span> <span class="pill {{ if .EvidenceRecordVerification.AuditRowFound }}ok{{ else }}warn{{ end }}">audit_row_found={{ .EvidenceRecordVerification.AuditRowFound }}</span> <span class="pill {{ if .EvidenceRecordVerification.AuditChainVerified }}ok{{ else }}warn{{ end }}">audit_chain_verified={{ .EvidenceRecordVerification.AuditChainVerified }}</span> <span class="pill {{ if .EvidenceRecordVerification.HashShapeValid }}ok{{ else }}warn{{ end }}">hash_shape_valid={{ .EvidenceRecordVerification.HashShapeValid }}</span> <span class="pill {{ if .EvidenceRecordVerification.ChainLinkMatch }}ok{{ else }}warn{{ end }}">chain_link_match={{ .EvidenceRecordVerification.ChainLinkMatch }}</span> <span class="pill {{ if .EvidenceRecordVerification.ValueBoundaryValid }}ok{{ else }}warn{{ end }}">value_boundary_valid={{ .EvidenceRecordVerification.ValueBoundaryValid }}</span></p>
 	    <p><span class="pill {{ if .EvidenceRecordVerification.ActionMatch }}ok{{ else }}warn{{ end }}">action_match={{ .EvidenceRecordVerification.ActionMatch }}</span> <span class="pill {{ if .EvidenceRecordVerification.RequestIDMatch }}ok{{ else }}warn{{ end }}">request_id_match={{ .EvidenceRecordVerification.RequestIDMatch }}</span> <span class="pill {{ if .EvidenceRecordVerification.SeverityMatch }}ok{{ else }}warn{{ end }}">severity_match={{ .EvidenceRecordVerification.SeverityMatch }}</span> <span class="pill {{ if .EvidenceRecordVerification.ReasonMatch }}ok{{ else }}warn{{ end }}">reason_match={{ .EvidenceRecordVerification.ReasonMatch }}</span> <span class="pill ok">input_returned={{ .EvidenceRecordVerification.InputReturned }}</span> <span class="pill ok">request_body_returned={{ .EvidenceRecordVerification.RequestBodyReturned }}</span> <span class="pill ok">value_returned={{ .EvidenceRecordVerification.ValueReturned }}</span></p>
 	  </div>
