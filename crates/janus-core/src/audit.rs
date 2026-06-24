@@ -24,6 +24,8 @@ pub enum AuditAction {
     ConsumerObserve,
     /// A rotation plan was created.
     RotationPlan,
+    /// A rotation lifecycle phase advanced or failed.
+    RotationLifecycle,
     /// Backend health was checked.
     BackendHealth,
     /// High-risk backend custody material was re-encrypted.

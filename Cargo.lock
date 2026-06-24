@@ -1242,6 +1242,12 @@ dependencies = [
 [[package]]
 name = "janus-forge"
 version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "janus-core",
+ "janus-provider-age",
+ "tokio",
+]
 
 [[package]]
 name = "janus-mock"

@@ -60,6 +60,11 @@ impl ValidationProbe {
         }
         Ok(Self(value))
     }
+
+    /// Safe value-free probe label.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Backend rotation request. The generated value is internal to Janus and must

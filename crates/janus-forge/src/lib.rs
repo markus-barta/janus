@@ -10,3 +10,807 @@
 //! ## Backlog
 //! - **JANUS-219** — Janus-Forge: issue + rotate `pharos-beacon` agent tokens
 //!   (the first real Forge consumer)
+
+#![forbid(unsafe_code)]
+
+use async_trait::async_trait;
+use janus_core::{
+    AuditAction, AuditEvent, AuditOutcome, AuditSink, ConsumerDescriptor, ConsumerRef,
+    ConsumerRegistry, JanusError, JanusResult, PrincipalChain, ReloadMethod, RotationDecision,
+    RotationOutcome, RotationPhase, RotationPlanner, SecretName, SecretRef, SecretStore,
+    SecretValue, Severity, ValidationProbe,
+};
+use janus_provider_age::{AgeRollbackMaterial, AgeSecretStore};
+
+/// Backend contract for broker-managed generated rotation.
+#[async_trait]
+pub trait GeneratedRotationBackend: SecretStore {
+    /// Provider-specific encrypted rollback handle.
+    type Rollback: Send + Sync;
+
+    /// Store a generated value and retain encrypted rollback material.
+    async fn prepare_generated_rotation(
+        &mut self,
+        name: &SecretName,
+        value: SecretValue,
+    ) -> JanusResult<Self::Rollback>;
+
+    /// Discard encrypted rollback material after validation/reload succeeds.
+    async fn commit_generated_rotation(&mut self, rollback: &Self::Rollback) -> JanusResult<()>;
+
+    /// Restore encrypted rollback material after validation/reload fails.
+    async fn rollback_generated_rotation(&mut self, rollback: &Self::Rollback) -> JanusResult<()>;
+}
+
+#[async_trait]
+impl GeneratedRotationBackend for AgeSecretStore {
+    type Rollback = AgeRollbackMaterial;
+
+    async fn prepare_generated_rotation(
+        &mut self,
+        name: &SecretName,
+        value: SecretValue,
+    ) -> JanusResult<Self::Rollback> {
+        AgeSecretStore::prepare_generated_rotation(self, name, value).await
+    }
+
+    async fn commit_generated_rotation(&mut self, rollback: &Self::Rollback) -> JanusResult<()> {
+        AgeSecretStore::commit_generated_rotation(self, rollback)
+            .await
+            .map(|_| ())
+    }
+
+    async fn rollback_generated_rotation(&mut self, rollback: &Self::Rollback) -> JanusResult<()> {
+        AgeSecretStore::rollback_generated_rotation(self, rollback)
+            .await
+            .map(|_| ())
+    }
+}
+
+/// Reviewed consumer-side actions for a generated rotation.
+#[async_trait]
+pub trait ConsumerRotationHooks {
+    /// Run one value-free validation probe.
+    async fn validate(&mut self, probe: &ValidationProbe) -> JanusResult<()>;
+
+    /// Reload one declared consumer.
+    async fn reload(&mut self, consumer: &ConsumerRef, method: &ReloadMethod) -> JanusResult<()>;
+}
+
+/// Forge write-side broker for generated rotation.
+pub struct GeneratedRotationBroker<S, A, H> {
+    store: S,
+    consumers: ConsumerRegistry,
+    audit: A,
+    hooks: H,
+}
+
+impl<S, A, H> GeneratedRotationBroker<S, A, H> {
+    /// Construct a broker from an approved backend, consumer registry, audit
+    /// sink, and reviewed consumer hooks.
+    pub fn new(store: S, consumers: ConsumerRegistry, audit: A, hooks: H) -> Self {
+        Self {
+            store,
+            consumers,
+            audit,
+            hooks,
+        }
+    }
+
+    /// Return broker parts for tests or controlled teardown.
+    pub fn into_parts(self) -> (S, ConsumerRegistry, A, H) {
+        (self.store, self.consumers, self.audit, self.hooks)
+    }
+}
+
+impl<S, A, H> GeneratedRotationBroker<S, A, H>
+where
+    S: GeneratedRotationBackend,
+    A: AuditSink,
+    H: ConsumerRotationHooks,
+{
+    /// Execute a generated rotation end-to-end:
+    /// plan, prepare encrypted rollback material, validate, reload, commit.
+    pub async fn rotate_generated(
+        &mut self,
+        name: &SecretName,
+        value: SecretValue,
+        principal: &PrincipalChain,
+    ) -> JanusResult<RotationOutcome> {
+        let secret_ref = self.secret_ref_for_name(name).await?;
+        let decision = RotationPlanner::new(self.consumers.clone()).plan_generated_with_audit(
+            &secret_ref,
+            &self.store.capabilities(),
+            &mut self.audit,
+            principal,
+        )?;
+        let plan = match decision {
+            RotationDecision::Safe(plan) => plan,
+            RotationDecision::Unsafe {
+                reason_code,
+                detail,
+            } => return Err(JanusError::policy_denied(reason_code, detail)),
+        };
+        let consumers = self
+            .consumers
+            .consumers_for(&secret_ref)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let rollback = self
+            .store
+            .prepare_generated_rotation(name, value)
+            .await
+            .inspect_err(|_| {
+                self.record_phase(
+                    &secret_ref,
+                    principal,
+                    RotationPhase::Failed,
+                    AuditOutcome::Denied,
+                    "prepare_failed",
+                    Severity::Warning,
+                )
+                .unwrap_or(());
+            })?;
+        self.record_after_prepare(&secret_ref, &rollback, principal)
+            .await?;
+
+        if let Err(err) = self.run_validations(&plan.validation).await {
+            self.rollback_after_failure(&secret_ref, &rollback, principal, "validation_failed")
+                .await?;
+            return Err(err);
+        }
+        self.record_phase(
+            &secret_ref,
+            principal,
+            RotationPhase::Validated,
+            AuditOutcome::Allowed,
+            "validated",
+            Severity::Notice,
+        )?;
+
+        if let Err(err) = self.reload_consumers(&consumers).await {
+            self.rollback_after_failure(&secret_ref, &rollback, principal, "reload_failed")
+                .await?;
+            return Err(err);
+        }
+        self.record_phase(
+            &secret_ref,
+            principal,
+            RotationPhase::ConsumersUpdated,
+            AuditOutcome::Allowed,
+            "consumers_updated",
+            Severity::Notice,
+        )?;
+
+        if let Err(err) = self.store.commit_generated_rotation(&rollback).await {
+            self.rollback_after_failure(&secret_ref, &rollback, principal, "commit_failed")
+                .await?;
+            return Err(err);
+        }
+        self.record_phase(
+            &secret_ref,
+            principal,
+            RotationPhase::Done,
+            AuditOutcome::Allowed,
+            "done",
+            Severity::Notice,
+        )?;
+
+        Ok(RotationOutcome {
+            secret_ref,
+            phase: RotationPhase::Done,
+            reason_code: "ok",
+            value_returned: false,
+        })
+    }
+
+    async fn secret_ref_for_name(&self, name: &SecretName) -> JanusResult<SecretRef> {
+        self.store
+            .list()
+            .await?
+            .into_iter()
+            .find(|descriptor| &descriptor.name == name)
+            .map(|descriptor| descriptor.secret_ref)
+            .ok_or_else(|| JanusError::NotInManifest {
+                name: name.as_str().to_string(),
+            })
+    }
+
+    async fn record_after_prepare(
+        &mut self,
+        secret_ref: &SecretRef,
+        rollback: &S::Rollback,
+        principal: &PrincipalChain,
+    ) -> JanusResult<()> {
+        if let Err(err) = self.record_phase(
+            secret_ref,
+            principal,
+            RotationPhase::Prepared,
+            AuditOutcome::Allowed,
+            "prepared",
+            Severity::Notice,
+        ) {
+            self.rollback_after_failure(secret_ref, rollback, principal, "audit_failed")
+                .await?;
+            return Err(err);
+        }
+        if let Err(err) = self.record_phase(
+            secret_ref,
+            principal,
+            RotationPhase::NewValueStored,
+            AuditOutcome::Allowed,
+            "new_value_stored",
+            Severity::Notice,
+        ) {
+            self.rollback_after_failure(secret_ref, rollback, principal, "audit_failed")
+                .await?;
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    async fn run_validations(&mut self, probes: &[ValidationProbe]) -> JanusResult<()> {
+        for probe in probes {
+            self.hooks.validate(probe).await?;
+        }
+        Ok(())
+    }
+
+    async fn reload_consumers(&mut self, consumers: &[ConsumerDescriptor]) -> JanusResult<()> {
+        for consumer in consumers {
+            if consumer.reload != ReloadMethod::None {
+                self.hooks
+                    .reload(&consumer.consumer_ref, &consumer.reload)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn rollback_after_failure(
+        &mut self,
+        secret_ref: &SecretRef,
+        rollback: &S::Rollback,
+        principal: &PrincipalChain,
+        reason_code: &'static str,
+    ) -> JanusResult<()> {
+        match self.store.rollback_generated_rotation(rollback).await {
+            Ok(()) => self.record_phase(
+                secret_ref,
+                principal,
+                RotationPhase::RolledBack,
+                AuditOutcome::Allowed,
+                reason_code,
+                Severity::High,
+            ),
+            Err(err) => {
+                self.record_phase(
+                    secret_ref,
+                    principal,
+                    RotationPhase::Failed,
+                    AuditOutcome::Denied,
+                    "rollback_failed",
+                    Severity::Critical,
+                )?;
+                Err(err)
+            }
+        }
+    }
+
+    fn record_phase(
+        &mut self,
+        secret_ref: &SecretRef,
+        principal: &PrincipalChain,
+        _phase: RotationPhase,
+        outcome: AuditOutcome,
+        reason_code: &'static str,
+        severity: Severity,
+    ) -> JanusResult<()> {
+        self.audit.record(AuditEvent::new(
+            AuditAction::RotationLifecycle,
+            outcome,
+            reason_code,
+            severity,
+            Some(secret_ref.clone()),
+            principal,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use janus_core::{
+        AuditWrite, BlastRadius, ConsumerKind, Environment, HealthStatus, OwnerRef, ProfileId,
+        ProjectId, RotationSpec, SafeLabel, ScopeRef, SecretDescriptor, SecretMeta,
+        StoreCapabilities, TrustLevel,
+    };
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct TestRollback;
+
+    struct TestStore {
+        descriptor: SecretDescriptor,
+        value: Vec<u8>,
+        rollback_value: Option<Vec<u8>>,
+        prepare_count: usize,
+        commit_count: usize,
+        rollback_count: usize,
+        fail_commit: bool,
+    }
+
+    impl TestStore {
+        fn new() -> (Self, SecretName, SecretRef) {
+            let project = ProjectId::new("janus").unwrap();
+            let name = SecretName::new("CANARY").unwrap();
+            let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+            let meta = SecretMeta {
+                name: name.clone(),
+                secret_ref: secret_ref.clone(),
+                label: SafeLabel::new("Canary token").unwrap(),
+                scope: ScopeRef::new("janus/dev").unwrap(),
+                required: true,
+                trust_level: TrustLevel::L1,
+                allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
+            };
+            (
+                Self {
+                    descriptor: meta.descriptor(true),
+                    value: b"old-canary".to_vec(),
+                    rollback_value: None,
+                    prepare_count: 0,
+                    commit_count: 0,
+                    rollback_count: 0,
+                    fail_commit: false,
+                },
+                name,
+                secret_ref,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl SecretStore for TestStore {
+        fn capabilities(&self) -> StoreCapabilities {
+            StoreCapabilities {
+                write: true,
+                delete: true,
+                generated_rotate: true,
+                rotate_native: false,
+                versioning: false,
+                leasing: false,
+                native_audit: false,
+                backend_key_custody: false,
+            }
+        }
+
+        async fn health(&self) -> JanusResult<HealthStatus> {
+            Ok(HealthStatus {
+                backend: "test",
+                ok: true,
+                detail: "ok".to_string(),
+            })
+        }
+
+        async fn list(&self) -> JanusResult<Vec<SecretDescriptor>> {
+            Ok(vec![self.descriptor.clone()])
+        }
+
+        async fn get(&self, name: &SecretName) -> JanusResult<SecretValue> {
+            if name != &self.descriptor.name {
+                return Err(JanusError::NotInManifest {
+                    name: name.as_str().to_string(),
+                });
+            }
+            Ok(SecretValue::new(self.value.clone()))
+        }
+
+        async fn set(&mut self, name: &SecretName, value: SecretValue) -> JanusResult<()> {
+            if name != &self.descriptor.name {
+                return Err(JanusError::NotInManifest {
+                    name: name.as_str().to_string(),
+                });
+            }
+            self.value = value.expose_bytes().to_vec();
+            Ok(())
+        }
+
+        async fn rotate(
+            &mut self,
+            name: &SecretName,
+            spec: &RotationSpec,
+        ) -> JanusResult<RotationOutcome> {
+            let value = spec
+                .generated_value
+                .as_ref()
+                .ok_or(JanusError::Unsupported {
+                    capability: "generated_value",
+                })?;
+            self.set(name, SecretValue::new(value.expose_bytes().to_vec()))
+                .await?;
+            Ok(RotationOutcome::rotated(self.descriptor.secret_ref.clone()))
+        }
+
+        async fn delete(&mut self, name: &SecretName) -> JanusResult<()> {
+            if name != &self.descriptor.name {
+                return Err(JanusError::NotInManifest {
+                    name: name.as_str().to_string(),
+                });
+            }
+            self.value.clear();
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl GeneratedRotationBackend for TestStore {
+        type Rollback = TestRollback;
+
+        async fn prepare_generated_rotation(
+            &mut self,
+            name: &SecretName,
+            value: SecretValue,
+        ) -> JanusResult<Self::Rollback> {
+            if name != &self.descriptor.name {
+                return Err(JanusError::NotInManifest {
+                    name: name.as_str().to_string(),
+                });
+            }
+            self.prepare_count += 1;
+            self.rollback_value = Some(self.value.clone());
+            self.value = value.expose_bytes().to_vec();
+            Ok(TestRollback)
+        }
+
+        async fn commit_generated_rotation(
+            &mut self,
+            _rollback: &Self::Rollback,
+        ) -> JanusResult<()> {
+            self.commit_count += 1;
+            if self.fail_commit {
+                return Err(JanusError::StoreUnavailable {
+                    detail: "commit failed".to_string(),
+                });
+            }
+            self.rollback_value = None;
+            Ok(())
+        }
+
+        async fn rollback_generated_rotation(
+            &mut self,
+            _rollback: &Self::Rollback,
+        ) -> JanusResult<()> {
+            self.rollback_count += 1;
+            let old = self
+                .rollback_value
+                .take()
+                .ok_or_else(|| JanusError::NotFound {
+                    name: self.descriptor.secret_ref.as_str().to_string(),
+                })?;
+            self.value = old;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct TestHooks {
+        validations: Vec<String>,
+        reloads: Vec<String>,
+        fail_validation: bool,
+        fail_reload: bool,
+    }
+
+    #[async_trait]
+    impl ConsumerRotationHooks for TestHooks {
+        async fn validate(&mut self, probe: &ValidationProbe) -> JanusResult<()> {
+            self.validations.push(probe.as_str().to_string());
+            if self.fail_validation {
+                return Err(JanusError::policy_denied(
+                    "validation_failed",
+                    "validation probe failed",
+                ));
+            }
+            Ok(())
+        }
+
+        async fn reload(
+            &mut self,
+            consumer: &ConsumerRef,
+            _method: &ReloadMethod,
+        ) -> JanusResult<()> {
+            self.reloads.push(consumer.as_str().to_string());
+            if self.fail_reload {
+                return Err(JanusError::policy_denied(
+                    "reload_failed",
+                    "consumer reload failed",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    fn principal() -> PrincipalChain {
+        janus_core::PrincipalChain::new(
+            janus_core::Principal::new(
+                janus_core::PrincipalKind::Executor,
+                janus_core::PrincipalId::new("forge-admin").unwrap(),
+            ),
+            ScopeRef::new("janus/dev").unwrap(),
+        )
+    }
+
+    fn consumer(secret_ref: SecretRef, validation: Vec<ValidationProbe>) -> ConsumerDescriptor {
+        ConsumerDescriptor {
+            consumer_ref: ConsumerRef::new("consumer.deploy").unwrap(),
+            secret_ref,
+            kind: ConsumerKind::ManagedCommand,
+            owner: OwnerRef::new("infra").unwrap(),
+            environment: Environment::new("prod").unwrap(),
+            reload: ReloadMethod::ExecHook {
+                hook: SafeLabel::new("reload deploy").unwrap(),
+            },
+            validation,
+            supports_dual_value: false,
+            blast_radius: BlastRadius::new("release-publishing").unwrap(),
+            declared: true,
+        }
+    }
+
+    fn lifecycle_reasons(audit: &AuditWrite) -> Vec<&'static str> {
+        audit
+            .events()
+            .iter()
+            .filter(|event| event.action == AuditAction::RotationLifecycle)
+            .map(|event| event.reason_code)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn generated_rotation_commits_after_validation_and_reload() {
+        let (store, name, secret_ref) = TestStore::new();
+        let registry = ConsumerRegistry::new(vec![consumer(
+            secret_ref.clone(),
+            vec![ValidationProbe::new("deploy-smoke").unwrap()],
+        )]);
+        let mut broker = GeneratedRotationBroker::new(
+            store,
+            registry,
+            AuditWrite::accepting(),
+            TestHooks::default(),
+        );
+
+        let outcome = broker
+            .rotate_generated(
+                &name,
+                SecretValue::new(b"new-canary".to_vec()),
+                &principal(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.secret_ref, secret_ref);
+        assert_eq!(outcome.phase, RotationPhase::Done);
+        assert!(!outcome.value_returned);
+
+        let (store, _registry, audit, hooks) = broker.into_parts();
+        assert_eq!(store.value, b"new-canary");
+        assert_eq!(store.prepare_count, 1);
+        assert_eq!(store.commit_count, 1);
+        assert_eq!(store.rollback_count, 0);
+        assert_eq!(hooks.validations, vec!["deploy-smoke"]);
+        assert_eq!(hooks.reloads, vec!["consumer.deploy"]);
+        assert_eq!(
+            lifecycle_reasons(&audit),
+            vec![
+                "prepared",
+                "new_value_stored",
+                "validated",
+                "consumers_updated",
+                "done"
+            ]
+        );
+        assert!(audit.events().iter().all(|event| {
+            !event.value_returned
+                && event
+                    .event_hash
+                    .as_ref()
+                    .is_some_and(|hash| hash.len() == 64)
+        }));
+    }
+
+    #[tokio::test]
+    async fn validation_failure_rolls_back_without_commit() {
+        let (store, name, secret_ref) = TestStore::new();
+        let registry = ConsumerRegistry::new(vec![consumer(
+            secret_ref,
+            vec![ValidationProbe::new("deploy-smoke").unwrap()],
+        )]);
+        let hooks = TestHooks {
+            fail_validation: true,
+            ..TestHooks::default()
+        };
+        let mut broker =
+            GeneratedRotationBroker::new(store, registry, AuditWrite::accepting(), hooks);
+
+        let err = broker
+            .rotate_generated(
+                &name,
+                SecretValue::new(b"should-roll-back".to_vec()),
+                &principal(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "validation_failed",
+                ..
+            }
+        ));
+
+        let (store, _registry, audit, hooks) = broker.into_parts();
+        assert_eq!(store.value, b"old-canary");
+        assert_eq!(store.prepare_count, 1);
+        assert_eq!(store.commit_count, 0);
+        assert_eq!(store.rollback_count, 1);
+        assert_eq!(hooks.validations, vec!["deploy-smoke"]);
+        assert!(hooks.reloads.is_empty());
+        assert_eq!(
+            lifecycle_reasons(&audit),
+            vec!["prepared", "new_value_stored", "validation_failed"]
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_failure_rolls_back_without_commit() {
+        let (store, name, secret_ref) = TestStore::new();
+        let registry = ConsumerRegistry::new(vec![consumer(
+            secret_ref,
+            vec![ValidationProbe::new("deploy-smoke").unwrap()],
+        )]);
+        let hooks = TestHooks {
+            fail_reload: true,
+            ..TestHooks::default()
+        };
+        let mut broker =
+            GeneratedRotationBroker::new(store, registry, AuditWrite::accepting(), hooks);
+
+        let err = broker
+            .rotate_generated(
+                &name,
+                SecretValue::new(b"should-roll-back".to_vec()),
+                &principal(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "reload_failed",
+                ..
+            }
+        ));
+
+        let (store, _registry, audit, hooks) = broker.into_parts();
+        assert_eq!(store.value, b"old-canary");
+        assert_eq!(store.prepare_count, 1);
+        assert_eq!(store.commit_count, 0);
+        assert_eq!(store.rollback_count, 1);
+        assert_eq!(hooks.validations, vec!["deploy-smoke"]);
+        assert_eq!(hooks.reloads, vec!["consumer.deploy"]);
+        assert_eq!(
+            lifecycle_reasons(&audit),
+            vec!["prepared", "new_value_stored", "validated", "reload_failed"]
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_failure_rolls_back_without_done() {
+        let (mut store, name, secret_ref) = TestStore::new();
+        store.fail_commit = true;
+        let registry = ConsumerRegistry::new(vec![consumer(
+            secret_ref,
+            vec![ValidationProbe::new("deploy-smoke").unwrap()],
+        )]);
+        let mut broker = GeneratedRotationBroker::new(
+            store,
+            registry,
+            AuditWrite::accepting(),
+            TestHooks::default(),
+        );
+
+        let err = broker
+            .rotate_generated(
+                &name,
+                SecretValue::new(b"should-roll-back".to_vec()),
+                &principal(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, JanusError::StoreUnavailable { .. }));
+
+        let (store, _registry, audit, hooks) = broker.into_parts();
+        assert_eq!(store.value, b"old-canary");
+        assert_eq!(store.prepare_count, 1);
+        assert_eq!(store.commit_count, 1);
+        assert_eq!(store.rollback_count, 1);
+        assert_eq!(hooks.validations, vec!["deploy-smoke"]);
+        assert_eq!(hooks.reloads, vec!["consumer.deploy"]);
+        assert_eq!(
+            lifecycle_reasons(&audit),
+            vec![
+                "prepared",
+                "new_value_stored",
+                "validated",
+                "consumers_updated",
+                "commit_failed"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn unsafe_plan_blocks_before_prepare() {
+        let (store, name, _secret_ref) = TestStore::new();
+        let mut broker = GeneratedRotationBroker::new(
+            store,
+            ConsumerRegistry::default(),
+            AuditWrite::accepting(),
+            TestHooks::default(),
+        );
+
+        let err = broker
+            .rotate_generated(
+                &name,
+                SecretValue::new(b"should-not-write".to_vec()),
+                &principal(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "unknown_consumers",
+                ..
+            }
+        ));
+        let (store, _registry, audit, _hooks) = broker.into_parts();
+        assert_eq!(store.value, b"old-canary");
+        assert_eq!(store.prepare_count, 0);
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::RotationPlan
+                && event.outcome == AuditOutcome::Denied
+                && event.reason_code == "unknown_consumers"
+        }));
+    }
+
+    #[tokio::test]
+    async fn audit_failure_blocks_before_prepare() {
+        let (store, name, secret_ref) = TestStore::new();
+        let registry = ConsumerRegistry::new(vec![consumer(
+            secret_ref,
+            vec![ValidationProbe::new("deploy-smoke").unwrap()],
+        )]);
+        let mut broker = GeneratedRotationBroker::new(
+            store,
+            registry,
+            AuditWrite::failing(),
+            TestHooks::default(),
+        );
+
+        let err = broker
+            .rotate_generated(
+                &name,
+                SecretValue::new(b"should-not-write".to_vec()),
+                &principal(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, JanusError::AuditUnavailable { .. }));
+        let (store, _registry, _audit, hooks) = broker.into_parts();
+        assert_eq!(store.value, b"old-canary");
+        assert_eq!(store.prepare_count, 0);
+        assert!(hooks.validations.is_empty());
+        assert!(hooks.reloads.is_empty());
+    }
+}

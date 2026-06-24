@@ -12,4 +12,9 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-# TODO(JANUS-219): janus-core + provider write paths + consumer registry.
+async-trait = "0.1"
+janus-core = { path = "../janus-core" }
+janus-provider-age = { path = "../janus-provider-age" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
