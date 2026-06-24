@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use age::{Decryptor, Encryptor};
 use async_trait::async_trait;
+use fs2::FileExt;
 use janus_core::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, HealthStatus, JanusError, JanusResult,
     ManifestCatalog, PrincipalChain, ProfileId, ProjectId, RotationOutcome, RotationSpec,
@@ -29,6 +30,16 @@ pub struct AgeSecretStore {
     identity_files: Vec<PathBuf>,
     recipients: Vec<String>,
     catalog: ManifestCatalog,
+}
+
+struct StoreLock {
+    file: File,
+}
+
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 /// Value-free result for age admin operations.
@@ -360,35 +371,42 @@ impl AgeSecretStore {
     /// Re-encrypt every present manifest entry to a new recipient set.
     pub async fn reencrypt_all(&mut self, recipients: Vec<String>) -> JanusResult<AgeAdminOutcome> {
         let recipients = normalize_recipient_strings(recipients)?;
-        let paths = self.present_secret_paths()?;
-        let present_secrets = paths.len();
-        if recipients == self.recipients {
-            return Ok(AgeAdminOutcome {
-                action: "admin.reencrypt",
-                changed: false,
-                present_secrets,
-                recipient_count: self.recipients.len(),
-                value_returned: false,
-            });
-        }
-
         let scope_dir = self.scope_dir();
+        let candidate_paths = self.catalog_secret_paths()?;
         let identity_files = self.identity_files.clone();
         let next_recipients = recipients.clone();
+        let current_recipients = self.recipients.clone();
+        let next_recipient_count = next_recipients.len();
         tokio::task::spawn_blocking(move || {
-            reencrypt_paths(&paths, &scope_dir, &identity_files, &next_recipients)
+            let _lock = try_lock_store_exclusive(&scope_dir)?;
+            let paths = present_paths(candidate_paths);
+            let present_secrets = paths.len();
+            if next_recipients == current_recipients {
+                return Ok(AgeAdminOutcome {
+                    action: "admin.reencrypt",
+                    changed: false,
+                    present_secrets,
+                    recipient_count: current_recipients.len(),
+                    value_returned: false,
+                });
+            }
+            reencrypt_paths(&paths, &scope_dir, &identity_files, &next_recipients)?;
+            Ok(AgeAdminOutcome {
+                action: "admin.reencrypt",
+                changed: true,
+                present_secrets,
+                recipient_count: next_recipient_count,
+                value_returned: false,
+            })
         })
         .await
         .map_err(|err| JanusError::StoreUnavailable {
             detail: format!("age reencrypt task failed: {err}"),
-        })??;
-        self.recipients = recipients;
-        Ok(AgeAdminOutcome {
-            action: "admin.reencrypt",
-            changed: true,
-            present_secrets,
-            recipient_count: self.recipients.len(),
-            value_returned: false,
+        })?
+        .inspect(|outcome| {
+            if outcome.changed {
+                self.recipients = recipients;
+            }
         })
     }
 
@@ -437,14 +455,16 @@ impl AgeSecretStore {
 
     fn present_secret_paths(&self) -> JanusResult<Vec<PathBuf>> {
         self.ensure_scope_dir()?;
-        let mut paths = Vec::new();
-        for meta in self.catalog.entries() {
-            let path = self.path_for(&meta.name)?;
-            if path.is_file() {
-                paths.push(path);
-            }
-        }
+        let paths = present_paths(self.catalog_secret_paths()?);
         Ok(paths)
+    }
+
+    fn catalog_secret_paths(&self) -> JanusResult<Vec<PathBuf>> {
+        self.catalog
+            .entries()
+            .iter()
+            .map(|meta| self.path_for(&meta.name))
+            .collect()
     }
 }
 
@@ -511,6 +531,7 @@ impl SecretStore for AgeSecretStore {
         let recipients = self.recipients.clone();
         let mut plaintext = value.expose_bytes().to_vec();
         tokio::task::spawn_blocking(move || {
+            let _lock = try_lock_store_exclusive(&scope_dir)?;
             let result = encrypt_to_file(&path, &scope_dir, &recipients, &plaintext);
             plaintext.zeroize();
             result
@@ -548,14 +569,20 @@ impl SecretStore for AgeSecretStore {
     async fn delete(&mut self, name: &SecretName) -> JanusResult<()> {
         self.ensure_manifest(name)?;
         let path = self.path_for(name)?;
-        if !path.is_file() {
-            return Err(JanusError::NotFound {
-                name: name.as_str().to_string(),
-            });
-        }
-        fs::remove_file(&path).map_err(map_store_io)?;
-        prune_empty_secret_dirs(path.parent(), &self.scope_dir())?;
-        Ok(())
+        let scope_dir = self.scope_dir();
+        let name = name.as_str().to_string();
+        tokio::task::spawn_blocking(move || {
+            let _lock = try_lock_store_exclusive(&scope_dir)?;
+            if !path.is_file() {
+                return Err(JanusError::NotFound { name });
+            }
+            fs::remove_file(&path).map_err(map_store_io)?;
+            prune_empty_secret_dirs(path.parent(), &scope_dir)
+        })
+        .await
+        .map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("age delete task failed: {err}"),
+        })?
     }
 }
 
@@ -643,6 +670,34 @@ where
         None,
         principal,
     ))
+}
+
+fn present_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths.into_iter().filter(|path| path.is_file()).collect()
+}
+
+fn try_lock_store_exclusive(scope_dir: &Path) -> JanusResult<StoreLock> {
+    fs::create_dir_all(scope_dir).map_err(map_store_io)?;
+    set_dir_private(scope_dir)?;
+    let lock_path = scope_dir.join(".janus-age.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(map_store_io)?;
+    set_file_private(&file)?;
+    file.try_lock_exclusive().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            JanusError::StoreUnavailable {
+                detail: "age store lock is already held".to_string(),
+            }
+        } else {
+            map_store_io(err)
+        }
+    })?;
+    Ok(StoreLock { file })
 }
 
 fn parse_recipients(values: &[String]) -> JanusResult<Vec<Box<dyn age::Recipient + Send>>> {
@@ -945,6 +1000,16 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             ),
             ScopeRef::new("janus/default").unwrap(),
         )
+    }
+
+    fn assert_lock_error(err: JanusError) {
+        match err {
+            JanusError::StoreUnavailable { detail } => {
+                assert!(detail.contains("lock"));
+                assert!(!detail.contains("canary"));
+            }
+            other => panic!("expected lock StoreUnavailable error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1298,6 +1363,58 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             store.delete(&fixture.canary).await,
             Err(JanusError::NotFound { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn write_paths_fail_closed_when_store_lock_is_held() {
+        let fixture = fixture();
+        let (new_identity, new_recipient) = extra_identity(&fixture, "locked-admin.identity");
+        let mut store = store(&fixture, fixture.identity_file.clone());
+        store
+            .set(&fixture.canary, SecretValue::new(b"locked-canary".to_vec()))
+            .await
+            .unwrap();
+
+        let lock = try_lock_store_exclusive(&store.scope_dir()).unwrap();
+        assert_lock_error(
+            store
+                .set(
+                    &fixture.canary,
+                    SecretValue::new(b"should-not-write".to_vec()),
+                )
+                .await
+                .unwrap_err(),
+        );
+        assert_lock_error(
+            store
+                .reencrypt_all(vec![
+                    fixture.host_recipient.clone(),
+                    fixture.admin_recipient.clone(),
+                    new_recipient.clone(),
+                ])
+                .await
+                .unwrap_err(),
+        );
+        assert_lock_error(store.delete(&fixture.canary).await.unwrap_err());
+        drop(lock);
+
+        let value = store.get(&fixture.canary).await.unwrap();
+        assert_eq!(value.expose_bytes(), b"locked-canary");
+        store
+            .add_recipient(new_recipient.clone())
+            .await
+            .expect("write should succeed after lock release");
+        let new_reader = AgeSecretStore::from_catalog(
+            ProjectId::new("janus").unwrap(),
+            "default",
+            fixture.store_dir.clone(),
+            fixture.catalog.clone(),
+            vec![new_identity],
+            vec![new_recipient],
+        )
+        .unwrap();
+        let recovered = new_reader.get(&fixture.canary).await.unwrap();
+        assert_eq!(recovered.expose_bytes(), b"locked-canary");
     }
 
     #[tokio::test]
