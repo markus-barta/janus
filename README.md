@@ -62,6 +62,14 @@ janus/
 
 ## Build
 
+Use the repo-local dev shell for local work:
+
+```bash
+direnv allow
+direnv exec . cargo test --workspace --locked
+# or: devenv shell -- cargo test --workspace --locked
+```
+
 **Engine (Rust):**
 ```bash
 cargo build              # workspace build (skeleton until the engine tickets land)

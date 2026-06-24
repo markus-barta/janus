@@ -16,8 +16,8 @@ use fs2::FileExt;
 use janus_core::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, HealthStatus, JanusError, JanusResult,
     ManifestCatalog, PrincipalChain, ProfileId, ProjectId, RotationOutcome, RotationSpec,
-    RotationStrategy, SafeLabel, ScopeRef, SecretDescriptor, SecretMeta, SecretName, SecretStore,
-    SecretValue, Severity, StoreCapabilities, TrustLevel,
+    RotationStrategy, SafeLabel, ScopeRef, SecretDescriptor, SecretMeta, SecretName, SecretRef,
+    SecretStore, SecretValue, Severity, StoreCapabilities, TrustLevel,
 };
 use secretspec as secretspec_crate;
 use zeroize::Zeroize;
@@ -80,6 +80,17 @@ pub struct AgeReencryptPlan {
     /// Whether the proposed recipient set differs from the current set.
     pub would_change: bool,
     /// Dry-runs never return secret values.
+    pub value_returned: bool,
+}
+
+/// Value-free handle to encrypted rollback material for a generated rotation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgeRollbackMaterial {
+    /// Secret that can be restored by this rollback handle.
+    pub secret_ref: SecretRef,
+    /// Opaque rollback-material identifier.
+    pub rollback_id: String,
+    /// Rollback handles never return secret values.
     pub value_returned: bool,
 }
 
@@ -195,6 +206,102 @@ impl AgeSecretStore {
     /// Value-free count of configured recipients.
     pub fn recipient_count(&self) -> usize {
         self.recipients.len()
+    }
+
+    /// Store a generated replacement value while preserving the current
+    /// encrypted material for rollback.
+    pub async fn prepare_generated_rotation(
+        &mut self,
+        name: &SecretName,
+        value: SecretValue,
+    ) -> JanusResult<AgeRollbackMaterial> {
+        let secret_ref = self.ensure_manifest(name)?.secret_ref.clone();
+        self.ensure_scope_dir()?;
+        let path = self.path_for(name)?;
+        let rollback_id = generated_rollback_id()?;
+        let rollback_path = self.rollback_path_for(name, &rollback_id)?;
+        let scope_dir = self.scope_dir();
+        let recipients = self.recipients.clone();
+        let not_found_name = secret_ref.as_str().to_string();
+        let mut plaintext = value.expose_bytes().to_vec();
+        tokio::task::spawn_blocking(move || {
+            let _lock = try_lock_store_exclusive(&scope_dir)?;
+            let result = prepare_generated_rotation_locked(
+                &path,
+                &rollback_path,
+                &scope_dir,
+                &recipients,
+                &plaintext,
+                &not_found_name,
+            );
+            plaintext.zeroize();
+            result
+        })
+        .await
+        .map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("age generated rotation prepare task failed: {err}"),
+        })??;
+        Ok(AgeRollbackMaterial {
+            secret_ref,
+            rollback_id,
+            value_returned: false,
+        })
+    }
+
+    /// Commit a prepared generated rotation by deleting encrypted rollback
+    /// material after external validation has succeeded.
+    pub async fn commit_generated_rotation(
+        &mut self,
+        rollback: &AgeRollbackMaterial,
+    ) -> JanusResult<AgeAdminOutcome> {
+        let name = self.catalog.meta_by_ref(&rollback.secret_ref)?.name.clone();
+        let rollback_path = self.rollback_path_for(&name, &rollback.rollback_id)?;
+        let scope_dir = self.scope_dir();
+        let not_found_name = rollback.secret_ref.as_str().to_string();
+        let recipient_count = self.recipients.len();
+        tokio::task::spawn_blocking(move || {
+            let _lock = try_lock_store_exclusive(&scope_dir)?;
+            commit_generated_rotation_locked(&rollback_path, &not_found_name)?;
+            Ok(AgeAdminOutcome {
+                action: "rotation.commit",
+                changed: true,
+                present_secrets: 1,
+                recipient_count,
+                value_returned: false,
+            })
+        })
+        .await
+        .map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("age generated rotation commit task failed: {err}"),
+        })?
+    }
+
+    /// Restore a generated rotation from encrypted rollback material.
+    pub async fn rollback_generated_rotation(
+        &mut self,
+        rollback: &AgeRollbackMaterial,
+    ) -> JanusResult<AgeAdminOutcome> {
+        let name = self.catalog.meta_by_ref(&rollback.secret_ref)?.name.clone();
+        let path = self.path_for(&name)?;
+        let rollback_path = self.rollback_path_for(&name, &rollback.rollback_id)?;
+        let scope_dir = self.scope_dir();
+        let not_found_name = rollback.secret_ref.as_str().to_string();
+        let recipient_count = self.recipients.len();
+        tokio::task::spawn_blocking(move || {
+            let _lock = try_lock_store_exclusive(&scope_dir)?;
+            rollback_generated_rotation_locked(&path, &rollback_path, &scope_dir, &not_found_name)?;
+            Ok(AgeAdminOutcome {
+                action: "rotation.rollback",
+                changed: true,
+                present_secrets: 1,
+                recipient_count,
+                value_returned: false,
+            })
+        })
+        .await
+        .map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("age generated rotation rollback task failed: {err}"),
+        })?
     }
 
     /// Plan a recipient-set change without decrypting or writing values.
@@ -443,6 +550,19 @@ impl AgeSecretStore {
         Ok(path)
     }
 
+    fn rollback_path_for(&self, name: &SecretName, rollback_id: &str) -> JanusResult<PathBuf> {
+        validate_rollback_id(rollback_id)?;
+        let path = self.path_for(name)?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| JanusError::StoreUnavailable {
+                detail: "age rollback path has no file name".to_string(),
+            })?;
+        let mut rollback_file_name = file_name.to_os_string();
+        rollback_file_name.push(format!(".rollback.{rollback_id}"));
+        Ok(path.with_file_name(rollback_file_name))
+    }
+
     fn ensure_scope_dir(&self) -> JanusResult<()> {
         let project_dir = self.root_dir.join(self.project.as_str());
         let scope_dir = project_dir.join(self.profile.as_str());
@@ -560,10 +680,36 @@ impl SecretStore for AgeSecretStore {
             .ok_or(JanusError::Unsupported {
                 capability: "generated_value",
             })?;
-        self.set(name, SecretValue::new(value.expose_bytes().to_vec()))
-            .await?;
-        let descriptor = self.catalog.descriptor_by_name(name, true)?;
-        Ok(RotationOutcome::rotated(descriptor.secret_ref))
+        let secret_ref = self.ensure_manifest(name)?.secret_ref.clone();
+        self.ensure_scope_dir()?;
+        let path = self.path_for(name)?;
+        let rollback_id = generated_rollback_id()?;
+        let rollback_path = self.rollback_path_for(name, &rollback_id)?;
+        let scope_dir = self.scope_dir();
+        let recipients = self.recipients.clone();
+        let not_found_name = secret_ref.as_str().to_string();
+        let mut plaintext = value.expose_bytes().to_vec();
+        tokio::task::spawn_blocking(move || {
+            let _lock = try_lock_store_exclusive(&scope_dir)?;
+            let result = (|| {
+                prepare_generated_rotation_locked(
+                    &path,
+                    &rollback_path,
+                    &scope_dir,
+                    &recipients,
+                    &plaintext,
+                    &not_found_name,
+                )?;
+                commit_generated_rotation_locked(&rollback_path, &not_found_name)
+            })();
+            plaintext.zeroize();
+            result
+        })
+        .await
+        .map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("age generated rotation task failed: {err}"),
+        })??;
+        Ok(RotationOutcome::rotated(secret_ref))
     }
 
     async fn delete(&mut self, name: &SecretName) -> JanusResult<()> {
@@ -654,6 +800,57 @@ fn reencrypt_paths(
     Ok(())
 }
 
+fn prepare_generated_rotation_locked(
+    path: &Path,
+    rollback_path: &Path,
+    scope_dir: &Path,
+    recipients: &[String],
+    plaintext: &[u8],
+    not_found_name: &str,
+) -> JanusResult<()> {
+    if !path.is_file() {
+        return Err(JanusError::NotFound {
+            name: not_found_name.to_string(),
+        });
+    }
+    let current = fs::read(path).map_err(map_store_io)?;
+    write_atomically(rollback_path, scope_dir, &current)?;
+    encrypt_to_file(path, scope_dir, recipients, plaintext)
+}
+
+fn commit_generated_rotation_locked(rollback_path: &Path, not_found_name: &str) -> JanusResult<()> {
+    if !rollback_path.is_file() {
+        return Err(JanusError::NotFound {
+            name: not_found_name.to_string(),
+        });
+    }
+    fs::remove_file(rollback_path).map_err(map_store_io)?;
+    if let Some(parent) = rollback_path.parent() {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn rollback_generated_rotation_locked(
+    path: &Path,
+    rollback_path: &Path,
+    scope_dir: &Path,
+    not_found_name: &str,
+) -> JanusResult<()> {
+    if !rollback_path.is_file() {
+        return Err(JanusError::NotFound {
+            name: not_found_name.to_string(),
+        });
+    }
+    let encrypted = fs::read(rollback_path).map_err(map_store_io)?;
+    write_atomically(path, scope_dir, &encrypted)?;
+    fs::remove_file(rollback_path).map_err(map_store_io)?;
+    if let Some(parent) = rollback_path.parent() {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
 fn record_admin_reencrypt_preflight<A>(
     audit: &mut A,
     principal: &PrincipalChain,
@@ -674,6 +871,30 @@ where
 
 fn present_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     paths.into_iter().filter(|path| path.is_file()).collect()
+}
+
+fn generated_rollback_id() -> JanusResult<String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("system clock before unix epoch: {err}"),
+        })?
+        .as_nanos();
+    Ok(format!("rb_{}_{}", std::process::id(), nanos))
+}
+
+fn validate_rollback_id(value: &str) -> JanusResult<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        return Err(JanusError::InvalidIdentifier {
+            kind: "age_rollback_id",
+        });
+    }
+    Ok(())
 }
 
 fn try_lock_store_exclusive(scope_dir: &Path) -> JanusResult<StoreLock> {
@@ -1058,6 +1279,161 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
         let admin_store = store(&fixture, fixture.admin_identity_file.clone());
         let recovered = admin_store.get(&fixture.canary).await.unwrap();
         assert_eq!(recovered.expose_bytes(), b"multi-recipient-canary");
+    }
+
+    #[tokio::test]
+    async fn generated_rotation_rollback_restores_encrypted_material_without_values() {
+        let fixture = fixture();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+        store
+            .set(
+                &fixture.canary,
+                SecretValue::new(b"rollback-original-canary".to_vec()),
+            )
+            .await
+            .unwrap();
+        let path = store.path_for(&fixture.canary).unwrap();
+        let original_ciphertext = fs::read(&path).unwrap();
+
+        let rollback = store
+            .prepare_generated_rotation(
+                &fixture.canary,
+                SecretValue::new(b"rollback-replacement-canary".to_vec()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rollback.secret_ref,
+            fixture
+                .catalog
+                .meta_by_name(&fixture.canary)
+                .unwrap()
+                .secret_ref
+        );
+        assert!(!rollback.value_returned);
+        assert!(!format!("{rollback:?}").contains("rollback-original-canary"));
+        assert!(!format!("{rollback:?}").contains("rollback-replacement-canary"));
+
+        let rollback_path = store
+            .rollback_path_for(&fixture.canary, &rollback.rollback_id)
+            .unwrap();
+        assert_eq!(fs::read(&rollback_path).unwrap(), original_ciphertext);
+        let replacement = store.get(&fixture.canary).await.unwrap();
+        assert_eq!(replacement.expose_bytes(), b"rollback-replacement-canary");
+
+        let lock = try_lock_store_exclusive(&store.scope_dir()).unwrap();
+        assert_lock_error(
+            store
+                .rollback_generated_rotation(&rollback)
+                .await
+                .unwrap_err(),
+        );
+        drop(lock);
+
+        let outcome = store.rollback_generated_rotation(&rollback).await.unwrap();
+        assert_eq!(
+            outcome,
+            AgeAdminOutcome {
+                action: "rotation.rollback",
+                changed: true,
+                present_secrets: 1,
+                recipient_count: 2,
+                value_returned: false,
+            }
+        );
+        assert!(!rollback_path.exists());
+        assert_eq!(fs::read(&path).unwrap(), original_ciphertext);
+        let restored = store.get(&fixture.canary).await.unwrap();
+        assert_eq!(restored.expose_bytes(), b"rollback-original-canary");
+    }
+
+    #[tokio::test]
+    async fn generated_rotation_commit_discards_rollback_material() {
+        let fixture = fixture();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+        store
+            .set(
+                &fixture.canary,
+                SecretValue::new(b"commit-original-canary".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let rollback = store
+            .prepare_generated_rotation(
+                &fixture.canary,
+                SecretValue::new(b"commit-replacement-canary".to_vec()),
+            )
+            .await
+            .unwrap();
+        let rollback_path = store
+            .rollback_path_for(&fixture.canary, &rollback.rollback_id)
+            .unwrap();
+        assert!(rollback_path.is_file());
+
+        let lock = try_lock_store_exclusive(&store.scope_dir()).unwrap();
+        assert_lock_error(
+            store
+                .commit_generated_rotation(&rollback)
+                .await
+                .unwrap_err(),
+        );
+        drop(lock);
+
+        let outcome = store.commit_generated_rotation(&rollback).await.unwrap();
+        assert_eq!(
+            outcome,
+            AgeAdminOutcome {
+                action: "rotation.commit",
+                changed: true,
+                present_secrets: 1,
+                recipient_count: 2,
+                value_returned: false,
+            }
+        );
+        assert!(!rollback_path.exists());
+        let committed = store.get(&fixture.canary).await.unwrap();
+        assert_eq!(committed.expose_bytes(), b"commit-replacement-canary");
+        assert!(matches!(
+            store.commit_generated_rotation(&rollback).await,
+            Err(JanusError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn generated_rotate_commits_rollback_material_after_success() {
+        let fixture = fixture();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+        store
+            .set(
+                &fixture.canary,
+                SecretValue::new(b"trait-rotation-original".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let outcome = store
+            .rotate(
+                &fixture.canary,
+                &RotationSpec::generated(SecretValue::new(b"trait-rotation-new".to_vec())),
+            )
+            .await
+            .unwrap();
+        assert!(!outcome.value_returned);
+        let rotated = store.get(&fixture.canary).await.unwrap();
+        assert_eq!(rotated.expose_bytes(), b"trait-rotation-new");
+
+        let path = store.path_for(&fixture.canary).unwrap();
+        let file_name = path.file_name().unwrap().to_string_lossy();
+        let rollback_prefix = format!("{file_name}.rollback.");
+        let has_rollback_file = fs::read_dir(path.parent().unwrap()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&rollback_prefix)
+        });
+        assert!(!has_rollback_file);
     }
 
     #[tokio::test]

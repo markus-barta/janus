@@ -5,6 +5,12 @@ Cargo.lock.bak
 
 # Go envelope keeps its own go-envelope/.gitignore (binary, coverage)
 
+# Nix / devenv
+/.devenv/
+/.direnv/
+/devenv.lock
+/devenv.local.nix
+
 # editor / OS
 .DS_Store
 *.swp
