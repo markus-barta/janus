@@ -1,8 +1,8 @@
 //! Rotation lifecycle model.
 
 use crate::{
-    ConsumerRef, ConsumerRegistry, JanusError, JanusResult, SafeLabel, SecretRef, SecretValue,
-    StoreCapabilities,
+    AuditAction, AuditEvent, AuditOutcome, AuditSink, ConsumerRef, ConsumerRegistry, JanusError,
+    JanusResult, PrincipalChain, SafeLabel, SecretRef, SecretValue, Severity, StoreCapabilities,
 };
 
 /// Backend/broker rotation strategy.
@@ -213,6 +213,35 @@ impl RotationPlanner {
                 label: SafeLabel::new("encrypted rollback material").expect("static label"),
             },
         })
+    }
+
+    /// Plan generated rotation and write value-free audit evidence.
+    pub fn plan_generated_with_audit<A>(
+        &self,
+        secret_ref: &SecretRef,
+        capabilities: &StoreCapabilities,
+        audit: &mut A,
+        principal: &PrincipalChain,
+    ) -> JanusResult<RotationDecision>
+    where
+        A: AuditSink,
+    {
+        let decision = self.plan_generated(secret_ref, capabilities);
+        let (outcome, reason_code, severity) = match &decision {
+            RotationDecision::Safe(_) => (AuditOutcome::Allowed, "ok", Severity::Notice),
+            RotationDecision::Unsafe { reason_code, .. } => {
+                (AuditOutcome::Denied, *reason_code, Severity::Warning)
+            }
+        };
+        audit.record(AuditEvent::new(
+            AuditAction::RotationPlan,
+            outcome,
+            reason_code,
+            severity,
+            Some(secret_ref.clone()),
+            principal,
+        ))?;
+        Ok(decision)
     }
 }
 

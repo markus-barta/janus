@@ -132,8 +132,10 @@ pub fn run_permit_contract(
 mod tests {
     use super::*;
     use janus_core::{
-        AuditAction, ManifestCatalog, ProjectId, SafeLabel, ScopeRef, SecretBroker, SecretMeta,
-        SecretRef, TrustLevel,
+        AuditAction, BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry,
+        Environment, ManifestCatalog, OwnerRef, ProjectId, ReloadMethod, RotationDecision,
+        RotationPlanner, SafeLabel, ScopeRef, SecretBroker, SecretMeta, SecretRef,
+        StoreCapabilities, TrustLevel, ValidationProbe,
     };
     use janus_mock::MockStore;
 
@@ -160,6 +162,75 @@ mod tests {
             .with_value(canary, fixture.expected_value.clone())
             .unwrap();
         (store, fixture)
+    }
+
+    fn principal(executor: &str, scope: &str) -> PrincipalChain {
+        PrincipalChain::new(
+            Principal::new(PrincipalKind::Executor, PrincipalId::new(executor).unwrap()),
+            ScopeRef::new(scope).unwrap(),
+        )
+    }
+
+    fn use_profile(
+        secret_ref: SecretRef,
+        enabled: bool,
+        executor: &str,
+        destination: &str,
+    ) -> UseProfile {
+        UseProfile {
+            id: ProfileId::new("profile.canary").unwrap(),
+            secret_ref,
+            executor: ExecutorRef::new(executor).unwrap(),
+            destination: Destination::new(destination).unwrap(),
+            egress: EgressMode::Connector,
+            trust_level: TrustLevel::L2,
+            ttl: Duration::from_secs(60),
+            single_use: true,
+            enabled,
+        }
+    }
+
+    fn use_request(secret_ref: SecretRef, destination: &str) -> UseRequest {
+        UseRequest {
+            secret_ref,
+            profile_id: ProfileId::new("profile.canary").unwrap(),
+            destination: Destination::new(destination).unwrap(),
+            purpose: Purpose::new("deploy canary").unwrap(),
+        }
+    }
+
+    fn consumer(
+        secret_ref: SecretRef,
+        consumer_ref: &str,
+        reload: ReloadMethod,
+        validation: Vec<ValidationProbe>,
+        declared: bool,
+    ) -> ConsumerDescriptor {
+        ConsumerDescriptor {
+            consumer_ref: ConsumerRef::new(consumer_ref).unwrap(),
+            secret_ref,
+            kind: ConsumerKind::ManagedCommand,
+            owner: OwnerRef::new("infra").unwrap(),
+            environment: Environment::new("prod").unwrap(),
+            reload,
+            validation,
+            supports_dual_value: false,
+            blast_radius: BlastRadius::new("release-publishing").unwrap(),
+            declared,
+        }
+    }
+
+    fn generated_rotation_capabilities() -> StoreCapabilities {
+        StoreCapabilities {
+            write: true,
+            delete: true,
+            generated_rotate: true,
+            rotate_native: false,
+            versioning: false,
+            leasing: false,
+            native_audit: false,
+            backend_key_custody: false,
+        }
     }
 
     #[tokio::test]
@@ -225,6 +296,7 @@ mod tests {
         };
         let permit = broker
             .request_use(&request, &principal, SystemTime::UNIX_EPOCH)
+            .await
             .unwrap();
         assert!(permit
             .matches(
@@ -273,5 +345,397 @@ mod tests {
             .any(|event| event.action == AuditAction::PermitIssue
                 && event.outcome == AuditOutcome::Allowed
                 && !event.value_returned));
+    }
+
+    #[tokio::test]
+    async fn tracer_points_7_to_11_work_through_core_contracts() {
+        let (store, fixture) = mock_store();
+        let descriptor = store.list().await.unwrap().remove(0);
+        let principal_chain = principal("runner-a", "janus/dev");
+        let executor = ExecutorRef::new("runner-a").unwrap();
+        let destination = Destination::new("deploy-api").unwrap();
+        let profile = use_profile(
+            descriptor.secret_ref.clone(),
+            true,
+            "runner-a",
+            "deploy-api",
+        );
+        let mut broker = SecretBroker::new(
+            store,
+            ProfilePolicy::new(vec![profile.clone()]),
+            AuditWrite::accepting(),
+        );
+
+        let permit = broker
+            .request_use(
+                &use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                &principal_chain,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+        let value = broker
+            .use_permit(
+                &permit,
+                &principal_chain,
+                &executor,
+                &destination,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(value.expose_bytes(), fixture.expected_value.as_slice());
+
+        let stale_ref = SecretRef::new("sec_stale_copied").unwrap();
+        let stale_request = broker
+            .request_use(
+                &use_request(stale_ref, "deploy-api"),
+                &principal_chain,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(stale_request, JanusError::NotInManifest { .. }));
+
+        let wrong_principal = principal("runner-b", "janus/dev");
+        let wrong_principal_use = match broker
+            .use_permit(
+                &permit,
+                &wrong_principal,
+                &ExecutorRef::new("runner-b").unwrap(),
+                &destination,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            )
+            .await
+        {
+            Ok(_) => panic!("wrong principal permit use should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            wrong_principal_use,
+            JanusError::PermitInvalid {
+                reason_code: "denied_wrong_principal",
+                ..
+            }
+        ));
+
+        let expired_use = match broker
+            .use_permit(
+                &permit,
+                &principal_chain,
+                &executor,
+                &destination,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(61),
+            )
+            .await
+        {
+            Ok(_) => panic!("expired permit use should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            expired_use,
+            JanusError::PermitInvalid {
+                reason_code: "denied_expired_permit",
+                ..
+            }
+        ));
+
+        let (_store, _policy, audit) = broker.into_parts();
+        let rendered_audit = format!("{:?}", audit.events());
+        assert!(!rendered_audit.contains("expected-canary"));
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::PermitDeny
+                && event.reason_code == "denied_not_in_manifest"
+                && event.outcome == AuditOutcome::Denied
+                && !event.value_returned
+        }));
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::SecretUse
+                && event.reason_code == "denied_wrong_principal"
+                && event.outcome == AuditOutcome::Denied
+                && !event.value_returned
+        }));
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::SecretUse
+                && event.reason_code == "denied_expired_permit"
+                && event.outcome == AuditOutcome::Denied
+                && !event.value_returned
+        }));
+
+        let (store, _) = mock_store();
+        let mut failing_broker = SecretBroker::new(
+            store,
+            ProfilePolicy::new(vec![profile]),
+            AuditWrite::failing(),
+        );
+        let audit_failure = match failing_broker
+            .use_permit(
+                &permit,
+                &principal_chain,
+                &executor,
+                &destination,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            )
+            .await
+        {
+            Ok(_) => panic!("audit failure should block permit use"),
+            Err(err) => err,
+        };
+        assert!(matches!(audit_failure, JanusError::AuditUnavailable { .. }));
+
+        let mut registry = ConsumerRegistry::new(vec![consumer(
+            descriptor.secret_ref.clone(),
+            "consumer.declared",
+            ReloadMethod::None,
+            vec![ValidationProbe::new("deploy-smoke").unwrap()],
+            true,
+        )]);
+        assert_eq!(registry.consumers_for(&descriptor.secret_ref).len(), 1);
+        let mut consumer_audit = AuditWrite::accepting();
+        registry
+            .record_observed_with_audit(
+                consumer(
+                    descriptor.secret_ref.clone(),
+                    "consumer.observed",
+                    ReloadMethod::Manual,
+                    Vec::new(),
+                    true,
+                ),
+                &mut consumer_audit,
+                &principal_chain,
+            )
+            .unwrap();
+        let consumers = registry.consumers_for(&descriptor.secret_ref);
+        assert_eq!(consumers.len(), 2);
+        assert!(consumers.iter().any(|consumer| consumer.declared));
+        assert!(consumers.iter().any(|consumer| !consumer.declared));
+        assert!(consumer_audit.events().iter().any(|event| {
+            event.action == AuditAction::ConsumerObserve
+                && event.outcome == AuditOutcome::Allowed
+                && !event.value_returned
+                && event
+                    .event_hash
+                    .as_ref()
+                    .is_some_and(|hash| hash.len() == 64)
+        }));
+
+        let allow_result = {
+            let mut issuer = PermitIssuer::new(
+                ProfilePolicy::new(vec![use_profile(
+                    descriptor.secret_ref.clone(),
+                    true,
+                    "runner-a",
+                    "deploy-api",
+                )]),
+                AuditWrite::accepting(),
+            );
+            let issued = issuer.issue(
+                &use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                &principal_chain,
+                SystemTime::UNIX_EPOCH,
+            );
+            (issued, issuer.into_audit())
+        };
+        assert!(allow_result.0.is_ok());
+        assert!(allow_result.1.events().iter().any(|event| {
+            event.action == AuditAction::PermitIssue && event.outcome == AuditOutcome::Allowed
+        }));
+
+        for (policy, req, actor, expected) in [
+            (
+                ProfilePolicy::default(),
+                use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                principal("runner-a", "janus/dev"),
+                "denied_no_matching_profile",
+            ),
+            (
+                ProfilePolicy::new(vec![use_profile(
+                    descriptor.secret_ref.clone(),
+                    false,
+                    "runner-a",
+                    "deploy-api",
+                )]),
+                use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                principal("runner-a", "janus/dev"),
+                "denied_profile_disabled",
+            ),
+            (
+                ProfilePolicy::new(vec![use_profile(
+                    descriptor.secret_ref.clone(),
+                    true,
+                    "runner-a",
+                    "deploy-api",
+                )]),
+                use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                principal("runner-b", "janus/dev"),
+                "denied_wrong_executor",
+            ),
+            (
+                ProfilePolicy::new(vec![use_profile(
+                    descriptor.secret_ref.clone(),
+                    true,
+                    "runner-a",
+                    "deploy-api",
+                )]),
+                use_request(descriptor.secret_ref.clone(), "other-api"),
+                principal("runner-a", "janus/dev"),
+                "denied_unapproved_destination",
+            ),
+        ] {
+            let mut issuer = PermitIssuer::new(policy, AuditWrite::accepting());
+            let err = issuer
+                .issue(&req, &actor, SystemTime::UNIX_EPOCH)
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                JanusError::PolicyDenied { reason_code, .. } if reason_code == expected
+            ));
+            let audit = issuer.into_audit();
+            assert!(audit.events().iter().any(|event| {
+                event.action == AuditAction::PermitDeny
+                    && event.reason_code == expected
+                    && event.outcome == AuditOutcome::Denied
+                    && !event.value_returned
+            }));
+        }
+
+        let mut weak_egress = use_profile(
+            descriptor.secret_ref.clone(),
+            true,
+            "runner-a",
+            "deploy-api",
+        );
+        weak_egress.egress = EgressMode::DeclaredOnly;
+        let mut issuer = PermitIssuer::new(
+            ProfilePolicy::new(vec![weak_egress]),
+            AuditWrite::accepting(),
+        );
+        let err = issuer
+            .issue(
+                &use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                &principal_chain,
+                SystemTime::UNIX_EPOCH,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "denied_egress_mode_insufficient",
+                ..
+            }
+        ));
+
+        let mut rotation_audit = AuditWrite::accepting();
+        let safe_planner = RotationPlanner::new(ConsumerRegistry::new(vec![consumer(
+            descriptor.secret_ref.clone(),
+            "consumer.safe",
+            ReloadMethod::None,
+            vec![ValidationProbe::new("deploy-smoke").unwrap()],
+            true,
+        )]));
+        let safe = safe_planner
+            .plan_generated_with_audit(
+                &descriptor.secret_ref,
+                &generated_rotation_capabilities(),
+                &mut rotation_audit,
+                &principal_chain,
+            )
+            .unwrap();
+        assert!(matches!(safe, RotationDecision::Safe(_)));
+
+        let unknown = RotationPlanner::new(ConsumerRegistry::default())
+            .plan_generated_with_audit(
+                &descriptor.secret_ref,
+                &generated_rotation_capabilities(),
+                &mut rotation_audit,
+                &principal_chain,
+            )
+            .unwrap();
+        assert!(matches!(
+            unknown,
+            RotationDecision::Unsafe {
+                reason_code: "unknown_consumers",
+                ..
+            }
+        ));
+
+        for (reload, expected) in [
+            (ReloadMethod::Manual, "consumer_reload_failed"),
+            (ReloadMethod::Unsupported, "consumer_reload_failed"),
+        ] {
+            let decision = RotationPlanner::new(ConsumerRegistry::new(vec![consumer(
+                descriptor.secret_ref.clone(),
+                "consumer.reload-blocked",
+                reload,
+                vec![ValidationProbe::new("deploy-smoke").unwrap()],
+                true,
+            )]))
+            .plan_generated_with_audit(
+                &descriptor.secret_ref,
+                &generated_rotation_capabilities(),
+                &mut rotation_audit,
+                &principal_chain,
+            )
+            .unwrap();
+            assert!(matches!(
+                decision,
+                RotationDecision::Unsafe { reason_code, .. } if reason_code == expected
+            ));
+        }
+
+        let missing_validation = RotationPlanner::new(ConsumerRegistry::new(vec![consumer(
+            descriptor.secret_ref.clone(),
+            "consumer.no-validation",
+            ReloadMethod::None,
+            Vec::new(),
+            true,
+        )]))
+        .plan_generated_with_audit(
+            &descriptor.secret_ref,
+            &generated_rotation_capabilities(),
+            &mut rotation_audit,
+            &principal_chain,
+        )
+        .unwrap();
+        assert!(matches!(
+            missing_validation,
+            RotationDecision::Unsafe {
+                reason_code: "consumer_validation_missing",
+                ..
+            }
+        ));
+
+        let unsupported_capabilities = RotationPlanner::new(ConsumerRegistry::new(vec![consumer(
+            descriptor.secret_ref.clone(),
+            "consumer.safe-but-backend-blocked",
+            ReloadMethod::None,
+            vec![ValidationProbe::new("deploy-smoke").unwrap()],
+            true,
+        )]))
+        .plan_generated_with_audit(
+            &descriptor.secret_ref,
+            &StoreCapabilities {
+                generated_rotate: false,
+                ..generated_rotation_capabilities()
+            },
+            &mut rotation_audit,
+            &principal_chain,
+        )
+        .unwrap();
+        assert!(matches!(
+            unsupported_capabilities,
+            RotationDecision::Unsafe {
+                reason_code: "rotation_unsupported",
+                ..
+            }
+        ));
+        assert!(rotation_audit.events().iter().all(|event| {
+            event.action == AuditAction::RotationPlan
+                && !event.value_returned
+                && event
+                    .event_hash
+                    .as_ref()
+                    .is_some_and(|hash| hash.len() == 64)
+        }));
     }
 }

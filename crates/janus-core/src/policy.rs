@@ -384,14 +384,14 @@ where
                 reason_code,
                 detail,
             } => {
-                let _ = self.audit.record(AuditEvent::new(
+                self.audit.record(AuditEvent::new(
                     AuditAction::PermitDeny,
                     AuditOutcome::Denied,
                     reason_code,
                     Severity::Warning,
                     Some(req.secret_ref.clone()),
                     principal,
-                ));
+                ))?;
                 Err(JanusError::policy_denied(reason_code, detail))
             }
         }

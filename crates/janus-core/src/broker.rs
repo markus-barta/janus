@@ -3,9 +3,9 @@
 use std::time::SystemTime;
 
 use crate::{
-    AuditAction, AuditEvent, AuditOutcome, AuditSink, JanusError, JanusResult, PermitIssuer,
-    PrincipalChain, ProfilePolicy, SecretDescriptor, SecretName, SecretStore, SecretValue,
-    Severity, UsePermit, UseRequest,
+    AuditAction, AuditEvent, AuditOutcome, AuditSink, Destination, ExecutorRef, JanusError,
+    JanusResult, PermitIssuer, PrincipalChain, ProfilePolicy, SecretDescriptor, SecretName,
+    SecretStore, SecretValue, Severity, UsePermit, UseRequest,
 };
 
 /// Policy/audit wrapper around a backend store.
@@ -57,14 +57,14 @@ where
             .find(|descriptor| &descriptor.name == name);
 
         let Some(descriptor) = descriptor else {
-            let _ = self.audit.record(AuditEvent::new(
+            self.audit.record(AuditEvent::new(
                 AuditAction::SecretUse,
                 AuditOutcome::Denied,
                 "denied_not_in_manifest",
                 Severity::Warning,
                 None,
                 principal,
-            ));
+            ))?;
             return Err(JanusError::NotInManifest {
                 name: name.as_str().to_string(),
             });
@@ -82,14 +82,94 @@ where
     }
 
     /// Request one use permit through default-deny policy and audit.
-    pub fn request_use(
+    pub async fn request_use(
         &mut self,
         req: &UseRequest,
         principal: &PrincipalChain,
         now: SystemTime,
     ) -> JanusResult<UsePermit> {
+        let listed = self.store.list().await?;
+        if !listed
+            .iter()
+            .any(|descriptor| descriptor.secret_ref == req.secret_ref)
+        {
+            self.audit.record(AuditEvent::new(
+                AuditAction::PermitDeny,
+                AuditOutcome::Denied,
+                "denied_not_in_manifest",
+                Severity::Warning,
+                Some(req.secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::NotInManifest {
+                name: req.secret_ref.as_str().to_string(),
+            });
+        }
+
         let mut issuer = PermitIssuer::new(&self.policy, &mut self.audit);
         issuer.issue(req, principal, now)
+    }
+
+    /// Consume a permit through the approved secret-bearing path.
+    ///
+    /// This is the point where copied/stale permits stay powerless: the permit
+    /// must still match principal, executor, destination, expiry, and a current
+    /// manifest ref before a value is read. Every denial is audited before it is
+    /// returned.
+    pub async fn use_permit(
+        &mut self,
+        permit: &UsePermit,
+        principal: &PrincipalChain,
+        executor: &ExecutorRef,
+        destination: &Destination,
+        now: SystemTime,
+    ) -> JanusResult<SecretValue> {
+        if let Err(err) = permit.matches(principal, executor, destination, now) {
+            let reason_code = match &err {
+                JanusError::PermitInvalid { reason_code, .. } => *reason_code,
+                _ => "denied_permit_invalid",
+            };
+            self.audit.record(AuditEvent::new(
+                AuditAction::SecretUse,
+                AuditOutcome::Denied,
+                reason_code,
+                Severity::Warning,
+                Some(permit.secret_ref().clone()),
+                principal,
+            ))?;
+            return Err(err);
+        }
+
+        let descriptor = self
+            .store
+            .list()
+            .await?
+            .into_iter()
+            .find(|descriptor| &descriptor.secret_ref == permit.secret_ref());
+
+        let Some(descriptor) = descriptor else {
+            self.audit.record(AuditEvent::new(
+                AuditAction::SecretUse,
+                AuditOutcome::Denied,
+                "denied_not_in_manifest",
+                Severity::Warning,
+                Some(permit.secret_ref().clone()),
+                principal,
+            ))?;
+            return Err(JanusError::NotInManifest {
+                name: permit.secret_ref().as_str().to_string(),
+            });
+        };
+
+        self.audit.record(AuditEvent::new(
+            AuditAction::SecretUse,
+            AuditOutcome::Allowed,
+            "ok",
+            Severity::Notice,
+            Some(descriptor.secret_ref.clone()),
+            principal,
+        ))?;
+        self.store.get(&descriptor.name).await
     }
 
     /// Split the broker back into its parts for assertions or embedding.

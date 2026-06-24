@@ -1,7 +1,9 @@
 //! Consumer registry for rotation and approved-use evidence.
 
-use crate::{ConsumerRef, JanusResult, SecretRef};
-use crate::{JanusError, SafeLabel};
+use crate::{
+    AuditAction, AuditEvent, AuditOutcome, AuditSink, ConsumerRef, JanusError, JanusResult,
+    PrincipalChain, SafeLabel, SecretRef, Severity,
+};
 
 /// Kind of consumer that may use a secret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +157,28 @@ impl ConsumerRegistry {
     pub fn record_observed(&mut self, mut consumer: ConsumerDescriptor) {
         consumer.declared = false;
         self.consumers.push(consumer);
+    }
+
+    /// Record one observed consumer with value-free audit evidence.
+    pub fn record_observed_with_audit<A>(
+        &mut self,
+        consumer: ConsumerDescriptor,
+        audit: &mut A,
+        principal: &PrincipalChain,
+    ) -> JanusResult<()>
+    where
+        A: AuditSink,
+    {
+        audit.record(AuditEvent::new(
+            AuditAction::ConsumerObserve,
+            AuditOutcome::Allowed,
+            "ok",
+            Severity::Notice,
+            Some(consumer.secret_ref.clone()),
+            principal,
+        ))?;
+        self.record_observed(consumer);
+        Ok(())
     }
 }
 

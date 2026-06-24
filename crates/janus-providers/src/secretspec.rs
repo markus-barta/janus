@@ -354,6 +354,7 @@ CANARY = { description = "Canary token", required = true }
         };
         let permit = broker
             .request_use(&request, &principal, SystemTime::UNIX_EPOCH)
+            .await
             .unwrap();
         assert!(permit
             .matches(
