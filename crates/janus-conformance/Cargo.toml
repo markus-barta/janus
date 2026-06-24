@@ -1,6 +1,6 @@
 [package]
-name = "janus-core"
-description = "Janus engine core: the async SecretStore trait, opaque SecretRef/UsePermit handles, policy + audit-as-evidence model."
+name = "janus-conformance"
+description = "Reusable Janus SecretStore contract tests."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,10 +12,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-async-trait = "0.1"
-hex = "0.4"
-sha2 = "0.10"
-zeroize = "1"
+janus-core = { path = "../janus-core" }
 
 [dev-dependencies]
+janus-mock = { path = "../janus-mock" }
 tokio = { version = "1", features = ["macros", "rt"] }

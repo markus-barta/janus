@@ -1,47 +1,43 @@
-//! # janus-core — the secret-handling engine (greenfield, Rust)
+//! # janus-core
 //!
-//! Implements the core model from PPM JANUS `guideline/architecture-v1`:
-//! opaque, non-authorizing [`SecretRef`]s; opaque, single-use [`UsePermit`]s;
-//! the backend-pluggable `SecretStore`; and the policy + audit-as-evidence
-//! model. The deployed Go REST service in `../../go-envelope` is the oversight
-//! **envelope** only — it brokers no secret values. This crate is the **engine**
-//! the envelope has been waiting for.
-//!
-//! ## Backlog tickets this crate covers
-//! - **JANUS-14** — core async `SecretStore`
-//! - **JANUS-28** — approved-use execution (the only path a value may leave Janus)
-//!
-//! Nothing here is implemented yet; the types below are sketches that anchor the
-//! implementation session to the spec's vocabulary.
+//! Core domain model for Janus: opaque references, principal-bound use permits,
+//! policy decisions, audit-as-evidence, and backend-neutral store contracts.
+//! The shipped Go envelope is an oversight surface; this crate is the engine
+//! that will eventually make secret-bearing decisions.
 
-// Skeleton crate: the placeholder fields are unused until the engine lands.
-#![allow(dead_code)]
+#![forbid(unsafe_code)]
 
-/// Opaque, non-authorizing reference to a declared secret.
-///
-/// A `SecretRef` names a secret that exists in the manifest allowlist but grants
-/// no access to its value. Safe to log, persist, and hand to an AI surface
-/// (architecture-v1 goal 6).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SecretRef(String);
+pub mod audit;
+pub mod broker;
+pub mod consumer;
+pub mod error;
+pub mod manifest;
+pub mod policy;
+pub mod principal;
+pub mod refs;
+pub mod rotation;
+pub mod store;
+pub mod value;
 
-/// Opaque, single-use, short-lived approval for exactly one narrow use.
-///
-/// A `UsePermit` authorizes one use path — built-in connector, managed command
-/// profile, or non-LLM provider path — bound to a principal chain. It is never
-/// the value, and copying it outside its binding must fail (architecture-v1
-/// goal 6, §threat-model).
-#[derive(Clone, Debug)]
-pub struct UsePermit(String);
-
-/// Backend-pluggable secret store. Concrete backends (age, secretspec, OpenBao,
-/// OS keyring) live in the `janus-providers` crate behind this trait so that no
-/// single vendor — including secretspec itself — can capture the core
-/// (architecture-v1 goal 8).
-///
-/// TODO(JANUS-14): make this `async` (tokio + async-trait), add the
-/// resolve / use / rotate surface, and wire the audit sink such that
-/// secret-bearing actions fail closed when audit cannot be written.
-pub trait SecretStore {
-    // Intentionally empty — see architecture-v1 §3 for the target surface.
-}
+pub use audit::{AuditAction, AuditEvent, AuditOutcome, AuditSink, AuditWrite, Severity};
+pub use broker::SecretBroker;
+pub use consumer::{
+    BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRegistry, Environment, OwnerRef,
+    ReloadMethod,
+};
+pub use error::{JanusError, JanusResult};
+pub use manifest::ManifestCatalog;
+pub use policy::{
+    EgressMode, PermitId, PermitIssuer, PolicyDecision, ProfileId, ProfilePolicy, Purpose,
+    TrustLevel, UsePermit, UseProfile, UseRequest,
+};
+pub use principal::{Principal, PrincipalChain, PrincipalId, PrincipalKind, ScopeRef};
+pub use refs::{
+    ConsumerRef, Destination, ExecutorRef, ProjectId, SafeLabel, SecretName, SecretRef,
+};
+pub use rotation::{
+    RollbackPlan, RotationDecision, RotationOutcome, RotationPhase, RotationPlan, RotationPlanner,
+    RotationSpec, RotationStrategy, ValidationProbe,
+};
+pub use store::{HealthStatus, SecretDescriptor, SecretMeta, SecretStore, StoreCapabilities};
+pub use value::SecretValue;

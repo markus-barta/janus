@@ -12,4 +12,11 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-# TODO(JANUS-21/12): age (rage), secretspec, openbao client, keyring crates.
+async-trait = "0.1"
+janus-core = { path = "../janus-core" }
+secrecy = "0.10.3"
+secretspec = { version = "=0.11.0", default-features = false }
+
+[dev-dependencies]
+janus-conformance = { path = "../janus-conformance" }
+tokio = { version = "1", features = ["macros", "rt"] }

@@ -14,3 +14,9 @@
 //! TODO: one module per provider, each behind the `SecretStore` trait. age is
 //! the self-host default, **not** the enterprise ceiling — the model must allow
 //! HSM/KMS/OpenBao-class custody later.
+
+#![forbid(unsafe_code)]
+
+pub mod secretspec;
+
+pub use secretspec::SecretspecStore;

@@ -24,7 +24,7 @@ Janus is being built in two layers, and they are at very different maturity:
 | Layer | What | Language | State |
 |---|---|---|---|
 | **Envelope** | governance / audit / evidence / oversight plane | Go (REST) | **shipped & live** at `vault.barta.cm`, iterated V1.1→V1.144 by an autonomous loop. Brokers **no secret values** (`value_returned:false`). Lives in [`go-envelope/`](go-envelope/). |
-| **Engine** | the secret-handling core: `SecretStore`, opaque handles, MCP warden, providers | **Rust** | **greenfield** — being built in [`crates/`](crates/). The product the envelope has been waiting for. |
+| **Engine** | the secret-handling core: `SecretStore`, opaque handles, MCP warden, providers | **Rust** | **first JANUS-14 slice landing** — async core contracts, mock/conformance, and a wrapped secretspec/dotenv adapter are in [`crates/`](crates/). MCP/age/execution are next. |
 
 **The plan (see `repo-topology-adr`):** build the missing engine fresh in Rust;
 keep the Go envelope running and **frozen** (no rewrite); port/retire the
@@ -46,9 +46,11 @@ design already chose is Rust-native: **secretspec** (manifest = allowlist),
 janus/
 ├── crates/                  # the Rust engine (greenfield)
 │   ├── janus-core/          # SecretStore trait, SecretRef/UsePermit, policy+audit  (JANUS-14, 28)
+│   ├── janus-conformance/   # reusable SecretStore + broker contract battery       (JANUS-14)
+│   ├── janus-mock/          # in-memory conformance/tracer backend                  (JANUS-14)
 │   ├── janus-warden/        # reference-only MCP surface (read side)                (JANUS-22)
 │   ├── janus-forge/         # rotation/write broker — not MCP, not LLM-driven       (JANUS-219)
-│   ├── janus-providers/     # age/agenix, secretspec, OpenBao, OS keyring backends  (JANUS-21, 12)
+│   ├── janus-providers/     # secretspec adapter now; age/OpenBao/keyring next      (JANUS-21, 12)
 │   └── janusd/              # the daemon that supersedes the envelope's serving
 ├── go-envelope/             # the shipped Go REST envelope (frozen, transitional)
 ├── docs/
@@ -62,7 +64,8 @@ janus/
 **Engine (Rust):**
 ```bash
 cargo build              # workspace build (skeleton until the engine tickets land)
-cargo test --all
+cargo test --workspace --locked
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 **Envelope (Go):**

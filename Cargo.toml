@@ -4,9 +4,11 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/janus-conformance",
     "crates/janus-core",
     "crates/janus-warden",
     "crates/janus-forge",
+    "crates/janus-mock",
     "crates/janus-providers",
     "crates/janusd",
 ]
