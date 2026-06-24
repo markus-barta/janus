@@ -1,6 +1,6 @@
 //! Audit-as-evidence contracts.
 
-use crate::{JanusError, JanusResult, PrincipalChain, SecretRef};
+use crate::{JanusError, JanusResult, PrincipalChain, SafeLabel, SecretRef};
 use sha2::{Digest, Sha256};
 
 /// Actions Janus core can audit.
@@ -24,6 +24,8 @@ pub enum AuditAction {
     ConsumerObserve,
     /// A rotation plan was created.
     RotationPlan,
+    /// A high-risk rotation was explicitly approved.
+    RotationApprove,
     /// A rotation lifecycle phase advanced or failed.
     RotationLifecycle,
     /// Backend health was checked.
@@ -83,6 +85,8 @@ pub struct AuditEvent {
     pub event_hash: Option<String>,
     /// Whether any secret value was returned. Core events should keep this false.
     pub value_returned: bool,
+    /// Optional value-free evidence label, such as an approval reason.
+    pub evidence: Option<SafeLabel>,
 }
 
 impl AuditEvent {
@@ -106,12 +110,19 @@ impl AuditEvent {
             prev_hash: None,
             event_hash: None,
             value_returned: false,
+            evidence: None,
         }
+    }
+
+    /// Attach value-free evidence to an event.
+    pub fn with_evidence(mut self, evidence: SafeLabel) -> Self {
+        self.evidence = Some(evidence);
+        self
     }
 
     fn hash_material(&self) -> String {
         format!(
-            "{:?}|{:?}|{}|{:?}|{:?}|{}|{}|{}",
+            "{:?}|{:?}|{}|{:?}|{:?}|{}|{}|{}|{:?}",
             self.action,
             self.outcome,
             self.reason_code,
@@ -120,6 +131,7 @@ impl AuditEvent {
             self.principal_binding,
             self.sequence.unwrap_or_default(),
             self.prev_hash.as_deref().unwrap_or("genesis"),
+            self.evidence,
         )
     }
 }

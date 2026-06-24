@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use janus_core::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, ConsumerDescriptor, ConsumerRef,
     ConsumerRegistry, JanusError, JanusResult, PrincipalChain, ReloadMethod, RotationDecision,
-    RotationOutcome, RotationPhase, RotationPlanner, SecretName, SecretRef, SecretStore,
+    RotationOutcome, RotationPhase, RotationPlanner, SafeLabel, SecretName, SecretRef, SecretStore,
     SecretValue, Severity, ValidationProbe,
 };
 use janus_provider_age::{AgeRollbackMaterial, AgeSecretStore};
@@ -106,6 +106,30 @@ impl GeneratedValuePolicy {
             bytes.push(*byte);
         }
         SecretValue::new(bytes)
+    }
+}
+
+/// Exact approval for a high-risk generated rotation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RotationApproval {
+    secret_ref: SecretRef,
+    reason: SafeLabel,
+}
+
+impl RotationApproval {
+    /// Construct an approval bound to one secret ref and safe reason label.
+    pub fn new(secret_ref: SecretRef, reason: SafeLabel) -> Self {
+        Self { secret_ref, reason }
+    }
+
+    /// Approved secret ref.
+    pub fn secret_ref(&self) -> &SecretRef {
+        &self.secret_ref
+    }
+
+    /// Safe approval reason.
+    pub fn reason(&self) -> &SafeLabel {
+        &self.reason
     }
 }
 
@@ -203,10 +227,11 @@ where
         &mut self,
         name: &SecretName,
         policy: &GeneratedValuePolicy,
+        approval: &RotationApproval,
         principal: &PrincipalChain,
     ) -> JanusResult<RotationOutcome> {
         let value = policy.generate();
-        self.rotate_generated_with_value(name, value, principal)
+        self.rotate_generated_with_value(name, value, approval, principal)
             .await
     }
 
@@ -221,9 +246,11 @@ where
         &mut self,
         name: &SecretName,
         value: SecretValue,
+        approval: &RotationApproval,
         principal: &PrincipalChain,
     ) -> JanusResult<RotationOutcome> {
         let secret_ref = self.secret_ref_for_name(name).await?;
+        self.record_approval(&secret_ref, approval, principal)?;
         let decision = RotationPlanner::new(self.consumers.clone()).plan_generated_with_audit(
             &secret_ref,
             &self.store.capabilities(),
@@ -322,6 +349,39 @@ where
             .ok_or_else(|| JanusError::NotInManifest {
                 name: name.as_str().to_string(),
             })
+    }
+
+    fn record_approval(
+        &mut self,
+        secret_ref: &SecretRef,
+        approval: &RotationApproval,
+        principal: &PrincipalChain,
+    ) -> JanusResult<()> {
+        if approval.secret_ref() != secret_ref {
+            self.audit.record(AuditEvent::new(
+                AuditAction::RotationApprove,
+                AuditOutcome::Denied,
+                "approval_secret_ref_mismatch",
+                Severity::Warning,
+                Some(secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::policy_denied(
+                "approval_secret_ref_mismatch",
+                "rotation approval does not match the target secret",
+            ));
+        }
+        self.audit.record(
+            AuditEvent::new(
+                AuditAction::RotationApprove,
+                AuditOutcome::Allowed,
+                "approved",
+                Severity::High,
+                Some(secret_ref.clone()),
+                principal,
+            )
+            .with_evidence(approval.reason().clone()),
+        )
     }
 
     async fn record_after_prepare(
@@ -647,6 +707,13 @@ mod tests {
         )
     }
 
+    fn approval(secret_ref: &SecretRef) -> RotationApproval {
+        RotationApproval::new(
+            secret_ref.clone(),
+            SafeLabel::new("JANUS-21 generated rotation").unwrap(),
+        )
+    }
+
     fn consumer(secret_ref: SecretRef, validation: Vec<ValidationProbe>) -> ConsumerDescriptor {
         ConsumerDescriptor {
             consumer_ref: ConsumerRef::new("consumer.deploy").unwrap(),
@@ -697,6 +764,7 @@ mod tests {
             .rotate_generated(
                 &name,
                 &GeneratedValuePolicy::url_safe(48).unwrap(),
+                &approval(&secret_ref),
                 &principal(),
             )
             .await
@@ -731,6 +799,17 @@ mod tests {
                     .as_ref()
                     .is_some_and(|hash| hash.len() == 64)
         }));
+        let approval_event = audit
+            .events()
+            .iter()
+            .find(|event| event.action == AuditAction::RotationApprove)
+            .unwrap();
+        assert_eq!(approval_event.outcome, AuditOutcome::Allowed);
+        assert_eq!(approval_event.reason_code, "approved");
+        assert_eq!(
+            approval_event.evidence.as_ref().unwrap().as_str(),
+            "JANUS-21 generated rotation"
+        );
         let rendered_audit = format!("{:?}", audit.events());
         assert!(!rendered_audit.contains(std::str::from_utf8(&store.value).unwrap()));
     }
@@ -739,7 +818,7 @@ mod tests {
     async fn validation_failure_rolls_back_without_commit() {
         let (store, name, secret_ref) = TestStore::new();
         let registry = ConsumerRegistry::new(vec![consumer(
-            secret_ref,
+            secret_ref.clone(),
             vec![ValidationProbe::new("deploy-smoke").unwrap()],
         )]);
         let hooks = TestHooks {
@@ -753,6 +832,7 @@ mod tests {
             .rotate_generated_with_value(
                 &name,
                 SecretValue::new(b"should-roll-back".to_vec()),
+                &approval(&secret_ref),
                 &principal(),
             )
             .await
@@ -782,7 +862,7 @@ mod tests {
     async fn reload_failure_rolls_back_without_commit() {
         let (store, name, secret_ref) = TestStore::new();
         let registry = ConsumerRegistry::new(vec![consumer(
-            secret_ref,
+            secret_ref.clone(),
             vec![ValidationProbe::new("deploy-smoke").unwrap()],
         )]);
         let hooks = TestHooks {
@@ -796,6 +876,7 @@ mod tests {
             .rotate_generated_with_value(
                 &name,
                 SecretValue::new(b"should-roll-back".to_vec()),
+                &approval(&secret_ref),
                 &principal(),
             )
             .await
@@ -826,7 +907,7 @@ mod tests {
         let (mut store, name, secret_ref) = TestStore::new();
         store.fail_commit = true;
         let registry = ConsumerRegistry::new(vec![consumer(
-            secret_ref,
+            secret_ref.clone(),
             vec![ValidationProbe::new("deploy-smoke").unwrap()],
         )]);
         let mut broker = GeneratedRotationBroker::new(
@@ -840,6 +921,7 @@ mod tests {
             .rotate_generated_with_value(
                 &name,
                 SecretValue::new(b"should-roll-back".to_vec()),
+                &approval(&secret_ref),
                 &principal(),
             )
             .await
@@ -867,7 +949,7 @@ mod tests {
 
     #[tokio::test]
     async fn unsafe_plan_blocks_before_prepare() {
-        let (store, name, _secret_ref) = TestStore::new();
+        let (store, name, secret_ref) = TestStore::new();
         let mut broker = GeneratedRotationBroker::new(
             store,
             ConsumerRegistry::default(),
@@ -879,6 +961,7 @@ mod tests {
             .rotate_generated_with_value(
                 &name,
                 SecretValue::new(b"should-not-write".to_vec()),
+                &approval(&secret_ref),
                 &principal(),
             )
             .await
@@ -904,7 +987,7 @@ mod tests {
     async fn audit_failure_blocks_before_prepare() {
         let (store, name, secret_ref) = TestStore::new();
         let registry = ConsumerRegistry::new(vec![consumer(
-            secret_ref,
+            secret_ref.clone(),
             vec![ValidationProbe::new("deploy-smoke").unwrap()],
         )]);
         let mut broker = GeneratedRotationBroker::new(
@@ -918,6 +1001,7 @@ mod tests {
             .rotate_generated_with_value(
                 &name,
                 SecretValue::new(b"should-not-write".to_vec()),
+                &approval(&secret_ref),
                 &principal(),
             )
             .await
@@ -928,6 +1012,52 @@ mod tests {
         assert_eq!(store.prepare_count, 0);
         assert!(hooks.validations.is_empty());
         assert!(hooks.reloads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn approval_mismatch_blocks_before_prepare() {
+        let (store, name, secret_ref) = TestStore::new();
+        let registry = ConsumerRegistry::new(vec![consumer(
+            secret_ref,
+            vec![ValidationProbe::new("deploy-smoke").unwrap()],
+        )]);
+        let wrong_approval = RotationApproval::new(
+            SecretRef::new("sec_wrong").unwrap(),
+            SafeLabel::new("wrong ticket").unwrap(),
+        );
+        let mut broker = GeneratedRotationBroker::new(
+            store,
+            registry,
+            AuditWrite::accepting(),
+            TestHooks::default(),
+        );
+
+        let err = broker
+            .rotate_generated_with_value(
+                &name,
+                SecretValue::new(b"should-not-write".to_vec()),
+                &wrong_approval,
+                &principal(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "approval_secret_ref_mismatch",
+                ..
+            }
+        ));
+        let (store, _registry, audit, hooks) = broker.into_parts();
+        assert_eq!(store.value, b"old-canary");
+        assert_eq!(store.prepare_count, 0);
+        assert!(hooks.validations.is_empty());
+        assert!(hooks.reloads.is_empty());
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::RotationApprove
+                && event.outcome == AuditOutcome::Denied
+                && event.reason_code == "approval_secret_ref_mismatch"
+        }));
     }
 
     #[test]
