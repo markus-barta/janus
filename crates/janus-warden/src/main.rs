@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 use std::env;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -17,6 +18,7 @@ use janus_core::{
     PrincipalKind, ProfilePolicy, ScopeRef, SecretBroker, SecretDescriptor, SecretStore,
     TrustLevel, UseProfile,
 };
+use janus_provider_age::AgeSecretStore;
 use janus_providers::SecretspecStore;
 use janus_warden::{tool_definitions, WardenRuntime};
 use rmcp::{
@@ -32,7 +34,75 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
-type Runtime = WardenRuntime<SecretspecStore, AuditWrite>;
+type Runtime = WardenRuntime<WardenStore, AuditWrite>;
+
+enum WardenStore {
+    Secretspec(SecretspecStore),
+    Age(AgeSecretStore),
+}
+
+#[async_trait::async_trait]
+impl SecretStore for WardenStore {
+    fn capabilities(&self) -> janus_core::StoreCapabilities {
+        match self {
+            Self::Secretspec(store) => store.capabilities(),
+            Self::Age(store) => store.capabilities(),
+        }
+    }
+
+    async fn health(&self) -> janus_core::JanusResult<janus_core::HealthStatus> {
+        match self {
+            Self::Secretspec(store) => store.health().await,
+            Self::Age(store) => store.health().await,
+        }
+    }
+
+    async fn list(&self) -> janus_core::JanusResult<Vec<SecretDescriptor>> {
+        match self {
+            Self::Secretspec(store) => store.list().await,
+            Self::Age(store) => store.list().await,
+        }
+    }
+
+    async fn get(
+        &self,
+        name: &janus_core::SecretName,
+    ) -> janus_core::JanusResult<janus_core::SecretValue> {
+        match self {
+            Self::Secretspec(store) => store.get(name).await,
+            Self::Age(store) => store.get(name).await,
+        }
+    }
+
+    async fn set(
+        &mut self,
+        name: &janus_core::SecretName,
+        value: janus_core::SecretValue,
+    ) -> janus_core::JanusResult<()> {
+        match self {
+            Self::Secretspec(store) => store.set(name, value).await,
+            Self::Age(store) => store.set(name, value).await,
+        }
+    }
+
+    async fn rotate(
+        &mut self,
+        name: &janus_core::SecretName,
+        spec: &janus_core::RotationSpec,
+    ) -> janus_core::JanusResult<janus_core::RotationOutcome> {
+        match self {
+            Self::Secretspec(store) => store.rotate(name, spec).await,
+            Self::Age(store) => store.rotate(name, spec).await,
+        }
+    }
+
+    async fn delete(&mut self, name: &janus_core::SecretName) -> janus_core::JanusResult<()> {
+        match self {
+            Self::Secretspec(store) => store.delete(name).await,
+            Self::Age(store) => store.delete(name).await,
+        }
+    }
+}
 
 /// `rmcp` server state.
 struct McpWarden {
@@ -118,21 +188,57 @@ async fn main() -> Result<()> {
 }
 
 async fn build_runtime_from_env() -> Result<Runtime> {
-    let manifest = required_env("JANUS_WARDEN_SECRETSPEC_FILE")?;
-    let profile = env::var("JANUS_WARDEN_SECRETSPEC_PROFILE").unwrap_or_else(|_| "default".into());
-    let provider_uri = required_env("JANUS_WARDEN_SECRETSPEC_PROVIDER_URI")?;
-    let store = SecretspecStore::load_from(manifest, profile, provider_uri)
-        .context("failed to load JANUS_WARDEN_SECRETSPEC_* backend")?;
+    let store = load_store_from_env()?;
     let descriptors = store
         .list()
         .await
-        .context("failed to list secretspec manifest descriptors during Warden boot")?;
+        .context("failed to list backend manifest descriptors during Warden boot")?;
     let policy = policy_from_env(&descriptors)?;
     Ok(WardenRuntime::new(SecretBroker::new(
         store,
         policy,
         AuditWrite::accepting(),
     )))
+}
+
+fn load_store_from_env() -> Result<WardenStore> {
+    match env::var("JANUS_WARDEN_BACKEND")
+        .unwrap_or_else(|_| "secretspec".into())
+        .as_str()
+    {
+        "secretspec" => load_secretspec_store().map(WardenStore::Secretspec),
+        "age" => load_age_store().map(WardenStore::Age),
+        other => anyhow::bail!("unsupported JANUS_WARDEN_BACKEND {other}"),
+    }
+}
+
+fn load_secretspec_store() -> Result<SecretspecStore> {
+    let manifest = required_env("JANUS_WARDEN_SECRETSPEC_FILE")?;
+    let profile = env::var("JANUS_WARDEN_SECRETSPEC_PROFILE").unwrap_or_else(|_| "default".into());
+    let provider_uri = required_env("JANUS_WARDEN_SECRETSPEC_PROVIDER_URI")?;
+    SecretspecStore::load_from(manifest, profile, provider_uri)
+        .context("failed to load JANUS_WARDEN_SECRETSPEC_* backend")
+}
+
+fn load_age_store() -> Result<AgeSecretStore> {
+    let manifest = env::var("JANUS_WARDEN_AGE_MANIFEST_FILE")
+        .or_else(|_| env::var("JANUS_WARDEN_SECRETSPEC_FILE"))
+        .context("JANUS_WARDEN_AGE_MANIFEST_FILE or JANUS_WARDEN_SECRETSPEC_FILE is required")?;
+    let profile = env::var("JANUS_WARDEN_AGE_PROFILE")
+        .or_else(|_| env::var("JANUS_WARDEN_SECRETSPEC_PROFILE"))
+        .unwrap_or_else(|_| "default".into());
+    let store_dir =
+        env::var("JANUS_WARDEN_AGE_STORE_DIR").unwrap_or_else(|_| "/var/lib/janus/secrets".into());
+    let identity_files = age_identity_files_from_env()?;
+    let recipients = age_recipients_from_env()?;
+    AgeSecretStore::load_from_secretspec_manifest(
+        manifest,
+        profile,
+        store_dir,
+        identity_files,
+        recipients,
+    )
+    .context("failed to load JANUS_WARDEN_BACKEND=age backend")
 }
 
 fn policy_from_env(descriptors: &[SecretDescriptor]) -> Result<ProfilePolicy> {
@@ -180,6 +286,51 @@ fn principal_from_env() -> Result<PrincipalChain> {
 
 fn executor_id_from_env() -> Result<String> {
     Ok(env::var("JANUS_WARDEN_EXECUTOR").unwrap_or_else(|_| "warden-stdio".into()))
+}
+
+fn age_identity_files_from_env() -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    if let Ok(value) = env::var("JANUS_WARDEN_AGE_IDENTITY_FILE") {
+        files.push(PathBuf::from(value));
+    }
+    if let Ok(value) = env::var("JANUS_WARDEN_AGE_IDENTITY_FILES") {
+        files.extend(
+            value
+                .split(':')
+                .filter(|part| !part.trim().is_empty())
+                .map(PathBuf::from),
+        );
+    }
+    if files.is_empty() {
+        anyhow::bail!(
+            "JANUS_WARDEN_AGE_IDENTITY_FILE or JANUS_WARDEN_AGE_IDENTITY_FILES is required"
+        );
+    }
+    Ok(files)
+}
+
+fn age_recipients_from_env() -> Result<Vec<String>> {
+    let mut recipients = Vec::new();
+    if let Ok(value) = env::var("JANUS_WARDEN_AGE_RECIPIENT") {
+        recipients.push(value);
+    }
+    if let Ok(path) = env::var("JANUS_WARDEN_AGE_RECIPIENTS_FILE") {
+        recipients.extend(read_recipient_file(Path::new(&path))?);
+    }
+    if recipients.is_empty() {
+        anyhow::bail!("JANUS_WARDEN_AGE_RECIPIENT or JANUS_WARDEN_AGE_RECIPIENTS_FILE is required");
+    }
+    Ok(recipients)
+}
+
+fn read_recipient_file(path: &Path) -> Result<Vec<String>> {
+    let contents = std::fs::read_to_string(path).context("failed to read age recipients file")?;
+    Ok(contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect())
 }
 
 fn required_env(key: &'static str) -> Result<String> {

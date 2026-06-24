@@ -23,8 +23,8 @@ Janus is being built in two layers, and they are at very different maturity:
 
 | Layer | What | Language | State |
 |---|---|---|---|
-| **Envelope** | governance / audit / evidence / oversight plane | Go (REST) | **shipped & live** at `vault.barta.cm`, iterated V1.1→V1.144 by an autonomous loop. Brokers **no secret values** (`value_returned:false`). Lives in [`go-envelope/`](go-envelope/). |
-| **Engine** | the secret-handling core: `SecretStore`, opaque handles, MCP warden, providers | **Rust** | **first JANUS-14 slice landing** — async core contracts, mock/conformance, and a wrapped secretspec/dotenv adapter are in [`crates/`](crates/). MCP/age/execution are next. |
+| **Envelope** | governance / audit / evidence / oversight plane | Go (REST) | **shipped & live** at `vault.barta.cm`, iterated V1.1→V1.146 by an autonomous loop. Brokers **no secret values** (`value_returned:false`). Lives in [`go-envelope/`](go-envelope/). |
+| **Engine** | the secret-handling core: `SecretStore`, opaque handles, MCP warden, providers | **Rust** | **JANUS-14/21/22 slices landing** — async core contracts, mock/conformance, wrapped secretspec/dotenv, reference-only MCP stdio, and the first native age provider are in [`crates/`](crates/). Execution is next. |
 
 **The plan (see `repo-topology-adr`):** build the missing engine fresh in Rust;
 keep the Go envelope running and **frozen** (no rewrite); port/retire the
@@ -48,9 +48,10 @@ janus/
 │   ├── janus-core/          # SecretStore trait, SecretRef/UsePermit, policy+audit  (JANUS-14, 28)
 │   ├── janus-conformance/   # reusable SecretStore + broker contract battery       (JANUS-14)
 │   ├── janus-mock/          # in-memory conformance/tracer backend                  (JANUS-14)
+│   ├── janus-provider-age/  # native age encrypted-file SecretStore                 (JANUS-21)
 │   ├── janus-warden/        # reference-only MCP surface (read side)                (JANUS-22)
 │   ├── janus-forge/         # rotation/write broker — not MCP, not LLM-driven       (JANUS-219)
-│   ├── janus-providers/     # secretspec adapter now; age/OpenBao/keyring next      (JANUS-21, 12)
+│   ├── janus-providers/     # wrapped secretspec adapter; OpenBao/keyring next      (JANUS-12)
 │   └── janusd/              # the daemon that supersedes the envelope's serving
 ├── go-envelope/             # the shipped Go REST envelope (frozen, transitional)
 ├── docs/
