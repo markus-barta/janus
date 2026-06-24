@@ -13,9 +13,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use age::{Decryptor, Encryptor};
 use async_trait::async_trait;
 use janus_core::{
-    HealthStatus, JanusError, JanusResult, ManifestCatalog, ProfileId, ProjectId, RotationOutcome,
-    RotationSpec, RotationStrategy, SafeLabel, ScopeRef, SecretDescriptor, SecretMeta, SecretName,
-    SecretStore, SecretValue, StoreCapabilities, TrustLevel,
+    AuditAction, AuditEvent, AuditOutcome, AuditSink, HealthStatus, JanusError, JanusResult,
+    ManifestCatalog, PrincipalChain, ProfileId, ProjectId, RotationOutcome, RotationSpec,
+    RotationStrategy, SafeLabel, ScopeRef, SecretDescriptor, SecretMeta, SecretName, SecretStore,
+    SecretValue, Severity, StoreCapabilities, TrustLevel,
 };
 use secretspec as secretspec_crate;
 use zeroize::Zeroize;
@@ -200,6 +201,42 @@ impl AgeSecretStore {
         })
     }
 
+    /// Plan a recipient-set change with value-free audit evidence.
+    pub fn key_rotation_dry_run_with_audit<A>(
+        &self,
+        proposed_recipients: Vec<String>,
+        audit: &mut A,
+        principal: &PrincipalChain,
+    ) -> JanusResult<AgeReencryptPlan>
+    where
+        A: AuditSink,
+    {
+        match self.key_rotation_dry_run(proposed_recipients) {
+            Ok(plan) => {
+                audit.record(AuditEvent::new(
+                    AuditAction::AdminReencrypt,
+                    AuditOutcome::Allowed,
+                    "dry_run",
+                    Severity::Notice,
+                    None,
+                    principal,
+                ))?;
+                Ok(plan)
+            }
+            Err(err) => {
+                audit.record(AuditEvent::new(
+                    AuditAction::AdminReencrypt,
+                    AuditOutcome::Denied,
+                    "dry_run_failed",
+                    Severity::Warning,
+                    None,
+                    principal,
+                ))?;
+                Err(err)
+            }
+        }
+    }
+
     /// Prove a break-glass/admin identity can decrypt every present manifest
     /// entry, without returning plaintext.
     pub async fn verify_recoverability(
@@ -220,6 +257,42 @@ impl AgeSecretStore {
         })
     }
 
+    /// Prove recoverability with value-free audit evidence.
+    pub async fn verify_recoverability_with_audit<A>(
+        &self,
+        identity_files: Vec<PathBuf>,
+        audit: &mut A,
+        principal: &PrincipalChain,
+    ) -> JanusResult<AgeRecoverabilityReport>
+    where
+        A: AuditSink,
+    {
+        match self.verify_recoverability(identity_files).await {
+            Ok(report) => {
+                audit.record(AuditEvent::new(
+                    AuditAction::BackendHealth,
+                    AuditOutcome::Allowed,
+                    "recoverability_ok",
+                    Severity::Notice,
+                    None,
+                    principal,
+                ))?;
+                Ok(report)
+            }
+            Err(err) => {
+                audit.record(AuditEvent::new(
+                    AuditAction::BackendHealth,
+                    AuditOutcome::Denied,
+                    "recoverability_failed",
+                    Severity::Warning,
+                    None,
+                    principal,
+                ))?;
+                Err(err)
+            }
+        }
+    }
+
     /// Add a recipient and re-encrypt present files to the expanded set.
     pub async fn add_recipient(
         &mut self,
@@ -234,6 +307,20 @@ impl AgeSecretStore {
             recipients.push(recipient);
         }
         self.reencrypt_all(recipients).await
+    }
+
+    /// Add a recipient only after required audit evidence is accepted.
+    pub async fn add_recipient_with_audit<A>(
+        &mut self,
+        recipient: impl Into<String>,
+        audit: &mut A,
+        principal: &PrincipalChain,
+    ) -> JanusResult<AgeAdminOutcome>
+    where
+        A: AuditSink,
+    {
+        record_admin_reencrypt_preflight(audit, principal, "recipient_add")?;
+        self.add_recipient(recipient).await
     }
 
     /// Remove a recipient and re-encrypt present files to the reduced set.
@@ -254,6 +341,20 @@ impl AgeSecretStore {
             });
         }
         self.reencrypt_all(recipients).await
+    }
+
+    /// Remove a recipient only after required audit evidence is accepted.
+    pub async fn remove_recipient_with_audit<A>(
+        &mut self,
+        recipient: &str,
+        audit: &mut A,
+        principal: &PrincipalChain,
+    ) -> JanusResult<AgeAdminOutcome>
+    where
+        A: AuditSink,
+    {
+        record_admin_reencrypt_preflight(audit, principal, "recipient_remove")?;
+        self.remove_recipient(recipient).await
     }
 
     /// Re-encrypt every present manifest entry to a new recipient set.
@@ -289,6 +390,20 @@ impl AgeSecretStore {
             recipient_count: self.recipients.len(),
             value_returned: false,
         })
+    }
+
+    /// Re-encrypt all present entries only after required audit evidence is accepted.
+    pub async fn reencrypt_all_with_audit<A>(
+        &mut self,
+        recipients: Vec<String>,
+        audit: &mut A,
+        principal: &PrincipalChain,
+    ) -> JanusResult<AgeAdminOutcome>
+    where
+        A: AuditSink,
+    {
+        record_admin_reencrypt_preflight(audit, principal, "reencrypt_all")?;
+        self.reencrypt_all(recipients).await
     }
 
     fn ensure_manifest(&self, name: &SecretName) -> JanusResult<&SecretMeta> {
@@ -512,6 +627,24 @@ fn reencrypt_paths(
     Ok(())
 }
 
+fn record_admin_reencrypt_preflight<A>(
+    audit: &mut A,
+    principal: &PrincipalChain,
+    reason_code: &'static str,
+) -> JanusResult<()>
+where
+    A: AuditSink,
+{
+    audit.record(AuditEvent::new(
+        AuditAction::AdminReencrypt,
+        AuditOutcome::Allowed,
+        reason_code,
+        Severity::High,
+        None,
+        principal,
+    ))
+}
+
 fn parse_recipients(values: &[String]) -> JanusResult<Vec<Box<dyn age::Recipient + Send>>> {
     let mut recipients: Vec<Box<dyn age::Recipient + Send>> = Vec::new();
     for value in values {
@@ -718,7 +851,9 @@ fn map_store_io(err: std::io::Error) -> JanusError {
 mod tests {
     use super::*;
     use age::secrecy::ExposeSecret;
-    use janus_core::{ManifestCatalog, SecretRef};
+    use janus_core::{
+        AuditWrite, ManifestCatalog, Principal, PrincipalId, PrincipalKind, SecretRef,
+    };
     use tempfile::TempDir;
 
     const TEST_SSH_ED25519_PK: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHsKLqeplhpW+uObz5dvMgjz1OxfM/XXUB+VHtZ6isGN alice@rust";
@@ -802,6 +937,16 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
         (identity_file, identity.to_public().to_string())
     }
 
+    fn principal() -> PrincipalChain {
+        PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("age-admin").unwrap(),
+            ),
+            ScopeRef::new("janus/default").unwrap(),
+        )
+    }
+
     #[tokio::test]
     async fn age_store_passes_core_contract_and_keeps_descriptors_value_free() {
         let fixture = fixture();
@@ -881,6 +1026,61 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             store.verify_recoverability(vec![wrong_identity]).await,
             Err(JanusError::StoreUnavailable { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn audited_recoverability_records_value_free_evidence() {
+        let fixture = fixture();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+        let principal = principal();
+        store
+            .set(
+                &fixture.canary,
+                SecretValue::new(b"recoverability-audit-canary".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let mut audit = AuditWrite::accepting();
+        let report = store
+            .verify_recoverability_with_audit(
+                vec![fixture.admin_identity_file.clone()],
+                &mut audit,
+                &principal,
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.checked, 1);
+        let event = &audit.events()[0];
+        assert_eq!(event.action, AuditAction::BackendHealth);
+        assert_eq!(event.outcome, AuditOutcome::Allowed);
+        assert_eq!(event.reason_code, "recoverability_ok");
+        assert_eq!(event.severity, Severity::Notice);
+        assert!(!event.value_returned);
+        assert!(event
+            .event_hash
+            .as_ref()
+            .is_some_and(|hash| hash.len() == 64));
+        assert!(!format!("{event:?}").contains("recoverability-audit-canary"));
+
+        let (wrong_identity, _) = extra_identity(&fixture, "wrong-recovery.identity");
+        let mut denied_audit = AuditWrite::accepting();
+        assert!(matches!(
+            store
+                .verify_recoverability_with_audit(
+                    vec![wrong_identity],
+                    &mut denied_audit,
+                    &principal
+                )
+                .await,
+            Err(JanusError::StoreUnavailable { .. })
+        ));
+        let denied = &denied_audit.events()[0];
+        assert_eq!(denied.action, AuditAction::BackendHealth);
+        assert_eq!(denied.outcome, AuditOutcome::Denied);
+        assert_eq!(denied.reason_code, "recoverability_failed");
+        assert_eq!(denied.severity, Severity::Warning);
+        assert!(!denied.value_returned);
     }
 
     #[tokio::test]
@@ -967,6 +1167,92 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
         assert!(!unchanged.changed);
         assert_eq!(unchanged.present_secrets, 1);
         assert!(!unchanged.value_returned);
+    }
+
+    #[tokio::test]
+    async fn audited_recipient_admin_ops_record_and_fail_closed() {
+        let fixture = fixture();
+        let (new_identity, new_recipient) = extra_identity(&fixture, "audited-admin.identity");
+        let mut store = store(&fixture, fixture.identity_file.clone());
+        let principal = principal();
+        store
+            .set(
+                &fixture.canary,
+                SecretValue::new(b"audited-admin-canary".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let mut dry_run_audit = AuditWrite::accepting();
+        let plan = store
+            .key_rotation_dry_run_with_audit(
+                vec![
+                    fixture.host_recipient.clone(),
+                    fixture.admin_recipient.clone(),
+                    new_recipient.clone(),
+                ],
+                &mut dry_run_audit,
+                &principal,
+            )
+            .unwrap();
+        assert!(plan.would_change);
+        let dry_run_event = &dry_run_audit.events()[0];
+        assert_eq!(dry_run_event.action, AuditAction::AdminReencrypt);
+        assert_eq!(dry_run_event.outcome, AuditOutcome::Allowed);
+        assert_eq!(dry_run_event.reason_code, "dry_run");
+        assert_eq!(dry_run_event.severity, Severity::Notice);
+        assert!(!dry_run_event.value_returned);
+
+        let mut failing_audit = AuditWrite::failing();
+        assert!(matches!(
+            store
+                .remove_recipient_with_audit(
+                    &fixture.admin_recipient,
+                    &mut failing_audit,
+                    &principal
+                )
+                .await,
+            Err(JanusError::AuditUnavailable { .. })
+        ));
+        assert_eq!(store.recipient_count(), 2);
+        let admin_reader = AgeSecretStore::from_catalog(
+            ProjectId::new("janus").unwrap(),
+            "default",
+            fixture.store_dir.clone(),
+            fixture.catalog.clone(),
+            vec![fixture.admin_identity_file.clone()],
+            vec![fixture.admin_recipient.clone()],
+        )
+        .unwrap();
+        let admin_recovered = admin_reader.get(&fixture.canary).await.unwrap();
+        assert_eq!(admin_recovered.expose_bytes(), b"audited-admin-canary");
+
+        let mut audit = AuditWrite::accepting();
+        let added = store
+            .add_recipient_with_audit(new_recipient.clone(), &mut audit, &principal)
+            .await
+            .unwrap();
+        assert!(added.changed);
+        assert_eq!(added.recipient_count, 3);
+        let event = &audit.events()[0];
+        assert_eq!(event.action, AuditAction::AdminReencrypt);
+        assert_eq!(event.outcome, AuditOutcome::Allowed);
+        assert_eq!(event.reason_code, "recipient_add");
+        assert_eq!(event.severity, Severity::High);
+        assert!(!event.value_returned);
+        assert!(!format!("{event:?}").contains("audited-admin-canary"));
+
+        let new_reader = AgeSecretStore::from_catalog(
+            ProjectId::new("janus").unwrap(),
+            "default",
+            fixture.store_dir.clone(),
+            fixture.catalog.clone(),
+            vec![new_identity],
+            vec![new_recipient],
+        )
+        .unwrap();
+        let new_recovered = new_reader.get(&fixture.canary).await.unwrap();
+        assert_eq!(new_recovered.expose_bytes(), b"audited-admin-canary");
     }
 
     #[tokio::test]

@@ -26,6 +26,10 @@ pub enum AuditAction {
     RotationPlan,
     /// Backend health was checked.
     BackendHealth,
+    /// High-risk backend custody material was re-encrypted.
+    AdminReencrypt,
+    /// Backend recoverability or restore readiness was checked.
+    AdminRestore,
 }
 
 /// Value-free audit outcome.
