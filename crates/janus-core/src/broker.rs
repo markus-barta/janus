@@ -5,7 +5,7 @@ use std::time::SystemTime;
 use crate::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, Destination, ExecutorRef, JanusError,
     JanusResult, PermitIssuer, PrincipalChain, ProfilePolicy, SecretDescriptor, SecretName,
-    SecretStore, SecretValue, Severity, UsePermit, UseRequest,
+    SecretRef, SecretStore, SecretValue, Severity, UsePermit, UseRequest,
 };
 
 /// Policy/audit wrapper around a backend store.
@@ -40,6 +40,57 @@ where
             principal,
         ))?;
         self.store.list().await
+    }
+
+    /// Value-free describe operation by opaque ref.
+    pub async fn describe(
+        &mut self,
+        secret_ref: &SecretRef,
+        principal: &PrincipalChain,
+    ) -> JanusResult<SecretDescriptor> {
+        let descriptor = self
+            .store
+            .list()
+            .await?
+            .into_iter()
+            .find(|descriptor| &descriptor.secret_ref == secret_ref);
+
+        let Some(descriptor) = descriptor else {
+            self.audit.record(AuditEvent::new(
+                AuditAction::SecretDescribe,
+                AuditOutcome::Denied,
+                "denied_not_in_manifest",
+                Severity::Warning,
+                Some(secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::NotInManifest {
+                name: secret_ref.as_str().to_string(),
+            });
+        };
+
+        self.audit.record(AuditEvent::new(
+            AuditAction::SecretDescribe,
+            AuditOutcome::Allowed,
+            "ok",
+            Severity::Info,
+            Some(descriptor.secret_ref.clone()),
+            principal,
+        ))?;
+        Ok(descriptor)
+    }
+
+    /// Value-free backend health check with audit evidence.
+    pub async fn health(&mut self, principal: &PrincipalChain) -> JanusResult<crate::HealthStatus> {
+        self.audit.record(AuditEvent::new(
+            AuditAction::BackendHealth,
+            AuditOutcome::Allowed,
+            "ok",
+            Severity::Info,
+            None,
+            principal,
+        ))?;
+        self.store.health().await
     }
 
     /// Internal approved read path used by non-LLM/provider/tracer code. Agents
@@ -108,6 +159,36 @@ where
 
         let mut issuer = PermitIssuer::new(&self.policy, &mut self.audit);
         issuer.issue(req, principal, now)
+    }
+
+    /// Request use from only model-acceptable inputs.
+    ///
+    /// Destination, executor, TTL, egress mode, and single-use semantics come
+    /// from the reviewed profile. This keeps AI-facing callers from choosing
+    /// policy-critical fields.
+    pub async fn request_profile_use(
+        &mut self,
+        secret_ref: &SecretRef,
+        profile_id: &crate::ProfileId,
+        purpose: crate::Purpose,
+        principal: &PrincipalChain,
+        now: SystemTime,
+    ) -> JanusResult<UsePermit> {
+        let destination = self
+            .policy
+            .profile_for(secret_ref, profile_id)
+            .map(|profile| profile.destination.clone())
+            .unwrap_or_else(|| {
+                Destination::new("profile-owned-destination-unavailable")
+                    .expect("static fallback destination")
+            });
+        let req = UseRequest {
+            secret_ref: secret_ref.clone(),
+            profile_id: profile_id.clone(),
+            destination,
+            purpose,
+        };
+        self.request_use(&req, principal, now).await
     }
 
     /// Consume a permit through the approved secret-bearing path.

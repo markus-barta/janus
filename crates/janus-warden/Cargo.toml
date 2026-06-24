@@ -12,4 +12,9 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-# TODO(JANUS-22): rmcp (official Rust MCP SDK) + janus-core.
+janus-core = { path = "../janus-core" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+janus-mock = { path = "../janus-mock" }
+tokio = { version = "1", features = ["macros", "rt"] }

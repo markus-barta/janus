@@ -674,6 +674,12 @@ dependencies = [
 [[package]]
 name = "janus-warden"
 version = "0.0.0"
+dependencies = [
+ "janus-core",
+ "janus-mock",
+ "serde",
+ "tokio",
+]
 
 [[package]]
 name = "janusd"

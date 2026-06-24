@@ -330,6 +330,21 @@ impl ProfilePolicy {
             .iter()
             .find(|profile| profile.id == req.profile_id && profile.secret_ref == req.secret_ref)
     }
+
+    /// Return a reviewed profile by secret ref and profile id.
+    ///
+    /// This is used by model-facing surfaces that may name only a profile and
+    /// purpose; destination, executor, TTL, and egress stay owned by the
+    /// reviewed profile rather than caller input.
+    pub fn profile_for(
+        &self,
+        secret_ref: &SecretRef,
+        profile_id: &ProfileId,
+    ) -> Option<&UseProfile> {
+        self.profiles
+            .iter()
+            .find(|profile| &profile.id == profile_id && &profile.secret_ref == secret_ref)
+    }
 }
 
 /// Issues permits only after policy allows and audit accepts the evidence.
