@@ -41,7 +41,7 @@ jobs:
     needs: build-test
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write      # attach SBOM as a release asset
       packages: write      # push image to ghcr
       id-token: write      # cosign keyless (OIDC)
       attestations: write  # build provenance attestation
