@@ -1308,8 +1308,13 @@ dependencies = [
 name = "janusd"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "janus-core",
+ "janus-forge",
+ "janus-provider-age",
  "janus-warden",
+ "tokio",
 ]
 
 [[package]]

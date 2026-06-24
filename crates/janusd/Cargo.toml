@@ -17,6 +17,10 @@ name = "janusd"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1"
+async-trait = "0.1"
 janus-core = { path = "../janus-core" }
+janus-forge = { path = "../janus-forge" }
+janus-provider-age = { path = "../janus-provider-age" }
 janus-warden = { path = "../janus-warden" }
-# janus-forge added when the write side comes online.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
