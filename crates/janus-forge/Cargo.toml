@@ -15,6 +15,7 @@ workspace = true
 async-trait = "0.1"
 janus-core = { path = "../janus-core" }
 janus-provider-age = { path = "../janus-provider-age" }
+rand = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

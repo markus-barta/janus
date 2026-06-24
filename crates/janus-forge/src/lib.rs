@@ -21,6 +21,93 @@ use janus_core::{
     SecretValue, Severity, ValidationProbe,
 };
 use janus_provider_age::{AgeRollbackMaterial, AgeSecretStore};
+use rand::rngs::OsRng;
+use rand::seq::SliceRandom;
+
+const URL_SAFE_ALPHABET: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const ALPHANUMERIC_ALPHABET: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const HEX_ALPHABET: &[u8] = b"0123456789abcdef";
+const MAX_GENERATED_VALUE_LEN: usize = 4096;
+
+/// Alphabet for broker-generated secret values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeneratedAlphabet {
+    /// URL-safe base64url-ish characters without padding.
+    UrlSafe,
+    /// ASCII letters and digits.
+    Alphanumeric,
+    /// Lowercase hexadecimal characters.
+    Hex,
+}
+
+impl GeneratedAlphabet {
+    fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::UrlSafe => URL_SAFE_ALPHABET,
+            Self::Alphanumeric => ALPHANUMERIC_ALPHABET,
+            Self::Hex => HEX_ALPHABET,
+        }
+    }
+}
+
+/// Policy for a broker-generated replacement value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedValuePolicy {
+    alphabet: GeneratedAlphabet,
+    length: usize,
+}
+
+impl GeneratedValuePolicy {
+    /// Construct a generation policy.
+    pub fn new(alphabet: GeneratedAlphabet, length: usize) -> JanusResult<Self> {
+        if length == 0 || length > MAX_GENERATED_VALUE_LEN {
+            return Err(JanusError::InvalidIdentifier {
+                kind: "generated_value_length",
+            });
+        }
+        Ok(Self { alphabet, length })
+    }
+
+    /// URL-safe generated value policy.
+    pub fn url_safe(length: usize) -> JanusResult<Self> {
+        Self::new(GeneratedAlphabet::UrlSafe, length)
+    }
+
+    /// ASCII alphanumeric generated value policy.
+    pub fn alphanumeric(length: usize) -> JanusResult<Self> {
+        Self::new(GeneratedAlphabet::Alphanumeric, length)
+    }
+
+    /// Lowercase hexadecimal generated value policy.
+    pub fn hex(length: usize) -> JanusResult<Self> {
+        Self::new(GeneratedAlphabet::Hex, length)
+    }
+
+    /// Configured output length.
+    pub fn length(&self) -> usize {
+        self.length
+    }
+
+    /// Configured alphabet.
+    pub fn alphabet(&self) -> GeneratedAlphabet {
+        self.alphabet
+    }
+
+    fn generate(&self) -> SecretValue {
+        let alphabet = self.alphabet.bytes();
+        let mut rng = OsRng;
+        let mut bytes = Vec::with_capacity(self.length);
+        for _ in 0..self.length {
+            let byte = alphabet
+                .choose(&mut rng)
+                .expect("static generated alphabets are non-empty");
+            bytes.push(*byte);
+        }
+        SecretValue::new(bytes)
+    }
+}
 
 /// Backend contract for broker-managed generated rotation.
 #[async_trait]
@@ -110,8 +197,27 @@ where
     H: ConsumerRotationHooks,
 {
     /// Execute a generated rotation end-to-end:
-    /// plan, prepare encrypted rollback material, validate, reload, commit.
+    /// generate, plan, prepare encrypted rollback material, validate, reload,
+    /// commit.
     pub async fn rotate_generated(
+        &mut self,
+        name: &SecretName,
+        policy: &GeneratedValuePolicy,
+        principal: &PrincipalChain,
+    ) -> JanusResult<RotationOutcome> {
+        let value = policy.generate();
+        self.rotate_generated_with_value(name, value, principal)
+            .await
+    }
+
+    /// Execute a generated rotation with a caller-supplied value that was
+    /// already produced inside an approved Forge path.
+    ///
+    /// Public/admin surfaces should prefer [`Self::rotate_generated`] so they
+    /// never accept a replacement literal from argv, JSON, or logs.
+    ///
+    /// plan, prepare encrypted rollback material, validate, reload, commit.
+    pub async fn rotate_generated_with_value(
         &mut self,
         name: &SecretName,
         value: SecretValue,
@@ -567,8 +673,14 @@ mod tests {
             .collect()
     }
 
+    fn is_url_safe(bytes: &[u8]) -> bool {
+        bytes
+            .iter()
+            .all(|byte| URL_SAFE_ALPHABET.iter().any(|allowed| allowed == byte))
+    }
+
     #[tokio::test]
-    async fn generated_rotation_commits_after_validation_and_reload() {
+    async fn generated_rotation_generates_value_and_commits_after_validation_and_reload() {
         let (store, name, secret_ref) = TestStore::new();
         let registry = ConsumerRegistry::new(vec![consumer(
             secret_ref.clone(),
@@ -584,7 +696,7 @@ mod tests {
         let outcome = broker
             .rotate_generated(
                 &name,
-                SecretValue::new(b"new-canary".to_vec()),
+                &GeneratedValuePolicy::url_safe(48).unwrap(),
                 &principal(),
             )
             .await
@@ -594,7 +706,9 @@ mod tests {
         assert!(!outcome.value_returned);
 
         let (store, _registry, audit, hooks) = broker.into_parts();
-        assert_eq!(store.value, b"new-canary");
+        assert_eq!(store.value.len(), 48);
+        assert!(is_url_safe(&store.value));
+        assert_ne!(store.value, b"old-canary");
         assert_eq!(store.prepare_count, 1);
         assert_eq!(store.commit_count, 1);
         assert_eq!(store.rollback_count, 0);
@@ -617,6 +731,8 @@ mod tests {
                     .as_ref()
                     .is_some_and(|hash| hash.len() == 64)
         }));
+        let rendered_audit = format!("{:?}", audit.events());
+        assert!(!rendered_audit.contains(std::str::from_utf8(&store.value).unwrap()));
     }
 
     #[tokio::test]
@@ -634,7 +750,7 @@ mod tests {
             GeneratedRotationBroker::new(store, registry, AuditWrite::accepting(), hooks);
 
         let err = broker
-            .rotate_generated(
+            .rotate_generated_with_value(
                 &name,
                 SecretValue::new(b"should-roll-back".to_vec()),
                 &principal(),
@@ -677,7 +793,7 @@ mod tests {
             GeneratedRotationBroker::new(store, registry, AuditWrite::accepting(), hooks);
 
         let err = broker
-            .rotate_generated(
+            .rotate_generated_with_value(
                 &name,
                 SecretValue::new(b"should-roll-back".to_vec()),
                 &principal(),
@@ -721,7 +837,7 @@ mod tests {
         );
 
         let err = broker
-            .rotate_generated(
+            .rotate_generated_with_value(
                 &name,
                 SecretValue::new(b"should-roll-back".to_vec()),
                 &principal(),
@@ -760,7 +876,7 @@ mod tests {
         );
 
         let err = broker
-            .rotate_generated(
+            .rotate_generated_with_value(
                 &name,
                 SecretValue::new(b"should-not-write".to_vec()),
                 &principal(),
@@ -799,7 +915,7 @@ mod tests {
         );
 
         let err = broker
-            .rotate_generated(
+            .rotate_generated_with_value(
                 &name,
                 SecretValue::new(b"should-not-write".to_vec()),
                 &principal(),
@@ -812,5 +928,21 @@ mod tests {
         assert_eq!(store.prepare_count, 0);
         assert!(hooks.validations.is_empty());
         assert!(hooks.reloads.is_empty());
+    }
+
+    #[test]
+    fn generated_value_policy_validates_length_and_alphabet() {
+        assert!(GeneratedValuePolicy::url_safe(0).is_err());
+        assert!(GeneratedValuePolicy::url_safe(MAX_GENERATED_VALUE_LEN + 1).is_err());
+        let policy = GeneratedValuePolicy::hex(32).unwrap();
+        assert_eq!(policy.length(), 32);
+        assert_eq!(policy.alphabet(), GeneratedAlphabet::Hex);
+        let value = policy.generate();
+        assert_eq!(value.expose_bytes().len(), 32);
+        assert!(value
+            .expose_bytes()
+            .iter()
+            .all(|byte| { HEX_ALPHABET.iter().any(|allowed| allowed == byte) }));
+        assert!(!format!("{policy:?}").contains(std::str::from_utf8(value.expose_bytes()).unwrap()));
     }
 }
