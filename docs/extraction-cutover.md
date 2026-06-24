@@ -1,14 +1,11 @@
 # nixcfg cutover — repoint the live deploy at the published image
 
-**Status: STAGED, not yet applied.** The Go envelope source was extracted from
-`nixcfg/hosts/csb1/docker/janus` into this repo (`go-envelope/`, full history via
-`git subtree split`, 2026-06-24). The live `vault.barta.cm` deploy still builds
-from the local source in nixcfg. This file is the **ready-to-apply** cutover for
-the implementation session.
-
-> ⚠️ **Do not `git rm` the Go source from nixcfg until the published image
-> exists and is verified.** Removing it first breaks the live `build:` deploy.
-> The steps below are strictly ordered for that reason.
+**Status: ✅ COMPLETE (2026-06-24).** The cutover was executed: nixcfg compose
+(`a92b3fff`) now pins the signed image `ghcr.io/markus-barta/janus/janus-envelope`
+@ `sha256:4f7d57adfefc...`; the source was removed from nixcfg (`catalog/` kept);
+csb1 pulled + recreated janus; `vault.barta.cm` verified healthy with
+`x-janus-build-commit: 7a217a89228e` (this repo's source sha). The steps below
+are retained as the reproducible record / rollback reference.
 
 ## Prerequisites (one-time)
 
