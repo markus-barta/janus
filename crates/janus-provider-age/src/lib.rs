@@ -30,6 +30,47 @@ pub struct AgeSecretStore {
     catalog: ManifestCatalog,
 }
 
+/// Value-free result for age admin operations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgeAdminOutcome {
+    /// Stable admin action label.
+    pub action: &'static str,
+    /// Whether encrypted material was rewritten.
+    pub changed: bool,
+    /// Number of manifest-present secret files considered.
+    pub present_secrets: usize,
+    /// Number of configured recipients after the operation.
+    pub recipient_count: usize,
+    /// Admin operations never return secret values.
+    pub value_returned: bool,
+}
+
+/// Value-free recoverability check report.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgeRecoverabilityReport {
+    /// Number of manifest-present secret files checked.
+    pub checked: usize,
+    /// Whether every checked file decrypted with the supplied identity set.
+    pub recoverable: bool,
+    /// Recoverability checks never return secret values.
+    pub value_returned: bool,
+}
+
+/// Value-free recipient/key rotation dry-run report.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgeReencryptPlan {
+    /// Number of manifest-present secret files that would be considered.
+    pub present_secrets: usize,
+    /// Current recipient count.
+    pub current_recipient_count: usize,
+    /// Proposed recipient count after validation/deduplication.
+    pub proposed_recipient_count: usize,
+    /// Whether the proposed recipient set differs from the current set.
+    pub would_change: bool,
+    /// Dry-runs never return secret values.
+    pub value_returned: bool,
+}
+
 impl AgeSecretStore {
     /// Build an age store from an already-reviewed manifest catalog.
     pub fn from_catalog(
@@ -139,6 +180,117 @@ impl AgeSecretStore {
         &self.catalog
     }
 
+    /// Value-free count of configured recipients.
+    pub fn recipient_count(&self) -> usize {
+        self.recipients.len()
+    }
+
+    /// Plan a recipient-set change without decrypting or writing values.
+    pub fn key_rotation_dry_run(
+        &self,
+        proposed_recipients: Vec<String>,
+    ) -> JanusResult<AgeReencryptPlan> {
+        let proposed_recipients = normalize_recipient_strings(proposed_recipients)?;
+        Ok(AgeReencryptPlan {
+            present_secrets: self.present_secret_paths()?.len(),
+            current_recipient_count: self.recipients.len(),
+            proposed_recipient_count: proposed_recipients.len(),
+            would_change: proposed_recipients != self.recipients,
+            value_returned: false,
+        })
+    }
+
+    /// Prove a break-glass/admin identity can decrypt every present manifest
+    /// entry, without returning plaintext.
+    pub async fn verify_recoverability(
+        &self,
+        identity_files: Vec<PathBuf>,
+    ) -> JanusResult<AgeRecoverabilityReport> {
+        let paths = self.present_secret_paths()?;
+        let checked = paths.len();
+        tokio::task::spawn_blocking(move || verify_recoverability_paths(&paths, &identity_files))
+            .await
+            .map_err(|err| JanusError::StoreUnavailable {
+                detail: format!("age recoverability task failed: {err}"),
+            })??;
+        Ok(AgeRecoverabilityReport {
+            checked,
+            recoverable: true,
+            value_returned: false,
+        })
+    }
+
+    /// Add a recipient and re-encrypt present files to the expanded set.
+    pub async fn add_recipient(
+        &mut self,
+        recipient: impl Into<String>,
+    ) -> JanusResult<AgeAdminOutcome> {
+        let recipient = recipient.into();
+        let mut recipients = self.recipients.clone();
+        if !recipients
+            .iter()
+            .any(|existing| existing.trim() == recipient.trim())
+        {
+            recipients.push(recipient);
+        }
+        self.reencrypt_all(recipients).await
+    }
+
+    /// Remove a recipient and re-encrypt present files to the reduced set.
+    pub async fn remove_recipient(&mut self, recipient: &str) -> JanusResult<AgeAdminOutcome> {
+        let recipients = self
+            .recipients
+            .iter()
+            .filter(|existing| existing.trim() != recipient.trim())
+            .cloned()
+            .collect::<Vec<_>>();
+        if recipients.len() == self.recipients.len() {
+            return Ok(AgeAdminOutcome {
+                action: "admin.reencrypt",
+                changed: false,
+                present_secrets: self.present_secret_paths()?.len(),
+                recipient_count: self.recipients.len(),
+                value_returned: false,
+            });
+        }
+        self.reencrypt_all(recipients).await
+    }
+
+    /// Re-encrypt every present manifest entry to a new recipient set.
+    pub async fn reencrypt_all(&mut self, recipients: Vec<String>) -> JanusResult<AgeAdminOutcome> {
+        let recipients = normalize_recipient_strings(recipients)?;
+        let paths = self.present_secret_paths()?;
+        let present_secrets = paths.len();
+        if recipients == self.recipients {
+            return Ok(AgeAdminOutcome {
+                action: "admin.reencrypt",
+                changed: false,
+                present_secrets,
+                recipient_count: self.recipients.len(),
+                value_returned: false,
+            });
+        }
+
+        let scope_dir = self.scope_dir();
+        let identity_files = self.identity_files.clone();
+        let next_recipients = recipients.clone();
+        tokio::task::spawn_blocking(move || {
+            reencrypt_paths(&paths, &scope_dir, &identity_files, &next_recipients)
+        })
+        .await
+        .map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("age reencrypt task failed: {err}"),
+        })??;
+        self.recipients = recipients;
+        Ok(AgeAdminOutcome {
+            action: "admin.reencrypt",
+            changed: true,
+            present_secrets,
+            recipient_count: self.recipients.len(),
+            value_returned: false,
+        })
+    }
+
     fn ensure_manifest(&self, name: &SecretName) -> JanusResult<&SecretMeta> {
         self.catalog.meta_by_name(name)
     }
@@ -166,6 +318,18 @@ impl AgeSecretStore {
             set_dir_private(path)?;
         }
         Ok(())
+    }
+
+    fn present_secret_paths(&self) -> JanusResult<Vec<PathBuf>> {
+        self.ensure_scope_dir()?;
+        let mut paths = Vec::new();
+        for meta in self.catalog.entries() {
+            let path = self.path_for(&meta.name)?;
+            if path.is_file() {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
     }
 }
 
@@ -286,6 +450,11 @@ fn encrypt_to_file(
     recipient_strings: &[String],
     plaintext: &[u8],
 ) -> JanusResult<()> {
+    let encrypted = encrypt_to_bytes(recipient_strings, plaintext)?;
+    write_atomically(path, scope_dir, &encrypted)
+}
+
+fn encrypt_to_bytes(recipient_strings: &[String], plaintext: &[u8]) -> JanusResult<Vec<u8>> {
     let recipients = parse_recipients(recipient_strings)?;
     let recipient_refs = recipients
         .iter()
@@ -299,7 +468,7 @@ fn encrypt_to_file(
         writer.write_all(plaintext).map_err(map_store_io)?;
         writer.finish().map_err(map_store_io)?;
     }
-    write_atomically(path, scope_dir, &encrypted)
+    Ok(encrypted)
 }
 
 fn decrypt_file(path: &Path, identity_files: &[PathBuf]) -> JanusResult<Vec<u8>> {
@@ -313,6 +482,34 @@ fn decrypt_file(path: &Path, identity_files: &[PathBuf]) -> JanusResult<Vec<u8>>
     let mut plaintext = Vec::new();
     reader.read_to_end(&mut plaintext).map_err(map_store_io)?;
     Ok(plaintext)
+}
+
+fn verify_recoverability_paths(paths: &[PathBuf], identity_files: &[PathBuf]) -> JanusResult<()> {
+    parse_identity_files(identity_files)?;
+    for path in paths {
+        let mut plaintext = decrypt_file(path, identity_files)?;
+        plaintext.zeroize();
+    }
+    Ok(())
+}
+
+fn reencrypt_paths(
+    paths: &[PathBuf],
+    scope_dir: &Path,
+    identity_files: &[PathBuf],
+    recipients: &[String],
+) -> JanusResult<()> {
+    let mut encrypted = Vec::with_capacity(paths.len());
+    for path in paths {
+        let mut plaintext = decrypt_file(path, identity_files)?;
+        let ciphertext = encrypt_to_bytes(recipients, &plaintext)?;
+        plaintext.zeroize();
+        encrypted.push((path.clone(), ciphertext));
+    }
+    for (path, ciphertext) in encrypted {
+        write_atomically(&path, scope_dir, &ciphertext)?;
+    }
+    Ok(())
 }
 
 fn parse_recipients(values: &[String]) -> JanusResult<Vec<Box<dyn age::Recipient + Send>>> {
@@ -340,6 +537,19 @@ fn parse_recipients(values: &[String]) -> JanusResult<Vec<Box<dyn age::Recipient
         });
     }
     Ok(recipients)
+}
+
+fn normalize_recipient_strings(values: Vec<String>) -> JanusResult<Vec<String>> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() || normalized.iter().any(|existing| existing == value) {
+            continue;
+        }
+        normalized.push(value.to_string());
+    }
+    parse_recipients(&normalized)?;
+    Ok(normalized)
 }
 
 fn parse_identity_files(paths: &[PathBuf]) -> JanusResult<Vec<Box<dyn age::Identity + Send>>> {
@@ -525,6 +735,8 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
         store_dir: PathBuf,
         identity_file: PathBuf,
         admin_identity_file: PathBuf,
+        host_recipient: String,
+        admin_recipient: String,
         recipients: Vec<String>,
         catalog: ManifestCatalog,
         canary: SecretName,
@@ -553,13 +765,17 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
         let admin_identity = admin.to_string();
         fs::write(&identity_file, host_identity.expose_secret()).unwrap();
         fs::write(&admin_identity_file, admin_identity.expose_secret()).unwrap();
+        let host_recipient = host.to_public().to_string();
+        let admin_recipient = admin.to_public().to_string();
         let project = ProjectId::new("janus").unwrap();
         let canary = SecretName::new("CANARY").unwrap();
         Fixture {
             store_dir: tmp.path().join("store"),
             identity_file,
             admin_identity_file,
-            recipients: vec![host.to_public().to_string(), admin.to_public().to_string()],
+            host_recipient: host_recipient.clone(),
+            admin_recipient: admin_recipient.clone(),
+            recipients: vec![host_recipient, admin_recipient],
             catalog: catalog(&project, &canary),
             canary,
             _tmp: tmp,
@@ -576,6 +792,14 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             fixture.recipients.clone(),
         )
         .unwrap()
+    }
+
+    fn extra_identity(fixture: &Fixture, filename: &str) -> (PathBuf, String) {
+        let identity = age::x25519::Identity::generate();
+        let identity_file = fixture._tmp.path().join(filename);
+        let identity_string = identity.to_string();
+        fs::write(&identity_file, identity_string.expose_secret()).unwrap();
+        (identity_file, identity.to_public().to_string())
     }
 
     #[tokio::test]
@@ -624,6 +848,125 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
         let admin_store = store(&fixture, fixture.admin_identity_file.clone());
         let recovered = admin_store.get(&fixture.canary).await.unwrap();
         assert_eq!(recovered.expose_bytes(), b"multi-recipient-canary");
+    }
+
+    #[tokio::test]
+    async fn recoverability_check_is_value_free_and_denies_wrong_identity() {
+        let fixture = fixture();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+        store
+            .set(
+                &fixture.canary,
+                SecretValue::new(b"break-glass-canary".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let report = store
+            .verify_recoverability(vec![fixture.admin_identity_file.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            report,
+            AgeRecoverabilityReport {
+                checked: 1,
+                recoverable: true,
+                value_returned: false,
+            }
+        );
+        assert!(!format!("{report:?}").contains("break-glass-canary"));
+
+        let (wrong_identity, _) = extra_identity(&fixture, "wrong.identity");
+        assert!(matches!(
+            store.verify_recoverability(vec![wrong_identity]).await,
+            Err(JanusError::StoreUnavailable { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn recipient_admin_ops_reencrypt_without_returning_values() {
+        let fixture = fixture();
+        let (new_identity, new_recipient) = extra_identity(&fixture, "new-admin.identity");
+        let mut host_store = store(&fixture, fixture.identity_file.clone());
+        host_store
+            .set(
+                &fixture.canary,
+                SecretValue::new(b"recipient-admin-canary".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let plan = host_store
+            .key_rotation_dry_run(vec![
+                fixture.host_recipient.clone(),
+                fixture.admin_recipient.clone(),
+                new_recipient.clone(),
+            ])
+            .unwrap();
+        assert_eq!(plan.present_secrets, 1);
+        assert_eq!(plan.current_recipient_count, 2);
+        assert_eq!(plan.proposed_recipient_count, 3);
+        assert!(plan.would_change);
+        assert!(!plan.value_returned);
+
+        let added = host_store
+            .add_recipient(new_recipient.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            added,
+            AgeAdminOutcome {
+                action: "admin.reencrypt",
+                changed: true,
+                present_secrets: 1,
+                recipient_count: 3,
+                value_returned: false,
+            }
+        );
+        assert!(!format!("{added:?}").contains("recipient-admin-canary"));
+
+        let new_reader = AgeSecretStore::from_catalog(
+            ProjectId::new("janus").unwrap(),
+            "default",
+            fixture.store_dir.clone(),
+            fixture.catalog.clone(),
+            vec![new_identity],
+            vec![new_recipient.clone()],
+        )
+        .unwrap();
+        let recovered = new_reader.get(&fixture.canary).await.unwrap();
+        assert_eq!(recovered.expose_bytes(), b"recipient-admin-canary");
+
+        let removed = host_store
+            .remove_recipient(&fixture.admin_recipient)
+            .await
+            .unwrap();
+        assert_eq!(removed.recipient_count, 2);
+        assert!(removed.changed);
+        let old_admin_reader = AgeSecretStore::from_catalog(
+            ProjectId::new("janus").unwrap(),
+            "default",
+            fixture.store_dir.clone(),
+            fixture.catalog.clone(),
+            vec![fixture.admin_identity_file.clone()],
+            vec![fixture.admin_recipient.clone()],
+        )
+        .unwrap();
+        assert!(matches!(
+            old_admin_reader.get(&fixture.canary).await,
+            Err(JanusError::StoreUnavailable { .. })
+        ));
+
+        let host_recovered = host_store.get(&fixture.canary).await.unwrap();
+        assert_eq!(host_recovered.expose_bytes(), b"recipient-admin-canary");
+
+        let unchanged = host_store
+            .reencrypt_all(vec![fixture.host_recipient.clone(), new_recipient])
+            .await
+            .unwrap();
+        assert!(!unchanged.changed);
+        assert_eq!(unchanged.present_secrets, 1);
+        assert!(!unchanged.value_returned);
     }
 
     #[tokio::test]
