@@ -1,0 +1,14 @@
+[package]
+name = "janus-core"
+description = "Janus engine core: the async SecretStore trait, opaque SecretRef/UsePermit handles, policy + audit-as-evidence model."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# TODO(JANUS-14): tokio, async-trait, serde, thiserror once the surface lands.

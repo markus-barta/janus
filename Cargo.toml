@@ -1,0 +1,22 @@
+# Janus — Rust engine workspace.
+# The Go envelope (go-envelope/) is a separate Go module, intentionally NOT a
+# workspace member. License is omitted until chosen (see README pre-publish list).
+[workspace]
+resolver = "2"
+members = [
+    "crates/janus-core",
+    "crates/janus-warden",
+    "crates/janus-forge",
+    "crates/janus-providers",
+    "crates/janusd",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.80"
+authors = ["Markus Barta <mba@barta.cm>"]
+repository = "https://github.com/markus-barta/janus"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

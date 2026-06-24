@@ -1,0 +1,10 @@
+# Rust workspace
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Go envelope keeps its own go-envelope/.gitignore (binary, coverage)
+
+# editor / OS
+.DS_Store
+*.swp

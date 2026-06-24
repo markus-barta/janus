@@ -1,0 +1,14 @@
+[package]
+name = "janus-providers"
+description = "Backend implementations of janus-core::SecretStore: age/agenix, secretspec, OpenBao, OS keyring."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# TODO(JANUS-21/12): age (rage), secretspec, openbao client, keyring crates.

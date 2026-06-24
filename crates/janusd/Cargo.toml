@@ -1,0 +1,21 @@
+[package]
+name = "janusd"
+description = "The Janus daemon — wires the engine crates into the serving binary that will supersede the Go envelope."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+default-run = "janusd"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "janusd"
+path = "src/main.rs"
+
+[dependencies]
+janus-core = { path = "../janus-core" }
+janus-warden = { path = "../janus-warden" }
+# janus-forge added when the write side comes online.

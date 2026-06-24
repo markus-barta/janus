@@ -1,0 +1,14 @@
+[package]
+name = "janus-forge"
+description = "Janus rotation/write broker (admin + script facing): makes and rotates secrets. Not MCP, not LLM-driven."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# TODO(JANUS-219): janus-core + provider write paths + consumer registry.

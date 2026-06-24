@@ -1,0 +1,14 @@
+[package]
+name = "janus-warden"
+description = "Janus reference-only MCP surface (read side): serves SecretRefs and brokers UsePermits to AI, never literals."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# TODO(JANUS-22): rmcp (official Rust MCP SDK) + janus-core.
