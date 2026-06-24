@@ -71,16 +71,19 @@ cd go-envelope
 go build ./... && go test ./...
 ```
 
-## Provenance pre-publish checklist
+## Provenance
 
 This repo was extracted from `nixcfg/hosts/csb1/docker/janus` with full history
-(`git subtree split`). Before pushing to a public remote:
+(`git subtree split`, 2026-06-24). Public-repo hygiene applied:
 
-- [ ] **License** — none declared yet (`Cargo.toml` omits the field on purpose). Pick one (MIT OR Apache-2.0 is the Rust convention) before publishing.
-- [ ] **`go-envelope/catalog/agenix-catalog.json`** is infra-inventory metadata (secret *names/sources/classifications*, no values). Decide whether it belongs in a public repo or should stay nixcfg-only deploy data (it is mounted from nixcfg at runtime regardless).
-- [ ] Confirm repo destination + visibility (personal `markus-barta/janus` vs an INSPR org; public vs private).
-
-No secret **values**, private keys, or `.age` files are present — verified at extraction time.
+- **License:** AGPL-3.0-only (matching the PAIMOS/INSPR family).
+- **No infra inventory:** `agenix-catalog.json` (the deploy-time catalog of secret
+  *names/sources/classifications*) was **scrubbed from all history** — it is not
+  needed for the build (mounted at runtime from nixcfg) and is infra
+  reconnaissance data that does not belong in a public repo.
+- **No secret values, private keys, or `.age` files** are present — verified at
+  extraction time and after the scrub. `bootstrap-zitadel-env.sh` only references
+  env vars and *generates* secrets at runtime.
 
 ---
 

@@ -12,8 +12,9 @@ the implementation session.
 
 ## Prerequisites (one-time)
 
-1. **Decide repo destination + visibility** and push this repo (README pre-publish
-   checklist: license, `agenix-catalog.json` infra-inventory exposure).
+1. ✅ **Done:** repo published at `github.com/markus-barta/janus` (public, AGPL-3.0).
+   The `agenix-catalog.json` infra inventory was scrubbed from history — it stays
+   nixcfg-only deploy data, mounted at runtime.
 2. Push triggers `.github/workflows/go-envelope.yml` `build-test`. Confirm green.
 
 ## Step 1 — publish a signed envelope image

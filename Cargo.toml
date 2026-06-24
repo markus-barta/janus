@@ -1,6 +1,6 @@
 # Janus — Rust engine workspace.
 # The Go envelope (go-envelope/) is a separate Go module, intentionally NOT a
-# workspace member. License is omitted until chosen (see README pre-publish list).
+# workspace member. Licensed AGPL-3.0-only (matching the PAIMOS/INSPR family).
 [workspace]
 resolver = "2"
 members = [
@@ -17,6 +17,7 @@ edition = "2021"
 rust-version = "1.80"
 authors = ["Markus Barta <mba@barta.cm>"]
 repository = "https://github.com/markus-barta/janus"
+license = "AGPL-3.0-only"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
