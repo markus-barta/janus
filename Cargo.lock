@@ -678,6 +678,7 @@ dependencies = [
  "janus-core",
  "janus-mock",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

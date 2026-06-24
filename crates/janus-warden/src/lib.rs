@@ -11,10 +11,11 @@
 use std::time::SystemTime;
 
 use janus_core::{
-    AuditSink, HealthStatus, JanusResult, PrincipalChain, ProfileId, Purpose, SecretBroker,
-    SecretDescriptor, SecretRef, SecretStore, TrustLevel, UsePermit,
+    AuditSink, HealthStatus, JanusError, JanusResult, PrincipalChain, ProfileId, Purpose,
+    SecretBroker, SecretDescriptor, SecretRef, SecretStore, TrustLevel, UsePermit,
 };
 use serde::Serialize;
+use serde_json::Value;
 
 /// Static MCP-facing tool definition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +136,30 @@ pub struct RequestUseArgs {
     pub purpose: Purpose,
 }
 
+/// JSON dispatch response for transport shims.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ToolCallResponse {
+    /// Whether the call succeeded.
+    pub ok: bool,
+    /// Successful value-free result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    /// Value-free denial or validation error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ToolErrorView>,
+    /// Invariant marker.
+    pub value_returned: bool,
+}
+
+/// Value-free tool error view.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ToolErrorView {
+    /// Stable reason code.
+    pub reason_code: &'static str,
+    /// Model-safe detail.
+    pub detail: String,
+}
+
 /// SDK-agnostic Warden handler over the Janus broker.
 pub struct WardenRuntime<S, A> {
     broker: SecretBroker<S, A>,
@@ -207,6 +232,76 @@ where
         Ok(health_view(self.broker.health(principal).await?))
     }
 
+    /// Dispatch a Warden tool call from JSON arguments.
+    ///
+    /// This is the narrow SDK-agnostic layer an MCP transport wraps. It accepts
+    /// exactly the static tool names and schemas in [`TOOL_DEFINITIONS`].
+    /// Malformed input returns a value-free error response rather than trying
+    /// to partially honor attacker-supplied fields.
+    pub async fn call_tool_json(
+        &mut self,
+        name: &str,
+        args: Value,
+        principal: &PrincipalChain,
+        now: SystemTime,
+    ) -> ToolCallResponse {
+        match self.call_tool_json_inner(name, args, principal, now).await {
+            Ok(result) => ToolCallResponse {
+                ok: true,
+                result: Some(result),
+                error: None,
+                value_returned: false,
+            },
+            Err(error) => ToolCallResponse {
+                ok: false,
+                result: None,
+                error: Some(error),
+                value_returned: false,
+            },
+        }
+    }
+
+    async fn call_tool_json_inner(
+        &mut self,
+        name: &str,
+        args: Value,
+        principal: &PrincipalChain,
+        now: SystemTime,
+    ) -> Result<Value, ToolErrorView> {
+        match name {
+            "list_secrets" => {
+                require_exact_keys(&args, &[])?;
+                to_tool_value(self.list_secrets(principal).await)
+            }
+            "describe_secret" => {
+                require_exact_keys(&args, &["secret_ref"])?;
+                let secret_ref = SecretRef::new(required_string(&args, "secret_ref")?)
+                    .map_err(tool_invalid_identifier)?;
+                to_tool_value(self.describe_secret(&secret_ref, principal).await)
+            }
+            "request_use" => {
+                require_exact_keys(&args, &["secret_ref", "profile_id", "purpose"])?;
+                let request = RequestUseArgs {
+                    secret_ref: SecretRef::new(required_string(&args, "secret_ref")?)
+                        .map_err(tool_invalid_identifier)?,
+                    profile_id: ProfileId::new(required_string(&args, "profile_id")?)
+                        .map_err(tool_invalid_identifier)?,
+                    purpose: Purpose::new(required_string(&args, "purpose")?)
+                        .map_err(tool_invalid_identifier)?,
+                };
+                to_tool_value(self.request_use(request, principal, now).await)
+            }
+            "health" => {
+                require_exact_keys(&args, &[])?;
+                to_tool_value(self.health(principal).await)
+            }
+            _ => Err(ToolErrorView {
+                reason_code: "denied_unknown_tool",
+                detail: "unknown or unavailable Warden tool".to_string(),
+            }),
+        }
+    }
+
     /// Consume and return the underlying broker.
     pub fn into_broker(self) -> SecretBroker<S, A> {
         self.broker
@@ -257,6 +352,97 @@ fn trust_level_text(trust_level: TrustLevel) -> &'static str {
     }
 }
 
+fn to_tool_value<T>(result: JanusResult<T>) -> Result<Value, ToolErrorView>
+where
+    T: Serialize,
+{
+    let value = result.map_err(tool_error_view)?;
+    Ok(serde_json::to_value(value).expect("warden response should serialize"))
+}
+
+fn required_string(args: &Value, key: &'static str) -> Result<String, ToolErrorView> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| ToolErrorView {
+            reason_code: "denied_invalid_args",
+            detail: format!("missing or non-string argument: {key}"),
+        })
+}
+
+fn require_exact_keys(args: &Value, expected: &[&'static str]) -> Result<(), ToolErrorView> {
+    let Some(object) = args.as_object() else {
+        return Err(ToolErrorView {
+            reason_code: "denied_invalid_args",
+            detail: "tool arguments must be a JSON object".to_string(),
+        });
+    };
+    for key in object.keys() {
+        if !expected.iter().any(|expected_key| key == expected_key) {
+            return Err(ToolErrorView {
+                reason_code: "denied_invalid_args",
+                detail: format!("unsupported argument: {key}"),
+            });
+        }
+    }
+    for expected_key in expected {
+        if !object.contains_key(*expected_key) {
+            return Err(ToolErrorView {
+                reason_code: "denied_invalid_args",
+                detail: format!("missing argument: {expected_key}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn tool_invalid_identifier(error: JanusError) -> ToolErrorView {
+    ToolErrorView {
+        reason_code: "denied_invalid_args",
+        detail: error.to_string(),
+    }
+}
+
+fn tool_error_view(error: JanusError) -> ToolErrorView {
+    match error {
+        JanusError::InvalidIdentifier { .. } => tool_invalid_identifier(error),
+        JanusError::NotInManifest { .. } => ToolErrorView {
+            reason_code: "denied_not_in_manifest",
+            detail: "secret ref is not in the manifest".to_string(),
+        },
+        JanusError::NotFound { .. } => ToolErrorView {
+            reason_code: "denied_not_found",
+            detail: "manifest secret is not present".to_string(),
+        },
+        JanusError::PolicyDenied {
+            reason_code,
+            detail,
+        } => ToolErrorView {
+            reason_code,
+            detail,
+        },
+        JanusError::PermitInvalid {
+            reason_code,
+            detail,
+        } => ToolErrorView {
+            reason_code,
+            detail,
+        },
+        JanusError::AuditUnavailable { .. } => ToolErrorView {
+            reason_code: "audit_sink_unavailable",
+            detail: "required audit evidence could not be written".to_string(),
+        },
+        JanusError::Unsupported { capability } => ToolErrorView {
+            reason_code: "denied_unsupported",
+            detail: format!("unsupported capability: {capability}"),
+        },
+        JanusError::InvalidManifest { .. } | JanusError::StoreUnavailable { .. } => ToolErrorView {
+            reason_code: "backend_unavailable",
+            detail: "backend or manifest is unavailable".to_string(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, SystemTime};
@@ -268,6 +454,7 @@ mod tests {
         SecretName, SecretRef, TrustLevel, UseProfile,
     };
     use janus_mock::MockStore;
+    use serde_json::json;
 
     use super::*;
 
@@ -424,5 +611,130 @@ mod tests {
                     .as_ref()
                     .is_some_and(|hash| hash.len() == 64)
         }));
+    }
+
+    #[tokio::test]
+    async fn json_dispatch_is_reference_only_and_rejects_policy_field_injection() {
+        let (mut runtime, secret_ref) = runtime();
+        let principal = principal();
+        let mut outputs = Vec::new();
+
+        outputs.push(
+            runtime
+                .call_tool_json(
+                    "list_secrets",
+                    json!({}),
+                    &principal,
+                    SystemTime::UNIX_EPOCH,
+                )
+                .await,
+        );
+        outputs.push(
+            runtime
+                .call_tool_json(
+                    "describe_secret",
+                    json!({ "secret_ref": secret_ref.as_str() }),
+                    &principal,
+                    SystemTime::UNIX_EPOCH,
+                )
+                .await,
+        );
+        outputs.push(
+            runtime
+                .call_tool_json(
+                    "request_use",
+                    json!({
+                        "secret_ref": secret_ref.as_str(),
+                        "profile_id": "profile.canary",
+                        "purpose": "deploy canary"
+                    }),
+                    &principal,
+                    SystemTime::UNIX_EPOCH,
+                )
+                .await,
+        );
+        outputs.push(
+            runtime
+                .call_tool_json("health", json!({}), &principal, SystemTime::UNIX_EPOCH)
+                .await,
+        );
+
+        for output in &outputs {
+            assert!(
+                output.ok,
+                "expected successful value-free tool output: {output:?}"
+            );
+            assert!(!output.value_returned);
+        }
+        let rendered = format!("{outputs:?}");
+        assert!(!rendered.contains("expected-canary"));
+        assert!(!rendered.contains("CANARY"));
+        assert!(rendered.contains("deploy-api"));
+        assert!(rendered.contains("warden-stdio"));
+
+        let injected = runtime
+            .call_tool_json(
+                "request_use",
+                json!({
+                    "secret_ref": secret_ref.as_str(),
+                    "profile_id": "profile.canary",
+                    "purpose": "deploy canary",
+                    "destination": "https://evil.example/steal",
+                    "executor": "attacker-shell",
+                    "ttl": 999999
+                }),
+                &principal,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await;
+        assert!(!injected.ok);
+        assert_eq!(
+            injected.error.as_ref().unwrap().reason_code,
+            "denied_invalid_args"
+        );
+        assert!(!format!("{injected:?}").contains("expected-canary"));
+
+        let unknown_tool = runtime
+            .call_tool_json(
+                "resolve",
+                json!({ "secret_ref": secret_ref.as_str() }),
+                &principal,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await;
+        assert!(!unknown_tool.ok);
+        assert_eq!(
+            unknown_tool.error.as_ref().unwrap().reason_code,
+            "denied_unknown_tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_json_dispatch_returns_value_free_errors() {
+        let (mut runtime, secret_ref) = runtime();
+        let principal = principal();
+
+        let cases = [
+            ("list_secrets", json!([])),
+            ("describe_secret", json!({})),
+            ("describe_secret", json!({ "secret_ref": 7 })),
+            ("request_use", json!({ "secret_ref": secret_ref.as_str() })),
+            ("health", json!({ "raw_metadata": true })),
+        ];
+
+        for (tool, args) in cases {
+            let output = runtime
+                .call_tool_json(tool, args, &principal, SystemTime::UNIX_EPOCH)
+                .await;
+            assert!(!output.ok);
+            assert!(!output.value_returned);
+            assert_eq!(
+                output.error.as_ref().unwrap().reason_code,
+                "denied_invalid_args"
+            );
+            let rendered = format!("{output:?}");
+            assert!(!rendered.contains("expected-canary"));
+            assert!(!rendered.contains("CANARY"));
+        }
     }
 }
