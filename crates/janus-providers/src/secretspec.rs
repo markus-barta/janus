@@ -211,7 +211,10 @@ mod tests {
         SecretBroker, UseProfile, UseRequest,
     };
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     struct DotenvFixture {
         dir: std::path::PathBuf,
@@ -219,12 +222,19 @@ mod tests {
         env_file: std::path::PathBuf,
     }
 
+    impl Drop for DotenvFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
     fn dotenv_fixture() -> DotenvFixture {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("janus-secretspec-{nonce}"));
+        let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("janus-secretspec-{nonce}-{id}"));
         fs::create_dir_all(&dir).unwrap();
         let manifest = dir.join("secretspec.toml");
         let env_file = dir.join(".env");
@@ -287,8 +297,6 @@ CANARY = { description = "Canary token", required = true }
         )
         .await
         .unwrap();
-
-        fs::remove_dir_all(fixture.dir).unwrap();
     }
 
     #[tokio::test]
@@ -397,7 +405,5 @@ CANARY = { description = "Canary token", required = true }
             .any(|event| event.action == AuditAction::PermitIssue
                 && event.outcome == AuditOutcome::Allowed
                 && !event.value_returned));
-
-        fs::remove_dir_all(fixture.dir).unwrap();
     }
 }

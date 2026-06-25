@@ -6,6 +6,7 @@ resolver = "2"
 members = [
     "crates/janus-conformance",
     "crates/janus-core",
+    "crates/janus-executor",
     "crates/janus-provider-age",
     "crates/janus-warden",
     "crates/janus-forge",

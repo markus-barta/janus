@@ -1240,6 +1240,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "janus-executor"
+version = "0.0.0"
+dependencies = [
+ "janus-core",
+ "janus-mock",
+ "tokio",
+]
+
+[[package]]
 name = "janus-forge"
 version = "0.0.0"
 dependencies = [

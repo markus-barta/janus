@@ -1,0 +1,19 @@
+[package]
+name = "janus-executor"
+description = "Janus approved-use execution layer: consumes permits through reviewed profiles without returning secret literals."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+janus-core = { path = "../janus-core" }
+
+[dev-dependencies]
+janus-mock = { path = "../janus-mock" }
+tokio = { version = "1", features = ["macros", "rt"] }
