@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -17,9 +17,13 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use janus_core::{
-    BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry, Environment,
-    JanusError, OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId,
-    ReloadMethod, SafeLabel, ScopeRef, SecretName, SecretStore, ValidationProbe,
+    BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry, Destination,
+    Environment, ExecutorRef, JanusError, OwnerRef, Principal, PrincipalChain, PrincipalId,
+    PrincipalKind, ProfileId, ReloadMethod, SafeLabel, ScopeRef, SecretName, SecretRef,
+    SecretStore, ValidationProbe,
+};
+use janus_executor::{
+    ManagedCommandProfile, ManagedCommandProfileSpec, ManagedCommandRuntimeLimits,
 };
 use janus_forge::{
     ConsumerRotationHooks, GeneratedAlphabet, GeneratedRotationBroker, GeneratedValuePolicy,
@@ -158,7 +162,9 @@ async fn run_forge_rotate_generated(config: ForgeRotateGeneratedConfig) -> Resul
 }
 
 async fn run_managed_command(config: RunManagedCommandConfig) -> Result<()> {
-    let mut runner = UnwiredManagedCommandRunner;
+    let manifest_path = run_profile_manifest_path()?;
+    let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
+    let mut runner = ProfileManifestManagedCommandRunner { profiles };
     let outcome = run_managed_command_with(&config, &mut runner).await?;
     emit_run_managed_outcome(&outcome);
     Ok(())
@@ -179,17 +185,22 @@ trait ManagedCommandRunner {
     async fn run(&mut self, config: &RunManagedCommandConfig) -> Result<ManagedCommandCliOutcome>;
 }
 
-struct UnwiredManagedCommandRunner;
+struct ProfileManifestManagedCommandRunner {
+    profiles: ManagedCommandProfileCatalog,
+}
 
 #[async_trait]
-impl ManagedCommandRunner for UnwiredManagedCommandRunner {
+impl ManagedCommandRunner for ProfileManifestManagedCommandRunner {
     async fn run(&mut self, config: &RunManagedCommandConfig) -> Result<ManagedCommandCliOutcome> {
-        let _ = (
-            config.profile_id.as_str(),
-            config.permit.as_str(),
-            config.requested_args.len(),
-        );
-        anyhow::bail!("janusd run profile loading and permit lookup are not wired yet")
+        let profile = self
+            .profiles
+            .profile(&config.profile_id)
+            .context("managed command profile not found")?;
+        if profile.allowed_args() != config.requested_args.as_slice() {
+            anyhow::bail!("janusd run command arguments do not match the reviewed profile");
+        }
+        let _ = config.permit.as_str();
+        anyhow::bail!("janusd run permit lookup is not wired yet")
     }
 }
 
@@ -223,6 +234,146 @@ fn emit_run_managed_outcome(outcome: &ManagedCommandCliOutcome) {
         "janusd run completed exit_success={} exit_code={:?} reason_code={} value_returned={}",
         outcome.exit_success, outcome.exit_code, outcome.reason_code, outcome.value_returned
     );
+}
+
+#[derive(Clone, Debug)]
+struct ManagedCommandProfileCatalog {
+    profiles: Vec<ManagedCommandProfile>,
+}
+
+impl ManagedCommandProfileCatalog {
+    fn load(path: &Path) -> Result<Self> {
+        let contents = std::fs::read_to_string(path).with_context(|| {
+            format!(
+                "failed to read managed command profile manifest {}",
+                path.display()
+            )
+        })?;
+        Self::parse(&contents)
+    }
+
+    fn parse(contents: &str) -> Result<Self> {
+        let parsed = toml::from_str::<ManagedCommandProfileCatalogToml>(contents)
+            .context("failed to parse managed command profile manifest")?;
+        let mut ids = BTreeSet::new();
+        let mut profiles = Vec::new();
+        for profile in parsed.profiles {
+            let profile = profile.into_profile()?;
+            if !ids.insert(profile.profile_id().as_str().to_string()) {
+                anyhow::bail!("duplicate managed command profile id");
+            }
+            profiles.push(profile);
+        }
+        if profiles.is_empty() {
+            anyhow::bail!("managed command profile manifest has no profiles");
+        }
+        Ok(Self { profiles })
+    }
+
+    fn profile(&self, profile_id: &ProfileId) -> Option<&ManagedCommandProfile> {
+        self.profiles
+            .iter()
+            .find(|profile| profile.profile_id() == profile_id)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ManagedCommandProfileCatalogToml {
+    profiles: Vec<ManagedCommandProfileToml>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ManagedCommandProfileToml {
+    id: String,
+    secret_ref: String,
+    executor: String,
+    destination: String,
+    env: String,
+    binary: PathBuf,
+    allowed_args: Vec<String>,
+    #[serde(default = "default_run_timeout_seconds")]
+    timeout_seconds: u64,
+    #[serde(default = "default_run_max_output_bytes")]
+    max_stdout_bytes: usize,
+    #[serde(default = "default_run_max_output_bytes")]
+    max_stderr_bytes: usize,
+    consumer: ManagedCommandConsumerToml,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ManagedCommandConsumerToml {
+    consumer_ref: String,
+    #[serde(default = "default_managed_command_kind")]
+    kind: String,
+    owner: String,
+    environment: String,
+    #[serde(default = "default_reload_method")]
+    reload: String,
+    #[serde(default)]
+    validation: Vec<String>,
+    #[serde(default)]
+    supports_dual_value: bool,
+    blast_radius: String,
+}
+
+impl ManagedCommandProfileToml {
+    fn into_profile(self) -> Result<ManagedCommandProfile> {
+        if self.consumer.kind != "managed_command" {
+            anyhow::bail!("managed command profile consumer kind must be managed_command");
+        }
+        let secret_ref = SecretRef::new(self.secret_ref)?;
+        let consumer = ConsumerDescriptor {
+            consumer_ref: ConsumerRef::new(self.consumer.consumer_ref)?,
+            secret_ref: secret_ref.clone(),
+            kind: ConsumerKind::ManagedCommand,
+            owner: OwnerRef::new(self.consumer.owner)?,
+            environment: Environment::new(self.consumer.environment)?,
+            reload: parse_reload_method(&self.consumer.reload)?,
+            validation: self
+                .consumer
+                .validation
+                .into_iter()
+                .map(ValidationProbe::new)
+                .collect::<janus_core::JanusResult<_>>()?,
+            supports_dual_value: self.consumer.supports_dual_value,
+            blast_radius: BlastRadius::new(self.consumer.blast_radius)?,
+            declared: true,
+        };
+        Ok(ManagedCommandProfile::new(ManagedCommandProfileSpec {
+            profile_id: ProfileId::new(self.id)?,
+            secret_ref,
+            executor: ExecutorRef::new(self.executor)?,
+            destination: Destination::new(self.destination)?,
+            env_name: SafeLabel::new(self.env)?,
+            binary: self.binary,
+            allowed_args: self.allowed_args,
+            runtime_limits: ManagedCommandRuntimeLimits {
+                timeout: Duration::from_secs(self.timeout_seconds),
+                max_stdout_bytes: self.max_stdout_bytes,
+                max_stderr_bytes: self.max_stderr_bytes,
+            },
+            consumer,
+        })?)
+    }
+}
+
+fn default_run_timeout_seconds() -> u64 {
+    30
+}
+
+fn default_run_max_output_bytes() -> usize {
+    64 * 1024
+}
+
+fn default_managed_command_kind() -> String {
+    "managed_command".to_string()
+}
+
+fn default_reload_method() -> String {
+    "none".to_string()
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -640,6 +791,15 @@ fn hook_manifest_path(configured: Option<&Path>) -> Result<PathBuf> {
         .context("--hook-manifest or JANUS_FORGE_HOOK_MANIFEST is required")
 }
 
+fn run_profile_manifest_path() -> Result<PathBuf> {
+    env_first(&[
+        "JANUS_RUN_PROFILE_MANIFEST",
+        "JANUS_MANAGED_PROFILE_MANIFEST",
+    ])
+    .map(PathBuf::from)
+    .context("JANUS_RUN_PROFILE_MANIFEST is required")
+}
+
 fn load_age_store_from_env() -> Result<AgeSecretStore> {
     let manifest = env_first(&[
         "JANUS_AGE_MANIFEST_FILE",
@@ -735,7 +895,7 @@ fn env_first(keys: &[&str]) -> Option<String> {
 
 fn print_usage() {
     eprintln!(
-        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
+        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
 }
 
@@ -750,10 +910,7 @@ mod tests {
         SecretMeta, SecretRef, TrustLevel, UsePermit, UseProfile, UseRequest,
     };
     #[cfg(unix)]
-    use janus_executor::{
-        ApprovedUseExecutor, ManagedCommandProfile, ManagedCommandProfileSpec,
-        ManagedCommandRequest, ManagedCommandRuntimeLimits,
-    };
+    use janus_executor::{ApprovedUseExecutor, ManagedCommandProfile, ManagedCommandRequest};
     #[cfg(unix)]
     use janus_mock::MockStore;
 
@@ -846,6 +1003,115 @@ mod tests {
         assert!(!err.to_string().contains("not-a-permit"));
     }
 
+    fn toml_string(value: &str) -> String {
+        format!("{value:?}")
+    }
+
+    fn toml_string_array(values: &[String]) -> String {
+        format!(
+            "[{}]",
+            values
+                .iter()
+                .map(|value| toml_string(value))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    fn managed_profile_toml(secret_ref: &SecretRef, allowed_args: &[String]) -> String {
+        format!(
+            r#"
+                [[profiles]]
+                id = "profile.canary"
+                secret_ref = {}
+                executor = "janus-run@fixture"
+                destination = "fixture-destination"
+                env = "GITHUB_TOKEN"
+                binary = "/bin/sh"
+                allowed_args = {}
+                timeout_seconds = 30
+                max_stdout_bytes = 65536
+                max_stderr_bytes = 65536
+
+                [profiles.consumer]
+                consumer_ref = "consumer.fixture_run"
+                kind = "managed_command"
+                owner = "janusd-test"
+                environment = "test"
+                reload = "none"
+                validation = ["fixture-run"]
+                supports_dual_value = false
+                blast_radius = "fixture"
+            "#,
+            toml_string(secret_ref.as_str()),
+            toml_string_array(allowed_args),
+        )
+    }
+
+    #[test]
+    fn managed_profile_manifest_parses_reviewed_command_contract() {
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let allowed_args = vec!["release".to_string(), "upload".to_string()];
+        let catalog =
+            ManagedCommandProfileCatalog::parse(&managed_profile_toml(&secret_ref, &allowed_args))
+                .unwrap();
+        let profile = catalog
+            .profile(&ProfileId::new("profile.canary").unwrap())
+            .unwrap();
+
+        assert_eq!(profile.secret_ref(), &secret_ref);
+        assert_eq!(profile.executor().as_str(), "janus-run@fixture");
+        assert_eq!(profile.destination().as_str(), "fixture-destination");
+        assert_eq!(profile.env_name().as_str(), "GITHUB_TOKEN");
+        assert_eq!(profile.binary(), &PathBuf::from("/bin/sh"));
+        assert_eq!(profile.allowed_args(), allowed_args.as_slice());
+        assert_eq!(profile.consumer_ref().as_str(), "consumer.fixture_run");
+        assert_eq!(profile.runtime_limits().timeout, Duration::from_secs(30));
+        assert_eq!(profile.runtime_limits().max_stdout_bytes, 65536);
+        assert_eq!(profile.runtime_limits().max_stderr_bytes, 65536);
+    }
+
+    #[test]
+    fn managed_profile_manifest_rejects_unknown_fields_and_duplicates() {
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let allowed_args = vec!["release".to_string(), "upload".to_string()];
+        let mut with_unknown = managed_profile_toml(&secret_ref, &allowed_args);
+        with_unknown.push_str("\nunreviewed = true\n");
+        let err = ManagedCommandProfileCatalog::parse(&with_unknown).unwrap_err();
+        assert!(err.to_string().contains("parse"));
+
+        let duplicate = format!(
+            "{}\n{}",
+            managed_profile_toml(&secret_ref, &allowed_args),
+            managed_profile_toml(&secret_ref, &allowed_args)
+        );
+        let err = ManagedCommandProfileCatalog::parse(&duplicate).unwrap_err();
+        assert!(err.to_string().contains("duplicate"));
+    }
+
+    #[tokio::test]
+    async fn profile_manifest_runner_rejects_unreviewed_args_before_permit_lookup() {
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let allowed_args = vec!["release".to_string(), "upload".to_string()];
+        let profiles =
+            ManagedCommandProfileCatalog::parse(&managed_profile_toml(&secret_ref, &allowed_args))
+                .unwrap();
+        let mut runner = ProfileManifestManagedCommandRunner { profiles };
+        let err = run_managed_command_with(
+            &RunManagedCommandConfig {
+                profile_id: ProfileId::new("profile.canary").unwrap(),
+                permit: PermitToken::new("use_abc123").unwrap(),
+                requested_args: vec!["release".to_string(), "delete".to_string()],
+            },
+            &mut runner,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("reviewed profile"));
+        assert!(!err.to_string().contains("use_abc123"));
+    }
+
     #[cfg(unix)]
     struct FixtureManagedCommandRunner {
         executor: ApprovedUseExecutor<MockStore, AuditWrite>,
@@ -912,29 +1178,12 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let profile = ManagedCommandProfile::new(ManagedCommandProfileSpec {
-                profile_id,
-                secret_ref: secret_ref.clone(),
-                executor: executor_ref,
-                destination,
-                env_name: SafeLabel::new("GITHUB_TOKEN").unwrap(),
-                binary: PathBuf::from("/bin/sh"),
-                allowed_args,
-                runtime_limits: ManagedCommandRuntimeLimits::default(),
-                consumer: ConsumerDescriptor {
-                    consumer_ref: ConsumerRef::new("consumer.fixture_run").unwrap(),
-                    secret_ref,
-                    kind: ConsumerKind::ManagedCommand,
-                    owner: OwnerRef::new("janusd-test").unwrap(),
-                    environment: Environment::new("test").unwrap(),
-                    reload: ReloadMethod::None,
-                    validation: vec![ValidationProbe::new("fixture-run").unwrap()],
-                    supports_dual_value: false,
-                    blast_radius: BlastRadius::new("fixture").unwrap(),
-                    declared: true,
-                },
-            })
+            let profile_catalog = ManagedCommandProfileCatalog::parse(&managed_profile_toml(
+                &secret_ref,
+                &allowed_args,
+            ))
             .unwrap();
+            let profile = profile_catalog.profile(&profile_id).unwrap().clone();
 
             Self {
                 executor: ApprovedUseExecutor::new(broker),
