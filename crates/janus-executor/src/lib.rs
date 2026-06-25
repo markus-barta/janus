@@ -8,7 +8,9 @@
 
 #![forbid(unsafe_code)]
 
+use std::ffi::OsString;
 use std::path::PathBuf;
+use std::process::{Command as ProcessCommand, Output as ProcessOutput, Stdio};
 use std::time::SystemTime;
 
 use janus_core::{
@@ -264,6 +266,23 @@ impl ManagedCommandExecution<'_> {
     pub fn binding(&self) -> &SecretEnvBinding<'_> {
         &self.binding
     }
+
+    /// Spawn the reviewed absolute binary with the reviewed argv and inject the
+    /// secret only as the profile's reviewed environment variable.
+    pub fn run_process(&self) -> JanusResult<ManagedCommandOutput> {
+        let env_value = secret_env_value(self.binding.value.expose_bytes())?;
+        let output = ProcessCommand::new(&self.plan.binary)
+            .args(&self.plan.args)
+            .env_clear()
+            .env(self.binding.env_name.as_str(), env_value)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|_| JanusError::StoreUnavailable {
+                detail: "managed command failed to start".to_string(),
+            })?;
+
+        Ok(ManagedCommandOutput::from_process_output(output))
+    }
 }
 
 /// Managed command output after Janus redaction.
@@ -273,6 +292,10 @@ pub struct ManagedCommandOutput {
     pub stdout: String,
     /// Redacted stderr.
     pub stderr: String,
+    /// Child process exit success marker.
+    pub exit_success: bool,
+    /// Child process exit code where the platform exposes one.
+    pub exit_code: Option<i32>,
     /// Invariant marker.
     pub value_returned: bool,
 }
@@ -284,6 +307,18 @@ impl ManagedCommandOutput {
         Self {
             stdout: stdout.into(),
             stderr: stderr.into(),
+            exit_success: true,
+            exit_code: Some(0),
+            value_returned: false,
+        }
+    }
+
+    fn from_process_output(output: ProcessOutput) -> Self {
+        Self {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_success: output.status.success(),
+            exit_code: output.status.code(),
             value_returned: false,
         }
     }
@@ -298,6 +333,22 @@ impl ManagedCommandOutput {
         self.value_returned = false;
         self
     }
+}
+
+#[cfg(unix)]
+fn secret_env_value(value: &[u8]) -> JanusResult<OsString> {
+    use std::os::unix::ffi::OsStringExt;
+
+    Ok(OsString::from_vec(value.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn secret_env_value(value: &[u8]) -> JanusResult<OsString> {
+    String::from_utf8(value.to_vec())
+        .map(OsString::from)
+        .map_err(|_| JanusError::Unsupported {
+            capability: "non_utf8_managed_command_env",
+        })
 }
 
 /// Value-free managed command execution outcome.
@@ -355,9 +406,9 @@ where
         Ok(outcome)
     }
 
-    /// Execute a reviewed managed-command profile without spawning a process in
-    /// this skeleton. The callback stands in for child-process setup; Janus
-    /// still validates the reviewed profile and redacts output.
+    /// Execute a reviewed managed-command profile with a caller-supplied
+    /// secret-bearing callback. This is the shared policy boundary used by the
+    /// real process runner and narrow connector adapters.
     pub async fn execute_managed_command<F>(
         &mut self,
         request: ManagedCommandRequest<'_>,
@@ -406,6 +457,17 @@ where
         })
     }
 
+    /// Execute a reviewed managed-command profile by spawning its reviewed
+    /// absolute binary and exact argv, injecting the secret as the reviewed env
+    /// binding, and returning only redacted output.
+    pub async fn run_managed_command(
+        &mut self,
+        request: ManagedCommandRequest<'_>,
+    ) -> JanusResult<ManagedCommandOutcome> {
+        self.execute_managed_command(request, |execution| execution.run_process())
+            .await
+    }
+
     /// Consume and return the underlying broker for inspection or embedding.
     pub fn into_broker(self) -> SecretBroker<S, A> {
         self.broker
@@ -415,6 +477,8 @@ where
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, SystemTime};
+    #[cfg(unix)]
+    use std::{fs, process};
 
     use janus_core::{
         AuditAction, AuditOutcome, AuditWrite, BlastRadius, ConsumerDescriptor, ConsumerKind,
@@ -518,14 +582,32 @@ mod tests {
         executor: ExecutorRef,
         destination: Destination,
     ) -> ManagedCommandProfile {
+        managed_command_profile_with_command(
+            profile_id,
+            secret_ref,
+            executor,
+            destination,
+            PathBuf::from("/usr/bin/gh"),
+            vec!["release".to_string(), "upload".to_string()],
+        )
+    }
+
+    fn managed_command_profile_with_command(
+        profile_id: ProfileId,
+        secret_ref: SecretRef,
+        executor: ExecutorRef,
+        destination: Destination,
+        binary: PathBuf,
+        allowed_args: Vec<String>,
+    ) -> ManagedCommandProfile {
         ManagedCommandProfile::new(ManagedCommandProfileSpec {
             profile_id,
             secret_ref: secret_ref.clone(),
             executor,
             destination,
             env_name: SafeLabel::new("GITHUB_TOKEN").unwrap(),
-            binary: PathBuf::from("/usr/bin/gh"),
-            allowed_args: vec!["release".to_string(), "upload".to_string()],
+            binary,
+            allowed_args,
             consumer: ConsumerDescriptor {
                 consumer_ref: ConsumerRef::new("consumer.github_release_publish").unwrap(),
                 secret_ref,
@@ -540,6 +622,18 @@ mod tests {
             },
         })
         .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn marker_path(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "janus-executor-{test_name}-{}-{nanos}",
+            process::id()
+        ))
     }
 
     fn invocation<'a>(
@@ -768,6 +862,118 @@ mod tests {
                     .is_some_and(|hash| hash.len() == 64)
         }));
         assert!(!format!("{:?}", audit.events()).contains("expected-canary"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_command_runner_spawns_reviewed_process_and_redacts_output() {
+        let (mut executor, permit, principal, executor_ref, destination, _profile) =
+            executor_fixture().await;
+        let profile = managed_command_profile_with_command(
+            permit.profile_id().clone(),
+            permit.secret_ref().clone(),
+            executor_ref,
+            destination,
+            PathBuf::from("/bin/sh"),
+            vec![
+                "-c".to_string(),
+                "printf 'stdout:%s' \"$GITHUB_TOKEN\"; printf 'stderr:%s' \"$GITHUB_TOKEN\" >&2"
+                    .to_string(),
+            ],
+        );
+
+        let outcome = executor
+            .run_managed_command(ManagedCommandRequest {
+                profile: &profile,
+                permit: &permit,
+                principal: &principal,
+                requested_args: profile.allowed_args().to_vec(),
+                now: run_at(),
+            })
+            .await
+            .unwrap();
+
+        assert!(!outcome.value_returned);
+        assert!(!outcome.plan.value_returned);
+        assert_eq!(outcome.plan.binary, PathBuf::from("/bin/sh"));
+        assert_eq!(outcome.output.stdout, "stdout:[REDACTED]");
+        assert_eq!(outcome.output.stderr, "stderr:[REDACTED]");
+        assert!(outcome.output.exit_success);
+        assert_eq!(outcome.output.exit_code, Some(0));
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
+
+        let (_store, _policy, audit) = executor.into_broker().into_parts();
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::SecretUse
+                && event.outcome == AuditOutcome::Allowed
+                && event.reason_code == "ok"
+                && !event.value_returned
+        }));
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::ConsumerObserve
+                && event.outcome == AuditOutcome::Allowed
+                && event.reason_code == "ok"
+                && event.secret_ref.as_ref() == Some(profile.secret_ref())
+                && event
+                    .evidence
+                    .as_ref()
+                    .is_some_and(|evidence| evidence.as_str() == profile.consumer_ref().as_str())
+                && !event.value_returned
+        }));
+        assert!(!format!("{:?}", audit.events()).contains("expected-canary"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_command_runner_rejects_unreviewed_args_before_spawn() {
+        let (mut executor, permit, principal, executor_ref, destination, _profile) =
+            executor_fixture().await;
+        let marker = marker_path("unreviewed-args");
+        let profile = managed_command_profile_with_command(
+            permit.profile_id().clone(),
+            permit.secret_ref().clone(),
+            executor_ref,
+            destination,
+            PathBuf::from("/bin/sh"),
+            vec![
+                "-c".to_string(),
+                "printf spawned > \"$1\"".to_string(),
+                "janus-fixture".to_string(),
+                marker.to_string_lossy().into_owned(),
+            ],
+        );
+        let mut requested_args = profile.allowed_args().to_vec();
+        requested_args.push("--attacker-controlled".to_string());
+
+        let err = executor
+            .run_managed_command(ManagedCommandRequest {
+                profile: &profile,
+                permit: &permit,
+                principal: &principal,
+                requested_args,
+                now: run_at(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "denied_unreviewed_command_args",
+                ..
+            }
+        ));
+        assert!(!marker.exists());
+        let (_store, _policy, audit) = executor.into_broker().into_parts();
+        assert!(!audit
+            .events()
+            .iter()
+            .any(|event| event.action == AuditAction::SecretUse));
+        assert!(!audit
+            .events()
+            .iter()
+            .any(|event| event.action == AuditAction::ConsumerObserve));
+        let _ = fs::remove_file(marker);
     }
 
     #[tokio::test]
