@@ -22,6 +22,7 @@ async-trait = "0.1"
 janus-core = { path = "../janus-core" }
 janus-executor = { path = "../janus-executor" }
 janus-forge = { path = "../janus-forge" }
+janus-local = { path = "../janus-local" }
 janus-provider-age = { path = "../janus-provider-age" }
 janus-warden = { path = "../janus-warden" }
 serde = { version = "1", features = ["derive"] }

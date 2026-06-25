@@ -18,6 +18,7 @@ use janus_core::{
     PrincipalKind, ProfilePolicy, ScopeRef, SecretBroker, SecretDescriptor, SecretStore,
     TrustLevel, UseProfile,
 };
+use janus_local::{FilePermitRegistry, NoopPermitStore, PermitStore};
 use janus_provider_age::AgeSecretStore;
 use janus_providers::SecretspecStore;
 use janus_warden::{tool_definitions, WardenRuntime};
@@ -34,11 +35,25 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
-type Runtime = WardenRuntime<WardenStore, AuditWrite>;
+type Runtime = WardenRuntime<WardenStore, AuditWrite, RuntimePermitStore>;
 
 enum WardenStore {
     Secretspec(SecretspecStore),
     Age(AgeSecretStore),
+}
+
+enum RuntimePermitStore {
+    Noop(NoopPermitStore),
+    File(FilePermitRegistry),
+}
+
+impl PermitStore for RuntimePermitStore {
+    fn store(&self, permit: &janus_core::UsePermit) -> janus_core::JanusResult<()> {
+        match self {
+            Self::Noop(store) => store.store(permit),
+            Self::File(store) => store.store(permit),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -194,11 +209,11 @@ async fn build_runtime_from_env() -> Result<Runtime> {
         .await
         .context("failed to list backend manifest descriptors during Warden boot")?;
     let policy = policy_from_env(&descriptors)?;
-    Ok(WardenRuntime::new(SecretBroker::new(
-        store,
-        policy,
-        AuditWrite::accepting(),
-    )))
+    let permits = permit_store_from_env()?;
+    Ok(WardenRuntime::with_permit_store(
+        SecretBroker::new(store, policy, AuditWrite::accepting()),
+        permits,
+    ))
 }
 
 fn load_store_from_env() -> Result<WardenStore> {
@@ -272,6 +287,13 @@ fn policy_from_env(descriptors: &[SecretDescriptor]) -> Result<ProfilePolicy> {
         }
     }
     Ok(ProfilePolicy::new(profiles))
+}
+
+fn permit_store_from_env() -> Result<RuntimePermitStore> {
+    let Some(dir) = optional_env_first(&["JANUS_WARDEN_PERMIT_DIR", "JANUS_PERMIT_DIR"])? else {
+        return Ok(RuntimePermitStore::Noop(NoopPermitStore));
+    };
+    Ok(RuntimePermitStore::File(FilePermitRegistry::new(dir)))
 }
 
 fn principal_from_env() -> Result<PrincipalChain> {
@@ -370,6 +392,15 @@ fn optional_env(key: &'static str) -> Result<Option<String>> {
         Err(env::VarError::NotPresent) => Ok(None),
         Err(err) => Err(err).with_context(|| format!("failed to read {key}")),
     }
+}
+
+fn optional_env_first(keys: &[&'static str]) -> Result<Option<String>> {
+    for key in keys {
+        if let Some(value) = optional_env(key)? {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
 }
 
 fn age_identity_files_from_env() -> Result<Vec<PathBuf>> {

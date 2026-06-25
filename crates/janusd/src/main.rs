@@ -12,23 +12,25 @@ use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use janus_core::{
-    BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry, Destination,
-    Environment, ExecutorRef, JanusError, OwnerRef, Principal, PrincipalChain, PrincipalId,
-    PrincipalKind, ProfileId, ReloadMethod, SafeLabel, ScopeRef, SecretName, SecretRef,
-    SecretStore, UsePermit, ValidationProbe,
+    AuditSink, AuditWrite, BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef,
+    ConsumerRegistry, Destination, Environment, ExecutorRef, JanusError, OwnerRef, Principal,
+    PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, ReloadMethod, SafeLabel,
+    ScopeRef, SecretBroker, SecretName, SecretRef, SecretStore, UsePermit, ValidationProbe,
 };
 use janus_executor::{
-    ManagedCommandProfile, ManagedCommandProfileSpec, ManagedCommandRuntimeLimits,
+    ApprovedUseExecutor, ManagedCommandProfile, ManagedCommandProfileSpec, ManagedCommandRequest,
+    ManagedCommandRuntimeLimits,
 };
 use janus_forge::{
     ConsumerRotationHooks, GeneratedAlphabet, GeneratedRotationBroker, GeneratedValuePolicy,
     RotationApproval,
 };
+use janus_local::{FilePermitRegistry, PermitRegistry as SharedPermitRegistry};
 use janus_provider_age::AgeSecretStore;
 use serde::Deserialize;
 use tokio::process::Command as TokioCommand;
@@ -83,6 +85,7 @@ impl PermitToken {
         if value.trim().is_empty()
             || value.trim().len() != value.len()
             || !value.starts_with("use_")
+            || value.len() <= "use_".len()
         {
             anyhow::bail!("invalid --permit token");
         }
@@ -164,9 +167,20 @@ async fn run_forge_rotate_generated(config: ForgeRotateGeneratedConfig) -> Resul
 async fn run_managed_command(config: RunManagedCommandConfig) -> Result<()> {
     let manifest_path = run_profile_manifest_path()?;
     let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
+    let permits = FilePermitRegistry::new(run_permit_registry_dir()?);
+    let store = load_age_store_from_env()?;
+    let executor = ApprovedUseExecutor::new(SecretBroker::new(
+        store,
+        ProfilePolicy::default(),
+        AuditWrite::accepting(),
+    ));
+    let principal = run_principal_from_env()?;
     let mut runner = ProfileManifestManagedCommandRunner {
         profiles,
-        permits: UnwiredPermitRegistry,
+        permits,
+        executor,
+        principal,
+        clock: SystemManagedCommandClock,
     };
     let outcome = run_managed_command_with(&config, &mut runner).await?;
     emit_run_managed_outcome(&outcome);
@@ -188,29 +202,82 @@ trait ManagedCommandRunner {
     async fn run(&mut self, config: &RunManagedCommandConfig) -> Result<ManagedCommandCliOutcome>;
 }
 
-trait LocalPermitRegistry {
+trait ManagedCommandPermitRegistry {
     fn resolve(&self, token: &PermitToken) -> Result<UsePermit>;
 }
 
-#[derive(Clone, Debug, Default)]
-struct UnwiredPermitRegistry;
-
-impl LocalPermitRegistry for UnwiredPermitRegistry {
+impl ManagedCommandPermitRegistry for FilePermitRegistry {
     fn resolve(&self, token: &PermitToken) -> Result<UsePermit> {
-        let _ = token.as_str();
-        anyhow::bail!("janusd run permit registry is not wired yet")
+        Ok(SharedPermitRegistry::take(self, token.as_str())?)
     }
 }
 
-struct ProfileManifestManagedCommandRunner<R = UnwiredPermitRegistry> {
-    profiles: ManagedCommandProfileCatalog,
-    permits: R,
+#[async_trait]
+trait ManagedCommandExecutor {
+    async fn run(
+        &mut self,
+        profile: &ManagedCommandProfile,
+        permit: &UsePermit,
+        principal: &PrincipalChain,
+        requested_args: Vec<String>,
+        now: SystemTime,
+    ) -> Result<ManagedCommandCliOutcome>;
 }
 
 #[async_trait]
-impl<R> ManagedCommandRunner for ProfileManifestManagedCommandRunner<R>
+impl<S, A> ManagedCommandExecutor for ApprovedUseExecutor<S, A>
 where
-    R: LocalPermitRegistry + Send,
+    S: SecretStore + Send,
+    A: AuditSink + Send,
+{
+    async fn run(
+        &mut self,
+        profile: &ManagedCommandProfile,
+        permit: &UsePermit,
+        principal: &PrincipalChain,
+        requested_args: Vec<String>,
+        now: SystemTime,
+    ) -> Result<ManagedCommandCliOutcome> {
+        let outcome = self
+            .run_managed_command(ManagedCommandRequest {
+                profile,
+                permit,
+                principal,
+                requested_args,
+                now,
+            })
+            .await?;
+        Ok(outcome.into())
+    }
+}
+
+trait ManagedCommandClock {
+    fn now(&self) -> SystemTime;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SystemManagedCommandClock;
+
+impl ManagedCommandClock for SystemManagedCommandClock {
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+}
+
+struct ProfileManifestManagedCommandRunner<R, E, C = SystemManagedCommandClock> {
+    profiles: ManagedCommandProfileCatalog,
+    permits: R,
+    executor: E,
+    principal: PrincipalChain,
+    clock: C,
+}
+
+#[async_trait]
+impl<R, E, C> ManagedCommandRunner for ProfileManifestManagedCommandRunner<R, E, C>
+where
+    R: ManagedCommandPermitRegistry + Send,
+    E: ManagedCommandExecutor + Send,
+    C: ManagedCommandClock + Send,
 {
     async fn run(&mut self, config: &RunManagedCommandConfig) -> Result<ManagedCommandCliOutcome> {
         let profile = self
@@ -220,8 +287,16 @@ where
         if profile.allowed_args() != config.requested_args.as_slice() {
             anyhow::bail!("janusd run command arguments do not match the reviewed profile");
         }
-        let _permit = self.permits.resolve(&config.permit)?;
-        anyhow::bail!("janusd run executor backend is not wired yet")
+        let permit = self.permits.resolve(&config.permit)?;
+        self.executor
+            .run(
+                profile,
+                &permit,
+                &self.principal,
+                config.requested_args.clone(),
+                self.clock.now(),
+            )
+            .await
     }
 }
 
@@ -821,6 +896,23 @@ fn run_profile_manifest_path() -> Result<PathBuf> {
     .context("JANUS_RUN_PROFILE_MANIFEST is required")
 }
 
+fn run_permit_registry_dir() -> Result<PathBuf> {
+    env_first(&["JANUS_RUN_PERMIT_DIR", "JANUS_PERMIT_DIR"])
+        .map(PathBuf::from)
+        .context("JANUS_RUN_PERMIT_DIR is required")
+}
+
+fn run_principal_from_env() -> Result<PrincipalChain> {
+    let executor = env_first(&["JANUS_RUN_EXECUTOR", "JANUS_WARDEN_EXECUTOR"])
+        .unwrap_or_else(|| "warden-stdio".to_string());
+    let scope = env_first(&["JANUS_RUN_SCOPE", "JANUS_WARDEN_SCOPE"])
+        .unwrap_or_else(|| "janus/default".to_string());
+    Ok(PrincipalChain::new(
+        Principal::new(PrincipalKind::Executor, PrincipalId::new(executor)?),
+        ScopeRef::new(scope)?,
+    ))
+}
+
 fn load_age_store_from_env() -> Result<AgeSecretStore> {
     let manifest = env_first(&[
         "JANUS_AGE_MANIFEST_FILE",
@@ -916,7 +1008,7 @@ fn env_first(keys: &[&str]) -> Option<String> {
 
 fn print_usage() {
     eprintln!(
-        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
+        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
 }
 
@@ -930,8 +1022,6 @@ mod tests {
         AuditWrite, Destination, EgressMode, ExecutorRef, ManifestCatalog, ProjectId, Purpose,
         SecretMeta, SecretRef, TrustLevel, UseProfile, UseRequest,
     };
-    #[cfg(unix)]
-    use janus_executor::{ApprovedUseExecutor, ManagedCommandProfile, ManagedCommandRequest};
     #[cfg(unix)]
     use janus_mock::MockStore;
 
@@ -1120,6 +1210,9 @@ mod tests {
         let mut runner = ProfileManifestManagedCommandRunner {
             profiles,
             permits: PermitLookupMustNotRun,
+            executor: ExecutorMustNotRun,
+            principal: fixture_principal(),
+            clock: FixedManagedCommandClock(SystemTime::UNIX_EPOCH),
         };
         let err = run_managed_command_with(
             &RunManagedCommandConfig {
@@ -1138,7 +1231,7 @@ mod tests {
 
     struct PermitLookupMustNotRun;
 
-    impl LocalPermitRegistry for PermitLookupMustNotRun {
+    impl ManagedCommandPermitRegistry for PermitLookupMustNotRun {
         fn resolve(&self, _token: &PermitToken) -> Result<UsePermit> {
             panic!("permit lookup should not run for unreviewed command arguments")
         }
@@ -1146,10 +1239,45 @@ mod tests {
 
     struct PermitLookupReached;
 
-    impl LocalPermitRegistry for PermitLookupReached {
+    impl ManagedCommandPermitRegistry for PermitLookupReached {
         fn resolve(&self, _token: &PermitToken) -> Result<UsePermit> {
             anyhow::bail!("fixture permit registry reached")
         }
+    }
+
+    struct ExecutorMustNotRun;
+
+    #[async_trait]
+    impl ManagedCommandExecutor for ExecutorMustNotRun {
+        async fn run(
+            &mut self,
+            _profile: &ManagedCommandProfile,
+            _permit: &UsePermit,
+            _principal: &PrincipalChain,
+            _requested_args: Vec<String>,
+            _now: SystemTime,
+        ) -> Result<ManagedCommandCliOutcome> {
+            panic!("managed command executor should not run")
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct FixedManagedCommandClock(SystemTime);
+
+    impl ManagedCommandClock for FixedManagedCommandClock {
+        fn now(&self) -> SystemTime {
+            self.0
+        }
+    }
+
+    fn fixture_principal() -> PrincipalChain {
+        PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("janus-run@fixture").unwrap(),
+            ),
+            ScopeRef::new("janus/dev").unwrap(),
+        )
     }
 
     #[tokio::test]
@@ -1162,6 +1290,9 @@ mod tests {
         let mut runner = ProfileManifestManagedCommandRunner {
             profiles,
             permits: PermitLookupReached,
+            executor: ExecutorMustNotRun,
+            principal: fixture_principal(),
+            clock: FixedManagedCommandClock(SystemTime::UNIX_EPOCH),
         };
         let err = run_managed_command_with(
             &RunManagedCommandConfig {
@@ -1194,7 +1325,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    impl LocalPermitRegistry for InMemoryPermitRegistry {
+    impl ManagedCommandPermitRegistry for InMemoryPermitRegistry {
         fn resolve(&self, token: &PermitToken) -> Result<UsePermit> {
             self.permits
                 .get(token.as_str())
@@ -1204,16 +1335,22 @@ mod tests {
     }
 
     #[cfg(unix)]
-    struct FixtureManagedCommandRunner {
-        executor: ApprovedUseExecutor<MockStore, AuditWrite>,
-        permits: InMemoryPermitRegistry,
+    type FixtureProfileManifestRunner = ProfileManifestManagedCommandRunner<
+        InMemoryPermitRegistry,
+        ApprovedUseExecutor<MockStore, AuditWrite>,
+        FixedManagedCommandClock,
+    >;
+
+    #[cfg(unix)]
+    struct FixtureManagedCommandHarness {
+        runner: FixtureProfileManifestRunner,
         permit_token: PermitToken,
-        principal: PrincipalChain,
-        profile: ManagedCommandProfile,
+        profile_id: ProfileId,
+        requested_args: Vec<String>,
     }
 
     #[cfg(unix)]
-    impl FixtureManagedCommandRunner {
+    impl FixtureManagedCommandHarness {
         async fn new(allowed_args: Vec<String>) -> Self {
             let project = ProjectId::new("janus").unwrap();
             let name = SecretName::new("CANARY").unwrap();
@@ -1245,13 +1382,7 @@ mod tests {
                 single_use: true,
                 enabled: true,
             };
-            let principal = PrincipalChain::new(
-                Principal::new(
-                    PrincipalKind::Executor,
-                    PrincipalId::new("janus-run@fixture").unwrap(),
-                ),
-                ScopeRef::new("janus/dev").unwrap(),
-            );
+            let principal = fixture_principal();
             let mut broker = janus_core::SecretBroker::new(
                 store,
                 janus_core::ProfilePolicy::new(vec![use_profile]),
@@ -1276,64 +1407,51 @@ mod tests {
             ))
             .unwrap();
             let profile = profile_catalog.profile(&profile_id).unwrap().clone();
+            let requested_args = profile.allowed_args().to_vec();
             let mut permits = InMemoryPermitRegistry::default();
             let permit_token = permits.insert(permit);
 
             Self {
-                executor: ApprovedUseExecutor::new(broker),
-                permits,
+                runner: ProfileManifestManagedCommandRunner {
+                    profiles: profile_catalog,
+                    permits,
+                    executor: ApprovedUseExecutor::new(broker),
+                    principal,
+                    clock: FixedManagedCommandClock(
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                    ),
+                },
                 permit_token,
-                principal,
-                profile,
+                profile_id,
+                requested_args,
             }
         }
 
         fn config(&self) -> RunManagedCommandConfig {
             RunManagedCommandConfig {
-                profile_id: self.profile.profile_id().clone(),
+                profile_id: self.profile_id.clone(),
                 permit: self.permit_token.clone(),
-                requested_args: self.profile.allowed_args().to_vec(),
+                requested_args: self.requested_args.clone(),
             }
         }
-    }
 
-    #[cfg(unix)]
-    #[async_trait]
-    impl ManagedCommandRunner for FixtureManagedCommandRunner {
-        async fn run(
-            &mut self,
-            config: &RunManagedCommandConfig,
-        ) -> Result<ManagedCommandCliOutcome> {
-            if &config.profile_id != self.profile.profile_id() {
-                anyhow::bail!("fixture profile not found");
-            }
-            let permit = self.permits.resolve(&config.permit)?;
-            let outcome = self
-                .executor
-                .run_managed_command(ManagedCommandRequest {
-                    profile: &self.profile,
-                    permit: &permit,
-                    principal: &self.principal,
-                    requested_args: config.requested_args.clone(),
-                    now: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
-                })
-                .await?;
-            Ok(outcome.into())
+        fn runner_mut(&mut self) -> &mut FixtureProfileManifestRunner {
+            &mut self.runner
         }
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn run_command_fixture_path_calls_executor_and_redacts_output() {
-        let mut runner = FixtureManagedCommandRunner::new(vec![
+        let mut harness = FixtureManagedCommandHarness::new(vec![
             "-c".to_string(),
             "printf 'stdout:%s' \"$GITHUB_TOKEN\"; printf 'stderr:%s' \"$GITHUB_TOKEN\" >&2"
                 .to_string(),
         ])
         .await;
-        let config = runner.config();
+        let config = harness.config();
 
-        let outcome = run_managed_command_with(&config, &mut runner)
+        let outcome = run_managed_command_with(&config, harness.runner_mut())
             .await
             .unwrap();
 
@@ -1351,17 +1469,17 @@ mod tests {
     async fn run_command_fixture_path_rejects_wrong_permit_before_execution() {
         let marker =
             std::env::temp_dir().join(format!("janusd-run-fixture-{}", std::process::id()));
-        let mut runner = FixtureManagedCommandRunner::new(vec![
+        let mut harness = FixtureManagedCommandHarness::new(vec![
             "-c".to_string(),
             "printf spawned > \"$1\"".to_string(),
             "janusd-fixture".to_string(),
             marker.to_string_lossy().into_owned(),
         ])
         .await;
-        let mut config = runner.config();
+        let mut config = harness.config();
         config.permit = PermitToken::new("use_wrongfixture").unwrap();
 
-        let err = run_managed_command_with(&config, &mut runner)
+        let err = run_managed_command_with(&config, harness.runner_mut())
             .await
             .unwrap_err();
 

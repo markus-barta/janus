@@ -15,6 +15,7 @@ use janus_core::{
     Purpose, SecretBroker, SecretDescriptor, SecretRef, SecretStore, Severity, TrustLevel,
     UsePermit,
 };
+use janus_local::{NoopPermitStore, PermitStore};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -186,18 +187,31 @@ pub struct ToolErrorView {
 }
 
 /// SDK-agnostic Warden handler over the Janus broker.
-pub struct WardenRuntime<S, A> {
+pub struct WardenRuntime<S, A, P = NoopPermitStore> {
     broker: SecretBroker<S, A>,
+    permits: P,
 }
 
-impl<S, A> WardenRuntime<S, A>
+impl<S, A> WardenRuntime<S, A, NoopPermitStore>
 where
     S: SecretStore,
     A: AuditSink,
 {
-    /// Construct a Warden runtime from the core broker.
+    /// Construct a Warden runtime from the core broker with no permit handoff.
     pub fn new(broker: SecretBroker<S, A>) -> Self {
-        Self { broker }
+        Self::with_permit_store(broker, NoopPermitStore)
+    }
+}
+
+impl<S, A, P> WardenRuntime<S, A, P>
+where
+    S: SecretStore,
+    A: AuditSink,
+    P: PermitStore,
+{
+    /// Construct a Warden runtime from the core broker and permit handoff store.
+    pub fn with_permit_store(broker: SecretBroker<S, A>, permits: P) -> Self {
+        Self { broker, permits }
     }
 
     /// List model-safe descriptors only.
@@ -249,6 +263,7 @@ where
                 now,
             )
             .await?;
+        self.permits.store(&permit)?;
         Ok(permit_view(&permit))
     }
 
@@ -589,6 +604,7 @@ fn tool_error_view(error: JanusError) -> ToolErrorView {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime};
 
     use janus_core::{
@@ -643,6 +659,16 @@ mod tests {
     fn runtime_with_profile_enabled(
         profile_enabled: bool,
     ) -> (WardenRuntime<MockStore, AuditWrite>, SecretRef) {
+        runtime_with_profile_enabled_and_permits(profile_enabled, NoopPermitStore)
+    }
+
+    fn runtime_with_profile_enabled_and_permits<P>(
+        profile_enabled: bool,
+        permits: P,
+    ) -> (WardenRuntime<MockStore, AuditWrite, P>, SecretRef)
+    where
+        P: PermitStore,
+    {
         let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
         let secret_ref = SecretRef::for_manifest_entry(&project, &name);
@@ -675,7 +701,35 @@ mod tests {
             ProfilePolicy::new(vec![profile]),
             AuditWrite::accepting(),
         );
-        (WardenRuntime::new(broker), secret_ref)
+        (
+            WardenRuntime::with_permit_store(broker, permits),
+            secret_ref,
+        )
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingPermitStore {
+        permit_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl PermitStore for RecordingPermitStore {
+        fn store(&self, permit: &UsePermit) -> JanusResult<()> {
+            self.permit_ids
+                .lock()
+                .unwrap()
+                .push(permit.id().as_str().to_string());
+            Ok(())
+        }
+    }
+
+    struct FailingPermitStore;
+
+    impl PermitStore for FailingPermitStore {
+        fn store(&self, _permit: &UsePermit) -> JanusResult<()> {
+            Err(JanusError::StoreUnavailable {
+                detail: "permit store unavailable".to_string(),
+            })
+        }
     }
 
     fn assert_integrity_event(
@@ -818,6 +872,51 @@ mod tests {
         assert_eq!(permit.destination, "deploy-api");
         assert!(!permit.value_returned);
         assert!(!format!("{permit:?}").contains("expected-canary"));
+    }
+
+    #[tokio::test]
+    async fn request_use_stores_permit_for_local_handoff() {
+        let recorder = RecordingPermitStore::default();
+        let observed = recorder.permit_ids.clone();
+        let (mut runtime, secret_ref) = runtime_with_profile_enabled_and_permits(true, recorder);
+        let principal = principal();
+
+        let permit = runtime
+            .request_use(
+                RequestUseArgs {
+                    secret_ref,
+                    profile_id: ProfileId::new("profile.canary").unwrap(),
+                    purpose: Purpose::new("deploy canary").unwrap(),
+                },
+                &principal,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(observed.lock().unwrap().as_slice(), &[permit.permit_id]);
+    }
+
+    #[tokio::test]
+    async fn request_use_fails_closed_when_local_handoff_fails() {
+        let (mut runtime, secret_ref) =
+            runtime_with_profile_enabled_and_permits(true, FailingPermitStore);
+        let principal = principal();
+
+        let err = runtime
+            .request_use(
+                RequestUseArgs {
+                    secret_ref,
+                    profile_id: ProfileId::new("profile.canary").unwrap(),
+                    purpose: Purpose::new("deploy canary").unwrap(),
+                },
+                &principal,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, JanusError::StoreUnavailable { .. }));
     }
 
     #[tokio::test]

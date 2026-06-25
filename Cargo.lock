@@ -1260,6 +1260,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "janus-local"
+version = "0.0.0"
+dependencies = [
+ "janus-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "janus-mock"
 version = "0.0.0"
 dependencies = [
@@ -1302,6 +1312,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "janus-core",
+ "janus-local",
  "janus-mock",
  "janus-provider-age",
  "janus-providers",
@@ -1322,6 +1333,7 @@ dependencies = [
  "janus-core",
  "janus-executor",
  "janus-forge",
+ "janus-local",
  "janus-mock",
  "janus-provider-age",
  "janus-warden",

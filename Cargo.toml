@@ -8,6 +8,7 @@ members = [
     "crates/janus-core",
     "crates/janus-executor",
     "crates/janus-provider-age",
+    "crates/janus-local",
     "crates/janus-warden",
     "crates/janus-forge",
     "crates/janus-mock",

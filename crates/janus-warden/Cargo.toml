@@ -19,6 +19,7 @@ path = "src/main.rs"
 anyhow = "1"
 async-trait = "0.1"
 janus-core = { path = "../janus-core" }
+janus-local = { path = "../janus-local" }
 janus-provider-age = { path = "../janus-provider-age" }
 janus-providers = { path = "../janus-providers" }
 rmcp = { version = "=1.7.0", default-features = false, features = ["server", "transport-io"] }

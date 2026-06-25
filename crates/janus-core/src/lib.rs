@@ -29,7 +29,7 @@ pub use error::{JanusError, JanusResult};
 pub use manifest::ManifestCatalog;
 pub use policy::{
     EgressMode, PermitId, PermitIssuer, PolicyDecision, ProfileId, ProfilePolicy, Purpose,
-    TrustLevel, UsePermit, UseProfile, UseRequest,
+    TrustLevel, UsePermit, UsePermitSnapshot, UseProfile, UseRequest,
 };
 pub use principal::{Principal, PrincipalChain, PrincipalId, PrincipalKind, ScopeRef};
 pub use refs::{

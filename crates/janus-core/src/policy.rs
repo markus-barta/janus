@@ -1,7 +1,7 @@
 //! Default-deny policy and use-permit model.
 
 use std::fmt;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, Destination, ExecutorRef, JanusError,
@@ -150,6 +150,22 @@ impl PermitId {
         Self(format!("use_{}", hex::encode(&digest[..12])))
     }
 
+    /// Rehydrate a previously issued opaque permit id.
+    pub fn from_opaque(value: impl Into<String>) -> JanusResult<Self> {
+        let value = value.into();
+        if value.trim().is_empty()
+            || value.trim().len() != value.len()
+            || !value.starts_with("use_")
+            || value.len() <= "use_".len()
+            || !value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return Err(JanusError::InvalidIdentifier { kind: "permit_id" });
+        }
+        Ok(Self(value))
+    }
+
     /// Opaque permit id text. This is power-bearing and should be handled as a
     /// token, not logged casually.
     pub fn as_str(&self) -> &str {
@@ -173,6 +189,31 @@ pub struct UsePermit {
     executor: ExecutorRef,
     principal_binding: String,
     expires_at: SystemTime,
+}
+
+/// Durable, value-free snapshot of a permit.
+///
+/// This is intentionally not model-facing: the permit id and principal binding
+/// remain power-bearing. It exists so local runtimes can persist an issued
+/// permit and later rehydrate it for the normal broker validation path.
+#[derive(Clone, PartialEq, Eq)]
+pub struct UsePermitSnapshot {
+    /// Opaque permit id.
+    pub permit_id: String,
+    /// Secret ref this permit is bound to.
+    pub secret_ref: String,
+    /// Profile this permit is bound to.
+    pub profile_id: String,
+    /// Destination this permit is bound to.
+    pub destination: String,
+    /// Executor this permit is bound to.
+    pub executor: String,
+    /// Principal binding key this permit is bound to.
+    pub principal_binding: String,
+    /// Permit expiry seconds since the Unix epoch.
+    pub expires_at_unix_secs: u64,
+    /// Permit expiry nanoseconds within the epoch second.
+    pub expires_at_subsec_nanos: u32,
 }
 
 impl UsePermit {
@@ -216,6 +257,53 @@ impl UsePermit {
     /// Whether the permit is expired at the supplied instant.
     pub fn is_expired_at(&self, now: SystemTime) -> bool {
         now >= self.expires_at
+    }
+
+    /// Export a durable snapshot for local permit registries.
+    pub fn snapshot(&self) -> UsePermitSnapshot {
+        let expires_at = self
+            .expires_at
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        UsePermitSnapshot {
+            permit_id: self.id.as_str().to_string(),
+            secret_ref: self.secret_ref.as_str().to_string(),
+            profile_id: self.profile_id.as_str().to_string(),
+            destination: self.destination.as_str().to_string(),
+            executor: self.executor.as_str().to_string(),
+            principal_binding: self.principal_binding.clone(),
+            expires_at_unix_secs: expires_at.as_secs(),
+            expires_at_subsec_nanos: expires_at.subsec_nanos(),
+        }
+    }
+
+    /// Rehydrate a durable snapshot for broker-side validation.
+    pub fn from_snapshot(snapshot: UsePermitSnapshot) -> JanusResult<Self> {
+        if snapshot.principal_binding.trim().is_empty()
+            || snapshot.principal_binding.trim().len() != snapshot.principal_binding.len()
+        {
+            return Err(JanusError::InvalidIdentifier {
+                kind: "principal_binding",
+            });
+        }
+        if snapshot.expires_at_subsec_nanos >= 1_000_000_000 {
+            return Err(JanusError::InvalidIdentifier {
+                kind: "permit_expiry",
+            });
+        }
+        Ok(Self {
+            id: PermitId::from_opaque(snapshot.permit_id)?,
+            secret_ref: SecretRef::new(snapshot.secret_ref)?,
+            profile_id: ProfileId::new(snapshot.profile_id)?,
+            destination: Destination::new(snapshot.destination)?,
+            executor: ExecutorRef::new(snapshot.executor)?,
+            principal_binding: snapshot.principal_binding,
+            expires_at: UNIX_EPOCH
+                + Duration::new(
+                    snapshot.expires_at_unix_secs,
+                    snapshot.expires_at_subsec_nanos,
+                ),
+        })
     }
 
     /// Check whether this permit can be consumed by a principal/executor/destination.
@@ -264,6 +352,21 @@ impl fmt::Debug for UsePermit {
             .field("executor", &self.executor)
             .field("principal_binding", &"<redacted>")
             .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl fmt::Debug for UsePermitSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UsePermitSnapshot")
+            .field("permit_id", &"<redacted>")
+            .field("secret_ref", &self.secret_ref)
+            .field("profile_id", &self.profile_id)
+            .field("destination", &self.destination)
+            .field("executor", &self.executor)
+            .field("principal_binding", &"<redacted>")
+            .field("expires_at_unix_secs", &self.expires_at_unix_secs)
+            .field("expires_at_subsec_nanos", &self.expires_at_subsec_nanos)
             .finish()
     }
 }
@@ -555,6 +658,28 @@ mod tests {
         let rendered = format!("{permit:?}");
         assert!(rendered.contains("<redacted>"));
         assert!(!rendered.contains("permit:profile.deploy"));
+        assert!(!rendered.contains("executor:runner-a|scope:proj/dev"));
+    }
+
+    #[test]
+    fn permit_snapshot_round_trips_without_debug_leaking_bindings() {
+        let policy = ProfilePolicy::new(vec![profile(true)]);
+        let mut issuer = PermitIssuer::new(policy, AuditWrite::accepting());
+        let permit = issuer
+            .issue(
+                &request("deploy-api"),
+                &principal("runner-a"),
+                SystemTime::UNIX_EPOCH,
+            )
+            .unwrap();
+        let snapshot = permit.snapshot();
+        let rendered = format!("{snapshot:?}");
+
+        let rehydrated = UsePermit::from_snapshot(snapshot).unwrap();
+
+        assert_eq!(rehydrated, permit);
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains(permit.id().as_str()));
         assert!(!rendered.contains("executor:runner-a|scope:proj/dev"));
     }
 
