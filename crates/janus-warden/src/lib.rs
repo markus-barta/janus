@@ -57,6 +57,30 @@ pub fn tool_definitions() -> &'static [ToolDefinition; 4] {
     &TOOL_DEFINITIONS
 }
 
+const FORBIDDEN_MODEL_OUTPUT_KEYS: &[&str] = &[
+    "value",
+    "values",
+    "secret_value",
+    "secret_values",
+    "secret_literal",
+    "literal",
+    "plaintext",
+    "plain_text",
+    "raw_secret",
+    "raw_value",
+    "raw_name",
+    "secret_name",
+    "backend_path",
+    "source_path",
+    "request_body",
+    "env",
+    "environment",
+    "token",
+    "cookie",
+    "connector_output",
+    "permit_payload",
+];
+
 /// Model-facing descriptor. It intentionally omits raw manifest names and
 /// backend paths.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -245,7 +269,7 @@ where
         principal: &PrincipalChain,
         now: SystemTime,
     ) -> ToolCallResponse {
-        match self.call_tool_json_inner(name, args, principal, now).await {
+        let response = match self.call_tool_json_inner(name, args, principal, now).await {
             Ok(result) => ToolCallResponse {
                 ok: true,
                 result: Some(result),
@@ -258,6 +282,11 @@ where
                 error: Some(error),
                 value_returned: false,
             },
+        };
+        if enforce_tool_response_boundary(&response).is_err() {
+            redaction_required_response()
+        } else {
+            response
         }
     }
 
@@ -381,7 +410,7 @@ fn require_exact_keys(args: &Value, expected: &[&'static str]) -> Result<(), Too
         if !expected.iter().any(|expected_key| key == expected_key) {
             return Err(ToolErrorView {
                 reason_code: "denied_invalid_args",
-                detail: format!("unsupported argument: {key}"),
+                detail: "unsupported argument supplied".to_string(),
             });
         }
     }
@@ -394,6 +423,47 @@ fn require_exact_keys(args: &Value, expected: &[&'static str]) -> Result<(), Too
         }
     }
     Ok(())
+}
+
+fn enforce_tool_response_boundary(response: &ToolCallResponse) -> Result<(), &'static str> {
+    let value =
+        serde_json::to_value(response).expect("Warden tool response should serialize for guard");
+    enforce_value_free_json(&value)
+}
+
+fn enforce_value_free_json(value: &Value) -> Result<(), &'static str> {
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                if key == "value_returned" && nested != &Value::Bool(false) {
+                    return Err("value_returned_true");
+                }
+                if FORBIDDEN_MODEL_OUTPUT_KEYS.contains(&key.as_str()) {
+                    return Err("forbidden_value_key");
+                }
+                enforce_value_free_json(nested)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                enforce_value_free_json(item)?;
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+    Ok(())
+}
+
+fn redaction_required_response() -> ToolCallResponse {
+    ToolCallResponse {
+        ok: false,
+        result: None,
+        error: Some(ToolErrorView {
+            reason_code: "redaction_required",
+            detail: "Warden response failed the value-free output boundary".to_string(),
+        }),
+        value_returned: false,
+    }
 }
 
 fn tool_invalid_identifier(error: JanusError) -> ToolErrorView {
@@ -502,6 +572,22 @@ mod tests {
             AuditWrite::accepting(),
         );
         (WardenRuntime::new(broker), secret_ref)
+    }
+
+    fn dynamic_key_object(key: &str, value: Value) -> Value {
+        let mut object = serde_json::Map::new();
+        object.insert(key.to_string(), value);
+        Value::Object(object)
+    }
+
+    fn assert_no_fixture_literal(output: &ToolCallResponse) {
+        let rendered = serde_json::to_string(output).unwrap();
+        for forbidden in ["expected-canary", "CANARY"] {
+            assert!(
+                !rendered.contains(forbidden),
+                "Warden output echoed fixture literal or raw name {forbidden}: {rendered}"
+            );
+        }
     }
 
     #[test]
@@ -732,9 +818,112 @@ mod tests {
                 output.error.as_ref().unwrap().reason_code,
                 "denied_invalid_args"
             );
-            let rendered = format!("{output:?}");
-            assert!(!rendered.contains("expected-canary"));
-            assert!(!rendered.contains("CANARY"));
+            assert_no_fixture_literal(&output);
         }
+    }
+
+    #[tokio::test]
+    async fn malformed_json_dispatch_does_not_echo_secret_like_input() {
+        let (mut runtime, secret_ref) = runtime();
+        let principal = principal();
+        let secret_like = "expected-canary";
+
+        let mut request_with_extra_key = serde_json::Map::new();
+        request_with_extra_key.insert("secret_ref".to_string(), json!(secret_ref.as_str()));
+        request_with_extra_key.insert("profile_id".to_string(), json!("profile.canary"));
+        request_with_extra_key.insert("purpose".to_string(), json!("deploy canary"));
+        request_with_extra_key.insert(secret_like.to_string(), json!("attacker-controlled"));
+
+        let mut request_with_extra_value = serde_json::Map::new();
+        request_with_extra_value.insert("secret_ref".to_string(), json!(secret_ref.as_str()));
+        request_with_extra_value.insert("profile_id".to_string(), json!("profile.canary"));
+        request_with_extra_value.insert("purpose".to_string(), json!("deploy canary"));
+        request_with_extra_value.insert("destination".to_string(), json!(secret_like));
+
+        let mut describe_with_extra_key = serde_json::Map::new();
+        describe_with_extra_key.insert("secret_ref".to_string(), json!(secret_ref.as_str()));
+        describe_with_extra_key.insert(secret_like.to_string(), json!(true));
+
+        let cases = [
+            ("list_secrets", dynamic_key_object(secret_like, json!(true))),
+            ("describe_secret", Value::Object(describe_with_extra_key)),
+            ("request_use", Value::Object(request_with_extra_key)),
+            ("request_use", Value::Object(request_with_extra_value)),
+            ("health", dynamic_key_object(secret_like, json!("ignored"))),
+            ("expected-canary", json!({})),
+            (
+                "describe_secret",
+                json!({ "secret_ref": "expected-canary" }),
+            ),
+            (
+                "request_use",
+                json!({
+                    "secret_ref": "expected-canary",
+                    "profile_id": "profile.canary",
+                    "purpose": "deploy canary"
+                }),
+            ),
+            (
+                "request_use",
+                json!({
+                    "secret_ref": secret_ref.as_str(),
+                    "profile_id": "expected-canary",
+                    "purpose": "deploy canary"
+                }),
+            ),
+            (
+                "request_use",
+                json!({
+                    "secret_ref": secret_ref.as_str(),
+                    "profile_id": "profile.canary",
+                    "purpose": "expected-canary"
+                }),
+            ),
+        ];
+
+        for (tool, args) in cases {
+            let output = runtime
+                .call_tool_json(tool, args, &principal, SystemTime::UNIX_EPOCH)
+                .await;
+            assert!(!output.value_returned);
+            assert_no_fixture_literal(&output);
+        }
+    }
+
+    #[test]
+    fn tool_response_boundary_rejects_value_bearing_shapes() {
+        let leaky_value = ToolCallResponse {
+            ok: true,
+            result: Some(json!({
+                "value_returned": false,
+                "value": "expected-canary"
+            })),
+            error: None,
+            value_returned: false,
+        };
+        assert!(enforce_tool_response_boundary(&leaky_value).is_err());
+
+        let leaky_flag = ToolCallResponse {
+            ok: true,
+            result: Some(json!({
+                "value_returned": true,
+                "secret_ref": "sec_fixture"
+            })),
+            error: None,
+            value_returned: false,
+        };
+        assert!(enforce_tool_response_boundary(&leaky_flag).is_err());
+
+        let value_free = ToolCallResponse {
+            ok: true,
+            result: Some(json!({
+                "secret_ref": "sec_fixture",
+                "label": "Fixture",
+                "value_returned": false
+            })),
+            error: None,
+            value_returned: false,
+        };
+        assert!(enforce_tool_response_boundary(&value_free).is_ok());
     }
 }
