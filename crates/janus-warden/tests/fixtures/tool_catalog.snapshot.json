@@ -1,0 +1,60 @@
+[
+  {
+    "name": "list_secrets",
+    "description": "List model-safe secret descriptors: curated labels, opaque SecretRefs, presence, trust tier, scope, and allowed use profiles. Never returns names, backend paths, or values.",
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "describe_secret",
+    "description": "Describe one manifest-declared secret by opaque SecretRef. Returns model-safe metadata and allowed use profiles only. Unknown refs return a denial and no permit.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "secret_ref": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "secret_ref"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "request_use",
+    "description": "Request an opaque short-lived UsePermit by SecretRef, reviewed profile id, and purpose. Destination, executor, egress, command, args, and TTL come from policy, not caller input.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "secret_ref": {
+          "type": "string"
+        },
+        "profile_id": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "secret_ref",
+        "profile_id",
+        "purpose"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "health",
+    "description": "Return redacted Warden/backend health for this principal chain. No secret metadata or values are returned.",
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  }
+]

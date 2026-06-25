@@ -590,6 +590,22 @@ mod tests {
         }
     }
 
+    fn reviewed_tool_catalog_value() -> Value {
+        Value::Array(
+            tool_definitions()
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": serde_json::from_str::<Value>(tool.input_schema)
+                            .expect("static Warden tool schema should be valid JSON"),
+                    })
+                })
+                .collect(),
+        )
+    }
+
     #[test]
     fn tool_catalog_is_reference_and_permit_only() {
         let tools = tool_definitions();
@@ -612,6 +628,18 @@ mod tests {
                 "tool catalog exposed forbidden tool text {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn tool_catalog_matches_reviewed_snapshot() {
+        let expected: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/tool_catalog.snapshot.json"))
+                .expect("reviewed Warden tool catalog snapshot should be valid JSON");
+        assert_eq!(
+            reviewed_tool_catalog_value(),
+            expected,
+            "Warden MCP tool names, descriptions, or schemas changed; update the reviewed snapshot intentionally"
+        );
     }
 
     #[tokio::test]
