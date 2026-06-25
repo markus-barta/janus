@@ -93,6 +93,26 @@ where
         self.store.health().await
     }
 
+    /// Record a value-free denial for a request rejected before a deeper core
+    /// operation can be constructed.
+    pub fn record_denial(
+        &mut self,
+        action: AuditAction,
+        reason_code: &'static str,
+        severity: Severity,
+        secret_ref: Option<SecretRef>,
+        principal: &PrincipalChain,
+    ) -> JanusResult<()> {
+        self.audit.record(AuditEvent::new(
+            action,
+            AuditOutcome::Denied,
+            reason_code,
+            severity,
+            secret_ref,
+            principal,
+        ))
+    }
+
     /// Internal approved read path used by non-LLM/provider/tracer code. Agents
     /// should receive refs/permits, not call this.
     pub async fn get(
