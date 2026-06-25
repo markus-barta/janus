@@ -521,7 +521,7 @@ mod tests {
         AuditAction, AuditOutcome, AuditWrite, Destination, EgressMode, ExecutorRef, JanusError,
         ManifestCatalog, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId,
         ProfilePolicy, ProjectId, Purpose, SafeLabel, ScopeRef, SecretBroker, SecretMeta,
-        SecretName, SecretRef, TrustLevel, UseProfile,
+        SecretName, SecretRef, Severity, TrustLevel, UseProfile,
     };
     use janus_mock::MockStore;
     use serde_json::json;
@@ -538,7 +538,37 @@ mod tests {
         )
     }
 
+    fn full_principal() -> PrincipalChain {
+        let mut principal = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("warden-stdio").unwrap(),
+            ),
+            ScopeRef::new("project:JANUS,repo:github.com/markus-barta/janus,task:JANUS-22,host:mbp0,session:mcp-session-1")
+                .unwrap(),
+        );
+        principal.agent = Some(Principal::new(
+            PrincipalKind::AgentSession,
+            PrincipalId::new("session:agent-session-1,model:codex").unwrap(),
+        ));
+        principal.human = Some(Principal::new(
+            PrincipalKind::Human,
+            PrincipalId::new("human-markus").unwrap(),
+        ));
+        principal.workload = Some(Principal::new(
+            PrincipalKind::Workload,
+            PrincipalId::new("stdio-mcp-client").unwrap(),
+        ));
+        principal
+    }
+
     fn runtime() -> (WardenRuntime<MockStore, AuditWrite>, SecretRef) {
+        runtime_with_profile_enabled(true)
+    }
+
+    fn runtime_with_profile_enabled(
+        profile_enabled: bool,
+    ) -> (WardenRuntime<MockStore, AuditWrite>, SecretRef) {
         let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
         let secret_ref = SecretRef::for_manifest_entry(&project, &name);
@@ -564,7 +594,7 @@ mod tests {
             trust_level: TrustLevel::L2,
             ttl: Duration::from_secs(60),
             single_use: true,
-            enabled: true,
+            enabled: profile_enabled,
         };
         let broker = SecretBroker::new(
             store,
@@ -572,6 +602,28 @@ mod tests {
             AuditWrite::accepting(),
         );
         (WardenRuntime::new(broker), secret_ref)
+    }
+
+    fn assert_integrity_event(
+        event: &janus_core::AuditEvent,
+        action: AuditAction,
+        outcome: AuditOutcome,
+        reason_code: &'static str,
+        severity: Severity,
+        principal_binding: &str,
+    ) {
+        assert_eq!(event.action, action);
+        assert_eq!(event.outcome, outcome);
+        assert_eq!(event.reason_code, reason_code);
+        assert_eq!(event.severity, severity);
+        assert_eq!(event.principal_binding, principal_binding);
+        assert!(!event.value_returned);
+        assert!(event.sequence.is_some());
+        assert!(event.prev_hash.is_some());
+        assert!(event
+            .event_hash
+            .as_ref()
+            .is_some_and(|hash| hash.len() == 64));
     }
 
     fn dynamic_key_object(key: &str, value: Value) -> Value {
@@ -725,6 +777,148 @@ mod tests {
                     .as_ref()
                     .is_some_and(|hash| hash.len() == 64)
         }));
+    }
+
+    #[tokio::test]
+    async fn json_dispatch_audits_full_principal_chain_for_each_tool() {
+        let (mut runtime, secret_ref) = runtime();
+        let principal = full_principal();
+        let binding = principal.binding_key();
+
+        for (tool, args) in [
+            ("list_secrets", json!({})),
+            (
+                "describe_secret",
+                json!({ "secret_ref": secret_ref.as_str() }),
+            ),
+            (
+                "request_use",
+                json!({
+                    "secret_ref": secret_ref.as_str(),
+                    "profile_id": "profile.canary",
+                    "purpose": "deploy canary"
+                }),
+            ),
+            ("health", json!({})),
+        ] {
+            let output = runtime
+                .call_tool_json(tool, args, &principal, SystemTime::UNIX_EPOCH)
+                .await;
+            assert!(output.ok, "expected {tool} to succeed: {output:?}");
+            assert!(!output.value_returned);
+        }
+
+        let broker = runtime.into_broker();
+        let (_store, _policy, audit) = broker.into_parts();
+        let events = audit.events();
+        assert_eq!(events.len(), 5);
+        assert_integrity_event(
+            &events[0],
+            AuditAction::SecretList,
+            AuditOutcome::Allowed,
+            "ok",
+            Severity::Info,
+            &binding,
+        );
+        assert_integrity_event(
+            &events[1],
+            AuditAction::SecretDescribe,
+            AuditOutcome::Allowed,
+            "ok",
+            Severity::Info,
+            &binding,
+        );
+        assert_eq!(events[1].secret_ref.as_ref(), Some(&secret_ref));
+        assert_integrity_event(
+            &events[2],
+            AuditAction::PermitRequest,
+            AuditOutcome::Allowed,
+            "ok",
+            Severity::Notice,
+            &binding,
+        );
+        assert_integrity_event(
+            &events[3],
+            AuditAction::PermitIssue,
+            AuditOutcome::Allowed,
+            "ok",
+            Severity::Notice,
+            &binding,
+        );
+        assert_integrity_event(
+            &events[4],
+            AuditAction::BackendHealth,
+            AuditOutcome::Allowed,
+            "ok",
+            Severity::Info,
+            &binding,
+        );
+    }
+
+    #[tokio::test]
+    async fn request_use_denials_audit_reason_and_full_principal_chain() {
+        let principal = full_principal();
+        let binding = principal.binding_key();
+
+        let (mut missing_profile_runtime, secret_ref) = runtime();
+        let missing_profile = missing_profile_runtime
+            .call_tool_json(
+                "request_use",
+                json!({
+                    "secret_ref": secret_ref.as_str(),
+                    "profile_id": "profile.missing",
+                    "purpose": "deploy canary"
+                }),
+                &principal,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await;
+        assert!(!missing_profile.ok);
+        assert_eq!(
+            missing_profile.error.as_ref().unwrap().reason_code,
+            "denied_no_matching_profile"
+        );
+        let (_store, _policy, audit) = missing_profile_runtime.into_broker().into_parts();
+        assert_eq!(audit.events().len(), 1);
+        assert_integrity_event(
+            &audit.events()[0],
+            AuditAction::PermitDeny,
+            AuditOutcome::Denied,
+            "denied_no_matching_profile",
+            Severity::Warning,
+            &binding,
+        );
+        assert_eq!(audit.events()[0].secret_ref.as_ref(), Some(&secret_ref));
+
+        let (mut disabled_profile_runtime, secret_ref) = runtime_with_profile_enabled(false);
+        let disabled_profile = disabled_profile_runtime
+            .call_tool_json(
+                "request_use",
+                json!({
+                    "secret_ref": secret_ref.as_str(),
+                    "profile_id": "profile.canary",
+                    "purpose": "deploy canary"
+                }),
+                &principal,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await;
+        assert!(!disabled_profile.ok);
+        assert_eq!(
+            disabled_profile.error.as_ref().unwrap().reason_code,
+            "denied_profile_disabled"
+        );
+        let (_store, _policy, audit) = disabled_profile_runtime.into_broker().into_parts();
+        assert_eq!(audit.events().len(), 1);
+        assert_integrity_event(
+            &audit.events()[0],
+            AuditAction::PermitDeny,
+            AuditOutcome::Denied,
+            "denied_profile_disabled",
+            Severity::Warning,
+            &binding,
+        );
+        assert_eq!(audit.events()[0].secret_ref.as_ref(), Some(&secret_ref));
     }
 
     #[tokio::test]
