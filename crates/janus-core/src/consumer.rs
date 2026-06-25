@@ -169,17 +169,25 @@ impl ConsumerRegistry {
     where
         A: AuditSink,
     {
-        audit.record(AuditEvent::new(
-            AuditAction::ConsumerObserve,
-            AuditOutcome::Allowed,
-            "ok",
-            Severity::Notice,
-            Some(consumer.secret_ref.clone()),
-            principal,
-        ))?;
+        audit.record(consumer_observe_event(&consumer, principal)?)?;
         self.record_observed(consumer);
         Ok(())
     }
+}
+
+pub(crate) fn consumer_observe_event(
+    consumer: &ConsumerDescriptor,
+    principal: &PrincipalChain,
+) -> JanusResult<AuditEvent> {
+    Ok(AuditEvent::new(
+        AuditAction::ConsumerObserve,
+        AuditOutcome::Allowed,
+        "ok",
+        Severity::Notice,
+        Some(consumer.secret_ref.clone()),
+        principal,
+    )
+    .with_evidence(SafeLabel::new(consumer.consumer_ref.as_str())?))
 }
 
 #[cfg(test)]

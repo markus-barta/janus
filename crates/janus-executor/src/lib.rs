@@ -185,6 +185,11 @@ impl ManagedCommandProfile {
         &self.consumer.consumer_ref
     }
 
+    /// Declared consumer metadata used for observation evidence.
+    pub fn consumer(&self) -> &ConsumerDescriptor {
+        &self.consumer
+    }
+
     fn plan_for_args(&self, requested_args: &[String]) -> JanusResult<ManagedCommandPlan> {
         if requested_args != self.allowed_args.as_slice() {
             return Err(JanusError::policy_denied(
@@ -392,6 +397,8 @@ where
             },
         })?
         .redact_known_value(&value);
+        self.broker
+            .record_consumer_observe(request.profile.consumer(), request.principal)?;
         Ok(ManagedCommandOutcome {
             plan,
             output,
@@ -745,6 +752,21 @@ mod tests {
                 && event.reason_code == "ok"
                 && !event.value_returned
         }));
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::ConsumerObserve
+                && event.outcome == AuditOutcome::Allowed
+                && event.reason_code == "ok"
+                && event.secret_ref.as_ref() == Some(profile.secret_ref())
+                && event
+                    .evidence
+                    .as_ref()
+                    .is_some_and(|evidence| evidence.as_str() == profile.consumer_ref().as_str())
+                && !event.value_returned
+                && event
+                    .event_hash
+                    .as_ref()
+                    .is_some_and(|hash| hash.len() == 64)
+        }));
         assert!(!format!("{:?}", audit.events()).contains("expected-canary"));
     }
 
@@ -789,6 +811,10 @@ mod tests {
             .events()
             .iter()
             .any(|event| event.action == AuditAction::SecretUse));
+        assert!(!audit
+            .events()
+            .iter()
+            .any(|event| event.action == AuditAction::ConsumerObserve));
     }
 
     #[test]

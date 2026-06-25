@@ -3,9 +3,10 @@
 use std::time::SystemTime;
 
 use crate::{
-    AuditAction, AuditEvent, AuditOutcome, AuditSink, Destination, ExecutorRef, JanusError,
-    JanusResult, PermitIssuer, PrincipalChain, ProfilePolicy, SecretDescriptor, SecretName,
-    SecretRef, SecretStore, SecretValue, Severity, UsePermit, UseRequest,
+    consumer::consumer_observe_event, AuditAction, AuditEvent, AuditOutcome, AuditSink,
+    ConsumerDescriptor, Destination, ExecutorRef, JanusError, JanusResult, PermitIssuer,
+    PrincipalChain, ProfilePolicy, SecretDescriptor, SecretName, SecretRef, SecretStore,
+    SecretValue, Severity, UsePermit, UseRequest,
 };
 
 /// Policy/audit wrapper around a backend store.
@@ -111,6 +112,16 @@ where
             secret_ref,
             principal,
         ))
+    }
+
+    /// Record value-free evidence that a declared consumer used a secret.
+    pub fn record_consumer_observe(
+        &mut self,
+        consumer: &ConsumerDescriptor,
+        principal: &PrincipalChain,
+    ) -> JanusResult<()> {
+        self.audit
+            .record(consumer_observe_event(consumer, principal)?)
     }
 
     /// Internal approved read path used by non-LLM/provider/tracer code. Agents
