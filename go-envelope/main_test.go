@@ -5713,6 +5713,7 @@ func TestCORSDeniedByDefault(t *testing.T) {
 	}{
 		{http.MethodGet, "/healthz", http.StatusOK},
 		{http.MethodGet, "/readyz", http.StatusOK},
+		{http.MethodGet, "/buildz", http.StatusOK},
 		{http.MethodGet, "/api/posture", http.StatusOK},
 		{http.MethodGet, "/missing", http.StatusNotFound},
 		{http.MethodOptions, "/api/posture", http.StatusMethodNotAllowed},
@@ -6866,6 +6867,65 @@ func TestHealthzIsRedactedLivenessOnly(t *testing.T) {
 	if got := rr.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Fatalf("healthz should keep nosniff header, got %q", got)
 	}
+}
+
+func TestBuildzExposesValueFreeBuildReceipt(t *testing.T) {
+	oldCommit, oldBuildTime := buildCommit, buildTime
+	buildCommit = "bed42fa782289d71f4dcde74c0594a8e398b60cc"
+	buildTime = "2026-06-25T07:25:00Z"
+	defer func() {
+		buildCommit, buildTime = oldCommit, oldBuildTime
+	}()
+	app := newTestApp(t)
+
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/buildz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		`"schema":"janus-runtime-build-receipt-v1"`,
+		`"status":"ok"`,
+		`"service":"janus"`,
+		`"mode":"self_hosted"`,
+		`"serving_binary":"go-envelope"`,
+		`"engine_state":"rust_engine_in_repo_transitional"`,
+		`"build_provenance"`,
+		`"commit":"bed42fa782289d71f4dcde74c0594a8e398b60cc"`,
+		`"commit_short":"bed42fa78228"`,
+		`"build_time":"2026-06-25T07:25:00Z"`,
+		`"commit_bound":true`,
+		`"build_time_bound":true`,
+		`"signed_image_expected":true`,
+		`"sbom_expected":true`,
+		`"provenance_expected":true`,
+		`"digest_pinned_expected":true`,
+		`"redacted":true`,
+		`"artifact_returned":false`,
+		`"sbom_returned":false`,
+		`"scanner_output_returned":false`,
+		`"env_returned":false`,
+		`"backend_path_returned":false`,
+		`"secret_value_returned":false`,
+		`"value_returned":false`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("buildz should include %s: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"oidc_configured", "auth_required", "descriptor_count", "audit_entries", "secret_count", "OIDC_SECRET", "JANUS_CATALOG_FILE", "secret-cookie-secret", "/run/agenix"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("buildz should not expose %q: %s", forbidden, body)
+		}
+	}
+	if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("buildz should keep no-store header, got %q", got)
+	}
+	if got := rr.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("buildz should keep nosniff header, got %q", got)
+	}
+	assertRouteResponseValueFree(t, "buildz", rr)
 }
 
 func TestReadyzLockedWhenAuthMissing(t *testing.T) {

@@ -547,6 +547,7 @@ func (app *App) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", app.handleHealth)
 	mux.HandleFunc("GET /readyz", app.handleReady)
+	mux.HandleFunc("GET /buildz", app.handleBuildReceipt)
 	mux.HandleFunc("GET /favicon.ico", app.handleFavicon)
 	mux.HandleFunc("GET /login", app.handleLogin)
 	mux.HandleFunc("GET /auth/reset", app.handleAuthReset)
@@ -607,7 +608,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/auth/smoke", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/auth/smoke", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
@@ -691,7 +692,7 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 
 func (app *App) rateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/favicon.ico" {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/buildz" || r.URL.Path == "/favicon.ico" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -835,6 +836,30 @@ func (app *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"mode":           app.cfg.ProductMode,
 		"redacted":       true,
 		"value_returned": false,
+	})
+}
+
+func (app *App) handleBuildReceipt(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"schema":                  "janus-runtime-build-receipt-v1",
+		"status":                  "ok",
+		"service":                 "janus",
+		"mode":                    app.cfg.ProductMode,
+		"serving_binary":          "go-envelope",
+		"engine_state":            "rust_engine_in_repo_transitional",
+		"build_provenance":        BuildProvenanceFor(),
+		"signed_image_expected":   true,
+		"sbom_expected":           true,
+		"provenance_expected":     true,
+		"digest_pinned_expected":  true,
+		"redacted":                true,
+		"artifact_returned":       false,
+		"sbom_returned":           false,
+		"scanner_output_returned": false,
+		"env_returned":            false,
+		"backend_path_returned":   false,
+		"secret_value_returned":   false,
+		"value_returned":          false,
 	})
 }
 
