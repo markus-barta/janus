@@ -108,6 +108,51 @@ program = "/usr/local/libexec/janus/reload-deploy"
 args = ["--service", "deploy"]
 ```
 
+**Approved-use run handoff (JANUS-28):**
+Warden issues opaque permits; `janusd run` consumes them through a local
+single-use handoff directory. The directory is local to one host and is created
+private (`0700`), with permit records written private (`0600`).
+
+Both sides must agree on the identity and policy bindings:
+
+```bash
+export JANUS_PERMIT_DIR=/run/janus/permits
+export JANUS_WARDEN_EXECUTOR=janus-run@csb1
+export JANUS_RUN_EXECUTOR=janus-run@csb1
+export JANUS_WARDEN_SCOPE=janus/prod
+export JANUS_RUN_SCOPE=janus/prod
+export JANUS_WARDEN_DESTINATION=deploy-api
+export JANUS_RUN_PROFILE_MANIFEST=/etc/janus/managed-commands.toml
+```
+
+The managed command profile owns executor, destination, secret ref, binary, and
+exact argv. Caller input supplies only the opaque permit id and candidate argv:
+
+```toml
+[[profiles]]
+id = "profile.deploy"
+secret_ref = "sec_deploy_token"
+executor = "janus-run@csb1"
+destination = "deploy-api"
+env = "DEPLOY_TOKEN"
+binary = "/usr/local/libexec/janus/deploy"
+allowed_args = ["release", "apply"]
+
+[profiles.consumer]
+consumer_ref = "consumer.deploy"
+owner = "janusd"
+environment = "prod"
+blast_radius = "deploy-api"
+```
+
+```bash
+janusd run --profile profile.deploy --permit use_... -- release apply
+```
+
+The permit id is power-bearing and should not be logged casually. A copied or
+stale permit still has to pass principal, executor, destination, profile, secret
+ref, manifest membership, expiry, and audit checks before a value is read.
+
 ## Provenance
 
 This repo was extracted from `nixcfg/hosts/csb1/docker/janus` with full history

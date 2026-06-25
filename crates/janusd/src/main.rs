@@ -1466,6 +1466,94 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn warden_file_registry_handoff_smoke_runs_janusd_command() {
+        let permit_dir = tempfile::tempdir().unwrap();
+        let project = ProjectId::new("janus").unwrap();
+        let name = SecretName::new("CANARY").unwrap();
+        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let executor_ref = ExecutorRef::new("janus-run@fixture").unwrap();
+        let destination = Destination::new("fixture-destination").unwrap();
+        let principal = fixture_principal();
+        let use_profile = UseProfile {
+            id: profile_id.clone(),
+            secret_ref: secret_ref.clone(),
+            executor: executor_ref,
+            destination: destination.clone(),
+            egress: EgressMode::Connector,
+            trust_level: TrustLevel::L2,
+            ttl: Duration::from_secs(60),
+            single_use: true,
+            enabled: true,
+        };
+        let mut warden = janus_warden::WardenRuntime::with_permit_store(
+            janus_core::SecretBroker::new(
+                fixture_store(&secret_ref, &name, &profile_id),
+                janus_core::ProfilePolicy::new(vec![use_profile]),
+                AuditWrite::accepting(),
+            ),
+            FilePermitRegistry::new(permit_dir.path()),
+        );
+        let permit = warden
+            .request_use(
+                janus_warden::RequestUseArgs {
+                    secret_ref: secret_ref.clone(),
+                    profile_id: profile_id.clone(),
+                    purpose: Purpose::new("fixture handoff").unwrap(),
+                },
+                &principal,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+
+        let allowed_args = vec![
+            "-c".to_string(),
+            "printf 'handoff:%s' \"$GITHUB_TOKEN\"".to_string(),
+        ];
+        let profiles =
+            ManagedCommandProfileCatalog::parse(&managed_profile_toml(&secret_ref, &allowed_args))
+                .unwrap();
+        let mut runner = ProfileManifestManagedCommandRunner {
+            profiles,
+            permits: FilePermitRegistry::new(permit_dir.path()),
+            executor: ApprovedUseExecutor::new(janus_core::SecretBroker::new(
+                fixture_store(&secret_ref, &name, &profile_id),
+                janus_core::ProfilePolicy::default(),
+                AuditWrite::accepting(),
+            )),
+            principal,
+            clock: FixedManagedCommandClock(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+        };
+        let config = RunManagedCommandConfig {
+            profile_id,
+            permit: PermitToken::new(permit.permit_id.clone()).unwrap(),
+            requested_args: allowed_args,
+        };
+
+        let outcome = run_managed_command_with(&config, &mut runner)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stdout, "handoff:[REDACTED]");
+        assert_eq!(outcome.stderr, "");
+        assert!(outcome.exit_success);
+        assert_eq!(outcome.reason_code, "ok");
+        assert!(!outcome.value_returned);
+        assert!(matches!(
+            janus_local::PermitRegistry::take(
+                &FilePermitRegistry::new(permit_dir.path()),
+                &permit.permit_id,
+            ),
+            Err(JanusError::PermitInvalid {
+                reason_code: "denied_unknown_permit",
+                ..
+            })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn run_command_fixture_path_rejects_wrong_permit_before_execution() {
         let marker =
             std::env::temp_dir().join(format!("janusd-run-fixture-{}", std::process::id()));
@@ -1486,6 +1574,27 @@ mod tests {
         assert!(err.to_string().contains("permit"));
         assert!(!marker.exists());
         let _ = std::fs::remove_file(marker);
+    }
+
+    #[cfg(unix)]
+    fn fixture_store(
+        secret_ref: &SecretRef,
+        name: &SecretName,
+        profile_id: &ProfileId,
+    ) -> MockStore {
+        let catalog = ManifestCatalog::new(vec![SecretMeta {
+            secret_ref: secret_ref.clone(),
+            name: name.clone(),
+            label: SafeLabel::new("Canary token").unwrap(),
+            scope: ScopeRef::new("janus/dev").unwrap(),
+            required: true,
+            trust_level: TrustLevel::L1,
+            allowed_uses: vec![profile_id.clone()],
+        }])
+        .unwrap();
+        MockStore::new(catalog)
+            .with_value(name.clone(), b"expected-canary".to_vec())
+            .unwrap()
     }
 
     #[test]

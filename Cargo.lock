@@ -1338,6 +1338,7 @@ dependencies = [
  "janus-provider-age",
  "janus-warden",
  "serde",
+ "tempfile",
  "tokio",
  "toml 0.8.23",
 ]
