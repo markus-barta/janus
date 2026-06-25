@@ -1,0 +1,28 @@
+FROM rust:1-bookworm AS build
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+RUN cargo build --locked --release -p janusd -p janus-warden
+
+FROM debian:bookworm-slim
+
+LABEL org.opencontainers.image.title="Janus Rust engine"
+LABEL org.opencontainers.image.description="Janus secret-handling engine binaries: janusd and janus-warden"
+LABEL org.opencontainers.image.source="https://github.com/markus-barta/janus"
+LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system janus \
+    && useradd --system --gid janus --home-dir /var/lib/janus --shell /usr/sbin/nologin janus \
+    && mkdir -p /etc/janus /run/janus/age /run/janus/permits /var/lib/janus/secrets \
+    && chown -R janus:janus /run/janus /var/lib/janus
+
+COPY --from=build /src/target/release/janusd /usr/local/bin/janusd
+COPY --from=build /src/target/release/janus-warden /usr/local/bin/janus-warden
+
+USER janus
+ENTRYPOINT ["janusd"]
+CMD ["--help"]

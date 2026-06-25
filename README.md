@@ -77,6 +77,19 @@ cargo test --workspace --locked
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+**Engine image:**
+Publish a signed Rust engine image by creating a GitHub Release whose tag
+matches `rust-engine-v*`:
+
+```bash
+gh release create rust-engine-v0.1.0 --target main \
+  --title "Rust engine v0.1.0" \
+  --notes "First signed Janus Rust engine image."
+```
+
+The release workflow pushes `ghcr.io/markus-barta/janus/janus-engine`, signs it
+keyless with cosign, uploads an SPDX SBOM, and publishes build provenance.
+
 **Envelope (Go):**
 ```bash
 cd go-envelope
