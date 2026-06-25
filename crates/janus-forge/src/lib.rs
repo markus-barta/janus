@@ -289,7 +289,10 @@ where
         self.record_after_prepare(&secret_ref, &rollback, principal)
             .await?;
 
-        if let Err(err) = self.run_validations(&plan.validation).await {
+        if let Err(err) = self
+            .run_validations(&secret_ref, &plan.validation, principal)
+            .await
+        {
             self.rollback_after_failure(&secret_ref, &rollback, principal, "validation_failed")
                 .await?;
             return Err(err);
@@ -303,7 +306,10 @@ where
             Severity::Notice,
         )?;
 
-        if let Err(err) = self.reload_consumers(&consumers).await {
+        if let Err(err) = self
+            .reload_consumers(&secret_ref, &consumers, principal)
+            .await
+        {
             self.rollback_after_failure(&secret_ref, &rollback, principal, "reload_failed")
                 .await?;
             return Err(err);
@@ -417,19 +423,62 @@ where
         Ok(())
     }
 
-    async fn run_validations(&mut self, probes: &[ValidationProbe]) -> JanusResult<()> {
+    async fn run_validations(
+        &mut self,
+        secret_ref: &SecretRef,
+        probes: &[ValidationProbe],
+        principal: &PrincipalChain,
+    ) -> JanusResult<()> {
         for probe in probes {
-            self.hooks.validate(probe).await?;
+            let result = self.hooks.validate(probe).await;
+            let (outcome, reason_code, severity) = match &result {
+                Ok(()) => (AuditOutcome::Allowed, "validated", Severity::Notice),
+                Err(_) => (AuditOutcome::Denied, "validation_failed", Severity::Warning),
+            };
+            self.audit.record(
+                AuditEvent::new(
+                    AuditAction::ConsumerValidate,
+                    outcome,
+                    reason_code,
+                    severity,
+                    Some(secret_ref.clone()),
+                    principal,
+                )
+                .with_evidence(SafeLabel::new(probe.as_str())?),
+            )?;
+            result?;
         }
         Ok(())
     }
 
-    async fn reload_consumers(&mut self, consumers: &[ConsumerDescriptor]) -> JanusResult<()> {
+    async fn reload_consumers(
+        &mut self,
+        secret_ref: &SecretRef,
+        consumers: &[ConsumerDescriptor],
+        principal: &PrincipalChain,
+    ) -> JanusResult<()> {
         for consumer in consumers {
             if consumer.reload != ReloadMethod::None {
-                self.hooks
+                let result = self
+                    .hooks
                     .reload(&consumer.consumer_ref, &consumer.reload)
-                    .await?;
+                    .await;
+                let (outcome, reason_code, severity) = match &result {
+                    Ok(()) => (AuditOutcome::Allowed, "reloaded", Severity::Notice),
+                    Err(_) => (AuditOutcome::Denied, "reload_failed", Severity::Warning),
+                };
+                self.audit.record(
+                    AuditEvent::new(
+                        AuditAction::ConsumerReload,
+                        outcome,
+                        reason_code,
+                        severity,
+                        Some(secret_ref.clone()),
+                        principal,
+                    )
+                    .with_evidence(reload_evidence(consumer)?),
+                )?;
+                result?;
             }
         }
         Ok(())
@@ -483,6 +532,23 @@ where
             principal,
         ))
     }
+}
+
+fn reload_evidence(consumer: &ConsumerDescriptor) -> JanusResult<SafeLabel> {
+    let reload_label = match &consumer.reload {
+        ReloadMethod::None => "none",
+        ReloadMethod::RestartService { service } => service.as_str(),
+        ReloadMethod::Signal { signal } => signal.as_str(),
+        ReloadMethod::ExecHook { hook } => hook.as_str(),
+        ReloadMethod::ConnectorAction { action } => action.as_str(),
+        ReloadMethod::Manual => "manual",
+        ReloadMethod::Unsupported => "unsupported",
+    };
+    SafeLabel::new(format!(
+        "{} {}",
+        consumer.consumer_ref.as_str(),
+        reload_label
+    ))
 }
 
 #[cfg(test)]
@@ -740,6 +806,15 @@ mod tests {
             .collect()
     }
 
+    fn reasons_for(audit: &AuditWrite, action: AuditAction) -> Vec<&'static str> {
+        audit
+            .events()
+            .iter()
+            .filter(|event| event.action == action)
+            .map(|event| event.reason_code)
+            .collect()
+    }
+
     fn is_url_safe(bytes: &[u8]) -> bool {
         bytes
             .iter()
@@ -782,6 +857,14 @@ mod tests {
         assert_eq!(store.rollback_count, 0);
         assert_eq!(hooks.validations, vec!["deploy-smoke"]);
         assert_eq!(hooks.reloads, vec!["consumer.deploy"]);
+        assert_eq!(
+            reasons_for(&audit, AuditAction::ConsumerValidate),
+            vec!["validated"]
+        );
+        assert_eq!(
+            reasons_for(&audit, AuditAction::ConsumerReload),
+            vec!["reloaded"]
+        );
         assert_eq!(
             lifecycle_reasons(&audit),
             vec![
@@ -853,6 +936,11 @@ mod tests {
         assert_eq!(hooks.validations, vec!["deploy-smoke"]);
         assert!(hooks.reloads.is_empty());
         assert_eq!(
+            reasons_for(&audit, AuditAction::ConsumerValidate),
+            vec!["validation_failed"]
+        );
+        assert!(reasons_for(&audit, AuditAction::ConsumerReload).is_empty());
+        assert_eq!(
             lifecycle_reasons(&audit),
             vec!["prepared", "new_value_stored", "validation_failed"]
         );
@@ -896,6 +984,14 @@ mod tests {
         assert_eq!(store.rollback_count, 1);
         assert_eq!(hooks.validations, vec!["deploy-smoke"]);
         assert_eq!(hooks.reloads, vec!["consumer.deploy"]);
+        assert_eq!(
+            reasons_for(&audit, AuditAction::ConsumerValidate),
+            vec!["validated"]
+        );
+        assert_eq!(
+            reasons_for(&audit, AuditAction::ConsumerReload),
+            vec!["reload_failed"]
+        );
         assert_eq!(
             lifecycle_reasons(&audit),
             vec!["prepared", "new_value_stored", "validated", "reload_failed"]

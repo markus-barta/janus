@@ -83,6 +83,31 @@ cd go-envelope
 go build ./... && go test ./...
 ```
 
+**Forge generated rotation (operator surface):**
+```bash
+janusd forge rotate-generated \
+  --secret CANARY \
+  --reason JANUS-28-reviewed-rotation \
+  --consumer-ref consumer.deploy \
+  --validation deploy-smoke \
+  --reload exec-hook:reload-deploy \
+  --hook-manifest /etc/janus/forge-hooks.toml
+```
+
+Hook manifests are reviewed local config. Programs must be absolute paths,
+arguments are arrays, hook stdio is discarded, and the hook environment is
+cleared before Janus adds value-free context variables.
+
+```toml
+[validation."deploy-smoke"]
+program = "/usr/bin/true"
+timeout_seconds = 30
+
+[reload.exec_hook."reload-deploy"]
+program = "/usr/local/libexec/janus/reload-deploy"
+args = ["--service", "deploy"]
+```
+
 ## Provenance
 
 This repo was extracted from `nixcfg/hosts/csb1/docker/janus` with full history

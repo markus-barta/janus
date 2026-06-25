@@ -22,6 +22,10 @@ pub enum AuditAction {
     ConsumerDeclare,
     /// A consumer use event was observed.
     ConsumerObserve,
+    /// A declared consumer validation probe ran.
+    ConsumerValidate,
+    /// A declared consumer reload hook ran.
+    ConsumerReload,
     /// A rotation plan was created.
     RotationPlan,
     /// A high-risk rotation was explicitly approved.
