@@ -9,9 +9,11 @@
 #![forbid(unsafe_code)]
 
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command as ProcessCommand, Output as ProcessOutput, Stdio};
-use std::time::SystemTime;
+use std::process::{Command as ProcessCommand, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 use janus_core::{
     AuditSink, ConsumerDescriptor, ConsumerKind, ConsumerRef, Destination, ExecutorRef, JanusError,
@@ -93,8 +95,31 @@ pub struct ManagedCommandProfileSpec {
     pub binary: PathBuf,
     /// Exact reviewed argv for this first skeleton.
     pub allowed_args: Vec<String>,
+    /// Reviewed process limits for timeout and model-facing output.
+    pub runtime_limits: ManagedCommandRuntimeLimits,
     /// Declared consumer metadata used by rotation evidence.
     pub consumer: ConsumerDescriptor,
+}
+
+/// Reviewed process limits for a managed command profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ManagedCommandRuntimeLimits {
+    /// Maximum wall-clock runtime before Janus kills the child.
+    pub timeout: Duration,
+    /// Maximum stdout bytes captured before the stream is suppressed.
+    pub max_stdout_bytes: usize,
+    /// Maximum stderr bytes captured before the stream is suppressed.
+    pub max_stderr_bytes: usize,
+}
+
+impl Default for ManagedCommandRuntimeLimits {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30),
+            max_stdout_bytes: 64 * 1024,
+            max_stderr_bytes: 64 * 1024,
+        }
+    }
 }
 
 /// A reviewed managed command profile.
@@ -107,6 +132,7 @@ pub struct ManagedCommandProfile {
     env_name: SafeLabel,
     binary: PathBuf,
     allowed_args: Vec<String>,
+    runtime_limits: ManagedCommandRuntimeLimits,
     consumer: ConsumerDescriptor,
 }
 
@@ -124,6 +150,16 @@ impl ManagedCommandProfile {
                     kind: "managed_command_arg",
                 });
             }
+        }
+        if spec.runtime_limits.timeout.is_zero() {
+            return Err(JanusError::InvalidManifest {
+                detail: "managed command timeout must be greater than zero".to_string(),
+            });
+        }
+        if spec.runtime_limits.max_stdout_bytes == 0 || spec.runtime_limits.max_stderr_bytes == 0 {
+            return Err(JanusError::InvalidManifest {
+                detail: "managed command output limits must be greater than zero".to_string(),
+            });
         }
         if spec.consumer.kind != ConsumerKind::ManagedCommand {
             return Err(JanusError::InvalidManifest {
@@ -143,6 +179,7 @@ impl ManagedCommandProfile {
             env_name: spec.env_name,
             binary: spec.binary,
             allowed_args: spec.allowed_args,
+            runtime_limits: spec.runtime_limits,
             consumer: spec.consumer,
         })
     }
@@ -182,6 +219,11 @@ impl ManagedCommandProfile {
         &self.allowed_args
     }
 
+    /// Reviewed process limits for timeout and model-facing output.
+    pub fn runtime_limits(&self) -> ManagedCommandRuntimeLimits {
+        self.runtime_limits
+    }
+
     /// Declared consumer ref for observation/rotation evidence.
     pub fn consumer_ref(&self) -> &ConsumerRef {
         &self.consumer.consumer_ref
@@ -208,6 +250,7 @@ impl ManagedCommandProfile {
             binary: self.binary.clone(),
             args: self.allowed_args.clone(),
             consumer_ref: self.consumer.consumer_ref.clone(),
+            runtime_limits: self.runtime_limits,
             value_returned: false,
         })
     }
@@ -246,6 +289,8 @@ pub struct ManagedCommandPlan {
     pub args: Vec<String>,
     /// Declared consumer.
     pub consumer_ref: ConsumerRef,
+    /// Reviewed runtime limits.
+    pub runtime_limits: ManagedCommandRuntimeLimits,
     /// Invariant marker.
     pub value_returned: bool,
 }
@@ -271,17 +316,46 @@ impl ManagedCommandExecution<'_> {
     /// secret only as the profile's reviewed environment variable.
     pub fn run_process(&self) -> JanusResult<ManagedCommandOutput> {
         let env_value = secret_env_value(self.binding.value.expose_bytes())?;
-        let output = ProcessCommand::new(&self.plan.binary)
+        let mut child = ProcessCommand::new(&self.plan.binary)
             .args(&self.plan.args)
             .env_clear()
             .env(self.binding.env_name.as_str(), env_value)
             .stdin(Stdio::null())
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|_| JanusError::StoreUnavailable {
                 detail: "managed command failed to start".to_string(),
             })?;
 
-        Ok(ManagedCommandOutput::from_process_output(output))
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| JanusError::StoreUnavailable {
+                detail: "managed command stdout capture unavailable".to_string(),
+            })?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| JanusError::StoreUnavailable {
+                detail: "managed command stderr capture unavailable".to_string(),
+            })?;
+        let stdout_handle = thread::spawn({
+            let limit = self.plan.runtime_limits.max_stdout_bytes;
+            move || capture_stream(stdout, limit)
+        });
+        let stderr_handle = thread::spawn({
+            let limit = self.plan.runtime_limits.max_stderr_bytes;
+            move || capture_stream(stderr, limit)
+        });
+
+        let (status, timed_out) = wait_with_timeout(&mut child, self.plan.runtime_limits.timeout)?;
+        let stdout = join_capture(stdout_handle)?;
+        let stderr = join_capture(stderr_handle)?;
+
+        Ok(ManagedCommandOutput::from_captured_process(
+            status, timed_out, stdout, stderr,
+        ))
     }
 }
 
@@ -296,6 +370,14 @@ pub struct ManagedCommandOutput {
     pub exit_success: bool,
     /// Child process exit code where the platform exposes one.
     pub exit_code: Option<i32>,
+    /// Stable value-free process outcome reason.
+    pub reason_code: &'static str,
+    /// Whether Janus killed the child after the reviewed timeout.
+    pub timed_out: bool,
+    /// Whether stdout exceeded the reviewed capture limit.
+    pub stdout_truncated: bool,
+    /// Whether stderr exceeded the reviewed capture limit.
+    pub stderr_truncated: bool,
     /// Invariant marker.
     pub value_returned: bool,
 }
@@ -309,16 +391,41 @@ impl ManagedCommandOutput {
             stderr: stderr.into(),
             exit_success: true,
             exit_code: Some(0),
+            reason_code: "ok",
+            timed_out: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
             value_returned: false,
         }
     }
 
-    fn from_process_output(output: ProcessOutput) -> Self {
+    fn from_captured_process(
+        status: ExitStatus,
+        timed_out: bool,
+        stdout: CapturedStream,
+        stderr: CapturedStream,
+    ) -> Self {
+        let stdout_truncated = stdout.truncated;
+        let stderr_truncated = stderr.truncated;
+        let exit_success = status.success() && !timed_out;
+        let reason_code = if timed_out {
+            "managed_command_timeout"
+        } else if !status.success() {
+            "managed_command_exit_nonzero"
+        } else if stdout_truncated || stderr_truncated {
+            "managed_command_output_truncated"
+        } else {
+            "ok"
+        };
         Self {
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            exit_success: output.status.success(),
-            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
+            exit_success,
+            exit_code: status.code(),
+            reason_code,
+            timed_out,
+            stdout_truncated,
+            stderr_truncated,
             value_returned: false,
         }
     }
@@ -330,8 +437,79 @@ impl ManagedCommandOutput {
                 self.stderr = self.stderr.replace(secret, "[REDACTED]");
             }
         }
+        if self.stdout_truncated {
+            self.stdout = "[TRUNCATED]".to_string();
+        }
+        if self.stderr_truncated {
+            self.stderr = "[TRUNCATED]".to_string();
+        }
         self.value_returned = false;
         self
+    }
+}
+
+struct CapturedStream {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn capture_stream(mut reader: impl Read, limit: usize) -> JanusResult<CapturedStream> {
+    let mut bytes = Vec::with_capacity(limit);
+    let mut scratch = [0_u8; 4096];
+    let mut truncated = false;
+
+    loop {
+        let read = reader
+            .read(&mut scratch)
+            .map_err(|_| JanusError::StoreUnavailable {
+                detail: "managed command output capture failed".to_string(),
+            })?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(bytes.len());
+        let to_store = remaining.min(read);
+        if to_store > 0 {
+            bytes.extend_from_slice(&scratch[..to_store]);
+        }
+        if to_store < read {
+            truncated = true;
+        }
+    }
+
+    Ok(CapturedStream { bytes, truncated })
+}
+
+fn join_capture(
+    handle: thread::JoinHandle<JanusResult<CapturedStream>>,
+) -> JanusResult<CapturedStream> {
+    handle.join().map_err(|_| JanusError::StoreUnavailable {
+        detail: "managed command output capture failed".to_string(),
+    })?
+}
+
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> JanusResult<(ExitStatus, bool)> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|_| JanusError::StoreUnavailable {
+            detail: "managed command wait failed".to_string(),
+        })? {
+            return Ok((status, false));
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            let _ = child.kill();
+            let status = child.wait().map_err(|_| JanusError::StoreUnavailable {
+                detail: "managed command kill wait failed".to_string(),
+            })?;
+            return Ok((status, true));
+        }
+
+        thread::sleep((deadline - now).min(Duration::from_millis(10)));
     }
 }
 
@@ -600,6 +778,26 @@ mod tests {
         binary: PathBuf,
         allowed_args: Vec<String>,
     ) -> ManagedCommandProfile {
+        managed_command_profile_with_command_and_limits(
+            profile_id,
+            secret_ref,
+            executor,
+            destination,
+            binary,
+            allowed_args,
+            ManagedCommandRuntimeLimits::default(),
+        )
+    }
+
+    fn managed_command_profile_with_command_and_limits(
+        profile_id: ProfileId,
+        secret_ref: SecretRef,
+        executor: ExecutorRef,
+        destination: Destination,
+        binary: PathBuf,
+        allowed_args: Vec<String>,
+        runtime_limits: ManagedCommandRuntimeLimits,
+    ) -> ManagedCommandProfile {
         ManagedCommandProfile::new(ManagedCommandProfileSpec {
             profile_id,
             secret_ref: secret_ref.clone(),
@@ -608,6 +806,7 @@ mod tests {
             env_name: SafeLabel::new("GITHUB_TOKEN").unwrap(),
             binary,
             allowed_args,
+            runtime_limits,
             consumer: ConsumerDescriptor {
                 consumer_ref: ConsumerRef::new("consumer.github_release_publish").unwrap(),
                 secret_ref,
@@ -900,6 +1099,10 @@ mod tests {
         assert_eq!(outcome.output.stderr, "stderr:[REDACTED]");
         assert!(outcome.output.exit_success);
         assert_eq!(outcome.output.exit_code, Some(0));
+        assert_eq!(outcome.output.reason_code, "ok");
+        assert!(!outcome.output.timed_out);
+        assert!(!outcome.output.stdout_truncated);
+        assert!(!outcome.output.stderr_truncated);
         assert!(!format!("{outcome:?}").contains("expected-canary"));
 
         let (_store, _policy, audit) = executor.into_broker().into_parts();
@@ -921,6 +1124,129 @@ mod tests {
                 && !event.value_returned
         }));
         assert!(!format!("{:?}", audit.events()).contains("expected-canary"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_command_runner_maps_nonzero_exit_without_leaking_output() {
+        let (mut executor, permit, principal, executor_ref, destination, _profile) =
+            executor_fixture().await;
+        let profile = managed_command_profile_with_command(
+            permit.profile_id().clone(),
+            permit.secret_ref().clone(),
+            executor_ref,
+            destination,
+            PathBuf::from("/bin/sh"),
+            vec![
+                "-c".to_string(),
+                "printf 'bad:%s' \"$GITHUB_TOKEN\"; printf 'err:%s' \"$GITHUB_TOKEN\" >&2; exit 7"
+                    .to_string(),
+            ],
+        );
+
+        let outcome = executor
+            .run_managed_command(ManagedCommandRequest {
+                profile: &profile,
+                permit: &permit,
+                principal: &principal,
+                requested_args: profile.allowed_args().to_vec(),
+                now: run_at(),
+            })
+            .await
+            .unwrap();
+
+        assert!(!outcome.output.exit_success);
+        assert_eq!(outcome.output.exit_code, Some(7));
+        assert_eq!(outcome.output.reason_code, "managed_command_exit_nonzero");
+        assert!(!outcome.output.timed_out);
+        assert_eq!(outcome.output.stdout, "bad:[REDACTED]");
+        assert_eq!(outcome.output.stderr, "err:[REDACTED]");
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_command_runner_caps_output_without_partial_secret_leaks() {
+        let (mut executor, permit, principal, executor_ref, destination, _profile) =
+            executor_fixture().await;
+        let profile = managed_command_profile_with_command_and_limits(
+            permit.profile_id().clone(),
+            permit.secret_ref().clone(),
+            executor_ref,
+            destination,
+            PathBuf::from("/bin/sh"),
+            vec![
+                "-c".to_string(),
+                "printf 'stdout:%s:tail' \"$GITHUB_TOKEN\"; printf 'stderr:%s:tail' \"$GITHUB_TOKEN\" >&2"
+                    .to_string(),
+            ],
+            ManagedCommandRuntimeLimits {
+                timeout: Duration::from_secs(5),
+                max_stdout_bytes: 8,
+                max_stderr_bytes: 8,
+            },
+        );
+
+        let outcome = executor
+            .run_managed_command(ManagedCommandRequest {
+                profile: &profile,
+                permit: &permit,
+                principal: &principal,
+                requested_args: profile.allowed_args().to_vec(),
+                now: run_at(),
+            })
+            .await
+            .unwrap();
+
+        assert!(!outcome.output.timed_out);
+        assert!(outcome.output.exit_success);
+        assert_eq!(
+            outcome.output.reason_code,
+            "managed_command_output_truncated"
+        );
+        assert!(outcome.output.stdout_truncated);
+        assert!(outcome.output.stderr_truncated);
+        assert_eq!(outcome.output.stdout, "[TRUNCATED]");
+        assert_eq!(outcome.output.stderr, "[TRUNCATED]");
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_command_runner_times_out_reviewed_process() {
+        let (mut executor, permit, principal, executor_ref, destination, _profile) =
+            executor_fixture().await;
+        let profile = managed_command_profile_with_command_and_limits(
+            permit.profile_id().clone(),
+            permit.secret_ref().clone(),
+            executor_ref,
+            destination,
+            PathBuf::from("/bin/sh"),
+            vec!["-c".to_string(), "while :; do :; done".to_string()],
+            ManagedCommandRuntimeLimits {
+                timeout: Duration::from_millis(20),
+                max_stdout_bytes: 1024,
+                max_stderr_bytes: 1024,
+            },
+        );
+
+        let outcome = executor
+            .run_managed_command(ManagedCommandRequest {
+                profile: &profile,
+                permit: &permit,
+                principal: &principal,
+                requested_args: profile.allowed_args().to_vec(),
+                now: run_at(),
+            })
+            .await
+            .unwrap();
+
+        assert!(!outcome.output.exit_success);
+        assert!(outcome.output.timed_out);
+        assert_eq!(outcome.output.reason_code, "managed_command_timeout");
+        assert_eq!(outcome.output.stdout, "");
+        assert_eq!(outcome.output.stderr, "");
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
     }
 
     #[cfg(unix)]
@@ -1053,6 +1379,7 @@ mod tests {
             env_name: SafeLabel::new("GITHUB_TOKEN").unwrap(),
             binary: PathBuf::from("gh"),
             allowed_args: vec!["release".to_string(), "upload".to_string()],
+            runtime_limits: ManagedCommandRuntimeLimits::default(),
             consumer: consumer.clone(),
         });
         assert!(matches!(
@@ -1062,19 +1389,40 @@ mod tests {
 
         let wrong_consumer = ManagedCommandProfile::new(ManagedCommandProfileSpec {
             profile_id,
-            secret_ref,
+            secret_ref: secret_ref.clone(),
             executor,
             destination,
             env_name: SafeLabel::new("GITHUB_TOKEN").unwrap(),
             binary: PathBuf::from("/usr/bin/gh"),
             allowed_args: vec!["release".to_string(), "upload".to_string()],
+            runtime_limits: ManagedCommandRuntimeLimits::default(),
             consumer: ConsumerDescriptor {
                 secret_ref: wrong_consumer_secret,
-                ..consumer
+                ..consumer.clone()
             },
         });
         assert!(matches!(
             wrong_consumer,
+            Err(JanusError::InvalidManifest { .. })
+        ));
+
+        let zero_timeout = ManagedCommandProfile::new(ManagedCommandProfileSpec {
+            profile_id: ProfileId::new("profile.canary").unwrap(),
+            secret_ref: secret_ref.clone(),
+            executor: ExecutorRef::new("janus-run@m5").unwrap(),
+            destination: Destination::new("deploy-api").unwrap(),
+            env_name: SafeLabel::new("GITHUB_TOKEN").unwrap(),
+            binary: PathBuf::from("/usr/bin/gh"),
+            allowed_args: vec!["release".to_string(), "upload".to_string()],
+            runtime_limits: ManagedCommandRuntimeLimits {
+                timeout: Duration::ZERO,
+                max_stdout_bytes: 1024,
+                max_stderr_bytes: 1024,
+            },
+            consumer,
+        });
+        assert!(matches!(
+            zero_timeout,
             Err(JanusError::InvalidManifest { .. })
         ));
     }
