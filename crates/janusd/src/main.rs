@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -17,8 +18,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use janus_core::{
     BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry, Environment,
-    JanusError, OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind, ReloadMethod,
-    SafeLabel, ScopeRef, SecretName, SecretStore, ValidationProbe,
+    JanusError, OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId,
+    ReloadMethod, SafeLabel, ScopeRef, SecretName, SecretStore, ValidationProbe,
 };
 use janus_forge::{
     ConsumerRotationHooks, GeneratedAlphabet, GeneratedRotationBroker, GeneratedValuePolicy,
@@ -39,6 +40,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::ForgeRotateGenerated(config) => run_forge_rotate_generated(config).await,
+        Command::RunManaged(config) => run_managed_command(config).await,
     }
 }
 
@@ -46,6 +48,7 @@ async fn main() -> Result<()> {
 enum Command {
     Help,
     ForgeRotateGenerated(ForgeRotateGeneratedConfig),
+    RunManaged(RunManagedCommandConfig),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +61,39 @@ struct ForgeRotateGeneratedConfig {
     alphabet: GeneratedAlphabet,
     length: usize,
     hook_manifest: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RunManagedCommandConfig {
+    profile_id: ProfileId,
+    permit: PermitToken,
+    requested_args: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct PermitToken(String);
+
+impl PermitToken {
+    fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if value.trim().is_empty()
+            || value.trim().len() != value.len()
+            || !value.starts_with("use_")
+        {
+            anyhow::bail!("invalid --permit token");
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for PermitToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PermitToken").field(&"<redacted>").finish()
+    }
 }
 
 impl Default for ForgeRotateGeneratedConfig {
@@ -119,6 +155,74 @@ async fn run_forge_rotate_generated(config: ForgeRotateGeneratedConfig) -> Resul
         outcome.value_returned
     );
     Ok(())
+}
+
+async fn run_managed_command(config: RunManagedCommandConfig) -> Result<()> {
+    let mut runner = UnwiredManagedCommandRunner;
+    let outcome = run_managed_command_with(&config, &mut runner).await?;
+    emit_run_managed_outcome(&outcome);
+    Ok(())
+}
+
+async fn run_managed_command_with<R>(
+    config: &RunManagedCommandConfig,
+    runner: &mut R,
+) -> Result<ManagedCommandCliOutcome>
+where
+    R: ManagedCommandRunner + Send,
+{
+    runner.run(config).await
+}
+
+#[async_trait]
+trait ManagedCommandRunner {
+    async fn run(&mut self, config: &RunManagedCommandConfig) -> Result<ManagedCommandCliOutcome>;
+}
+
+struct UnwiredManagedCommandRunner;
+
+#[async_trait]
+impl ManagedCommandRunner for UnwiredManagedCommandRunner {
+    async fn run(&mut self, config: &RunManagedCommandConfig) -> Result<ManagedCommandCliOutcome> {
+        let _ = (
+            config.profile_id.as_str(),
+            config.permit.as_str(),
+            config.requested_args.len(),
+        );
+        anyhow::bail!("janusd run profile loading and permit lookup are not wired yet")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManagedCommandCliOutcome {
+    stdout: String,
+    stderr: String,
+    exit_success: bool,
+    exit_code: Option<i32>,
+    reason_code: &'static str,
+    value_returned: bool,
+}
+
+impl From<janus_executor::ManagedCommandOutcome> for ManagedCommandCliOutcome {
+    fn from(outcome: janus_executor::ManagedCommandOutcome) -> Self {
+        Self {
+            stdout: outcome.output.stdout,
+            stderr: outcome.output.stderr,
+            exit_success: outcome.output.exit_success,
+            exit_code: outcome.output.exit_code,
+            reason_code: outcome.output.reason_code,
+            value_returned: outcome.value_returned || outcome.output.value_returned,
+        }
+    }
+}
+
+fn emit_run_managed_outcome(outcome: &ManagedCommandCliOutcome) {
+    print!("{}", outcome.stdout);
+    eprint!("{}", outcome.stderr);
+    eprintln!(
+        "janusd run completed exit_success={} exit_code={:?} reason_code={} value_returned={}",
+        outcome.exit_success, outcome.exit_code, outcome.reason_code, outcome.value_returned
+    );
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -354,8 +458,67 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         [forge, rotate, rest @ ..] if forge == "forge" && rotate == "rotate-generated" => {
             parse_forge_rotate_generated(rest.iter().cloned()).map(Command::ForgeRotateGenerated)
         }
+        [run, rest @ ..] if run == "run" => {
+            parse_run_managed(rest.iter().cloned()).map(Command::RunManaged)
+        }
         _ => anyhow::bail!("unsupported janusd command; run `janusd --help`"),
     }
+}
+
+fn parse_run_managed(args: impl IntoIterator<Item = String>) -> Result<RunManagedCommandConfig> {
+    let mut profile_id = None;
+    let mut permit = None;
+    let mut requested_args = Vec::new();
+    let mut saw_separator = false;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--profile" => {
+                if profile_id
+                    .replace(ProfileId::new(required_arg("--profile", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--profile may only be provided once");
+                }
+            }
+            "--permit" => {
+                if permit
+                    .replace(PermitToken::new(required_arg("--permit", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--permit may only be provided once");
+                }
+            }
+            "--" => {
+                saw_separator = true;
+                requested_args.extend(args);
+                break;
+            }
+            "--secret" | "--secret-ref" | "--value" | "--env" | "--binary" | "--destination"
+            | "--executor" => {
+                anyhow::bail!("run policy fields come from the reviewed profile")
+            }
+            other if other.starts_with('-') => anyhow::bail!("unsupported janusd run flag"),
+            _ => anyhow::bail!("janusd run command arguments must follow --"),
+        }
+    }
+
+    let Some(profile_id) = profile_id else {
+        anyhow::bail!("--profile is required");
+    };
+    let Some(permit) = permit else {
+        anyhow::bail!("--permit is required");
+    };
+    if !saw_separator {
+        anyhow::bail!("janusd run requires -- before command arguments");
+    }
+
+    Ok(RunManagedCommandConfig {
+        profile_id,
+        permit,
+        requested_args,
+    })
 }
 
 fn parse_forge_rotate_generated(
@@ -572,19 +735,297 @@ fn env_first(keys: &[&str]) -> Option<String> {
 
 fn print_usage() {
     eprintln!(
-        "janusd\n\nCommands:\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
+        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::time::SystemTime;
+
+    #[cfg(unix)]
+    use janus_core::{
+        AuditWrite, Destination, EgressMode, ExecutorRef, ManifestCatalog, ProjectId, Purpose,
+        SecretMeta, SecretRef, TrustLevel, UsePermit, UseProfile, UseRequest,
+    };
+    #[cfg(unix)]
+    use janus_executor::{
+        ApprovedUseExecutor, ManagedCommandProfile, ManagedCommandProfileSpec,
+        ManagedCommandRequest, ManagedCommandRuntimeLimits,
+    };
+    #[cfg(unix)]
+    use janus_mock::MockStore;
+
     use super::*;
 
     fn parse_ok(args: &[&str]) -> ForgeRotateGeneratedConfig {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::ForgeRotateGenerated(config) => config,
             Command::Help => panic!("expected forge config"),
+            Command::RunManaged(_) => panic!("expected forge config"),
         }
+    }
+
+    fn parse_run_ok(args: &[&str]) -> RunManagedCommandConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::RunManaged(config) => config,
+            Command::ForgeRotateGenerated(_) => panic!("expected run config"),
+            Command::Help => panic!("expected run config"),
+        }
+    }
+
+    #[test]
+    fn parses_run_profile_permit_and_separator_args_without_exposing_permit_debug() {
+        let config = parse_run_ok(&[
+            "run",
+            "--profile",
+            "profile.canary",
+            "--permit",
+            "use_abc123",
+            "--",
+            "release",
+            "upload",
+        ]);
+
+        assert_eq!(config.profile_id.as_str(), "profile.canary");
+        assert_eq!(config.permit.as_str(), "use_abc123");
+        assert_eq!(config.requested_args, vec!["release", "upload"]);
+        assert!(!format!("{config:?}").contains("use_abc123"));
+    }
+
+    #[test]
+    fn run_rejects_policy_fields_and_literal_args_without_echoing_values() {
+        let err = parse_args(
+            [
+                "run",
+                "--profile",
+                "profile.canary",
+                "--permit",
+                "use_abc123",
+                "--secret-ref",
+                "sec_do_not_echo",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("profile"));
+        assert!(!err.to_string().contains("sec_do_not_echo"));
+
+        let err = parse_args(
+            [
+                "run",
+                "--profile",
+                "profile.canary",
+                "--permit",
+                "use_abc123",
+                "do-not-echo-me",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--"));
+        assert!(!err.to_string().contains("do-not-echo-me"));
+
+        let err = parse_args(
+            [
+                "run",
+                "--profile",
+                "profile.canary",
+                "--permit",
+                "not-a-permit",
+                "--",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--permit"));
+        assert!(!err.to_string().contains("not-a-permit"));
+    }
+
+    #[cfg(unix)]
+    struct FixtureManagedCommandRunner {
+        executor: ApprovedUseExecutor<MockStore, AuditWrite>,
+        permit: UsePermit,
+        principal: PrincipalChain,
+        profile: ManagedCommandProfile,
+    }
+
+    #[cfg(unix)]
+    impl FixtureManagedCommandRunner {
+        async fn new(allowed_args: Vec<String>) -> Self {
+            let project = ProjectId::new("janus").unwrap();
+            let name = SecretName::new("CANARY").unwrap();
+            let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+            let profile_id = ProfileId::new("profile.canary").unwrap();
+            let executor_ref = ExecutorRef::new("janus-run@fixture").unwrap();
+            let destination = Destination::new("fixture-destination").unwrap();
+            let catalog = ManifestCatalog::new(vec![SecretMeta {
+                secret_ref: secret_ref.clone(),
+                name: name.clone(),
+                label: SafeLabel::new("Canary token").unwrap(),
+                scope: ScopeRef::new("janus/dev").unwrap(),
+                required: true,
+                trust_level: TrustLevel::L1,
+                allowed_uses: vec![profile_id.clone()],
+            }])
+            .unwrap();
+            let store = MockStore::new(catalog)
+                .with_value(name, b"expected-canary".to_vec())
+                .unwrap();
+            let use_profile = UseProfile {
+                id: profile_id.clone(),
+                secret_ref: secret_ref.clone(),
+                executor: executor_ref.clone(),
+                destination: destination.clone(),
+                egress: EgressMode::Connector,
+                trust_level: TrustLevel::L2,
+                ttl: Duration::from_secs(60),
+                single_use: true,
+                enabled: true,
+            };
+            let principal = PrincipalChain::new(
+                Principal::new(
+                    PrincipalKind::Executor,
+                    PrincipalId::new("janus-run@fixture").unwrap(),
+                ),
+                ScopeRef::new("janus/dev").unwrap(),
+            );
+            let mut broker = janus_core::SecretBroker::new(
+                store,
+                janus_core::ProfilePolicy::new(vec![use_profile]),
+                AuditWrite::accepting(),
+            );
+            let permit = broker
+                .request_use(
+                    &UseRequest {
+                        secret_ref: secret_ref.clone(),
+                        profile_id: profile_id.clone(),
+                        destination: destination.clone(),
+                        purpose: Purpose::new("fixture run").unwrap(),
+                    },
+                    &principal,
+                    SystemTime::UNIX_EPOCH,
+                )
+                .await
+                .unwrap();
+            let profile = ManagedCommandProfile::new(ManagedCommandProfileSpec {
+                profile_id,
+                secret_ref: secret_ref.clone(),
+                executor: executor_ref,
+                destination,
+                env_name: SafeLabel::new("GITHUB_TOKEN").unwrap(),
+                binary: PathBuf::from("/bin/sh"),
+                allowed_args,
+                runtime_limits: ManagedCommandRuntimeLimits::default(),
+                consumer: ConsumerDescriptor {
+                    consumer_ref: ConsumerRef::new("consumer.fixture_run").unwrap(),
+                    secret_ref,
+                    kind: ConsumerKind::ManagedCommand,
+                    owner: OwnerRef::new("janusd-test").unwrap(),
+                    environment: Environment::new("test").unwrap(),
+                    reload: ReloadMethod::None,
+                    validation: vec![ValidationProbe::new("fixture-run").unwrap()],
+                    supports_dual_value: false,
+                    blast_radius: BlastRadius::new("fixture").unwrap(),
+                    declared: true,
+                },
+            })
+            .unwrap();
+
+            Self {
+                executor: ApprovedUseExecutor::new(broker),
+                permit,
+                principal,
+                profile,
+            }
+        }
+
+        fn config(&self) -> RunManagedCommandConfig {
+            RunManagedCommandConfig {
+                profile_id: self.profile.profile_id().clone(),
+                permit: PermitToken::new(self.permit.id().as_str()).unwrap(),
+                requested_args: self.profile.allowed_args().to_vec(),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl ManagedCommandRunner for FixtureManagedCommandRunner {
+        async fn run(
+            &mut self,
+            config: &RunManagedCommandConfig,
+        ) -> Result<ManagedCommandCliOutcome> {
+            if &config.profile_id != self.profile.profile_id() {
+                anyhow::bail!("fixture profile not found");
+            }
+            if config.permit.as_str() != self.permit.id().as_str() {
+                anyhow::bail!("fixture permit not found");
+            }
+            let outcome = self
+                .executor
+                .run_managed_command(ManagedCommandRequest {
+                    profile: &self.profile,
+                    permit: &self.permit,
+                    principal: &self.principal,
+                    requested_args: config.requested_args.clone(),
+                    now: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                })
+                .await?;
+            Ok(outcome.into())
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_fixture_path_calls_executor_and_redacts_output() {
+        let mut runner = FixtureManagedCommandRunner::new(vec![
+            "-c".to_string(),
+            "printf 'stdout:%s' \"$GITHUB_TOKEN\"; printf 'stderr:%s' \"$GITHUB_TOKEN\" >&2"
+                .to_string(),
+        ])
+        .await;
+        let config = runner.config();
+
+        let outcome = run_managed_command_with(&config, &mut runner)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stdout, "stdout:[REDACTED]");
+        assert_eq!(outcome.stderr, "stderr:[REDACTED]");
+        assert!(outcome.exit_success);
+        assert_eq!(outcome.exit_code, Some(0));
+        assert_eq!(outcome.reason_code, "ok");
+        assert!(!outcome.value_returned);
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_fixture_path_rejects_wrong_permit_before_execution() {
+        let marker =
+            std::env::temp_dir().join(format!("janusd-run-fixture-{}", std::process::id()));
+        let mut runner = FixtureManagedCommandRunner::new(vec![
+            "-c".to_string(),
+            "printf spawned > \"$1\"".to_string(),
+            "janusd-fixture".to_string(),
+            marker.to_string_lossy().into_owned(),
+        ])
+        .await;
+        let mut config = runner.config();
+        config.permit = PermitToken::new("use_wrongfixture").unwrap();
+
+        let err = run_managed_command_with(&config, &mut runner)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("permit"));
+        assert!(!marker.exists());
+        let _ = std::fs::remove_file(marker);
     }
 
     #[test]
