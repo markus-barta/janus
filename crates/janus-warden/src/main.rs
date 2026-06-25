@@ -275,17 +275,101 @@ fn policy_from_env(descriptors: &[SecretDescriptor]) -> Result<ProfilePolicy> {
 }
 
 fn principal_from_env() -> Result<PrincipalChain> {
-    Ok(PrincipalChain::new(
+    let mut principal = PrincipalChain::new(
         Principal::new(
             PrincipalKind::Executor,
             PrincipalId::new(executor_id_from_env()?)?,
         ),
-        ScopeRef::new(env::var("JANUS_WARDEN_SCOPE").unwrap_or_else(|_| "janus/default".into()))?,
-    ))
+        scope_from_env()?,
+    );
+    principal.agent = agent_principal_from_env()?;
+    principal.human = optional_principal_from_env(PrincipalKind::Human, "JANUS_WARDEN_HUMAN")?;
+    principal.workload =
+        optional_principal_from_env(PrincipalKind::Workload, "JANUS_WARDEN_WORKLOAD")?;
+    principal.admin = optional_principal_from_env(PrincipalKind::Admin, "JANUS_WARDEN_ADMIN")?;
+    Ok(principal)
 }
 
 fn executor_id_from_env() -> Result<String> {
     Ok(env::var("JANUS_WARDEN_EXECUTOR").unwrap_or_else(|_| "warden-stdio".into()))
+}
+
+fn scope_from_env() -> Result<ScopeRef> {
+    if let Some(scope) = optional_env("JANUS_WARDEN_SCOPE")? {
+        return Ok(ScopeRef::new(scope)?);
+    }
+
+    let project = optional_env("JANUS_WARDEN_PROJECT")?;
+    let repo = optional_env("JANUS_WARDEN_REPO")?;
+    let task = optional_env("JANUS_WARDEN_TASK")?;
+    let host = optional_env("JANUS_WARDEN_HOST")?;
+    let session = optional_env("JANUS_WARDEN_SESSION")?;
+
+    if project.is_none() && repo.is_none() && task.is_none() && host.is_none() && session.is_none()
+    {
+        return Ok(ScopeRef::new("janus/default")?);
+    }
+
+    let mut parts = vec![format!(
+        "project:{}",
+        project.unwrap_or_else(|| "janus".to_string())
+    )];
+    if let Some(repo) = repo {
+        parts.push(format!("repo:{repo}"));
+    }
+    if let Some(task) = task {
+        parts.push(format!("task:{task}"));
+    }
+    if let Some(host) = host {
+        parts.push(format!("host:{host}"));
+    }
+    if let Some(session) = session {
+        parts.push(format!("session:{session}"));
+    }
+    Ok(ScopeRef::new(parts.join(","))?)
+}
+
+fn agent_principal_from_env() -> Result<Option<Principal>> {
+    let session = optional_env("JANUS_WARDEN_AGENT_SESSION")?;
+    let model = optional_env("JANUS_WARDEN_AGENT_MODEL")?;
+    let Some(id) = agent_principal_id(session, model) else {
+        return Ok(None);
+    };
+    Ok(Some(Principal::new(
+        PrincipalKind::AgentSession,
+        PrincipalId::new(id)?,
+    )))
+}
+
+fn agent_principal_id(session: Option<String>, model: Option<String>) -> Option<String> {
+    match (session, model) {
+        (Some(session), Some(model)) => Some(format!("session:{session},model:{model}")),
+        (Some(session), None) => Some(format!("session:{session}")),
+        (None, Some(model)) => Some(format!("model:{model}")),
+        (None, None) => None,
+    }
+}
+
+fn optional_principal_from_env(
+    kind: PrincipalKind,
+    key: &'static str,
+) -> Result<Option<Principal>> {
+    optional_env(key)?
+        .map(|value| Ok(Principal::new(kind, PrincipalId::new(value)?)))
+        .transpose()
+}
+
+fn optional_env(key: &'static str) -> Result<Option<String>> {
+    match env::var(key) {
+        Ok(value) => {
+            if value.trim().is_empty() || value.trim().len() != value.len() {
+                anyhow::bail!("{key} must be non-empty and must not have surrounding whitespace");
+            }
+            Ok(Some(value))
+        }
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("failed to read {key}")),
+    }
 }
 
 fn age_identity_files_from_env() -> Result<Vec<PathBuf>> {
@@ -346,4 +430,129 @@ fn init_tracing() {
         .json()
         .with_target(true)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::sync::Mutex;
+
+    use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const PRINCIPAL_ENV_KEYS: &[&str] = &[
+        "JANUS_WARDEN_EXECUTOR",
+        "JANUS_WARDEN_SCOPE",
+        "JANUS_WARDEN_PROJECT",
+        "JANUS_WARDEN_REPO",
+        "JANUS_WARDEN_TASK",
+        "JANUS_WARDEN_HOST",
+        "JANUS_WARDEN_SESSION",
+        "JANUS_WARDEN_AGENT_SESSION",
+        "JANUS_WARDEN_AGENT_MODEL",
+        "JANUS_WARDEN_HUMAN",
+        "JANUS_WARDEN_WORKLOAD",
+        "JANUS_WARDEN_ADMIN",
+    ];
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn clear_principal_env() -> Self {
+            let saved = PRINCIPAL_ENV_KEYS
+                .iter()
+                .map(|key| (*key, env::var(key).ok()))
+                .collect();
+            for key in PRINCIPAL_ENV_KEYS {
+                env::remove_var(key);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => env::set_var(key, value),
+                    None => env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn principal_env_defaults_to_existing_executor_and_scope() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::clear_principal_env();
+
+        let principal = principal_from_env().unwrap();
+
+        assert_eq!(
+            principal.binding_key(),
+            "executor:warden-stdio|scope:janus/default"
+        );
+        assert!(principal.agent.is_none());
+        assert!(principal.human.is_none());
+        assert!(principal.workload.is_none());
+        assert!(principal.admin.is_none());
+    }
+
+    #[test]
+    fn principal_env_builds_full_local_identity_chain() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::clear_principal_env();
+        env::set_var("JANUS_WARDEN_EXECUTOR", "warden-stdio");
+        env::set_var("JANUS_WARDEN_PROJECT", "JANUS");
+        env::set_var("JANUS_WARDEN_REPO", "github.com/markus-barta/janus");
+        env::set_var("JANUS_WARDEN_TASK", "JANUS-22");
+        env::set_var("JANUS_WARDEN_HOST", "mbp0");
+        env::set_var("JANUS_WARDEN_SESSION", "mcp-session-1");
+        env::set_var("JANUS_WARDEN_AGENT_SESSION", "agent-session-1");
+        env::set_var("JANUS_WARDEN_AGENT_MODEL", "codex");
+        env::set_var("JANUS_WARDEN_HUMAN", "human-markus");
+        env::set_var("JANUS_WARDEN_WORKLOAD", "stdio-mcp-client");
+        env::set_var("JANUS_WARDEN_ADMIN", "admin-break-glass");
+
+        let principal = principal_from_env().unwrap();
+
+        assert_eq!(
+            principal.binding_key(),
+            "executor:warden-stdio|scope:project:JANUS,repo:github.com/markus-barta/janus,task:JANUS-22,host:mbp0,session:mcp-session-1|human:human-markus|agent:session:agent-session-1,model:codex|workload:stdio-mcp-client|admin:admin-break-glass"
+        );
+    }
+
+    #[test]
+    fn explicit_scope_overrides_scope_components() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::clear_principal_env();
+        env::set_var(
+            "JANUS_WARDEN_SCOPE",
+            "project:JANUS,host:csb1,session:explicit",
+        );
+        env::set_var("JANUS_WARDEN_PROJECT", "ignored");
+        env::set_var("JANUS_WARDEN_HOST", "ignored");
+
+        let principal = principal_from_env().unwrap();
+
+        assert_eq!(
+            principal.binding_key(),
+            "executor:warden-stdio|scope:project:JANUS,host:csb1,session:explicit"
+        );
+    }
+
+    #[test]
+    fn principal_env_rejects_trimmed_identity_values() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::clear_principal_env();
+        env::set_var("JANUS_WARDEN_AGENT_SESSION", " agent-session-1 ");
+
+        let err = principal_from_env().unwrap_err().to_string();
+
+        assert!(err.contains("JANUS_WARDEN_AGENT_SESSION"));
+        assert!(err.contains("must not have surrounding whitespace"));
+    }
 }
