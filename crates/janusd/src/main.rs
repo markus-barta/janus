@@ -20,7 +20,7 @@ use janus_core::{
     BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry, Destination,
     Environment, ExecutorRef, JanusError, OwnerRef, Principal, PrincipalChain, PrincipalId,
     PrincipalKind, ProfileId, ReloadMethod, SafeLabel, ScopeRef, SecretName, SecretRef,
-    SecretStore, ValidationProbe,
+    SecretStore, UsePermit, ValidationProbe,
 };
 use janus_executor::{
     ManagedCommandProfile, ManagedCommandProfileSpec, ManagedCommandRuntimeLimits,
@@ -164,7 +164,10 @@ async fn run_forge_rotate_generated(config: ForgeRotateGeneratedConfig) -> Resul
 async fn run_managed_command(config: RunManagedCommandConfig) -> Result<()> {
     let manifest_path = run_profile_manifest_path()?;
     let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
-    let mut runner = ProfileManifestManagedCommandRunner { profiles };
+    let mut runner = ProfileManifestManagedCommandRunner {
+        profiles,
+        permits: UnwiredPermitRegistry,
+    };
     let outcome = run_managed_command_with(&config, &mut runner).await?;
     emit_run_managed_outcome(&outcome);
     Ok(())
@@ -185,12 +188,30 @@ trait ManagedCommandRunner {
     async fn run(&mut self, config: &RunManagedCommandConfig) -> Result<ManagedCommandCliOutcome>;
 }
 
-struct ProfileManifestManagedCommandRunner {
+trait LocalPermitRegistry {
+    fn resolve(&self, token: &PermitToken) -> Result<UsePermit>;
+}
+
+#[derive(Clone, Debug, Default)]
+struct UnwiredPermitRegistry;
+
+impl LocalPermitRegistry for UnwiredPermitRegistry {
+    fn resolve(&self, token: &PermitToken) -> Result<UsePermit> {
+        let _ = token.as_str();
+        anyhow::bail!("janusd run permit registry is not wired yet")
+    }
+}
+
+struct ProfileManifestManagedCommandRunner<R = UnwiredPermitRegistry> {
     profiles: ManagedCommandProfileCatalog,
+    permits: R,
 }
 
 #[async_trait]
-impl ManagedCommandRunner for ProfileManifestManagedCommandRunner {
+impl<R> ManagedCommandRunner for ProfileManifestManagedCommandRunner<R>
+where
+    R: LocalPermitRegistry + Send,
+{
     async fn run(&mut self, config: &RunManagedCommandConfig) -> Result<ManagedCommandCliOutcome> {
         let profile = self
             .profiles
@@ -199,8 +220,8 @@ impl ManagedCommandRunner for ProfileManifestManagedCommandRunner {
         if profile.allowed_args() != config.requested_args.as_slice() {
             anyhow::bail!("janusd run command arguments do not match the reviewed profile");
         }
-        let _ = config.permit.as_str();
-        anyhow::bail!("janusd run permit lookup is not wired yet")
+        let _permit = self.permits.resolve(&config.permit)?;
+        anyhow::bail!("janusd run executor backend is not wired yet")
     }
 }
 
@@ -907,7 +928,7 @@ mod tests {
     #[cfg(unix)]
     use janus_core::{
         AuditWrite, Destination, EgressMode, ExecutorRef, ManifestCatalog, ProjectId, Purpose,
-        SecretMeta, SecretRef, TrustLevel, UsePermit, UseProfile, UseRequest,
+        SecretMeta, SecretRef, TrustLevel, UseProfile, UseRequest,
     };
     #[cfg(unix)]
     use janus_executor::{ApprovedUseExecutor, ManagedCommandProfile, ManagedCommandRequest};
@@ -1096,7 +1117,10 @@ mod tests {
         let profiles =
             ManagedCommandProfileCatalog::parse(&managed_profile_toml(&secret_ref, &allowed_args))
                 .unwrap();
-        let mut runner = ProfileManifestManagedCommandRunner { profiles };
+        let mut runner = ProfileManifestManagedCommandRunner {
+            profiles,
+            permits: PermitLookupMustNotRun,
+        };
         let err = run_managed_command_with(
             &RunManagedCommandConfig {
                 profile_id: ProfileId::new("profile.canary").unwrap(),
@@ -1112,10 +1136,78 @@ mod tests {
         assert!(!err.to_string().contains("use_abc123"));
     }
 
+    struct PermitLookupMustNotRun;
+
+    impl LocalPermitRegistry for PermitLookupMustNotRun {
+        fn resolve(&self, _token: &PermitToken) -> Result<UsePermit> {
+            panic!("permit lookup should not run for unreviewed command arguments")
+        }
+    }
+
+    struct PermitLookupReached;
+
+    impl LocalPermitRegistry for PermitLookupReached {
+        fn resolve(&self, _token: &PermitToken) -> Result<UsePermit> {
+            anyhow::bail!("fixture permit registry reached")
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_manifest_runner_resolves_permit_after_reviewed_args() {
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let allowed_args = vec!["release".to_string(), "upload".to_string()];
+        let profiles =
+            ManagedCommandProfileCatalog::parse(&managed_profile_toml(&secret_ref, &allowed_args))
+                .unwrap();
+        let mut runner = ProfileManifestManagedCommandRunner {
+            profiles,
+            permits: PermitLookupReached,
+        };
+        let err = run_managed_command_with(
+            &RunManagedCommandConfig {
+                profile_id: ProfileId::new("profile.canary").unwrap(),
+                permit: PermitToken::new("use_abc123").unwrap(),
+                requested_args: allowed_args,
+            },
+            &mut runner,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("permit registry reached"));
+        assert!(!err.to_string().contains("use_abc123"));
+    }
+
+    #[cfg(unix)]
+    #[derive(Clone, Debug, Default)]
+    struct InMemoryPermitRegistry {
+        permits: BTreeMap<String, UsePermit>,
+    }
+
+    #[cfg(unix)]
+    impl InMemoryPermitRegistry {
+        fn insert(&mut self, permit: UsePermit) -> PermitToken {
+            let token = PermitToken::new(permit.id().as_str()).unwrap();
+            self.permits.insert(token.as_str().to_string(), permit);
+            token
+        }
+    }
+
+    #[cfg(unix)]
+    impl LocalPermitRegistry for InMemoryPermitRegistry {
+        fn resolve(&self, token: &PermitToken) -> Result<UsePermit> {
+            self.permits
+                .get(token.as_str())
+                .cloned()
+                .context("fixture permit not found")
+        }
+    }
+
     #[cfg(unix)]
     struct FixtureManagedCommandRunner {
         executor: ApprovedUseExecutor<MockStore, AuditWrite>,
-        permit: UsePermit,
+        permits: InMemoryPermitRegistry,
+        permit_token: PermitToken,
         principal: PrincipalChain,
         profile: ManagedCommandProfile,
     }
@@ -1184,10 +1276,13 @@ mod tests {
             ))
             .unwrap();
             let profile = profile_catalog.profile(&profile_id).unwrap().clone();
+            let mut permits = InMemoryPermitRegistry::default();
+            let permit_token = permits.insert(permit);
 
             Self {
                 executor: ApprovedUseExecutor::new(broker),
-                permit,
+                permits,
+                permit_token,
                 principal,
                 profile,
             }
@@ -1196,7 +1291,7 @@ mod tests {
         fn config(&self) -> RunManagedCommandConfig {
             RunManagedCommandConfig {
                 profile_id: self.profile.profile_id().clone(),
-                permit: PermitToken::new(self.permit.id().as_str()).unwrap(),
+                permit: self.permit_token.clone(),
                 requested_args: self.profile.allowed_args().to_vec(),
             }
         }
@@ -1212,14 +1307,12 @@ mod tests {
             if &config.profile_id != self.profile.profile_id() {
                 anyhow::bail!("fixture profile not found");
             }
-            if config.permit.as_str() != self.permit.id().as_str() {
-                anyhow::bail!("fixture permit not found");
-            }
+            let permit = self.permits.resolve(&config.permit)?;
             let outcome = self
                 .executor
                 .run_managed_command(ManagedCommandRequest {
                     profile: &self.profile,
-                    permit: &self.permit,
+                    permit: &permit,
                     principal: &self.principal,
                     requested_args: config.requested_args.clone(),
                     now: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
