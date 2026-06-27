@@ -10,6 +10,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,10 +21,10 @@ use async_trait::async_trait;
 use janus_core::{
     ApprovalGrant, AuditSink, AuditWrite, BlastRadius, ClassPermitPolicy, ConsumerDescriptor,
     ConsumerKind, ConsumerRef, ConsumerRegistry, Destination, EgressMode, Environment, ExecutorRef,
-    JanusError, OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId,
-    ProfilePolicy, Purpose, ReloadMethod, SafeLabel, ScopeRef, SecretBroker, SecretDescriptor,
-    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, TrustLevel, UsePermit, UseProfile,
-    UseRequest, ValidationProbe,
+    JanusError, LifecycleTransitionPolicy, OwnerRef, Principal, PrincipalChain, PrincipalId,
+    PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReloadMethod, SafeLabel, ScopeRef,
+    SecretBroker, SecretDescriptor, SecretLifecycle, SecretMeta, SecretMetadataOverlay, SecretName,
+    SecretRef, SecretStore, TrustLevel, UsePermit, UseProfile, UseRequest, ValidationProbe,
 };
 use janus_executor::{
     ApprovedUseExecutor, ManagedCommandProfile, ManagedCommandProfileSpec, ManagedCommandRequest,
@@ -43,6 +45,11 @@ use tokio::time::timeout;
 
 const DEFAULT_HOOK_TIMEOUT_SECONDS: u64 = 30;
 const MAX_APPROVAL_TTL_SECONDS: u64 = 3600;
+const METADATA_ENV_KEYS: &[&str] = &[
+    "JANUS_AGE_METADATA_FILE",
+    "JANUS_WARDEN_AGE_METADATA_FILE",
+    "JANUS_METADATA_FILE",
+];
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -54,6 +61,7 @@ async fn main() -> Result<()> {
         Command::ForgeRotateGenerated(config) => run_forge_rotate_generated(config).await,
         Command::RunManaged(config) => run_managed_command(config).await,
         Command::Approve(command) => run_approve(command).await,
+        Command::LifecycleTransition(config) => run_lifecycle_transition(config).await,
     }
 }
 
@@ -63,6 +71,7 @@ enum Command {
     ForgeRotateGenerated(ForgeRotateGeneratedConfig),
     RunManaged(RunManagedCommandConfig),
     Approve(ApproveCommand),
+    LifecycleTransition(LifecycleTransitionConfig),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,6 +124,14 @@ struct ApproveRevokeConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct LifecycleTransitionConfig {
+    secret_ref: SecretRef,
+    to: SecretLifecycle,
+    reason: SafeLabel,
+    metadata_file: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ApprovedPermitIssueOutcome {
     permit_id: String,
     approval_id: String,
@@ -123,6 +140,15 @@ struct ApprovedPermitIssueOutcome {
     executor: String,
     destination: String,
     approval_revoked: bool,
+    value_returned: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LifecycleTransitionCliOutcome {
+    secret_ref: String,
+    from: &'static str,
+    to: &'static str,
+    reason_code: &'static str,
     value_returned: bool,
 }
 
@@ -308,6 +334,95 @@ async fn run_approve(command: ApproveCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn run_lifecycle_transition(config: LifecycleTransitionConfig) -> Result<()> {
+    let metadata_file =
+        lifecycle_metadata_file_path(config.metadata_file.as_deref(), METADATA_ENV_KEYS)?;
+    let store = load_age_store_from_env_with_metadata_path(Some(&metadata_file))?;
+    let principal = lifecycle_principal_from_env()?;
+    let mut audit = AuditWrite::accepting();
+    let outcome =
+        apply_lifecycle_transition_with(&config, &metadata_file, store, &principal, &mut audit)
+            .await?;
+    emit_lifecycle_transition_outcome(&outcome);
+    Ok(())
+}
+
+async fn apply_lifecycle_transition_with<S, A>(
+    config: &LifecycleTransitionConfig,
+    metadata_file: &Path,
+    store: S,
+    principal: &PrincipalChain,
+    audit: &mut A,
+) -> Result<LifecycleTransitionCliOutcome>
+where
+    S: SecretStore,
+    A: AuditSink,
+{
+    let descriptors = store
+        .list()
+        .await
+        .context("failed to list descriptors for lifecycle transition")?;
+    let descriptor = descriptors
+        .iter()
+        .find(|descriptor| descriptor.secret_ref == config.secret_ref)
+        .ok_or_else(|| JanusError::NotInManifest {
+            name: config.secret_ref.as_str().to_string(),
+        })?;
+    let transition = LifecycleTransitionPolicy::transition(
+        descriptor,
+        config.to,
+        config.reason.clone(),
+        principal,
+        audit,
+    )?;
+
+    let mut overlay = SecretMetadataOverlay::load_toml_file(metadata_file)
+        .with_context(|| "failed to load lifecycle metadata overlay")?;
+    overlay.set_secret_lifecycle(descriptor.name.clone(), transition.to());
+    let mut metadata_entries = descriptors
+        .iter()
+        .map(secret_meta_from_descriptor)
+        .collect::<Vec<_>>();
+    overlay
+        .apply_to_entries(&mut metadata_entries)
+        .context("lifecycle metadata overlay no longer matches manifest")?;
+    write_metadata_overlay_atomic(metadata_file, &overlay.to_toml_string()?)?;
+
+    Ok(LifecycleTransitionCliOutcome {
+        secret_ref: transition.secret_ref().as_str().to_string(),
+        from: transition.from().as_str(),
+        to: transition.to().as_str(),
+        reason_code: "lifecycle_transition_ok",
+        value_returned: false,
+    })
+}
+
+fn secret_meta_from_descriptor(descriptor: &SecretDescriptor) -> SecretMeta {
+    SecretMeta {
+        secret_ref: descriptor.secret_ref.clone(),
+        name: descriptor.name.clone(),
+        label: descriptor.label.clone(),
+        scope: descriptor.scope.clone(),
+        owner: descriptor.owner.clone(),
+        classification: descriptor.classification,
+        lifecycle: descriptor.lifecycle,
+        required: descriptor.required,
+        trust_level: descriptor.trust_level,
+        allowed_uses: descriptor.allowed_uses.clone(),
+    }
+}
+
+fn emit_lifecycle_transition_outcome(outcome: &LifecycleTransitionCliOutcome) {
+    println!(
+        "janusd lifecycle transition ok secret_ref={} from={} to={} reason_code={} value_returned={}",
+        outcome.secret_ref,
+        outcome.from,
+        outcome.to,
+        outcome.reason_code,
+        outcome.value_returned
+    );
 }
 
 async fn issue_approved_permit_with<S, R, P>(
@@ -1082,8 +1197,72 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
                 .map(ApproveCommand::Revoke)
                 .map(Command::Approve)
         }
+        [lifecycle, transition, rest @ ..]
+            if lifecycle == "lifecycle" && transition == "transition" =>
+        {
+            parse_lifecycle_transition(rest.iter().cloned()).map(Command::LifecycleTransition)
+        }
         _ => anyhow::bail!("unsupported janusd command; run `janusd --help`"),
     }
+}
+
+fn parse_lifecycle_transition(
+    args: impl IntoIterator<Item = String>,
+) -> Result<LifecycleTransitionConfig> {
+    let mut secret_ref = None;
+    let mut to = None;
+    let mut reason = None;
+    let mut metadata_file = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--secret-ref" => {
+                if secret_ref
+                    .replace(SecretRef::new(required_arg("--secret-ref", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--secret-ref may only be provided once");
+                }
+            }
+            "--to" => {
+                if to
+                    .replace(SecretLifecycle::parse(&required_arg("--to", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--to may only be provided once");
+                }
+            }
+            "--reason" => {
+                if reason
+                    .replace(SafeLabel::new(required_arg("--reason", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--reason may only be provided once");
+                }
+            }
+            "--metadata-file" => {
+                if metadata_file
+                    .replace(PathBuf::from(required_arg("--metadata-file", args.next())?))
+                    .is_some()
+                {
+                    anyhow::bail!("--metadata-file may only be provided once");
+                }
+            }
+            "--secret" | "--name" | "--value" | "--raw-value" | "--owner" | "--classification" => {
+                anyhow::bail!("lifecycle transition accepts only value-free lifecycle fields")
+            }
+            other if other.starts_with('-') => anyhow::bail!("unsupported janusd lifecycle flag"),
+            _ => anyhow::bail!("unsupported janusd lifecycle argument"),
+        }
+    }
+
+    Ok(LifecycleTransitionConfig {
+        secret_ref: secret_ref.context("--secret-ref is required")?,
+        to: to.context("--to is required")?,
+        reason: reason.context("--reason is required")?,
+        metadata_file,
+    })
 }
 
 fn parse_approve_issue(args: impl IntoIterator<Item = String>) -> Result<ApproveIssueConfig> {
@@ -1471,6 +1650,12 @@ fn run_principal_from_env() -> Result<PrincipalChain> {
 }
 
 fn load_age_store_from_env() -> Result<AgeSecretStore> {
+    load_age_store_from_env_with_metadata_path(None)
+}
+
+fn load_age_store_from_env_with_metadata_path(
+    metadata_file: Option<&Path>,
+) -> Result<AgeSecretStore> {
     let manifest = env_first(&[
         "JANUS_AGE_MANIFEST_FILE",
         "JANUS_WARDEN_AGE_MANIFEST_FILE",
@@ -1483,11 +1668,14 @@ fn load_age_store_from_env() -> Result<AgeSecretStore> {
         .unwrap_or_else(|| "/var/lib/janus/secrets".to_string());
     let identity_files = age_identity_files_from_env()?;
     let recipients = age_recipients_from_env()?;
-    let metadata = metadata_overlay_from_env(&[
-        "JANUS_AGE_METADATA_FILE",
-        "JANUS_WARDEN_AGE_METADATA_FILE",
-        "JANUS_METADATA_FILE",
-    ])?;
+    let metadata = if let Some(path) = metadata_file {
+        Some(
+            SecretMetadataOverlay::load_toml_file(path)
+                .context("failed to load lifecycle metadata overlay")?,
+        )
+    } else {
+        metadata_overlay_from_env(METADATA_ENV_KEYS)?
+    };
     AgeSecretStore::load_from_secretspec_manifest_with_metadata(
         manifest,
         profile,
@@ -1499,6 +1687,18 @@ fn load_age_store_from_env() -> Result<AgeSecretStore> {
     .context("failed to load age backend for janusd")
 }
 
+fn lifecycle_metadata_file_path(
+    configured: Option<&Path>,
+    env_keys: &[&'static str],
+) -> Result<PathBuf> {
+    if let Some(path) = configured {
+        return Ok(path.to_path_buf());
+    }
+    env_first(env_keys)
+        .map(PathBuf::from)
+        .context("JANUS_AGE_METADATA_FILE, JANUS_WARDEN_AGE_METADATA_FILE, or JANUS_METADATA_FILE is required for lifecycle transition")
+}
+
 fn metadata_overlay_from_env(keys: &[&'static str]) -> Result<Option<SecretMetadataOverlay>> {
     for key in keys {
         if let Ok(path) = env::var(key) {
@@ -1508,6 +1708,49 @@ fn metadata_overlay_from_env(keys: &[&'static str]) -> Result<Option<SecretMetad
         }
     }
     Ok(None)
+}
+
+fn write_metadata_overlay_atomic(path: &Path, contents: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).context("failed to create metadata overlay directory")?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("metadata overlay path must include a file name")?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp_path = parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), nonce));
+    let result = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp_path)
+            .context("failed to create temporary metadata overlay")?;
+        file.write_all(contents.as_bytes())
+            .context("failed to write temporary metadata overlay")?;
+        file.write_all(b"\n")
+            .context("failed to finish temporary metadata overlay")?;
+        file.flush()
+            .context("failed to flush temporary metadata overlay")?;
+        file.sync_all()
+            .context("failed to sync temporary metadata overlay")?;
+        fs::rename(&temp_path, path).context("failed to replace metadata overlay atomically")?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
 }
 
 fn age_identity_files_from_env() -> Result<Vec<PathBuf>> {
@@ -1576,13 +1819,23 @@ fn forge_principal_from_env() -> Result<PrincipalChain> {
     ))
 }
 
+fn lifecycle_principal_from_env() -> Result<PrincipalChain> {
+    let executor =
+        env::var("JANUS_LIFECYCLE_EXECUTOR").unwrap_or_else(|_| "janusd-lifecycle".to_string());
+    let scope = env::var("JANUS_LIFECYCLE_SCOPE").unwrap_or_else(|_| "janus/default".to_string());
+    Ok(PrincipalChain::new(
+        Principal::new(PrincipalKind::Executor, PrincipalId::new(executor)?),
+        ScopeRef::new(scope)?,
+    ))
+}
+
 fn env_first(keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| env::var(key).ok())
 }
 
 fn print_usage() {
     eprintln!(
-        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
+        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
 }
 
@@ -1593,8 +1846,9 @@ mod tests {
 
     #[cfg(unix)]
     use janus_core::{
-        AuditWrite, Destination, EgressMode, ExecutorRef, ManifestCatalog, ProjectId, Purpose,
-        SecretClass, SecretLifecycle, SecretMeta, SecretRef, TrustLevel, UseProfile, UseRequest,
+        AuditAction, AuditOutcome, AuditWrite, Destination, EgressMode, ExecutorRef,
+        ManifestCatalog, ProjectId, Purpose, SecretClass, SecretLifecycle, SecretMeta, SecretRef,
+        TrustLevel, UseProfile, UseRequest,
     };
     #[cfg(unix)]
     use janus_mock::MockStore;
@@ -1607,6 +1861,7 @@ mod tests {
             Command::Help => panic!("expected forge config"),
             Command::RunManaged(_) => panic!("expected forge config"),
             Command::Approve(_) => panic!("expected forge config"),
+            Command::LifecycleTransition(_) => panic!("expected forge config"),
         }
     }
 
@@ -1616,6 +1871,7 @@ mod tests {
             Command::ForgeRotateGenerated(_) => panic!("expected run config"),
             Command::Help => panic!("expected run config"),
             Command::Approve(_) => panic!("expected run config"),
+            Command::LifecycleTransition(_) => panic!("expected run config"),
         }
     }
 
@@ -1626,6 +1882,7 @@ mod tests {
             Command::RunManaged(_) => panic!("expected approve issue config"),
             Command::Approve(_) => panic!("expected approve issue config"),
             Command::Help => panic!("expected approve issue config"),
+            Command::LifecycleTransition(_) => panic!("expected approve issue config"),
         }
     }
 
@@ -1636,6 +1893,7 @@ mod tests {
             Command::RunManaged(_) => panic!("expected approve permit config"),
             Command::Approve(_) => panic!("expected approve permit config"),
             Command::Help => panic!("expected approve permit config"),
+            Command::LifecycleTransition(_) => panic!("expected approve permit config"),
         }
     }
 
@@ -1646,6 +1904,17 @@ mod tests {
             Command::RunManaged(_) => panic!("expected approve revoke config"),
             Command::Approve(_) => panic!("expected approve revoke config"),
             Command::Help => panic!("expected approve revoke config"),
+            Command::LifecycleTransition(_) => panic!("expected approve revoke config"),
+        }
+    }
+
+    fn parse_lifecycle_transition_ok(args: &[&str]) -> LifecycleTransitionConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::LifecycleTransition(config) => config,
+            Command::ForgeRotateGenerated(_) => panic!("expected lifecycle config"),
+            Command::RunManaged(_) => panic!("expected lifecycle config"),
+            Command::Approve(_) => panic!("expected lifecycle config"),
+            Command::Help => panic!("expected lifecycle config"),
         }
     }
 
@@ -1795,6 +2064,56 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("--permit-ttl-seconds"));
+    }
+
+    #[test]
+    fn parses_lifecycle_transition_without_literal_inputs() {
+        let config = parse_lifecycle_transition_ok(&[
+            "lifecycle",
+            "transition",
+            "--secret-ref",
+            "sec_fixture",
+            "--to",
+            "disabled",
+            "--reason",
+            "reviewed disable",
+            "--metadata-file",
+            "/tmp/janus-metadata.toml",
+        ]);
+
+        assert_eq!(config.secret_ref.as_str(), "sec_fixture");
+        assert_eq!(config.to, SecretLifecycle::Disabled);
+        assert_eq!(config.reason.as_str(), "reviewed disable");
+        assert_eq!(
+            config.metadata_file,
+            Some(PathBuf::from("/tmp/janus-metadata.toml"))
+        );
+
+        let err = parse_args(
+            [
+                "lifecycle",
+                "transition",
+                "--secret-ref",
+                "sec_fixture",
+                "--to",
+                "disabled",
+                "--reason",
+                "reviewed disable",
+                "--value",
+                "do-not-echo-me",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("value-free"));
+        assert!(!err.to_string().contains("do-not-echo-me"));
+    }
+
+    #[test]
+    fn lifecycle_transition_requires_metadata_configuration() {
+        let err = lifecycle_metadata_file_path(None, &[]).unwrap_err();
+        assert!(err.to_string().contains("METADATA"));
     }
 
     #[test]
@@ -2119,6 +2438,165 @@ mod tests {
         ));
         assert!(SharedApprovalRegistry::get(&approvals, approval.id().as_str()).is_ok());
         assert_eq!(std::fs::read_dir(permit_dir.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_transition_persists_overlay_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let metadata_file = dir.path().join("metadata.toml");
+        std::fs::write(
+            &metadata_file,
+            r#"
+            [defaults]
+            owner = "infra"
+            classification = "normal"
+            lifecycle = "active"
+
+            [[secrets]]
+            name = "CANARY"
+            owner = "security"
+            classification = "high_value"
+            lifecycle = "active"
+            "#,
+        )
+        .unwrap();
+        let project = ProjectId::new("janus").unwrap();
+        let name = SecretName::new("CANARY").unwrap();
+        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let config = LifecycleTransitionConfig {
+            secret_ref: secret_ref.clone(),
+            to: SecretLifecycle::Disabled,
+            reason: SafeLabel::new("reviewed disable").unwrap(),
+            metadata_file: Some(metadata_file.clone()),
+        };
+        let mut audit = AuditWrite::accepting();
+
+        let outcome = apply_lifecycle_transition_with(
+            &config,
+            &metadata_file,
+            fixture_store_with_class_and_lifecycle(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::HighValue,
+                SecretLifecycle::Active,
+            ),
+            &fixture_principal(),
+            &mut audit,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.secret_ref, secret_ref.as_str());
+        assert_eq!(outcome.from, "active");
+        assert_eq!(outcome.to, "disabled");
+        assert_eq!(outcome.reason_code, "lifecycle_transition_ok");
+        assert!(!outcome.value_returned);
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
+        let overlay = SecretMetadataOverlay::load_toml_file(&metadata_file).unwrap();
+        let mut entries = vec![SecretMeta {
+            secret_ref: secret_ref.clone(),
+            name: name.clone(),
+            label: SafeLabel::new("Canary token").unwrap(),
+            scope: ScopeRef::new("janus/dev").unwrap(),
+            owner: None,
+            classification: None,
+            lifecycle: SecretLifecycle::Active,
+            required: true,
+            trust_level: TrustLevel::L1,
+            allowed_uses: vec![profile_id],
+        }];
+        overlay.apply_to_entries(&mut entries).unwrap();
+        assert_eq!(entries[0].owner.as_ref().unwrap().as_str(), "security");
+        assert_eq!(entries[0].classification, Some(SecretClass::HighValue));
+        assert_eq!(entries[0].lifecycle, SecretLifecycle::Disabled);
+        assert_eq!(audit.events().len(), 1);
+        let event = &audit.events()[0];
+        assert_eq!(event.action, AuditAction::SecretLifecycle);
+        assert_eq!(event.outcome, AuditOutcome::Allowed);
+        assert_eq!(event.reason_code, "lifecycle_transition_ok");
+        assert_eq!(event.evidence.as_ref(), Some(&config.reason));
+        assert!(!event.value_returned);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_transition_denials_leave_overlay_unchanged() {
+        for (from, to, expected_reason) in [
+            (
+                SecretLifecycle::Active,
+                SecretLifecycle::Active,
+                "denied_lifecycle_transition_noop",
+            ),
+            (
+                SecretLifecycle::Disabled,
+                SecretLifecycle::Active,
+                "denied_lifecycle_transition_unsupported",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let metadata_file = dir.path().join("metadata.toml");
+            std::fs::write(
+                &metadata_file,
+                format!(
+                    r#"
+                    [defaults]
+                    owner = "infra"
+                    classification = "normal"
+                    lifecycle = "active"
+
+                    [[secrets]]
+                    name = "CANARY"
+                    lifecycle = "{}"
+                    "#,
+                    from.as_str()
+                ),
+            )
+            .unwrap();
+            let before = std::fs::read_to_string(&metadata_file).unwrap();
+            let project = ProjectId::new("janus").unwrap();
+            let name = SecretName::new("CANARY").unwrap();
+            let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+            let profile_id = ProfileId::new("profile.canary").unwrap();
+            let config = LifecycleTransitionConfig {
+                secret_ref: secret_ref.clone(),
+                to,
+                reason: SafeLabel::new("reviewed lifecycle attempt").unwrap(),
+                metadata_file: Some(metadata_file.clone()),
+            };
+            let mut audit = AuditWrite::accepting();
+
+            let err = apply_lifecycle_transition_with(
+                &config,
+                &metadata_file,
+                fixture_store_with_class_and_lifecycle(
+                    &secret_ref,
+                    &name,
+                    &profile_id,
+                    SecretClass::Normal,
+                    from,
+                ),
+                &fixture_principal(),
+                &mut audit,
+            )
+            .await
+            .unwrap_err();
+
+            let janus_err = err.downcast_ref::<JanusError>().unwrap();
+            assert!(matches!(
+                janus_err,
+                JanusError::PolicyDenied { reason_code, .. } if *reason_code == expected_reason
+            ));
+            assert_eq!(std::fs::read_to_string(&metadata_file).unwrap(), before);
+            assert_eq!(audit.events().len(), 1);
+            let event = &audit.events()[0];
+            assert_eq!(event.action, AuditAction::SecretLifecycle);
+            assert_eq!(event.outcome, AuditOutcome::Denied);
+            assert_eq!(event.reason_code, expected_reason);
+            assert!(!event.value_returned);
+        }
     }
 
     #[test]
@@ -2524,7 +3002,13 @@ mod tests {
         name: &SecretName,
         profile_id: &ProfileId,
     ) -> MockStore {
-        fixture_store_with_class(secret_ref, name, profile_id, SecretClass::Normal)
+        fixture_store_with_class_and_lifecycle(
+            secret_ref,
+            name,
+            profile_id,
+            SecretClass::Normal,
+            SecretLifecycle::Active,
+        )
     }
 
     #[cfg(unix)]
@@ -2534,6 +3018,23 @@ mod tests {
         profile_id: &ProfileId,
         class: SecretClass,
     ) -> MockStore {
+        fixture_store_with_class_and_lifecycle(
+            secret_ref,
+            name,
+            profile_id,
+            class,
+            SecretLifecycle::Active,
+        )
+    }
+
+    #[cfg(unix)]
+    fn fixture_store_with_class_and_lifecycle(
+        secret_ref: &SecretRef,
+        name: &SecretName,
+        profile_id: &ProfileId,
+        class: SecretClass,
+        lifecycle: SecretLifecycle,
+    ) -> MockStore {
         let catalog = ManifestCatalog::new(vec![SecretMeta {
             secret_ref: secret_ref.clone(),
             name: name.clone(),
@@ -2541,7 +3042,7 @@ mod tests {
             scope: ScopeRef::new("janus/dev").unwrap(),
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(class),
-            lifecycle: SecretLifecycle::Active,
+            lifecycle,
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],

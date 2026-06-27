@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     JanusError, JanusResult, OwnerRef, SecretClass, SecretLifecycle, SecretMeta, SecretName,
@@ -31,6 +31,18 @@ impl SecretMetadataPatch {
         }
         if let Some(lifecycle) = self.lifecycle {
             meta.lifecycle = lifecycle;
+        }
+    }
+
+    fn to_toml(&self) -> SecretMetadataPatchTomlOut {
+        SecretMetadataPatchTomlOut {
+            owner: self.owner.as_ref().map(|owner| owner.as_str().to_string()),
+            classification: self
+                .classification
+                .map(|classification| classification.as_str().to_string()),
+            lifecycle: self
+                .lifecycle
+                .map(|lifecycle| lifecycle.as_str().to_string()),
         }
     }
 }
@@ -81,6 +93,35 @@ impl SecretMetadataOverlay {
                 detail: format!("metadata overlay read failed: {err}"),
             })?;
         Self::parse_toml(&contents)
+    }
+
+    /// Set or replace the per-secret lifecycle patch while preserving other metadata.
+    pub fn set_secret_lifecycle(&mut self, name: SecretName, lifecycle: SecretLifecycle) {
+        self.secrets.entry(name).or_default().lifecycle = Some(lifecycle);
+    }
+
+    /// Serialize this overlay to canonical TOML.
+    pub fn to_toml_string(&self) -> JanusResult<String> {
+        let output = SecretMetadataOverlayTomlOut {
+            defaults: self.defaults.to_toml(),
+            secrets: self
+                .secrets
+                .iter()
+                .map(|(name, patch)| SecretMetadataEntryTomlOut {
+                    name: name.as_str().to_string(),
+                    owner: patch.owner.as_ref().map(|owner| owner.as_str().to_string()),
+                    classification: patch
+                        .classification
+                        .map(|classification| classification.as_str().to_string()),
+                    lifecycle: patch
+                        .lifecycle
+                        .map(|lifecycle| lifecycle.as_str().to_string()),
+                })
+                .collect(),
+        };
+        toml::to_string_pretty(&output).map_err(|err| JanusError::InvalidManifest {
+            detail: format!("metadata overlay serialize failed: {err}"),
+        })
     }
 
     /// Apply this overlay to manifest entries, rejecting stale overlay names.
@@ -150,6 +191,41 @@ struct SecretMetadataEntryToml {
     name: String,
     owner: Option<String>,
     classification: Option<String>,
+    lifecycle: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SecretMetadataOverlayTomlOut {
+    #[serde(skip_serializing_if = "SecretMetadataPatchTomlOut::is_empty")]
+    defaults: SecretMetadataPatchTomlOut,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    secrets: Vec<SecretMetadataEntryTomlOut>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct SecretMetadataPatchTomlOut {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    classification: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lifecycle: Option<String>,
+}
+
+impl SecretMetadataPatchTomlOut {
+    fn is_empty(&self) -> bool {
+        self.owner.is_none() && self.classification.is_none() && self.lifecycle.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SecretMetadataEntryTomlOut {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    classification: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     lifecycle: Option<String>,
 }
 
@@ -253,5 +329,45 @@ mod tests {
             invalid_lifecycle,
             JanusError::InvalidIdentifier { .. }
         ));
+    }
+
+    #[test]
+    fn overlay_updates_lifecycle_and_serializes_without_losing_metadata() {
+        let mut overlay = SecretMetadataOverlay::parse_toml(
+            r#"
+            [defaults]
+            owner = "infra"
+            classification = "normal"
+            lifecycle = "active"
+
+            [[secrets]]
+            name = "CANARY"
+            owner = "security"
+            classification = "high_value"
+            lifecycle = "active"
+            "#,
+        )
+        .unwrap();
+
+        overlay.set_secret_lifecycle(
+            SecretName::new("CANARY").unwrap(),
+            SecretLifecycle::Disabled,
+        );
+        overlay.set_secret_lifecycle(
+            SecretName::new("OTHER").unwrap(),
+            SecretLifecycle::PendingDelete,
+        );
+        let encoded = overlay.to_toml_string().unwrap();
+        let round_tripped = SecretMetadataOverlay::parse_toml(&encoded).unwrap();
+        let mut entries = vec![meta("CANARY"), meta("OTHER")];
+
+        round_tripped.apply_to_entries(&mut entries).unwrap();
+
+        assert_eq!(entries[0].owner.as_ref().unwrap().as_str(), "security");
+        assert_eq!(entries[0].classification, Some(SecretClass::HighValue));
+        assert_eq!(entries[0].lifecycle, SecretLifecycle::Disabled);
+        assert_eq!(entries[1].owner.as_ref().unwrap().as_str(), "infra");
+        assert_eq!(entries[1].classification, Some(SecretClass::Normal));
+        assert_eq!(entries[1].lifecycle, SecretLifecycle::PendingDelete);
     }
 }
