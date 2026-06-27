@@ -23,8 +23,10 @@ use janus_core::{
     ConsumerKind, ConsumerRef, ConsumerRegistry, Destination, EgressMode, Environment, ExecutorRef,
     JanusError, LifecycleTransitionPolicy, OwnerRef, Principal, PrincipalChain, PrincipalId,
     PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReloadMethod, SafeLabel, ScopeRef,
-    SecretBroker, SecretDescriptor, SecretLifecycle, SecretMeta, SecretMetadataOverlay, SecretName,
-    SecretRef, SecretStore, TrustLevel, UsePermit, UseProfile, UseRequest, ValidationProbe,
+    SecretAgeEvidence, SecretBroker, SecretDescriptor, SecretLifecycle, SecretMeta,
+    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, StaleSecretPolicy,
+    StaleSecretReportRow, StaleSecretReporter, TrustLevel, UsePermit, UseProfile, UseRequest,
+    ValidationProbe,
 };
 use janus_executor::{
     ApprovedUseExecutor, ManagedCommandProfile, ManagedCommandProfileSpec, ManagedCommandRequest,
@@ -45,6 +47,8 @@ use tokio::time::timeout;
 
 const DEFAULT_HOOK_TIMEOUT_SECONDS: u64 = 30;
 const MAX_APPROVAL_TTL_SECONDS: u64 = 3600;
+const DEFAULT_STALE_AFTER_DAYS: u64 = 90;
+const DEFAULT_MISSING_EVIDENCE_AFTER_DAYS: u64 = 7;
 const METADATA_ENV_KEYS: &[&str] = &[
     "JANUS_AGE_METADATA_FILE",
     "JANUS_WARDEN_AGE_METADATA_FILE",
@@ -62,6 +66,7 @@ async fn main() -> Result<()> {
         Command::RunManaged(config) => run_managed_command(config).await,
         Command::Approve(command) => run_approve(command).await,
         Command::LifecycleTransition(config) => run_lifecycle_transition(config).await,
+        Command::LifecycleStaleReport(config) => run_lifecycle_stale_report(config).await,
     }
 }
 
@@ -72,6 +77,7 @@ enum Command {
     RunManaged(RunManagedCommandConfig),
     Approve(ApproveCommand),
     LifecycleTransition(LifecycleTransitionConfig),
+    LifecycleStaleReport(LifecycleStaleReportConfig),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,6 +135,13 @@ struct LifecycleTransitionConfig {
     to: SecretLifecycle,
     reason: SafeLabel,
     metadata_file: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LifecycleStaleReportConfig {
+    evidence_file: Option<PathBuf>,
+    stale_after: Duration,
+    missing_evidence_after: Duration,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -349,6 +362,46 @@ async fn run_lifecycle_transition(config: LifecycleTransitionConfig) -> Result<(
     Ok(())
 }
 
+async fn run_lifecycle_stale_report(config: LifecycleStaleReportConfig) -> Result<()> {
+    let store = load_age_store_from_env()?;
+    let principal = lifecycle_principal_from_env()?;
+    let evidence = load_stale_evidence(config.evidence_file.as_deref())?;
+    let mut audit = AuditWrite::accepting();
+    let rows = build_lifecycle_stale_report_with(
+        &config,
+        store,
+        &evidence,
+        &principal,
+        &mut audit,
+        SystemTime::now(),
+    )
+    .await?;
+    emit_lifecycle_stale_report(&rows);
+    Ok(())
+}
+
+async fn build_lifecycle_stale_report_with<S, A>(
+    config: &LifecycleStaleReportConfig,
+    store: S,
+    evidence: &BTreeMap<SecretRef, SecretAgeEvidence>,
+    principal: &PrincipalChain,
+    audit: &mut A,
+    now: SystemTime,
+) -> Result<Vec<StaleSecretReportRow>>
+where
+    S: SecretStore,
+    A: AuditSink,
+{
+    let descriptors = store
+        .list()
+        .await
+        .context("failed to list descriptors for lifecycle stale report")?;
+    let policy = StaleSecretPolicy::new(config.stale_after, config.missing_evidence_after);
+    StaleSecretReporter::new(policy)
+        .report(&descriptors, evidence, now, principal, audit)
+        .map_err(Into::into)
+}
+
 async fn apply_lifecycle_transition_with<S, A>(
     config: &LifecycleTransitionConfig,
     metadata_file: &Path,
@@ -423,6 +476,32 @@ fn emit_lifecycle_transition_outcome(outcome: &LifecycleTransitionCliOutcome) {
         outcome.reason_code,
         outcome.value_returned
     );
+}
+
+fn emit_lifecycle_stale_report(rows: &[StaleSecretReportRow]) {
+    for row in rows {
+        let owner = row
+            .owner
+            .as_ref()
+            .map(OwnerRef::as_str)
+            .unwrap_or("unassigned");
+        let age = row
+            .last_activity_age_seconds
+            .map(|age| age.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        println!(
+            "janusd lifecycle stale-report secret_ref={} status={} reason_code={} action_required={} action={} owner={} lifecycle={} age_seconds={} value_returned={}",
+            row.secret_ref.as_str(),
+            row.status.as_str(),
+            row.reason_code,
+            row.action_required,
+            row.action,
+            owner,
+            row.lifecycle.as_str(),
+            age,
+            row.value_returned
+        );
+    }
 }
 
 async fn issue_approved_permit_with<S, R, P>(
@@ -1202,6 +1281,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         {
             parse_lifecycle_transition(rest.iter().cloned()).map(Command::LifecycleTransition)
         }
+        [lifecycle, stale_report, rest @ ..]
+            if lifecycle == "lifecycle" && stale_report == "stale-report" =>
+        {
+            parse_lifecycle_stale_report(rest.iter().cloned()).map(Command::LifecycleStaleReport)
+        }
         _ => anyhow::bail!("unsupported janusd command; run `janusd --help`"),
     }
 }
@@ -1262,6 +1346,62 @@ fn parse_lifecycle_transition(
         to: to.context("--to is required")?,
         reason: reason.context("--reason is required")?,
         metadata_file,
+    })
+}
+
+fn parse_lifecycle_stale_report(
+    args: impl IntoIterator<Item = String>,
+) -> Result<LifecycleStaleReportConfig> {
+    let mut evidence_file = None;
+    let mut stale_after = Duration::from_secs(DEFAULT_STALE_AFTER_DAYS * 24 * 60 * 60);
+    let mut missing_evidence_after =
+        Duration::from_secs(DEFAULT_MISSING_EVIDENCE_AFTER_DAYS * 24 * 60 * 60);
+    let mut stale_after_set = false;
+    let mut missing_evidence_after_set = false;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--evidence-file" => {
+                if evidence_file
+                    .replace(PathBuf::from(required_arg("--evidence-file", args.next())?))
+                    .is_some()
+                {
+                    anyhow::bail!("--evidence-file may only be provided once");
+                }
+            }
+            "--stale-after-days" => {
+                if stale_after_set {
+                    anyhow::bail!("--stale-after-days may only be provided once");
+                }
+                stale_after = parse_positive_days(
+                    "--stale-after-days",
+                    &required_arg("--stale-after-days", args.next())?,
+                )?;
+                stale_after_set = true;
+            }
+            "--missing-evidence-after-days" => {
+                if missing_evidence_after_set {
+                    anyhow::bail!("--missing-evidence-after-days may only be provided once");
+                }
+                missing_evidence_after = parse_positive_days(
+                    "--missing-evidence-after-days",
+                    &required_arg("--missing-evidence-after-days", args.next())?,
+                )?;
+                missing_evidence_after_set = true;
+            }
+            "--secret" | "--secret-ref" | "--name" | "--value" | "--raw-value" => {
+                anyhow::bail!("lifecycle stale-report accepts only value-free report controls")
+            }
+            other if other.starts_with('-') => anyhow::bail!("unsupported janusd lifecycle flag"),
+            _ => anyhow::bail!("unsupported janusd lifecycle argument"),
+        }
+    }
+
+    Ok(LifecycleStaleReportConfig {
+        evidence_file,
+        stale_after,
+        missing_evidence_after,
     })
 }
 
@@ -1439,6 +1579,19 @@ fn parse_positive_duration(flag: &'static str, value: &str) -> Result<Duration> 
     if seconds == 0 {
         anyhow::bail!("{flag} must be greater than zero");
     }
+    Ok(Duration::from_secs(seconds))
+}
+
+fn parse_positive_days(flag: &'static str, value: &str) -> Result<Duration> {
+    let days = value
+        .parse::<u64>()
+        .with_context(|| format!("invalid {flag}"))?;
+    if days == 0 {
+        anyhow::bail!("{flag} must be greater than zero");
+    }
+    let seconds = days
+        .checked_mul(24 * 60 * 60)
+        .with_context(|| format!("{flag} is too large"))?;
     Ok(Duration::from_secs(seconds))
 }
 
@@ -1753,6 +1906,52 @@ fn write_metadata_overlay_atomic(path: &Path, contents: &str) -> Result<()> {
     result
 }
 
+fn load_stale_evidence(path: Option<&Path>) -> Result<BTreeMap<SecretRef, SecretAgeEvidence>> {
+    let Some(path) = path else {
+        return Ok(BTreeMap::new());
+    };
+    let contents = fs::read_to_string(path).context("failed to read lifecycle evidence file")?;
+    let parsed: LifecycleStaleEvidenceToml =
+        toml::from_str(&contents).context("failed to parse lifecycle evidence file")?;
+    let mut evidence = BTreeMap::new();
+    for entry in parsed.secrets {
+        let secret_ref = SecretRef::new(entry.secret_ref)?;
+        let record = SecretAgeEvidence {
+            secret_ref: secret_ref.clone(),
+            declared_at: entry.declared_at_unix_secs.map(unix_time),
+            last_used_at: entry.last_used_at_unix_secs.map(unix_time),
+            last_rotated_at: entry.last_rotated_at_unix_secs.map(unix_time),
+        };
+        if evidence.insert(secret_ref.clone(), record).is_some() {
+            anyhow::bail!(
+                "duplicate lifecycle evidence entry for {}",
+                secret_ref.as_str()
+            );
+        }
+    }
+    Ok(evidence)
+}
+
+fn unix_time(seconds: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(seconds)
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LifecycleStaleEvidenceToml {
+    #[serde(default)]
+    secrets: Vec<LifecycleStaleEvidenceEntryToml>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LifecycleStaleEvidenceEntryToml {
+    secret_ref: String,
+    declared_at_unix_secs: Option<u64>,
+    last_used_at_unix_secs: Option<u64>,
+    last_rotated_at_unix_secs: Option<u64>,
+}
+
 fn age_identity_files_from_env() -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for key in ["JANUS_AGE_IDENTITY_FILE", "JANUS_WARDEN_AGE_IDENTITY_FILE"] {
@@ -1835,7 +2034,7 @@ fn env_first(keys: &[&str]) -> Option<String> {
 
 fn print_usage() {
     eprintln!(
-        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
+        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
 }
 
@@ -1848,7 +2047,7 @@ mod tests {
     use janus_core::{
         AuditAction, AuditOutcome, AuditWrite, Destination, EgressMode, ExecutorRef,
         ManifestCatalog, ProjectId, Purpose, SecretClass, SecretLifecycle, SecretMeta, SecretRef,
-        TrustLevel, UseProfile, UseRequest,
+        StaleSecretStatus, TrustLevel, UseProfile, UseRequest,
     };
     #[cfg(unix)]
     use janus_mock::MockStore;
@@ -1862,6 +2061,7 @@ mod tests {
             Command::RunManaged(_) => panic!("expected forge config"),
             Command::Approve(_) => panic!("expected forge config"),
             Command::LifecycleTransition(_) => panic!("expected forge config"),
+            Command::LifecycleStaleReport(_) => panic!("expected forge config"),
         }
     }
 
@@ -1872,6 +2072,7 @@ mod tests {
             Command::Help => panic!("expected run config"),
             Command::Approve(_) => panic!("expected run config"),
             Command::LifecycleTransition(_) => panic!("expected run config"),
+            Command::LifecycleStaleReport(_) => panic!("expected run config"),
         }
     }
 
@@ -1883,6 +2084,7 @@ mod tests {
             Command::Approve(_) => panic!("expected approve issue config"),
             Command::Help => panic!("expected approve issue config"),
             Command::LifecycleTransition(_) => panic!("expected approve issue config"),
+            Command::LifecycleStaleReport(_) => panic!("expected approve issue config"),
         }
     }
 
@@ -1894,6 +2096,7 @@ mod tests {
             Command::Approve(_) => panic!("expected approve permit config"),
             Command::Help => panic!("expected approve permit config"),
             Command::LifecycleTransition(_) => panic!("expected approve permit config"),
+            Command::LifecycleStaleReport(_) => panic!("expected approve permit config"),
         }
     }
 
@@ -1905,6 +2108,7 @@ mod tests {
             Command::Approve(_) => panic!("expected approve revoke config"),
             Command::Help => panic!("expected approve revoke config"),
             Command::LifecycleTransition(_) => panic!("expected approve revoke config"),
+            Command::LifecycleStaleReport(_) => panic!("expected approve revoke config"),
         }
     }
 
@@ -1915,6 +2119,18 @@ mod tests {
             Command::RunManaged(_) => panic!("expected lifecycle config"),
             Command::Approve(_) => panic!("expected lifecycle config"),
             Command::Help => panic!("expected lifecycle config"),
+            Command::LifecycleStaleReport(_) => panic!("expected lifecycle config"),
+        }
+    }
+
+    fn parse_lifecycle_stale_report_ok(args: &[&str]) -> LifecycleStaleReportConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::LifecycleStaleReport(config) => config,
+            Command::LifecycleTransition(_) => panic!("expected lifecycle stale-report config"),
+            Command::ForgeRotateGenerated(_) => panic!("expected lifecycle stale-report config"),
+            Command::RunManaged(_) => panic!("expected lifecycle stale-report config"),
+            Command::Approve(_) => panic!("expected lifecycle stale-report config"),
+            Command::Help => panic!("expected lifecycle stale-report config"),
         }
     }
 
@@ -2114,6 +2330,90 @@ mod tests {
     fn lifecycle_transition_requires_metadata_configuration() {
         let err = lifecycle_metadata_file_path(None, &[]).unwrap_err();
         assert!(err.to_string().contains("METADATA"));
+    }
+
+    #[test]
+    fn parses_lifecycle_stale_report_without_literal_inputs() {
+        let config = parse_lifecycle_stale_report_ok(&[
+            "lifecycle",
+            "stale-report",
+            "--evidence-file",
+            "/tmp/janus-stale-evidence.toml",
+            "--stale-after-days",
+            "30",
+            "--missing-evidence-after-days",
+            "3",
+        ]);
+
+        assert_eq!(
+            config.evidence_file,
+            Some(PathBuf::from("/tmp/janus-stale-evidence.toml"))
+        );
+        assert_eq!(config.stale_after, Duration::from_secs(30 * 24 * 60 * 60));
+        assert_eq!(
+            config.missing_evidence_after,
+            Duration::from_secs(3 * 24 * 60 * 60)
+        );
+
+        let err = parse_args(
+            [
+                "lifecycle",
+                "stale-report",
+                "--evidence-file",
+                "/tmp/janus-stale-evidence.toml",
+                "--value",
+                "do-not-echo-me",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("value-free"));
+        assert!(!err.to_string().contains("do-not-echo-me"));
+
+        let err = parse_args(
+            ["lifecycle", "stale-report", "--stale-after-days", "0"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--stale-after-days"));
+    }
+
+    #[test]
+    fn lifecycle_stale_evidence_loads_opaque_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evidence.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [[secrets]]
+            secret_ref = "sec_fixture"
+            declared_at_unix_secs = 10
+            last_used_at_unix_secs = 20
+            last_rotated_at_unix_secs = 30
+            "#,
+        )
+        .unwrap();
+
+        let evidence = load_stale_evidence(Some(&path)).unwrap();
+        let record = evidence
+            .get(&SecretRef::new("sec_fixture").unwrap())
+            .unwrap();
+
+        assert_eq!(record.secret_ref.as_str(), "sec_fixture");
+        assert_eq!(
+            record.declared_at,
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(10))
+        );
+        assert_eq!(
+            record.last_used_at,
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(20))
+        );
+        assert_eq!(
+            record.last_rotated_at,
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(30))
+        );
     }
 
     #[test]
@@ -2597,6 +2897,59 @@ mod tests {
             assert_eq!(event.reason_code, expected_reason);
             assert!(!event.value_returned);
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_stale_report_reports_value_free_rows_and_audit() {
+        let project = ProjectId::new("janus").unwrap();
+        let name = SecretName::new("CANARY").unwrap();
+        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let config = LifecycleStaleReportConfig {
+            evidence_file: None,
+            stale_after: Duration::from_secs(60),
+            missing_evidence_after: Duration::from_secs(30),
+        };
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let mut evidence = BTreeMap::new();
+        evidence.insert(
+            secret_ref.clone(),
+            SecretAgeEvidence::new(secret_ref.clone())
+                .with_last_used_at(now - Duration::from_secs(61)),
+        );
+        let mut audit = AuditWrite::accepting();
+
+        let rows = build_lifecycle_stale_report_with(
+            &config,
+            fixture_store_with_class_and_lifecycle(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::Normal,
+                SecretLifecycle::Active,
+            ),
+            &evidence,
+            &fixture_principal(),
+            &mut audit,
+            now,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].secret_ref, secret_ref);
+        assert_eq!(rows[0].status, StaleSecretStatus::Stale);
+        assert_eq!(rows[0].reason_code, "stale_activity_age_exceeded");
+        assert!(rows[0].action_required);
+        assert_eq!(rows[0].action, "review_rotate_or_disable");
+        assert_eq!(rows[0].last_activity_age_seconds, Some(61));
+        assert!(!rows[0].value_returned);
+        assert!(!format!("{rows:?}").contains("expected-canary"));
+        assert_eq!(audit.events().len(), 1);
+        assert_eq!(audit.events()[0].action, AuditAction::SecretStalenessReport);
+        assert_eq!(audit.events()[0].reason_code, "stale_activity_age_exceeded");
+        assert!(!audit.events()[0].value_returned);
     }
 
     #[test]

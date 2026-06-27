@@ -17,6 +17,7 @@ pub mod policy;
 pub mod principal;
 pub mod refs;
 pub mod rotation;
+pub mod stale;
 pub mod store;
 pub mod value;
 
@@ -41,6 +42,10 @@ pub use refs::{
 pub use rotation::{
     RollbackPlan, RotationDecision, RotationOutcome, RotationPhase, RotationPlan, RotationPlanner,
     RotationSpec, RotationStrategy, ValidationProbe,
+};
+pub use stale::{
+    SecretAgeEvidence, StaleSecretPolicy, StaleSecretReportRow, StaleSecretReporter,
+    StaleSecretStatus,
 };
 pub use store::{
     HealthStatus, LifecycleTransition, LifecycleTransitionPolicy, SecretClass, SecretDescriptor,
