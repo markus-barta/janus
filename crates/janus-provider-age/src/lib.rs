@@ -15,9 +15,9 @@ use async_trait::async_trait;
 use fs2::FileExt;
 use janus_core::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, HealthStatus, JanusError, JanusResult,
-    ManifestCatalog, PrincipalChain, ProfileId, ProjectId, RotationOutcome, RotationSpec,
-    RotationStrategy, SafeLabel, ScopeRef, SecretDescriptor, SecretMeta, SecretName, SecretRef,
-    SecretStore, SecretValue, Severity, StoreCapabilities, TrustLevel,
+    ManifestCatalog, OwnerRef, PrincipalChain, ProfileId, ProjectId, RotationOutcome, RotationSpec,
+    RotationStrategy, SafeLabel, ScopeRef, SecretClass, SecretDescriptor, SecretMeta, SecretName,
+    SecretRef, SecretStore, SecretValue, Severity, StoreCapabilities, TrustLevel,
 };
 use secretspec as secretspec_crate;
 use zeroize::Zeroize;
@@ -182,6 +182,12 @@ impl AgeSecretStore {
                         .unwrap_or_else(|| "Manifest-declared secret".to_string()),
                 )?,
                 scope: ScopeRef::new(format!("{}/{}", project.as_str(), profile))?,
+                owner: Some(OwnerRef::new(format!(
+                    "secretspec:{}/{}",
+                    project.as_str(),
+                    profile
+                ))?),
+                classification: Some(SecretClass::Normal),
                 required,
                 trust_level: TrustLevel::L1,
                 allowed_uses: vec![ProfileId::new(format!("profile.{}", name.as_str()))?],
@@ -1159,6 +1165,8 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             name: canary.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
             scope: ScopeRef::new("janus/default").unwrap(),
+            owner: Some(OwnerRef::new("infra").unwrap()),
+            classification: Some(SecretClass::Normal),
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.CANARY").unwrap()],

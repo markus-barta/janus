@@ -68,7 +68,7 @@ impl ManifestCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ProfileId, ProjectId, SafeLabel, ScopeRef, TrustLevel};
+    use crate::{OwnerRef, ProfileId, ProjectId, SafeLabel, ScopeRef, SecretClass, TrustLevel};
 
     fn meta(name: &str) -> SecretMeta {
         let project = ProjectId::new("janus").unwrap();
@@ -78,6 +78,8 @@ mod tests {
             name,
             label: SafeLabel::new("Canary").unwrap(),
             scope: ScopeRef::new("janus/dev").unwrap(),
+            owner: Some(OwnerRef::new("infra").unwrap()),
+            classification: Some(SecretClass::Normal),
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],

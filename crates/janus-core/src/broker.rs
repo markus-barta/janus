@@ -152,6 +152,18 @@ where
             });
         };
 
+        if let Some((reason_code, detail)) = descriptor.metadata_use_denial() {
+            self.audit.record(AuditEvent::new(
+                AuditAction::SecretUse,
+                AuditOutcome::Denied,
+                reason_code,
+                Severity::Warning,
+                Some(descriptor.secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::policy_denied(reason_code, detail));
+        }
+
         self.audit.record(AuditEvent::new(
             AuditAction::SecretUse,
             AuditOutcome::Allowed,
@@ -171,10 +183,11 @@ where
         now: SystemTime,
     ) -> JanusResult<UsePermit> {
         let listed = self.store.list().await?;
-        if !listed
+        let descriptor = listed
             .iter()
-            .any(|descriptor| descriptor.secret_ref == req.secret_ref)
-        {
+            .find(|descriptor| descriptor.secret_ref == req.secret_ref);
+
+        let Some(descriptor) = descriptor else {
             self.audit.record(AuditEvent::new(
                 AuditAction::PermitDeny,
                 AuditOutcome::Denied,
@@ -186,6 +199,18 @@ where
             return Err(JanusError::NotInManifest {
                 name: req.secret_ref.as_str().to_string(),
             });
+        };
+
+        if let Some((reason_code, detail)) = descriptor.metadata_use_denial() {
+            self.audit.record(AuditEvent::new(
+                AuditAction::PermitDeny,
+                AuditOutcome::Denied,
+                reason_code,
+                Severity::Warning,
+                Some(req.secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::policy_denied(reason_code, detail));
         }
 
         let mut issuer = PermitIssuer::new(&self.policy, &mut self.audit);
@@ -272,6 +297,18 @@ where
                 name: permit.secret_ref().as_str().to_string(),
             });
         };
+
+        if let Some((reason_code, detail)) = descriptor.metadata_use_denial() {
+            self.audit.record(AuditEvent::new(
+                AuditAction::SecretUse,
+                AuditOutcome::Denied,
+                reason_code,
+                Severity::Warning,
+                Some(descriptor.secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::policy_denied(reason_code, detail));
+        }
 
         self.audit.record(AuditEvent::new(
             AuditAction::SecretUse,

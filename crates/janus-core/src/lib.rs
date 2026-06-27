@@ -39,5 +39,7 @@ pub use rotation::{
     RollbackPlan, RotationDecision, RotationOutcome, RotationPhase, RotationPlan, RotationPlanner,
     RotationSpec, RotationStrategy, ValidationProbe,
 };
-pub use store::{HealthStatus, SecretDescriptor, SecretMeta, SecretStore, StoreCapabilities};
+pub use store::{
+    HealthStatus, SecretClass, SecretDescriptor, SecretMeta, SecretStore, StoreCapabilities,
+};
 pub use value::SecretValue;

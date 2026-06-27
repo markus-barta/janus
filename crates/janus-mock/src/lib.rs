@@ -122,7 +122,8 @@ impl SecretStore for MockStore {
 mod tests {
     use super::*;
     use janus_core::{
-        ProfileId, ProjectId, SafeLabel, ScopeRef, SecretMeta, SecretRef, TrustLevel,
+        OwnerRef, ProfileId, ProjectId, SafeLabel, ScopeRef, SecretClass, SecretMeta, SecretRef,
+        TrustLevel,
     };
 
     fn catalog() -> (ManifestCatalog, SecretName) {
@@ -133,6 +134,8 @@ mod tests {
             name: name.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
             scope: ScopeRef::new("janus/dev").unwrap(),
+            owner: Some(OwnerRef::new("infra").unwrap()),
+            classification: Some(SecretClass::Normal),
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],

@@ -556,7 +556,7 @@ mod tests {
     use super::*;
     use janus_core::{
         AuditWrite, BlastRadius, ConsumerKind, Environment, HealthStatus, OwnerRef, ProfileId,
-        ProjectId, RotationSpec, SafeLabel, ScopeRef, SecretDescriptor, SecretMeta,
+        ProjectId, RotationSpec, SafeLabel, ScopeRef, SecretClass, SecretDescriptor, SecretMeta,
         StoreCapabilities, TrustLevel,
     };
 
@@ -583,6 +583,8 @@ mod tests {
                 secret_ref: secret_ref.clone(),
                 label: SafeLabel::new("Canary token").unwrap(),
                 scope: ScopeRef::new("janus/dev").unwrap(),
+                owner: Some(OwnerRef::new("infra").unwrap()),
+                classification: Some(SecretClass::Normal),
                 required: true,
                 trust_level: TrustLevel::L1,
                 allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],

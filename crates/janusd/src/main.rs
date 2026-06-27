@@ -1020,7 +1020,7 @@ mod tests {
     #[cfg(unix)]
     use janus_core::{
         AuditWrite, Destination, EgressMode, ExecutorRef, ManifestCatalog, ProjectId, Purpose,
-        SecretMeta, SecretRef, TrustLevel, UseProfile, UseRequest,
+        SecretClass, SecretMeta, SecretRef, TrustLevel, UseProfile, UseRequest,
     };
     #[cfg(unix)]
     use janus_mock::MockStore;
@@ -1363,6 +1363,8 @@ mod tests {
                 name: name.clone(),
                 label: SafeLabel::new("Canary token").unwrap(),
                 scope: ScopeRef::new("janus/dev").unwrap(),
+                owner: Some(OwnerRef::new("infra").unwrap()),
+                classification: Some(SecretClass::Normal),
                 required: true,
                 trust_level: TrustLevel::L1,
                 allowed_uses: vec![profile_id.clone()],
@@ -1587,6 +1589,8 @@ mod tests {
             name: name.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
             scope: ScopeRef::new("janus/dev").unwrap(),
+            owner: Some(OwnerRef::new("infra").unwrap()),
+            classification: Some(SecretClass::Normal),
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],

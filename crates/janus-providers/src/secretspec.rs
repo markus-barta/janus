@@ -4,9 +4,10 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use janus_core::{
-    HealthStatus, JanusError, JanusResult, ManifestCatalog, ProfileId, ProjectId, RotationOutcome,
-    RotationSpec, RotationStrategy, SafeLabel, ScopeRef, SecretDescriptor, SecretMeta, SecretName,
-    SecretRef, SecretStore, SecretValue, StoreCapabilities, TrustLevel,
+    HealthStatus, JanusError, JanusResult, ManifestCatalog, OwnerRef, ProfileId, ProjectId,
+    RotationOutcome, RotationSpec, RotationStrategy, SafeLabel, ScopeRef, SecretClass,
+    SecretDescriptor, SecretMeta, SecretName, SecretRef, SecretStore, SecretValue,
+    StoreCapabilities, TrustLevel,
 };
 use secrecy::{ExposeSecret, SecretString};
 use secretspec as secretspec_crate;
@@ -72,6 +73,12 @@ impl SecretspecStore {
                         .unwrap_or_else(|| "Manifest-declared secret".to_string()),
                 )?,
                 scope: ScopeRef::new(format!("{}/{}", project.as_str(), profile))?,
+                owner: Some(OwnerRef::new(format!(
+                    "secretspec:{}/{}",
+                    project.as_str(),
+                    profile
+                ))?),
+                classification: Some(SecretClass::Normal),
                 required,
                 trust_level: TrustLevel::L1,
                 allowed_uses: vec![ProfileId::new(format!("profile.{}", name.as_str()))?],

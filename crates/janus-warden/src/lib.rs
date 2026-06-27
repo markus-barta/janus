@@ -71,6 +71,10 @@ const FORBIDDEN_MODEL_OUTPUT_KEYS: &[&str] = &[
     "raw_secret",
     "raw_value",
     "raw_name",
+    "owner",
+    "owner_ref",
+    "classification",
+    "secret_class",
     "secret_name",
     "backend_path",
     "source_path",
@@ -99,6 +103,12 @@ pub struct SecretDescriptorView {
     pub trust_level: &'static str,
     /// Allowed profile ids.
     pub allowed_uses: Vec<String>,
+    /// Safe completeness state for owner/class metadata.
+    pub metadata_state: &'static str,
+    /// Safe risk hint derived from classification without exposing raw owner.
+    pub risk_hint: &'static str,
+    /// Whether normal approved-use paths are allowed by metadata completeness.
+    pub normal_use_allowed: bool,
     /// Invariant marker.
     pub value_returned: bool,
 }
@@ -406,6 +416,9 @@ fn descriptor_view(descriptor: SecretDescriptor) -> SecretDescriptorView {
             .iter()
             .map(|profile| profile.as_str().to_string())
             .collect(),
+        metadata_state: descriptor.metadata_state(),
+        risk_hint: descriptor.risk_hint(),
+        normal_use_allowed: descriptor.metadata_complete(),
         value_returned: false,
     }
 }
@@ -609,9 +622,9 @@ mod tests {
 
     use janus_core::{
         AuditAction, AuditOutcome, AuditWrite, Destination, EgressMode, ExecutorRef, JanusError,
-        ManifestCatalog, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId,
-        ProfilePolicy, ProjectId, Purpose, SafeLabel, ScopeRef, SecretBroker, SecretMeta,
-        SecretName, SecretRef, Severity, TrustLevel, UseProfile,
+        ManifestCatalog, OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind,
+        ProfileId, ProfilePolicy, ProjectId, Purpose, SafeLabel, ScopeRef, SecretBroker,
+        SecretClass, SecretMeta, SecretName, SecretRef, Severity, TrustLevel, UseProfile,
     };
     use janus_mock::MockStore;
     use serde_json::json;
@@ -677,6 +690,8 @@ mod tests {
             name: name.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
             scope: ScopeRef::new("janus/dev").unwrap(),
+            owner: Some(OwnerRef::new("infra").unwrap()),
+            classification: Some(SecretClass::Normal),
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
@@ -831,6 +846,9 @@ mod tests {
         assert_eq!(listed.secrets.len(), 1);
         assert_eq!(listed.secrets[0].secret_ref, secret_ref.as_str());
         assert_eq!(listed.secrets[0].label, "Canary token");
+        assert_eq!(listed.secrets[0].metadata_state, "complete");
+        assert_eq!(listed.secrets[0].risk_hint, "standard");
+        assert!(listed.secrets[0].normal_use_allowed);
         assert!(!listed.value_returned);
 
         let described = runtime
@@ -838,6 +856,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(described.secret.secret_ref, secret_ref.as_str());
+        assert_eq!(described.secret.metadata_state, "complete");
+        assert_eq!(described.secret.risk_hint, "standard");
+        assert!(described.secret.normal_use_allowed);
         assert!(!described.value_returned);
 
         let health = runtime.health(&principal).await.unwrap();
@@ -847,6 +868,11 @@ mod tests {
         let rendered = format!("{listed:?}{described:?}{health:?}");
         assert!(!rendered.contains("expected-canary"));
         assert!(!rendered.contains("CANARY"));
+        let rendered_json = serde_json::to_string(&listed).unwrap();
+        assert!(!rendered_json.contains("infra"));
+        assert!(!rendered_json.contains("owner"));
+        assert!(!rendered_json.contains("classification"));
+        assert!(!rendered_json.contains("normal\""));
     }
 
     #[tokio::test]

@@ -134,12 +134,22 @@ mod tests {
     use janus_core::{
         AuditAction, BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry,
         Environment, ManifestCatalog, OwnerRef, ProjectId, ReloadMethod, RotationDecision,
-        RotationPlanner, SafeLabel, ScopeRef, SecretBroker, SecretMeta, SecretRef,
+        RotationPlanner, SafeLabel, ScopeRef, SecretBroker, SecretClass, SecretMeta, SecretRef,
         StoreCapabilities, TrustLevel, ValidationProbe,
     };
     use janus_mock::MockStore;
 
     fn mock_store() -> (MockStore, StoreFixture) {
+        mock_store_with_metadata(
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::Normal),
+        )
+    }
+
+    fn mock_store_with_metadata(
+        owner: Option<OwnerRef>,
+        classification: Option<SecretClass>,
+    ) -> (MockStore, StoreFixture) {
         let project = ProjectId::new("janus").unwrap();
         let canary = SecretName::new("CANARY").unwrap();
         let secret_ref = SecretRef::for_manifest_entry(&project, &canary);
@@ -148,6 +158,8 @@ mod tests {
             name: canary.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
             scope: ScopeRef::new("janus/dev").unwrap(),
+            owner,
+            classification,
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
@@ -244,6 +256,116 @@ mod tests {
         let (store, _) = mock_store();
         let descriptor = store.list().await.unwrap().remove(0);
         run_permit_contract(descriptor.secret_ref, "runner-a", "deploy-api").unwrap();
+    }
+
+    #[tokio::test]
+    async fn broker_denies_permit_issue_for_incomplete_secret_metadata() {
+        for (owner, classification, expected) in [
+            (None, Some(SecretClass::Normal), "denied_missing_owner"),
+            (
+                Some(OwnerRef::new("infra").unwrap()),
+                None,
+                "denied_missing_classification",
+            ),
+            (None, None, "denied_metadata_incomplete"),
+        ] {
+            let (store, _) = mock_store_with_metadata(owner, classification);
+            let descriptor = store.list().await.unwrap().remove(0);
+            let principal_chain = principal("runner-a", "janus/dev");
+            let mut broker = SecretBroker::new(
+                store,
+                ProfilePolicy::new(vec![use_profile(
+                    descriptor.secret_ref.clone(),
+                    true,
+                    "runner-a",
+                    "deploy-api",
+                )]),
+                AuditWrite::accepting(),
+            );
+
+            let err = broker
+                .request_use(
+                    &use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                    &principal_chain,
+                    SystemTime::UNIX_EPOCH,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                JanusError::PolicyDenied { reason_code, .. } if reason_code == expected
+            ));
+            let (_store, _policy, audit) = broker.into_parts();
+            assert!(audit.events().iter().any(|event| {
+                event.action == AuditAction::PermitDeny
+                    && event.reason_code == expected
+                    && event.outcome == AuditOutcome::Denied
+                    && !event.value_returned
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn broker_rechecks_metadata_before_permit_consumption() {
+        let (complete_store, _) = mock_store();
+        let descriptor = complete_store.list().await.unwrap().remove(0);
+        let principal_chain = principal("runner-a", "janus/dev");
+        let executor = ExecutorRef::new("runner-a").unwrap();
+        let destination = Destination::new("deploy-api").unwrap();
+        let profile = use_profile(
+            descriptor.secret_ref.clone(),
+            true,
+            "runner-a",
+            "deploy-api",
+        );
+        let mut issuing_broker = SecretBroker::new(
+            complete_store,
+            ProfilePolicy::new(vec![profile.clone()]),
+            AuditWrite::accepting(),
+        );
+        let permit = issuing_broker
+            .request_use(
+                &use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                &principal_chain,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+
+        let (incomplete_store, _) =
+            mock_store_with_metadata(Some(OwnerRef::new("infra").unwrap()), None);
+        let mut consuming_broker = SecretBroker::new(
+            incomplete_store,
+            ProfilePolicy::new(vec![profile]),
+            AuditWrite::accepting(),
+        );
+        let err = match consuming_broker
+            .use_permit(
+                &permit,
+                &principal_chain,
+                &executor,
+                &destination,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            )
+            .await
+        {
+            Ok(_) => panic!("metadata-incomplete permit consumption should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "denied_missing_classification",
+                ..
+            }
+        ));
+        let (_store, _policy, audit) = consuming_broker.into_parts();
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::SecretUse
+                && event.reason_code == "denied_missing_classification"
+                && event.outcome == AuditOutcome::Denied
+                && !event.value_returned
+        }));
     }
 
     #[tokio::test]
