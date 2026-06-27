@@ -689,6 +689,30 @@ mod tests {
     where
         P: PermitStore,
     {
+        runtime_with_metadata_and_permits(
+            profile_enabled,
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::Normal),
+            permits,
+        )
+    }
+
+    fn runtime_with_metadata(
+        owner: Option<OwnerRef>,
+        classification: Option<SecretClass>,
+    ) -> (WardenRuntime<MockStore, AuditWrite>, SecretRef) {
+        runtime_with_metadata_and_permits(true, owner, classification, NoopPermitStore)
+    }
+
+    fn runtime_with_metadata_and_permits<P>(
+        profile_enabled: bool,
+        owner: Option<OwnerRef>,
+        classification: Option<SecretClass>,
+        permits: P,
+    ) -> (WardenRuntime<MockStore, AuditWrite, P>, SecretRef)
+    where
+        P: PermitStore,
+    {
         let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
         let secret_ref = SecretRef::for_manifest_entry(&project, &name);
@@ -697,8 +721,8 @@ mod tests {
             name: name.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
             scope: ScopeRef::new("janus/dev").unwrap(),
-            owner: Some(OwnerRef::new("infra").unwrap()),
-            classification: Some(SecretClass::Normal),
+            owner,
+            classification,
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
@@ -880,6 +904,103 @@ mod tests {
         assert!(!rendered_json.contains("owner"));
         assert!(!rendered_json.contains("classification"));
         assert!(!rendered_json.contains("normal\""));
+    }
+
+    #[tokio::test]
+    async fn incomplete_metadata_is_visible_as_blocked_without_raw_details() {
+        let cases = [
+            (
+                None,
+                Some(SecretClass::Normal),
+                "standard",
+                "denied_missing_owner",
+            ),
+            (
+                Some(OwnerRef::new("infra").unwrap()),
+                None,
+                "blocked_metadata_incomplete",
+                "denied_missing_classification",
+            ),
+            (
+                None,
+                None,
+                "blocked_metadata_incomplete",
+                "denied_metadata_incomplete",
+            ),
+        ];
+
+        for (owner, classification, expected_risk_hint, expected_reason) in cases {
+            let (mut runtime, secret_ref) = runtime_with_metadata(owner, classification);
+            let principal = principal();
+
+            let listed = runtime.list_secrets(&principal).await.unwrap();
+            assert_eq!(listed.secrets.len(), 1);
+            assert_eq!(listed.secrets[0].secret_ref, secret_ref.as_str());
+            assert_eq!(listed.secrets[0].label, "Canary token");
+            assert_eq!(listed.secrets[0].metadata_state, "incomplete");
+            assert_eq!(listed.secrets[0].risk_hint, expected_risk_hint);
+            assert!(!listed.secrets[0].normal_use_allowed);
+            assert!(!listed.value_returned);
+
+            let described = runtime
+                .describe_secret(&secret_ref, &principal)
+                .await
+                .unwrap();
+            assert_eq!(described.secret.metadata_state, "incomplete");
+            assert_eq!(described.secret.risk_hint, expected_risk_hint);
+            assert!(!described.secret.normal_use_allowed);
+            assert!(!described.value_returned);
+
+            let denied = runtime
+                .call_tool_json(
+                    "request_use",
+                    json!({
+                        "secret_ref": secret_ref.as_str(),
+                        "profile_id": "profile.canary",
+                        "purpose": "deploy canary"
+                    }),
+                    &principal,
+                    SystemTime::UNIX_EPOCH,
+                )
+                .await;
+            assert!(!denied.ok);
+            assert!(denied.result.is_none());
+            assert!(!denied.value_returned);
+            assert_eq!(denied.error.as_ref().unwrap().reason_code, expected_reason);
+
+            let descriptor_json = serde_json::to_string(&json!({
+                "listed": listed,
+                "described": described,
+            }))
+            .unwrap();
+            for forbidden in [
+                "CANARY",
+                "infra",
+                "\"owner\"",
+                "\"classification\"",
+                "normal\"",
+            ] {
+                assert!(!descriptor_json.contains(forbidden), "{forbidden} leaked");
+            }
+
+            let rendered = serde_json::to_string(&json!({
+                "listed": listed,
+                "described": described,
+                "denied": denied,
+            }))
+            .unwrap();
+            for forbidden in [
+                "expected-canary",
+                "CANARY",
+                "infra",
+                "\"owner\"",
+                "\"classification\"",
+                "\"normal\"",
+                "backend_path",
+            ] {
+                assert!(!rendered.contains(forbidden), "{forbidden} leaked");
+            }
+        }
     }
 
     #[tokio::test]
