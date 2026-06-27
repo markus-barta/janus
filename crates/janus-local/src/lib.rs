@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use janus_core::{
-    ApprovalGrant, ApprovalGrantSnapshot, JanusError, JanusResult, UsePermit, UsePermitSnapshot,
+    ApprovalGrant, ApprovalGrantSnapshot, JanusError, JanusResult, SecretAgeEvidence, SecretRef,
+    UsePermit, UsePermitSnapshot,
 };
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +45,21 @@ pub trait ApprovalRegistry {
     fn revoke(&self, approval_id: &str) -> JanusResult<()>;
 }
 
+/// Local registry for value-free lifecycle age evidence.
+pub trait LifecycleEvidenceRegistry {
+    /// Record when a secret entered the local lifecycle reporting scope.
+    fn record_declared(&self, secret_ref: &SecretRef, at: SystemTime) -> JanusResult<()>;
+
+    /// Record an approved-use timestamp for stale reporting.
+    fn record_used(&self, secret_ref: &SecretRef, at: SystemTime) -> JanusResult<()>;
+
+    /// Record a rotation timestamp for stale reporting.
+    fn record_rotated(&self, secret_ref: &SecretRef, at: SystemTime) -> JanusResult<()>;
+
+    /// List value-free lifecycle evidence for stale reporting.
+    fn list(&self) -> JanusResult<Vec<SecretAgeEvidence>>;
+}
+
 /// Permit sink used when no local handoff registry is configured.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoopPermitStore;
@@ -63,6 +79,12 @@ pub struct FilePermitRegistry {
 /// File-backed local approval registry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileApprovalRegistry {
+    dir: PathBuf,
+}
+
+/// File-backed local lifecycle evidence registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileLifecycleEvidenceRegistry {
     dir: PathBuf,
 }
 
@@ -166,6 +188,64 @@ impl FileApprovalRegistry {
     fn path_for(&self, approval_id: &str) -> JanusResult<PathBuf> {
         validate_approval_file_token(approval_id)?;
         Ok(self.dir.join(format!("{approval_id}.json")))
+    }
+}
+
+impl FileLifecycleEvidenceRegistry {
+    /// Build a registry rooted at a private directory.
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    /// Registry root directory.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn ensure_dir(&self) -> JanusResult<()> {
+        fs::create_dir_all(&self.dir)
+            .map_err(|_| store_unavailable("lifecycle evidence registry unavailable"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.dir, fs::Permissions::from_mode(0o700)).map_err(|_| {
+                store_unavailable("lifecycle evidence registry permissions unavailable")
+            })?;
+        }
+
+        let metadata = fs::symlink_metadata(&self.dir)
+            .map_err(|_| store_unavailable("lifecycle evidence registry unavailable"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(store_unavailable(
+                "lifecycle evidence registry path is not a directory",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(store_unavailable(
+                    "lifecycle evidence registry directory must be private",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn path_for(&self, secret_ref: &SecretRef) -> JanusResult<PathBuf> {
+        validate_secret_ref_file_token(secret_ref.as_str())?;
+        Ok(self.dir.join(format!("{}.json", secret_ref.as_str())))
+    }
+
+    fn update<F>(&self, secret_ref: &SecretRef, update: F) -> JanusResult<()>
+    where
+        F: FnOnce(&mut SecretAgeEvidence),
+    {
+        self.ensure_dir()?;
+        let path = self.path_for(secret_ref)?;
+        let mut evidence = read_optional_lifecycle_evidence(&path, secret_ref)?;
+        update(&mut evidence);
+        write_lifecycle_evidence_atomic(&path, &evidence)
     }
 }
 
@@ -277,6 +357,54 @@ impl PermitRegistry for FilePermitRegistry {
     }
 }
 
+impl LifecycleEvidenceRegistry for FileLifecycleEvidenceRegistry {
+    fn record_declared(&self, secret_ref: &SecretRef, at: SystemTime) -> JanusResult<()> {
+        self.update(secret_ref, |evidence| {
+            evidence.declared_at = Some(match evidence.declared_at {
+                Some(existing) if existing <= at => existing,
+                _ => at,
+            });
+        })
+    }
+
+    fn record_used(&self, secret_ref: &SecretRef, at: SystemTime) -> JanusResult<()> {
+        self.update(secret_ref, |evidence| {
+            evidence.last_used_at = Some(max_time(evidence.last_used_at, at));
+        })
+    }
+
+    fn record_rotated(&self, secret_ref: &SecretRef, at: SystemTime) -> JanusResult<()> {
+        self.update(secret_ref, |evidence| {
+            evidence.last_rotated_at = Some(max_time(evidence.last_rotated_at, at));
+        })
+    }
+
+    fn list(&self) -> JanusResult<Vec<SecretAgeEvidence>> {
+        self.ensure_dir()?;
+        let mut records = Vec::new();
+        let entries = fs::read_dir(&self.dir)
+            .map_err(|_| store_unavailable("failed to list lifecycle evidence registry"))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|_| store_unavailable("failed to list lifecycle evidence entry"))?;
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                return Err(store_unavailable(
+                    "lifecycle evidence entry name is malformed",
+                ));
+            };
+            let Some(secret_ref_text) = file_name.strip_suffix(".json") else {
+                continue;
+            };
+            validate_secret_ref_file_token(secret_ref_text)?;
+            let secret_ref = SecretRef::new(secret_ref_text)?;
+            records.push(read_lifecycle_evidence(&path, &secret_ref)?);
+        }
+        records.sort_by(|left, right| left.secret_ref.as_str().cmp(right.secret_ref.as_str()));
+        Ok(records)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PermitFileRecord {
@@ -308,6 +436,16 @@ struct ApprovalGrantFileRecord {
     expires_at_unix_secs: u64,
     expires_at_subsec_nanos: u32,
     reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LifecycleEvidenceFileRecord {
+    version: u8,
+    secret_ref: String,
+    declared_at_unix_secs: Option<u64>,
+    last_used_at_unix_secs: Option<u64>,
+    last_rotated_at_unix_secs: Option<u64>,
 }
 
 impl From<UsePermitSnapshot> for PermitFileRecord {
@@ -389,6 +527,35 @@ impl ApprovalGrantFileRecord {
     }
 }
 
+impl From<&SecretAgeEvidence> for LifecycleEvidenceFileRecord {
+    fn from(evidence: &SecretAgeEvidence) -> Self {
+        Self {
+            version: 1,
+            secret_ref: evidence.secret_ref.as_str().to_string(),
+            declared_at_unix_secs: evidence.declared_at.map(unix_seconds),
+            last_used_at_unix_secs: evidence.last_used_at.map(unix_seconds),
+            last_rotated_at_unix_secs: evidence.last_rotated_at.map(unix_seconds),
+        }
+    }
+}
+
+impl LifecycleEvidenceFileRecord {
+    fn into_evidence(self) -> JanusResult<SecretAgeEvidence> {
+        if self.version != 1 {
+            return Err(store_unavailable(
+                "lifecycle evidence registry entry version is unsupported",
+            ));
+        }
+        let secret_ref = SecretRef::new(self.secret_ref)?;
+        Ok(SecretAgeEvidence {
+            secret_ref,
+            declared_at: self.declared_at_unix_secs.map(unix_time),
+            last_used_at: self.last_used_at_unix_secs.map(unix_time),
+            last_rotated_at: self.last_rotated_at_unix_secs.map(unix_time),
+        })
+    }
+}
+
 fn read_claimed_permit(path: &Path, requested_permit_id: &str) -> JanusResult<UsePermit> {
     check_secure_file(path)?;
     let file =
@@ -441,6 +608,50 @@ fn read_approval(path: &Path, requested_approval_id: &str) -> JanusResult<Approv
     })
 }
 
+fn read_optional_lifecycle_evidence(
+    path: &Path,
+    secret_ref: &SecretRef,
+) -> JanusResult<SecretAgeEvidence> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => read_lifecycle_evidence(path, secret_ref),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            Ok(SecretAgeEvidence::new(secret_ref.clone()))
+        }
+        Err(_) => Err(store_unavailable(
+            "lifecycle evidence registry entry unavailable",
+        )),
+    }
+}
+
+fn read_lifecycle_evidence(
+    path: &Path,
+    requested_secret_ref: &SecretRef,
+) -> JanusResult<SecretAgeEvidence> {
+    check_secure_lifecycle_evidence_file(path)?;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(store_unavailable(
+                "lifecycle evidence registry entry was not found",
+            ))
+        }
+        Err(_) => {
+            return Err(store_unavailable(
+                "failed to open lifecycle evidence registry entry",
+            ))
+        }
+    };
+    let record: LifecycleEvidenceFileRecord = serde_json::from_reader(BufReader::new(file))
+        .map_err(|_| store_unavailable("lifecycle evidence registry entry is malformed"))?;
+    let evidence = record.into_evidence()?;
+    if &evidence.secret_ref != requested_secret_ref {
+        return Err(store_unavailable(
+            "lifecycle evidence registry entry does not match the requested secret ref",
+        ));
+    }
+    Ok(evidence)
+}
+
 fn validate_permit_file_token(permit_id: &str) -> JanusResult<()> {
     if permit_id.trim().is_empty()
         || permit_id.trim().len() != permit_id.len()
@@ -471,6 +682,18 @@ fn validate_approval_file_token(approval_id: &str) -> JanusResult<()> {
             "denied_invalid_approval_id",
             "approval id is malformed",
         ));
+    }
+    Ok(())
+}
+
+fn validate_secret_ref_file_token(secret_ref: &str) -> JanusResult<()> {
+    if secret_ref.trim().is_empty()
+        || secret_ref.trim().len() != secret_ref.len()
+        || !secret_ref
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Err(JanusError::InvalidIdentifier { kind: "secret_ref" });
     }
     Ok(())
 }
@@ -533,6 +756,59 @@ fn create_secure_new_approval_file(path: &Path) -> JanusResult<File> {
     Ok(file)
 }
 
+fn write_lifecycle_evidence_atomic(path: &Path, evidence: &SecretAgeEvidence) -> JanusResult<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| store_unavailable("lifecycle evidence path is malformed"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp_path = parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), nonce));
+    let result = (|| -> JanusResult<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&temp_path)
+            .map_err(|_| store_unavailable("failed to create lifecycle evidence entry"))?;
+        let mut writer = BufWriter::new(file);
+        let record = LifecycleEvidenceFileRecord::from(evidence);
+        serde_json::to_writer(&mut writer, &record)
+            .map_err(|_| store_unavailable("failed to encode lifecycle evidence entry"))?;
+        writer
+            .write_all(b"\n")
+            .map_err(|_| store_unavailable("failed to write lifecycle evidence entry"))?;
+        writer
+            .flush()
+            .map_err(|_| store_unavailable("failed to flush lifecycle evidence entry"))?;
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|_| store_unavailable("failed to sync lifecycle evidence entry"))?;
+        fs::rename(&temp_path, path)
+            .map_err(|_| store_unavailable("failed to replace lifecycle evidence entry"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|_| {
+                store_unavailable("lifecycle evidence file permissions unavailable")
+            })?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
 fn check_secure_file(path: &Path) -> JanusResult<()> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|_| store_unavailable("permit registry entry unavailable"))?;
@@ -583,6 +859,54 @@ fn check_secure_approval_file(path: &Path) -> JanusResult<()> {
         }
     }
     Ok(())
+}
+
+fn check_secure_lifecycle_evidence_file(path: &Path) -> JanusResult<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(store_unavailable(
+                "lifecycle evidence registry entry was not found",
+            ))
+        }
+        Err(_) => {
+            return Err(store_unavailable(
+                "lifecycle evidence registry entry unavailable",
+            ))
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(store_unavailable(
+            "lifecycle evidence registry entry is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(store_unavailable(
+                "lifecycle evidence registry entry is not private",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn unix_seconds(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn unix_time(seconds: u64) -> SystemTime {
+    UNIX_EPOCH + std::time::Duration::from_secs(seconds)
+}
+
+fn max_time(existing: Option<SystemTime>, candidate: SystemTime) -> SystemTime {
+    match existing {
+        Some(existing) if existing >= candidate => existing,
+        _ => candidate,
+    }
 }
 
 fn store_unavailable(detail: impl Into<String>) -> JanusError {
@@ -742,5 +1066,69 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn lifecycle_evidence_registry_merges_and_lists_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileLifecycleEvidenceRegistry::new(dir.path());
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let other_ref = SecretRef::new("sec_other").unwrap();
+
+        registry
+            .record_declared(&secret_ref, UNIX_EPOCH + Duration::from_secs(50))
+            .unwrap();
+        registry
+            .record_declared(&secret_ref, UNIX_EPOCH + Duration::from_secs(40))
+            .unwrap();
+        registry
+            .record_used(&secret_ref, UNIX_EPOCH + Duration::from_secs(20))
+            .unwrap();
+        registry
+            .record_used(&secret_ref, UNIX_EPOCH + Duration::from_secs(10))
+            .unwrap();
+        registry
+            .record_rotated(&secret_ref, UNIX_EPOCH + Duration::from_secs(30))
+            .unwrap();
+        registry
+            .record_used(&other_ref, UNIX_EPOCH + Duration::from_secs(5))
+            .unwrap();
+
+        let listed = registry.list().unwrap();
+
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].secret_ref, secret_ref);
+        assert_eq!(
+            listed[0].declared_at,
+            Some(UNIX_EPOCH + Duration::from_secs(40))
+        );
+        assert_eq!(
+            listed[0].last_used_at,
+            Some(UNIX_EPOCH + Duration::from_secs(20))
+        );
+        assert_eq!(
+            listed[0].last_rotated_at,
+            Some(UNIX_EPOCH + Duration::from_secs(30))
+        );
+        assert_eq!(listed[1].secret_ref, other_ref);
+        assert_eq!(
+            listed[1].last_used_at,
+            Some(UNIX_EPOCH + Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn lifecycle_evidence_registry_rejects_path_like_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileLifecycleEvidenceRegistry::new(dir.path());
+        let secret_ref = SecretRef::new("sec_../escape").unwrap();
+
+        let err = registry.record_used(&secret_ref, UNIX_EPOCH).unwrap_err();
+
+        assert!(matches!(
+            err,
+            JanusError::InvalidIdentifier { kind: "secret_ref" }
+        ));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

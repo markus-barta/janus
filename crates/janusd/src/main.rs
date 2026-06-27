@@ -22,8 +22,8 @@ use janus_core::{
     ApprovalGrant, AuditSink, AuditWrite, BlastRadius, ClassPermitPolicy, ConsumerDescriptor,
     ConsumerKind, ConsumerRef, ConsumerRegistry, Destination, EgressMode, Environment, ExecutorRef,
     JanusError, LifecycleTransitionPolicy, OwnerRef, Principal, PrincipalChain, PrincipalId,
-    PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReloadMethod, SafeLabel, ScopeRef,
-    SecretAgeEvidence, SecretBroker, SecretDescriptor, SecretLifecycle, SecretMeta,
+    PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReloadMethod, RotationOutcome, SafeLabel,
+    ScopeRef, SecretAgeEvidence, SecretBroker, SecretDescriptor, SecretLifecycle, SecretMeta,
     SecretMetadataOverlay, SecretName, SecretRef, SecretStore, StaleSecretPolicy,
     StaleSecretReportRow, StaleSecretReporter, TrustLevel, UsePermit, UseProfile, UseRequest,
     ValidationProbe,
@@ -37,7 +37,9 @@ use janus_forge::{
     RotationApproval,
 };
 use janus_local::{
-    ApprovalRegistry as SharedApprovalRegistry, FileApprovalRegistry, FilePermitRegistry,
+    ApprovalRegistry as SharedApprovalRegistry, FileApprovalRegistry,
+    FileLifecycleEvidenceRegistry, FilePermitRegistry,
+    LifecycleEvidenceRegistry as SharedLifecycleEvidenceRegistry,
     PermitRegistry as SharedPermitRegistry, PermitStore as SharedPermitStore,
 };
 use janus_provider_age::AgeSecretStore;
@@ -272,6 +274,8 @@ async fn run_forge_rotate_generated(config: ForgeRotateGeneratedConfig) -> Resul
     let outcome = broker
         .rotate_generated(&config.secret, &policy, &approval, &principal)
         .await?;
+    let lifecycle_evidence = FileLifecycleEvidenceRegistry::new(lifecycle_evidence_registry_dir());
+    record_rotation_evidence(&outcome, &lifecycle_evidence, SystemTime::now())?;
 
     println!(
         "janusd forge rotate-generated ok secret_ref={} phase={:?} reason_code={} value_returned={}",
@@ -302,6 +306,8 @@ async fn run_managed_command(config: RunManagedCommandConfig) -> Result<()> {
         clock: SystemManagedCommandClock,
     };
     let outcome = run_managed_command_with(&config, &mut runner).await?;
+    let lifecycle_evidence = FileLifecycleEvidenceRegistry::new(lifecycle_evidence_registry_dir());
+    record_managed_command_evidence(&outcome, &lifecycle_evidence, SystemTime::now())?;
     emit_run_managed_outcome(&outcome);
     Ok(())
 }
@@ -365,7 +371,8 @@ async fn run_lifecycle_transition(config: LifecycleTransitionConfig) -> Result<(
 async fn run_lifecycle_stale_report(config: LifecycleStaleReportConfig) -> Result<()> {
     let store = load_age_store_from_env()?;
     let principal = lifecycle_principal_from_env()?;
-    let evidence = load_stale_evidence(config.evidence_file.as_deref())?;
+    let registry = FileLifecycleEvidenceRegistry::new(lifecycle_evidence_registry_dir());
+    let evidence = load_stale_evidence_sources(&registry, config.evidence_file.as_deref())?;
     let mut audit = AuditWrite::accepting();
     let rows = build_lifecycle_stale_report_with(
         &config,
@@ -502,6 +509,30 @@ fn emit_lifecycle_stale_report(rows: &[StaleSecretReportRow]) {
             row.value_returned
         );
     }
+}
+
+fn record_managed_command_evidence<R>(
+    outcome: &ManagedCommandCliOutcome,
+    registry: &R,
+    at: SystemTime,
+) -> Result<()>
+where
+    R: SharedLifecycleEvidenceRegistry,
+{
+    registry.record_used(&outcome.secret_ref, at)?;
+    Ok(())
+}
+
+fn record_rotation_evidence<R>(
+    outcome: &RotationOutcome,
+    registry: &R,
+    at: SystemTime,
+) -> Result<()>
+where
+    R: SharedLifecycleEvidenceRegistry,
+{
+    registry.record_rotated(&outcome.secret_ref, at)?;
+    Ok(())
 }
 
 async fn issue_approved_permit_with<S, R, P>(
@@ -852,6 +883,7 @@ where
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ManagedCommandCliOutcome {
+    secret_ref: SecretRef,
     stdout: String,
     stderr: String,
     exit_success: bool,
@@ -863,6 +895,7 @@ struct ManagedCommandCliOutcome {
 impl From<janus_executor::ManagedCommandOutcome> for ManagedCommandCliOutcome {
     fn from(outcome: janus_executor::ManagedCommandOutcome) -> Self {
         Self {
+            secret_ref: outcome.plan.secret_ref,
             stdout: outcome.output.stdout,
             stderr: outcome.output.stderr,
             exit_success: outcome.output.exit_success,
@@ -1791,6 +1824,12 @@ fn approval_registry_dir() -> Result<PathBuf> {
         .context("JANUS_APPROVAL_DIR is required")
 }
 
+fn lifecycle_evidence_registry_dir() -> PathBuf {
+    env_first(&["JANUS_LIFECYCLE_EVIDENCE_DIR", "JANUS_STALE_EVIDENCE_DIR"])
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/janus/lifecycle-evidence"))
+}
+
 fn run_principal_from_env() -> Result<PrincipalChain> {
     let executor = env_first(&["JANUS_RUN_EXECUTOR", "JANUS_WARDEN_EXECUTOR"])
         .unwrap_or_else(|| "warden-stdio".to_string());
@@ -1904,6 +1943,55 @@ fn write_metadata_overlay_atomic(path: &Path, contents: &str) -> Result<()> {
         let _ = fs::remove_file(&temp_path);
     }
     result
+}
+
+fn load_stale_evidence_sources<R>(
+    registry: &R,
+    manual_path: Option<&Path>,
+) -> Result<BTreeMap<SecretRef, SecretAgeEvidence>>
+where
+    R: SharedLifecycleEvidenceRegistry,
+{
+    let mut evidence = BTreeMap::new();
+    merge_stale_evidence(&mut evidence, registry.list()?);
+    merge_stale_evidence(
+        &mut evidence,
+        load_stale_evidence(manual_path)?.into_values(),
+    );
+    Ok(evidence)
+}
+
+fn merge_stale_evidence<I>(target: &mut BTreeMap<SecretRef, SecretAgeEvidence>, records: I)
+where
+    I: IntoIterator<Item = SecretAgeEvidence>,
+{
+    for record in records {
+        target
+            .entry(record.secret_ref.clone())
+            .and_modify(|existing| merge_stale_evidence_record(existing, &record))
+            .or_insert(record);
+    }
+}
+
+fn merge_stale_evidence_record(existing: &mut SecretAgeEvidence, incoming: &SecretAgeEvidence) {
+    existing.declared_at = match (existing.declared_at, incoming.declared_at) {
+        (Some(left), Some(right)) => Some(if left <= right { left } else { right }),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    };
+    existing.last_used_at = max_optional_time(existing.last_used_at, incoming.last_used_at);
+    existing.last_rotated_at =
+        max_optional_time(existing.last_rotated_at, incoming.last_rotated_at);
+}
+
+fn max_optional_time(left: Option<SystemTime>, right: Option<SystemTime>) -> Option<SystemTime> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(if left >= right { left } else { right }),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
 }
 
 fn load_stale_evidence(path: Option<&Path>) -> Result<BTreeMap<SecretRef, SecretAgeEvidence>> {
@@ -2405,6 +2493,53 @@ mod tests {
         assert_eq!(
             record.declared_at,
             Some(SystemTime::UNIX_EPOCH + Duration::from_secs(10))
+        );
+        assert_eq!(
+            record.last_used_at,
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(20))
+        );
+        assert_eq!(
+            record.last_rotated_at,
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn lifecycle_stale_evidence_merges_registry_and_manual_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileLifecycleEvidenceRegistry::new(dir.path().join("registry"));
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        registry
+            .record_declared(
+                &secret_ref,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            )
+            .unwrap();
+        registry
+            .record_used(
+                &secret_ref,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+            )
+            .unwrap();
+        let manual = dir.path().join("manual.toml");
+        std::fs::write(
+            &manual,
+            r#"
+            [[secrets]]
+            secret_ref = "sec_fixture"
+            declared_at_unix_secs = 5
+            last_used_at_unix_secs = 15
+            last_rotated_at_unix_secs = 30
+            "#,
+        )
+        .unwrap();
+
+        let evidence = load_stale_evidence_sources(&registry, Some(&manual)).unwrap();
+        let record = evidence.get(&secret_ref).unwrap();
+
+        assert_eq!(
+            record.declared_at,
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(5))
         );
         assert_eq!(
             record.last_used_at,
@@ -2950,6 +3085,49 @@ mod tests {
         assert_eq!(audit.events()[0].action, AuditAction::SecretStalenessReport);
         assert_eq!(audit.events()[0].reason_code, "stale_activity_age_exceeded");
         assert!(!audit.events()[0].value_returned);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_command_success_records_lifecycle_use_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileLifecycleEvidenceRegistry::new(dir.path());
+        let mut harness = FixtureManagedCommandHarness::new(vec![
+            "-c".to_string(),
+            "printf 'used:%s' \"$GITHUB_TOKEN\"".to_string(),
+        ])
+        .await;
+        let config = harness.config();
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(2);
+
+        let outcome = run_managed_command_with(&config, harness.runner_mut())
+            .await
+            .unwrap();
+        record_managed_command_evidence(&outcome, &registry, at).unwrap();
+
+        let evidence = registry.list().unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].secret_ref, outcome.secret_ref);
+        assert_eq!(evidence[0].last_used_at, Some(at));
+        assert_eq!(evidence[0].last_rotated_at, None);
+        assert!(!format!("{evidence:?}").contains("expected-canary"));
+    }
+
+    #[test]
+    fn generated_rotation_success_records_lifecycle_rotation_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileLifecycleEvidenceRegistry::new(dir.path());
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(30);
+        let outcome = RotationOutcome::rotated(secret_ref.clone());
+
+        record_rotation_evidence(&outcome, &registry, at).unwrap();
+
+        let evidence = registry.list().unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].secret_ref, secret_ref);
+        assert_eq!(evidence[0].last_used_at, None);
+        assert_eq!(evidence[0].last_rotated_at, Some(at));
     }
 
     #[test]
