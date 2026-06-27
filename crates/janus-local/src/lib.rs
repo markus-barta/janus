@@ -11,7 +11,7 @@ use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use janus_core::{JanusError, JanusResult, UsePermit, UsePermitSnapshot};
+use janus_core::{ApprovalGrantSnapshot, JanusError, JanusResult, UsePermit, UsePermitSnapshot};
 use serde::{Deserialize, Serialize};
 
 /// Sink for newly issued permits.
@@ -151,21 +151,41 @@ struct PermitFileRecord {
     destination: String,
     executor: String,
     egress: Option<String>,
+    purpose: Option<String>,
+    approval: Option<ApprovalGrantFileRecord>,
     principal_binding: String,
     expires_at_unix_secs: u64,
     expires_at_subsec_nanos: u32,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovalGrantFileRecord {
+    approval_id: String,
+    secret_ref: String,
+    profile_id: String,
+    executor: String,
+    destination: String,
+    class: String,
+    egress: String,
+    purpose: String,
+    expires_at_unix_secs: u64,
+    expires_at_subsec_nanos: u32,
+    reason: String,
+}
+
 impl From<UsePermitSnapshot> for PermitFileRecord {
     fn from(snapshot: UsePermitSnapshot) -> Self {
         Self {
-            version: 2,
+            version: 3,
             permit_id: snapshot.permit_id,
             secret_ref: snapshot.secret_ref,
             profile_id: snapshot.profile_id,
             destination: snapshot.destination,
             executor: snapshot.executor,
             egress: Some(snapshot.egress),
+            purpose: Some(snapshot.purpose),
+            approval: snapshot.approval.map(ApprovalGrantFileRecord::from),
             principal_binding: snapshot.principal_binding,
             expires_at_unix_secs: snapshot.expires_at_unix_secs,
             expires_at_subsec_nanos: snapshot.expires_at_subsec_nanos,
@@ -175,7 +195,7 @@ impl From<UsePermitSnapshot> for PermitFileRecord {
 
 impl PermitFileRecord {
     fn into_snapshot(self) -> JanusResult<UsePermitSnapshot> {
-        if !matches!(self.version, 1 | 2) {
+        if !matches!(self.version, 1..=3) {
             return Err(JanusError::permit_invalid(
                 "denied_unsupported_permit_record",
                 "permit registry entry version is unsupported",
@@ -188,10 +208,48 @@ impl PermitFileRecord {
             destination: self.destination,
             executor: self.executor,
             egress: self.egress.unwrap_or_else(|| "declared_only".to_string()),
+            purpose: self.purpose.unwrap_or_else(|| "legacy permit".to_string()),
+            approval: self.approval.map(ApprovalGrantFileRecord::into_snapshot),
             principal_binding: self.principal_binding,
             expires_at_unix_secs: self.expires_at_unix_secs,
             expires_at_subsec_nanos: self.expires_at_subsec_nanos,
         })
+    }
+}
+
+impl From<ApprovalGrantSnapshot> for ApprovalGrantFileRecord {
+    fn from(snapshot: ApprovalGrantSnapshot) -> Self {
+        Self {
+            approval_id: snapshot.approval_id,
+            secret_ref: snapshot.secret_ref,
+            profile_id: snapshot.profile_id,
+            executor: snapshot.executor,
+            destination: snapshot.destination,
+            class: snapshot.class,
+            egress: snapshot.egress,
+            purpose: snapshot.purpose,
+            expires_at_unix_secs: snapshot.expires_at_unix_secs,
+            expires_at_subsec_nanos: snapshot.expires_at_subsec_nanos,
+            reason: snapshot.reason,
+        }
+    }
+}
+
+impl ApprovalGrantFileRecord {
+    fn into_snapshot(self) -> ApprovalGrantSnapshot {
+        ApprovalGrantSnapshot {
+            approval_id: self.approval_id,
+            secret_ref: self.secret_ref,
+            profile_id: self.profile_id,
+            executor: self.executor,
+            destination: self.destination,
+            class: self.class,
+            egress: self.egress,
+            purpose: self.purpose,
+            expires_at_unix_secs: self.expires_at_unix_secs,
+            expires_at_subsec_nanos: self.expires_at_subsec_nanos,
+            reason: self.reason,
+        }
     }
 }
 

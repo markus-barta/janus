@@ -30,8 +30,9 @@ pub use error::{JanusError, JanusResult};
 pub use manifest::ManifestCatalog;
 pub use metadata::{SecretMetadataOverlay, SecretMetadataPatch};
 pub use policy::{
-    ClassPermitPolicy, EgressMode, PermitId, PermitIssuer, PolicyDecision, ProfileId,
-    ProfilePolicy, Purpose, TrustLevel, UsePermit, UsePermitSnapshot, UseProfile, UseRequest,
+    ApprovalGrant, ApprovalGrantScope, ApprovalGrantSnapshot, ApprovalId, ClassPermitPolicy,
+    EgressMode, PermitId, PermitIssuer, PolicyDecision, ProfileId, ProfilePolicy, Purpose,
+    TrustLevel, UsePermit, UsePermitSnapshot, UseProfile, UseRequest,
 };
 pub use principal::{Principal, PrincipalChain, PrincipalId, PrincipalKind, ScopeRef};
 pub use refs::{

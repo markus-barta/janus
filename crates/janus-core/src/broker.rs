@@ -3,10 +3,10 @@
 use std::time::SystemTime;
 
 use crate::{
-    consumer::consumer_observe_event, AuditAction, AuditEvent, AuditOutcome, AuditSink,
-    ClassPermitPolicy, ConsumerDescriptor, Destination, ExecutorRef, JanusError, JanusResult,
-    PermitIssuer, PolicyDecision, PrincipalChain, ProfilePolicy, SecretDescriptor, SecretName,
-    SecretRef, SecretStore, SecretValue, Severity, UsePermit, UseRequest,
+    consumer::consumer_observe_event, ApprovalGrant, AuditAction, AuditEvent, AuditOutcome,
+    AuditSink, ClassPermitPolicy, ConsumerDescriptor, Destination, ExecutorRef, JanusError,
+    JanusResult, PermitIssuer, PolicyDecision, PrincipalChain, ProfilePolicy, SecretDescriptor,
+    SecretName, SecretRef, SecretStore, SecretValue, Severity, UsePermit, UseRequest,
 };
 
 /// Policy/audit wrapper around a backend store.
@@ -186,6 +186,22 @@ where
         principal: &PrincipalChain,
         now: SystemTime,
     ) -> JanusResult<UsePermit> {
+        self.request_use_with_approval(req, principal, now, None)
+            .await
+    }
+
+    /// Request one use permit with an optional exact approval grant.
+    ///
+    /// This is for trusted/admin paths. Model-facing surfaces should continue
+    /// to call `request_use` / `request_profile_use` so the model cannot mint
+    /// or broaden approvals.
+    pub async fn request_use_with_approval(
+        &mut self,
+        req: &UseRequest,
+        principal: &PrincipalChain,
+        now: SystemTime,
+        approval: Option<&ApprovalGrant>,
+    ) -> JanusResult<UsePermit> {
         let listed = self.store.list().await?;
         let descriptor = listed
             .iter()
@@ -221,7 +237,7 @@ where
             .classification
             .expect("metadata_use_denial guarantees classification is present");
         let mut issuer = PermitIssuer::new(&self.policy, &mut self.audit);
-        issuer.issue_for_class(req, principal, now, class)
+        issuer.issue_for_class_with_approval(req, principal, now, class, approval)
     }
 
     /// Request use from only model-acceptable inputs.

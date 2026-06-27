@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, Destination, ExecutorRef, JanusError,
-    JanusResult, PrincipalChain, SecretClass, SecretRef, Severity,
+    JanusResult, PrincipalChain, SafeLabel, SecretClass, SecretRef, Severity,
 };
 use sha2::{Digest, Sha256};
 
@@ -148,6 +148,300 @@ pub struct UseRequest {
     pub purpose: Purpose,
 }
 
+/// Opaque id for an exact approval grant.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct ApprovalId(String);
+
+impl ApprovalId {
+    fn derive(scope: &ApprovalGrantScope, expires_at: SystemTime, reason: &SafeLabel) -> Self {
+        let expires_at = expires_at.duration_since(UNIX_EPOCH).unwrap_or_default();
+        let mut hasher = Sha256::new();
+        hasher.update(b"janus-approval-v1\0");
+        hasher.update(scope.secret_ref.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(scope.profile_id.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(scope.executor.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(scope.destination.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(scope.class.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(scope.egress.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(scope.purpose.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(expires_at.as_secs().to_le_bytes());
+        hasher.update(expires_at.subsec_nanos().to_le_bytes());
+        hasher.update(b"\0");
+        hasher.update(reason.as_str().as_bytes());
+        let digest = hasher.finalize();
+        Self(format!("appr_{}", hex::encode(&digest[..12])))
+    }
+
+    /// Rehydrate an opaque approval id.
+    pub fn from_opaque(value: impl Into<String>) -> JanusResult<Self> {
+        let value = value.into();
+        if value.trim().is_empty()
+            || value.trim().len() != value.len()
+            || !value.starts_with("appr_")
+            || value.len() <= "appr_".len()
+            || !value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return Err(JanusError::InvalidIdentifier {
+                kind: "approval_id",
+            });
+        }
+        Ok(Self(value))
+    }
+
+    /// Opaque approval id text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ApprovalId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ApprovalId").field(&"<redacted>").finish()
+    }
+}
+
+/// Exact use scope approved by an approval grant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalGrantScope {
+    /// Secret ref this grant is scoped to.
+    pub secret_ref: SecretRef,
+    /// Profile id this grant is scoped to.
+    pub profile_id: ProfileId,
+    /// Executor this grant is scoped to.
+    pub executor: ExecutorRef,
+    /// Destination this grant is scoped to.
+    pub destination: Destination,
+    /// Secret class this grant is scoped to.
+    pub class: SecretClass,
+    /// Egress mode this grant is scoped to.
+    pub egress: EgressMode,
+    /// Purpose this grant is scoped to.
+    pub purpose: Purpose,
+}
+
+impl ApprovalGrantScope {
+    /// Build the exact approval scope for a reviewed request/profile pair.
+    pub fn for_request(req: &UseRequest, profile: &UseProfile, class: SecretClass) -> Self {
+        Self {
+            secret_ref: req.secret_ref.clone(),
+            profile_id: req.profile_id.clone(),
+            executor: profile.executor.clone(),
+            destination: req.destination.clone(),
+            class,
+            egress: profile.egress,
+            purpose: req.purpose.clone(),
+        }
+    }
+
+    fn for_permit(permit: &UsePermit, class: SecretClass) -> Self {
+        Self {
+            secret_ref: permit.secret_ref.clone(),
+            profile_id: permit.profile_id.clone(),
+            executor: permit.executor.clone(),
+            destination: permit.destination.clone(),
+            class,
+            egress: permit.egress,
+            purpose: permit.purpose.clone(),
+        }
+    }
+}
+
+/// Exact, short-lived approval for a high-risk use path.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ApprovalGrant {
+    id: ApprovalId,
+    scope: ApprovalGrantScope,
+    expires_at: SystemTime,
+    reason: SafeLabel,
+}
+
+/// Durable, value-free snapshot of an approval grant bound into a permit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalGrantSnapshot {
+    /// Opaque approval id.
+    pub approval_id: String,
+    /// Secret ref this grant is scoped to.
+    pub secret_ref: String,
+    /// Profile id this grant is scoped to.
+    pub profile_id: String,
+    /// Executor this grant is scoped to.
+    pub executor: String,
+    /// Destination this grant is scoped to.
+    pub destination: String,
+    /// Secret class this grant is scoped to.
+    pub class: String,
+    /// Egress mode this grant is scoped to.
+    pub egress: String,
+    /// Purpose this grant is scoped to.
+    pub purpose: String,
+    /// Grant expiry seconds since Unix epoch.
+    pub expires_at_unix_secs: u64,
+    /// Grant expiry nanoseconds within the epoch second.
+    pub expires_at_subsec_nanos: u32,
+    /// Value-free approval reason.
+    pub reason: String,
+}
+
+impl ApprovalGrant {
+    /// Construct an exact approval grant.
+    pub fn new(scope: ApprovalGrantScope, expires_at: SystemTime, reason: SafeLabel) -> Self {
+        let id = ApprovalId::derive(&scope, expires_at, &reason);
+        Self {
+            id,
+            scope,
+            expires_at,
+            reason,
+        }
+    }
+
+    /// Construct a grant for a reviewed request/profile pair.
+    pub fn for_request(
+        req: &UseRequest,
+        profile: &UseProfile,
+        class: SecretClass,
+        expires_at: SystemTime,
+        reason: SafeLabel,
+    ) -> Self {
+        Self::new(
+            ApprovalGrantScope::for_request(req, profile, class),
+            expires_at,
+            reason,
+        )
+    }
+
+    /// Opaque approval id.
+    pub fn id(&self) -> &ApprovalId {
+        &self.id
+    }
+
+    /// Exact grant scope.
+    pub fn scope(&self) -> &ApprovalGrantScope {
+        &self.scope
+    }
+
+    /// Value-free approval reason.
+    pub fn reason(&self) -> &SafeLabel {
+        &self.reason
+    }
+
+    /// Whether the grant is expired at the supplied instant.
+    pub fn is_expired_at(&self, now: SystemTime) -> bool {
+        now >= self.expires_at
+    }
+
+    fn validate_request(
+        &self,
+        req: &UseRequest,
+        profile: &UseProfile,
+        class: SecretClass,
+        now: SystemTime,
+    ) -> PolicyDecision {
+        if self.is_expired_at(now) {
+            return approval_denied("approval_expired", "approval grant is expired");
+        }
+        if self.scope != ApprovalGrantScope::for_request(req, profile, class) {
+            return approval_denied(
+                "approval_scope_mismatch",
+                "approval grant does not match the exact requested use",
+            );
+        }
+        PolicyDecision::Allow
+    }
+
+    fn validate_permit(
+        &self,
+        permit: &UsePermit,
+        class: SecretClass,
+        now: SystemTime,
+    ) -> PolicyDecision {
+        if self.is_expired_at(now) {
+            return approval_denied("approval_expired", "approval grant is expired");
+        }
+        if self.scope != ApprovalGrantScope::for_permit(permit, class) {
+            return approval_denied(
+                "approval_scope_mismatch",
+                "approval grant does not match the exact permit use",
+            );
+        }
+        PolicyDecision::Allow
+    }
+
+    /// Export a durable value-free approval snapshot.
+    pub fn snapshot(&self) -> ApprovalGrantSnapshot {
+        let expires_at = self
+            .expires_at
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        ApprovalGrantSnapshot {
+            approval_id: self.id.as_str().to_string(),
+            secret_ref: self.scope.secret_ref.as_str().to_string(),
+            profile_id: self.scope.profile_id.as_str().to_string(),
+            executor: self.scope.executor.as_str().to_string(),
+            destination: self.scope.destination.as_str().to_string(),
+            class: self.scope.class.as_str().to_string(),
+            egress: self.scope.egress.as_str().to_string(),
+            purpose: self.scope.purpose.as_str().to_string(),
+            expires_at_unix_secs: expires_at.as_secs(),
+            expires_at_subsec_nanos: expires_at.subsec_nanos(),
+            reason: self.reason.as_str().to_string(),
+        }
+    }
+
+    /// Rehydrate a value-free approval snapshot.
+    pub fn from_snapshot(snapshot: ApprovalGrantSnapshot) -> JanusResult<Self> {
+        if snapshot.expires_at_subsec_nanos >= 1_000_000_000 {
+            return Err(JanusError::InvalidIdentifier {
+                kind: "approval_expiry",
+            });
+        }
+        Ok(Self {
+            id: ApprovalId::from_opaque(snapshot.approval_id)?,
+            scope: ApprovalGrantScope {
+                secret_ref: SecretRef::new(snapshot.secret_ref)?,
+                profile_id: ProfileId::new(snapshot.profile_id)?,
+                executor: ExecutorRef::new(snapshot.executor)?,
+                destination: Destination::new(snapshot.destination)?,
+                class: SecretClass::parse(&snapshot.class)?,
+                egress: EgressMode::parse(&snapshot.egress)?,
+                purpose: Purpose::new(snapshot.purpose)?,
+            },
+            expires_at: UNIX_EPOCH
+                + Duration::new(
+                    snapshot.expires_at_unix_secs,
+                    snapshot.expires_at_subsec_nanos,
+                ),
+            reason: SafeLabel::new(snapshot.reason)?,
+        })
+    }
+}
+
+impl fmt::Debug for ApprovalGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApprovalGrant")
+            .field("id", &"<redacted>")
+            .field("scope", &self.scope)
+            .field("expires_at", &self.expires_at)
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
+fn approval_denied(reason_code: &'static str, detail: &'static str) -> PolicyDecision {
+    PolicyDecision::Deny {
+        reason_code,
+        detail: detail.to_string(),
+    }
+}
+
 /// Secret-class policy requirements for permit-bearing paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClassPermitPolicy {
@@ -157,6 +451,12 @@ pub struct ClassPermitPolicy {
     requires_approval: bool,
     allow_severity: Severity,
     deny_severity: Severity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClassPermitDecision {
+    decision: PolicyDecision,
+    approval_used: bool,
 }
 
 impl ClassPermitPolicy {
@@ -220,37 +520,85 @@ impl ClassPermitPolicy {
         self.deny_severity
     }
 
-    fn decide_profile(self, profile: &UseProfile) -> PolicyDecision {
-        self.decide_bound_use(profile.egress, profile.ttl)
+    fn decide_profile_with_approval(
+        self,
+        req: &UseRequest,
+        profile: &UseProfile,
+        approval: Option<&ApprovalGrant>,
+        now: SystemTime,
+    ) -> ClassPermitDecision {
+        let approval_valid = match approval {
+            Some(grant) => match grant.validate_request(req, profile, self.class, now) {
+                PolicyDecision::Allow => true,
+                decision @ PolicyDecision::Deny { .. } => {
+                    return ClassPermitDecision {
+                        decision,
+                        approval_used: false,
+                    }
+                }
+            },
+            None => false,
+        };
+        self.decide_bound_use(profile.egress, profile.ttl, approval_valid)
     }
 
     /// Decide whether a current permit remains acceptable for this class.
     pub fn decide_permit(self, permit: &UsePermit, now: SystemTime) -> PolicyDecision {
-        self.decide_bound_use(permit.egress(), permit.remaining_ttl_at(now))
+        let approval_valid = match permit.approval() {
+            Some(grant) => match grant.validate_permit(permit, self.class, now) {
+                PolicyDecision::Allow => true,
+                decision @ PolicyDecision::Deny { .. } => return decision,
+            },
+            None => false,
+        };
+        self.decide_bound_use(
+            permit.egress(),
+            permit.remaining_ttl_at(now),
+            approval_valid,
+        )
+        .decision
     }
 
-    fn decide_bound_use(self, egress: EgressMode, ttl: Duration) -> PolicyDecision {
-        if self.requires_approval {
-            return PolicyDecision::Deny {
-                reason_code: "approval_missing",
-                detail: "break-glass use requires an explicit approval grant".to_string(),
+    fn decide_bound_use(
+        self,
+        egress: EgressMode,
+        ttl: Duration,
+        approval_valid: bool,
+    ) -> ClassPermitDecision {
+        if self.requires_approval && !approval_valid {
+            return ClassPermitDecision {
+                decision: PolicyDecision::Deny {
+                    reason_code: "approval_missing",
+                    detail: "break-glass use requires an explicit approval grant".to_string(),
+                },
+                approval_used: false,
             };
         }
         if let Some(max_ttl) = self.max_ttl {
             if ttl > max_ttl {
-                return PolicyDecision::Deny {
-                    reason_code: "denied_ttl_exceeds_class_limit",
-                    detail: "profile permit TTL exceeds secret class limit".to_string(),
+                return ClassPermitDecision {
+                    decision: PolicyDecision::Deny {
+                        reason_code: "denied_ttl_exceeds_class_limit",
+                        detail: "profile permit TTL exceeds secret class limit".to_string(),
+                    },
+                    approval_used: false,
                 };
             }
         }
-        if self.requires_strong_egress && !egress.is_strong() {
-            return PolicyDecision::Deny {
-                reason_code: "denied_egress_mode_insufficient",
-                detail: "secret class requires stronger egress enforcement".to_string(),
+        let weak_egress_override = self.requires_strong_egress && !egress.is_strong();
+        if weak_egress_override && !approval_valid {
+            return ClassPermitDecision {
+                decision: PolicyDecision::Deny {
+                    reason_code: "denied_egress_mode_insufficient",
+                    detail: "secret class requires stronger egress enforcement".to_string(),
+                },
+                approval_used: false,
             };
         }
-        PolicyDecision::Allow
+        ClassPermitDecision {
+            decision: PolicyDecision::Allow,
+            approval_used: approval_valid && (self.requires_approval || weak_egress_override),
+        }
     }
 }
 
@@ -273,7 +621,12 @@ pub enum PolicyDecision {
 pub struct PermitId(String);
 
 impl PermitId {
-    fn derive(profile: &UseProfile, principal: &PrincipalChain, now: SystemTime) -> Self {
+    fn derive(
+        profile: &UseProfile,
+        principal: &PrincipalChain,
+        purpose: &Purpose,
+        now: SystemTime,
+    ) -> Self {
         let timestamp = now
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
@@ -283,6 +636,8 @@ impl PermitId {
         hasher.update(profile.id.as_str().as_bytes());
         hasher.update(b"\0");
         hasher.update(profile.secret_ref.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(purpose.as_str().as_bytes());
         hasher.update(b"\0");
         hasher.update(principal.binding_key().as_bytes());
         hasher.update(b"\0");
@@ -329,6 +684,8 @@ pub struct UsePermit {
     destination: Destination,
     executor: ExecutorRef,
     egress: EgressMode,
+    purpose: Purpose,
+    approval: Option<ApprovalGrant>,
     principal_binding: String,
     expires_at: SystemTime,
 }
@@ -352,6 +709,10 @@ pub struct UsePermitSnapshot {
     pub executor: String,
     /// Egress posture this permit was issued under.
     pub egress: String,
+    /// Purpose this permit was issued for.
+    pub purpose: String,
+    /// Approval grant this permit was issued under, if any.
+    pub approval: Option<ApprovalGrantSnapshot>,
     /// Principal binding key this permit is bound to.
     pub principal_binding: String,
     /// Permit expiry seconds since the Unix epoch.
@@ -361,14 +722,22 @@ pub struct UsePermitSnapshot {
 }
 
 impl UsePermit {
-    fn new(profile: &UseProfile, principal: &PrincipalChain, now: SystemTime) -> Self {
+    fn new(
+        profile: &UseProfile,
+        req: &UseRequest,
+        principal: &PrincipalChain,
+        now: SystemTime,
+        approval: Option<&ApprovalGrant>,
+    ) -> Self {
         Self {
-            id: PermitId::derive(profile, principal, now),
+            id: PermitId::derive(profile, principal, &req.purpose, now),
             secret_ref: profile.secret_ref.clone(),
             profile_id: profile.id.clone(),
             destination: profile.destination.clone(),
             executor: profile.executor.clone(),
             egress: profile.egress,
+            purpose: req.purpose.clone(),
+            approval: approval.cloned(),
             principal_binding: principal.binding_key(),
             expires_at: now + profile.ttl,
         }
@@ -404,6 +773,16 @@ impl UsePermit {
         self.egress
     }
 
+    /// Purpose this permit was issued for.
+    pub fn purpose(&self) -> &Purpose {
+        &self.purpose
+    }
+
+    /// Approval grant bound into this permit, if any.
+    pub fn approval(&self) -> Option<&ApprovalGrant> {
+        self.approval.as_ref()
+    }
+
     /// Remaining permit lifetime at a supplied instant.
     pub fn remaining_ttl_at(&self, now: SystemTime) -> Duration {
         self.expires_at.duration_since(now).unwrap_or_default()
@@ -427,6 +806,8 @@ impl UsePermit {
             destination: self.destination.as_str().to_string(),
             executor: self.executor.as_str().to_string(),
             egress: self.egress.as_str().to_string(),
+            purpose: self.purpose.as_str().to_string(),
+            approval: self.approval.as_ref().map(ApprovalGrant::snapshot),
             principal_binding: self.principal_binding.clone(),
             expires_at_unix_secs: expires_at.as_secs(),
             expires_at_subsec_nanos: expires_at.subsec_nanos(),
@@ -454,6 +835,11 @@ impl UsePermit {
             destination: Destination::new(snapshot.destination)?,
             executor: ExecutorRef::new(snapshot.executor)?,
             egress: EgressMode::parse(&snapshot.egress)?,
+            purpose: Purpose::new(snapshot.purpose)?,
+            approval: snapshot
+                .approval
+                .map(ApprovalGrant::from_snapshot)
+                .transpose()?,
             principal_binding: snapshot.principal_binding,
             expires_at: UNIX_EPOCH
                 + Duration::new(
@@ -508,6 +894,8 @@ impl fmt::Debug for UsePermit {
             .field("destination", &self.destination)
             .field("executor", &self.executor)
             .field("egress", &self.egress)
+            .field("purpose", &self.purpose)
+            .field("approval", &self.approval)
             .field("principal_binding", &"<redacted>")
             .field("expires_at", &self.expires_at)
             .finish()
@@ -523,6 +911,8 @@ impl fmt::Debug for UsePermitSnapshot {
             .field("destination", &self.destination)
             .field("executor", &self.executor)
             .field("egress", &self.egress)
+            .field("purpose", &self.purpose)
+            .field("approval", &self.approval)
             .field("principal_binding", &"<redacted>")
             .field("expires_at_unix_secs", &self.expires_at_unix_secs)
             .field("expires_at_subsec_nanos", &self.expires_at_subsec_nanos)
@@ -582,14 +972,30 @@ impl ProfilePolicy {
         principal: &PrincipalChain,
         class: SecretClass,
     ) -> PolicyDecision {
+        self.decide_for_class_with_approval(req, principal, class, None, UNIX_EPOCH)
+            .decision
+    }
+
+    fn decide_for_class_with_approval(
+        &self,
+        req: &UseRequest,
+        principal: &PrincipalChain,
+        class: SecretClass,
+        approval: Option<&ApprovalGrant>,
+        now: SystemTime,
+    ) -> ClassPermitDecision {
         let decision = self.decide(req, principal);
         if !matches!(decision, PolicyDecision::Allow) {
-            return decision;
+            return ClassPermitDecision {
+                decision,
+                approval_used: false,
+            };
         }
         let profile = self
             .matching_profile(req)
             .expect("allow decision requires a matching profile");
-        ClassPermitPolicy::for_class(class).decide_profile(profile)
+        ClassPermitPolicy::for_class(class)
+            .decide_profile_with_approval(req, profile, approval, now)
     }
 
     fn matching_profile(&self, req: &UseRequest) -> Option<&UseProfile> {
@@ -620,6 +1026,16 @@ pub struct PermitIssuer<P, A> {
     audit: A,
 }
 
+struct IssueDecision<'a> {
+    req: &'a UseRequest,
+    principal: &'a PrincipalChain,
+    now: SystemTime,
+    decision: PolicyDecision,
+    allow_severity: Severity,
+    deny_severity: Severity,
+    approval: Option<&'a ApprovalGrant>,
+}
+
 impl<P, A> PermitIssuer<P, A>
 where
     P: AsRef<ProfilePolicy>,
@@ -637,14 +1053,15 @@ where
         principal: &PrincipalChain,
         now: SystemTime,
     ) -> JanusResult<UsePermit> {
-        self.issue_with_decision(
+        self.issue_with_decision(IssueDecision {
             req,
             principal,
             now,
-            self.policy.as_ref().decide(req, principal),
-            Severity::Notice,
-            Severity::Warning,
-        )
+            decision: self.policy.as_ref().decide(req, principal),
+            allow_severity: Severity::Notice,
+            deny_severity: Severity::Warning,
+            approval: None,
+        })
     }
 
     /// Issue a permit with additional secret-class requirements.
@@ -655,28 +1072,60 @@ where
         now: SystemTime,
         class: SecretClass,
     ) -> JanusResult<UsePermit> {
-        let class_policy = ClassPermitPolicy::for_class(class);
-        self.issue_with_decision(
-            req,
-            principal,
-            now,
-            self.policy.as_ref().decide_for_class(req, principal, class),
-            class_policy.allow_severity(),
-            class_policy.deny_severity(),
-        )
+        self.issue_for_class_with_approval(req, principal, now, class, None)
     }
 
-    fn issue_with_decision(
+    /// Issue a permit with secret-class requirements and an optional exact approval grant.
+    pub fn issue_for_class_with_approval(
         &mut self,
         req: &UseRequest,
         principal: &PrincipalChain,
         now: SystemTime,
-        decision: PolicyDecision,
-        allow_severity: Severity,
-        deny_severity: Severity,
+        class: SecretClass,
+        approval: Option<&ApprovalGrant>,
     ) -> JanusResult<UsePermit> {
+        let class_policy = ClassPermitPolicy::for_class(class);
+        let class_decision = self
+            .policy
+            .as_ref()
+            .decide_for_class_with_approval(req, principal, class, approval, now);
+        let approval_to_bind = approval.filter(|_| class_decision.approval_used);
+        self.issue_with_decision(IssueDecision {
+            req,
+            principal,
+            now,
+            decision: class_decision.decision,
+            allow_severity: class_policy.allow_severity(),
+            deny_severity: class_policy.deny_severity(),
+            approval: approval_to_bind,
+        })
+    }
+
+    fn issue_with_decision(&mut self, issue: IssueDecision<'_>) -> JanusResult<UsePermit> {
+        let IssueDecision {
+            req,
+            principal,
+            now,
+            decision,
+            allow_severity,
+            deny_severity,
+            approval,
+        } = issue;
         match decision {
             PolicyDecision::Allow => {
+                if let Some(grant) = approval {
+                    self.audit.record(
+                        AuditEvent::new(
+                            AuditAction::PermitApprove,
+                            AuditOutcome::Allowed,
+                            "approved",
+                            Severity::High,
+                            Some(req.secret_ref.clone()),
+                            principal,
+                        )
+                        .with_evidence(grant.reason().clone()),
+                    )?;
+                }
                 self.audit.record(AuditEvent::new(
                     AuditAction::PermitRequest,
                     AuditOutcome::Allowed,
@@ -698,7 +1147,7 @@ where
                     .as_ref()
                     .matching_profile(req)
                     .expect("allow decision requires a matching profile");
-                Ok(UsePermit::new(profile, principal, now))
+                Ok(UsePermit::new(profile, req, principal, now, approval))
             }
             PolicyDecision::Deny {
                 reason_code,
@@ -732,7 +1181,7 @@ impl AsRef<ProfilePolicy> for ProfilePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AuditWrite, Principal, PrincipalId, PrincipalKind, ScopeRef};
+    use crate::{AuditWrite, Principal, PrincipalId, PrincipalKind, SafeLabel, ScopeRef};
 
     fn principal(executor: &str) -> PrincipalChain {
         PrincipalChain::new(
@@ -762,6 +1211,21 @@ mod tests {
             destination: Destination::new(destination).unwrap(),
             purpose: Purpose::new("deploy release").unwrap(),
         }
+    }
+
+    fn approval_for(
+        profile: &UseProfile,
+        req: &UseRequest,
+        class: SecretClass,
+        expires_at: SystemTime,
+    ) -> ApprovalGrant {
+        ApprovalGrant::for_request(
+            req,
+            profile,
+            class,
+            expires_at,
+            SafeLabel::new("approved maintenance window").unwrap(),
+        )
     }
 
     #[test]
@@ -966,6 +1430,159 @@ mod tests {
             decision,
             PolicyDecision::Deny {
                 reason_code: "approval_missing",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn approval_grants_are_exact_short_lived_and_value_free() {
+        let profile = profile(true);
+        let req = request("deploy-api");
+        let grant = approval_for(
+            &profile,
+            &req,
+            SecretClass::BreakGlass,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(30),
+        );
+
+        let snapshot = grant.snapshot();
+        let rehydrated = ApprovalGrant::from_snapshot(snapshot).unwrap();
+        assert_eq!(rehydrated, grant);
+        assert!(grant.id().as_str().starts_with("appr_"));
+        assert_eq!(grant.reason().as_str(), "approved maintenance window");
+        assert!(!format!("{grant:?}").contains(grant.id().as_str()));
+
+        let mut wrong_purpose = req.clone();
+        wrong_purpose.purpose = Purpose::new("different purpose").unwrap();
+        let mismatch = grant.validate_request(
+            &wrong_purpose,
+            &profile,
+            SecretClass::BreakGlass,
+            SystemTime::UNIX_EPOCH,
+        );
+        assert!(matches!(
+            mismatch,
+            PolicyDecision::Deny {
+                reason_code: "approval_scope_mismatch",
+                ..
+            }
+        ));
+
+        let expired = grant.validate_request(
+            &req,
+            &profile,
+            SecretClass::BreakGlass,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(30),
+        );
+        assert!(matches!(
+            expired,
+            PolicyDecision::Deny {
+                reason_code: "approval_expired",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn break_glass_class_accepts_exact_approval_grant() {
+        let profile = profile(true);
+        let req = request("deploy-api");
+        let grant = approval_for(
+            &profile,
+            &req,
+            SecretClass::BreakGlass,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(30),
+        );
+        let policy = ProfilePolicy::new(vec![profile]);
+        let mut issuer = PermitIssuer::new(policy, AuditWrite::accepting());
+
+        let permit = issuer
+            .issue_for_class_with_approval(
+                &req,
+                &principal("runner-a"),
+                SystemTime::UNIX_EPOCH,
+                SecretClass::BreakGlass,
+                Some(&grant),
+            )
+            .unwrap();
+
+        assert!(permit.approval().is_some());
+        assert_eq!(permit.purpose().as_str(), "deploy release");
+        assert!(matches!(
+            ClassPermitPolicy::for_class(SecretClass::BreakGlass)
+                .decide_permit(&permit, SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+            PolicyDecision::Allow
+        ));
+        assert!(matches!(
+            ClassPermitPolicy::for_class(SecretClass::BreakGlass)
+                .decide_permit(&permit, SystemTime::UNIX_EPOCH + Duration::from_secs(31)),
+            PolicyDecision::Deny {
+                reason_code: "approval_expired",
+                ..
+            }
+        ));
+
+        let audit = issuer.into_audit();
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::PermitApprove
+                && event.outcome == AuditOutcome::Allowed
+                && event.reason_code == "approved"
+                && event.severity == Severity::High
+                && event.evidence.as_ref().unwrap().as_str() == "approved maintenance window"
+                && !event.value_returned
+        }));
+    }
+
+    #[test]
+    fn high_value_weak_egress_override_requires_exact_approval() {
+        let mut weak = profile(true);
+        weak.egress = EgressMode::DeclaredOnly;
+        let req = request("deploy-api");
+        let grant = approval_for(
+            &weak,
+            &req,
+            SecretClass::HighValue,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(30),
+        );
+        let policy = ProfilePolicy::new(vec![weak.clone()]);
+        let mut issuer = PermitIssuer::new(policy, AuditWrite::accepting());
+
+        let permit = issuer
+            .issue_for_class_with_approval(
+                &req,
+                &principal("runner-a"),
+                SystemTime::UNIX_EPOCH,
+                SecretClass::HighValue,
+                Some(&grant),
+            )
+            .unwrap();
+        assert_eq!(permit.egress(), EgressMode::DeclaredOnly);
+        assert!(permit.approval().is_some());
+
+        let policy = ProfilePolicy::new(vec![weak]);
+        let mut issuer = PermitIssuer::new(policy, AuditWrite::accepting());
+        let mut wrong_grant_req = req.clone();
+        wrong_grant_req.destination = Destination::new("other-api").unwrap();
+        let wrong_grant = approval_for(
+            &profile(true),
+            &wrong_grant_req,
+            SecretClass::HighValue,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(30),
+        );
+        let err = issuer
+            .issue_for_class_with_approval(
+                &req,
+                &principal("runner-a"),
+                SystemTime::UNIX_EPOCH,
+                SecretClass::HighValue,
+                Some(&wrong_grant),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "approval_scope_mismatch",
                 ..
             }
         ));

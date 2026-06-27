@@ -132,10 +132,10 @@ pub fn run_permit_contract(
 mod tests {
     use super::*;
     use janus_core::{
-        AuditAction, BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry,
-        Environment, ManifestCatalog, OwnerRef, ProjectId, ReloadMethod, RotationDecision,
-        RotationPlanner, SafeLabel, ScopeRef, SecretBroker, SecretClass, SecretMeta, SecretRef,
-        Severity, StoreCapabilities, TrustLevel, ValidationProbe,
+        ApprovalGrant, AuditAction, BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef,
+        ConsumerRegistry, Environment, ManifestCatalog, OwnerRef, ProjectId, ReloadMethod,
+        RotationDecision, RotationPlanner, SafeLabel, ScopeRef, SecretBroker, SecretClass,
+        SecretMeta, SecretRef, Severity, StoreCapabilities, TrustLevel, ValidationProbe,
     };
     use janus_mock::MockStore;
 
@@ -209,6 +209,21 @@ mod tests {
             destination: Destination::new(destination).unwrap(),
             purpose: Purpose::new("deploy canary").unwrap(),
         }
+    }
+
+    fn approval_for(
+        profile: &UseProfile,
+        req: &UseRequest,
+        class: SecretClass,
+        expires_at: SystemTime,
+    ) -> ApprovalGrant {
+        ApprovalGrant::for_request(
+            req,
+            profile,
+            class,
+            expires_at,
+            SafeLabel::new("approved emergency window").unwrap(),
+        )
     }
 
     fn consumer(
@@ -518,6 +533,144 @@ mod tests {
                 && event.reason_code == "approval_missing"
                 && event.severity == Severity::High
                 && event.outcome == AuditOutcome::Denied
+                && !event.value_returned
+        }));
+    }
+
+    #[tokio::test]
+    async fn broker_allows_break_glass_with_exact_approval_and_rechecks_expiry() {
+        let (store, fixture) = mock_store_with_metadata(
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::BreakGlass),
+        );
+        let descriptor = store.list().await.unwrap().remove(0);
+        let principal_chain = principal("runner-a", "janus/dev");
+        let executor = ExecutorRef::new("runner-a").unwrap();
+        let destination = Destination::new("deploy-api").unwrap();
+        let profile = use_profile(
+            descriptor.secret_ref.clone(),
+            true,
+            "runner-a",
+            "deploy-api",
+        );
+        let request = use_request(descriptor.secret_ref.clone(), "deploy-api");
+        let approval = approval_for(
+            &profile,
+            &request,
+            SecretClass::BreakGlass,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(30),
+        );
+        let mut broker = SecretBroker::new(
+            store,
+            ProfilePolicy::new(vec![profile]),
+            AuditWrite::accepting(),
+        );
+
+        let permit = broker
+            .request_use_with_approval(
+                &request,
+                &principal_chain,
+                SystemTime::UNIX_EPOCH,
+                Some(&approval),
+            )
+            .await
+            .unwrap();
+        let value = broker
+            .use_permit(
+                &permit,
+                &principal_chain,
+                &executor,
+                &destination,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(value.expose_bytes(), fixture.expected_value.as_slice());
+
+        let err = match broker
+            .use_permit(
+                &permit,
+                &principal_chain,
+                &executor,
+                &destination,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(31),
+            )
+            .await
+        {
+            Ok(_) => panic!("approval-backed permit use should fail after grant expiry"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "approval_expired",
+                ..
+            }
+        ));
+
+        let (_store, _policy, audit) = broker.into_parts();
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::PermitApprove
+                && event.outcome == AuditOutcome::Allowed
+                && event.reason_code == "approved"
+                && event.severity == Severity::High
+                && event.evidence.as_ref().unwrap().as_str() == "approved emergency window"
+                && !event.value_returned
+        }));
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::SecretUse
+                && event.outcome == AuditOutcome::Denied
+                && event.reason_code == "approval_expired"
+                && event.severity == Severity::High
+                && !event.value_returned
+        }));
+    }
+
+    #[tokio::test]
+    async fn broker_allows_high_value_weak_egress_only_with_exact_approval() {
+        let (store, _) = mock_store_with_metadata(
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::HighValue),
+        );
+        let descriptor = store.list().await.unwrap().remove(0);
+        let principal_chain = principal("runner-a", "janus/dev");
+        let mut weak_profile = use_profile(
+            descriptor.secret_ref.clone(),
+            true,
+            "runner-a",
+            "deploy-api",
+        );
+        weak_profile.egress = EgressMode::DeclaredOnly;
+        let request = use_request(descriptor.secret_ref.clone(), "deploy-api");
+        let approval = approval_for(
+            &weak_profile,
+            &request,
+            SecretClass::HighValue,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(30),
+        );
+        let mut broker = SecretBroker::new(
+            store,
+            ProfilePolicy::new(vec![weak_profile]),
+            AuditWrite::accepting(),
+        );
+
+        let permit = broker
+            .request_use_with_approval(
+                &request,
+                &principal_chain,
+                SystemTime::UNIX_EPOCH,
+                Some(&approval),
+            )
+            .await
+            .unwrap();
+        assert!(permit.approval().is_some());
+        assert_eq!(permit.egress(), EgressMode::DeclaredOnly);
+
+        let (_store, _policy, audit) = broker.into_parts();
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::PermitApprove
+                && event.outcome == AuditOutcome::Allowed
+                && event.severity == Severity::High
                 && !event.value_returned
         }));
     }

@@ -16,6 +16,8 @@ pub enum AuditAction {
     PermitRequest,
     /// A permit was issued.
     PermitIssue,
+    /// A high-risk permit was explicitly approved.
+    PermitApprove,
     /// Policy denied a permit.
     PermitDeny,
     /// A consumer was declared.
