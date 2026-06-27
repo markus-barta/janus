@@ -600,6 +600,13 @@ fn tool_error_view(error: JanusError) -> ToolErrorView {
             reason_code,
             detail,
         },
+        JanusError::ApprovalInvalid {
+            reason_code,
+            detail,
+        } => ToolErrorView {
+            reason_code,
+            detail,
+        },
         JanusError::AuditUnavailable { .. } => ToolErrorView {
             reason_code: "audit_sink_unavailable",
             detail: "required audit evidence could not be written".to_string(),

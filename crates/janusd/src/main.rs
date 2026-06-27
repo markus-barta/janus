@@ -17,11 +17,12 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use janus_core::{
-    AuditSink, AuditWrite, BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef,
-    ConsumerRegistry, Destination, Environment, ExecutorRef, JanusError, OwnerRef, Principal,
-    PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, ReloadMethod, SafeLabel,
-    ScopeRef, SecretBroker, SecretMetadataOverlay, SecretName, SecretRef, SecretStore, UsePermit,
-    ValidationProbe,
+    ApprovalGrant, AuditSink, AuditWrite, BlastRadius, ConsumerDescriptor, ConsumerKind,
+    ConsumerRef, ConsumerRegistry, Destination, EgressMode, Environment, ExecutorRef, JanusError,
+    OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy,
+    Purpose, ReloadMethod, SafeLabel, ScopeRef, SecretBroker, SecretDescriptor,
+    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, TrustLevel, UsePermit, UseProfile,
+    UseRequest, ValidationProbe,
 };
 use janus_executor::{
     ApprovedUseExecutor, ManagedCommandProfile, ManagedCommandProfileSpec, ManagedCommandRequest,
@@ -31,13 +32,17 @@ use janus_forge::{
     ConsumerRotationHooks, GeneratedAlphabet, GeneratedRotationBroker, GeneratedValuePolicy,
     RotationApproval,
 };
-use janus_local::{FilePermitRegistry, PermitRegistry as SharedPermitRegistry};
+use janus_local::{
+    ApprovalRegistry as SharedApprovalRegistry, FileApprovalRegistry, FilePermitRegistry,
+    PermitRegistry as SharedPermitRegistry,
+};
 use janus_provider_age::AgeSecretStore;
 use serde::Deserialize;
 use tokio::process::Command as TokioCommand;
 use tokio::time::timeout;
 
 const DEFAULT_HOOK_TIMEOUT_SECONDS: u64 = 30;
+const MAX_APPROVAL_TTL_SECONDS: u64 = 3600;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -48,6 +53,7 @@ async fn main() -> Result<()> {
         }
         Command::ForgeRotateGenerated(config) => run_forge_rotate_generated(config).await,
         Command::RunManaged(config) => run_managed_command(config).await,
+        Command::Approve(command) => run_approve(command).await,
     }
 }
 
@@ -56,6 +62,14 @@ enum Command {
     Help,
     ForgeRotateGenerated(ForgeRotateGeneratedConfig),
     RunManaged(RunManagedCommandConfig),
+    Approve(ApproveCommand),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ApproveCommand {
+    Issue(ApproveIssueConfig),
+    List,
+    Revoke(ApproveRevokeConfig),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +89,21 @@ struct RunManagedCommandConfig {
     profile_id: ProfileId,
     permit: PermitToken,
     requested_args: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ApproveIssueConfig {
+    secret_ref: SecretRef,
+    profile_id: ProfileId,
+    purpose: Purpose,
+    reason: SafeLabel,
+    egress: EgressMode,
+    expires_in: Duration,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ApproveRevokeConfig {
+    approval: ApprovalToken,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -101,6 +130,36 @@ impl PermitToken {
 impl fmt::Debug for PermitToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("PermitToken").field(&"<redacted>").finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ApprovalToken(String);
+
+impl ApprovalToken {
+    fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if value.trim().is_empty()
+            || value.trim().len() != value.len()
+            || !value.starts_with("appr_")
+            || value.len() <= "appr_".len()
+            || !value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            anyhow::bail!("invalid --approval token");
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ApprovalToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ApprovalToken").field(&"<redacted>").finish()
     }
 }
 
@@ -186,6 +245,130 @@ async fn run_managed_command(config: RunManagedCommandConfig) -> Result<()> {
     let outcome = run_managed_command_with(&config, &mut runner).await?;
     emit_run_managed_outcome(&outcome);
     Ok(())
+}
+
+async fn run_approve(command: ApproveCommand) -> Result<()> {
+    let registry = FileApprovalRegistry::new(approval_registry_dir()?);
+    match command {
+        ApproveCommand::Issue(config) => {
+            let manifest_path = run_profile_manifest_path()?;
+            let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
+            let store = load_age_store_from_env()?;
+            let descriptors = store
+                .list()
+                .await
+                .context("failed to list age manifest descriptors for approval issue")?;
+            let approval =
+                build_approval_grant(&config, &profiles, &descriptors, SystemTime::now())?;
+            SharedApprovalRegistry::store(&registry, &approval)?;
+            emit_approve_issue_outcome(&approval);
+        }
+        ApproveCommand::List => {
+            let approvals = SharedApprovalRegistry::list(&registry)?;
+            emit_approve_list_outcome(&approvals);
+        }
+        ApproveCommand::Revoke(config) => {
+            SharedApprovalRegistry::revoke(&registry, config.approval.as_str())?;
+            emit_approve_revoke_outcome(&config.approval);
+        }
+    }
+    Ok(())
+}
+
+fn build_approval_grant(
+    config: &ApproveIssueConfig,
+    profiles: &ManagedCommandProfileCatalog,
+    descriptors: &[SecretDescriptor],
+    now: SystemTime,
+) -> Result<ApprovalGrant> {
+    let profile = profiles
+        .profile(&config.profile_id)
+        .context("managed command profile not found")?;
+    if profile.secret_ref() != &config.secret_ref {
+        anyhow::bail!("approval profile does not match the requested secret ref");
+    }
+    let descriptor = descriptors
+        .iter()
+        .find(|descriptor| descriptor.secret_ref == config.secret_ref)
+        .ok_or_else(|| JanusError::NotInManifest {
+            name: config.secret_ref.as_str().to_string(),
+        })?;
+    if !descriptor
+        .allowed_uses
+        .iter()
+        .any(|profile_id| profile_id == &config.profile_id)
+    {
+        anyhow::bail!("approval profile is not allowed by secret metadata");
+    }
+    if let Some((reason_code, detail)) = descriptor.metadata_use_denial() {
+        return Err(JanusError::policy_denied(reason_code, detail).into());
+    }
+    let class = descriptor
+        .classification
+        .expect("metadata_use_denial guarantees classification is present");
+    let use_profile = UseProfile {
+        id: profile.profile_id().clone(),
+        secret_ref: profile.secret_ref().clone(),
+        executor: profile.executor().clone(),
+        destination: profile.destination().clone(),
+        egress: config.egress,
+        trust_level: TrustLevel::L2,
+        ttl: config.expires_in,
+        single_use: true,
+        enabled: true,
+    };
+    let request = UseRequest {
+        secret_ref: config.secret_ref.clone(),
+        profile_id: config.profile_id.clone(),
+        destination: profile.destination().clone(),
+        purpose: config.purpose.clone(),
+    };
+    Ok(ApprovalGrant::for_request(
+        &request,
+        &use_profile,
+        class,
+        now + config.expires_in,
+        config.reason.clone(),
+    ))
+}
+
+fn emit_approve_issue_outcome(approval: &ApprovalGrant) {
+    let snapshot = approval.snapshot();
+    println!(
+        "janusd approve issue ok approval_id={} secret_ref={} profile_id={} class={} egress={} expires_at_unix_secs={} value_returned=false",
+        snapshot.approval_id,
+        snapshot.secret_ref,
+        snapshot.profile_id,
+        snapshot.class,
+        snapshot.egress,
+        snapshot.expires_at_unix_secs
+    );
+}
+
+fn emit_approve_list_outcome(approvals: &[ApprovalGrant]) {
+    println!(
+        "janusd approve list count={} value_returned=false",
+        approvals.len()
+    );
+    for approval in approvals {
+        let snapshot = approval.snapshot();
+        println!(
+            "approval_id={} secret_ref={} profile_id={} class={} egress={} expires_at_unix_secs={} value_returned=false",
+            snapshot.approval_id,
+            snapshot.secret_ref,
+            snapshot.profile_id,
+            snapshot.class,
+            snapshot.egress,
+            snapshot.expires_at_unix_secs
+        );
+    }
+}
+
+fn emit_approve_revoke_outcome(approval: &ApprovalToken) {
+    println!(
+        "janusd approve revoke ok approval_id={} value_returned=false",
+        approval.as_str()
+    );
 }
 
 async fn run_managed_command_with<R>(
@@ -709,8 +892,139 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         [run, rest @ ..] if run == "run" => {
             parse_run_managed(rest.iter().cloned()).map(Command::RunManaged)
         }
+        [approve, issue, rest @ ..] if approve == "approve" && issue == "issue" => {
+            parse_approve_issue(rest.iter().cloned())
+                .map(ApproveCommand::Issue)
+                .map(Command::Approve)
+        }
+        [approve, list] if approve == "approve" && list == "list" => {
+            Ok(Command::Approve(ApproveCommand::List))
+        }
+        [approve, revoke, rest @ ..] if approve == "approve" && revoke == "revoke" => {
+            parse_approve_revoke(rest.iter().cloned())
+                .map(ApproveCommand::Revoke)
+                .map(Command::Approve)
+        }
         _ => anyhow::bail!("unsupported janusd command; run `janusd --help`"),
     }
+}
+
+fn parse_approve_issue(args: impl IntoIterator<Item = String>) -> Result<ApproveIssueConfig> {
+    let mut secret_ref = None;
+    let mut profile_id = None;
+    let mut purpose = None;
+    let mut reason = None;
+    let mut egress = None;
+    let mut expires_in = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--secret-ref" => {
+                if secret_ref
+                    .replace(SecretRef::new(required_arg("--secret-ref", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--secret-ref may only be provided once");
+                }
+            }
+            "--profile" => {
+                if profile_id
+                    .replace(ProfileId::new(required_arg("--profile", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--profile may only be provided once");
+                }
+            }
+            "--purpose" => {
+                if purpose
+                    .replace(Purpose::new(required_arg("--purpose", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--purpose may only be provided once");
+                }
+            }
+            "--reason" => {
+                if reason
+                    .replace(SafeLabel::new(required_arg("--reason", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--reason may only be provided once");
+                }
+            }
+            "--egress" => {
+                if egress
+                    .replace(EgressMode::parse(&required_arg("--egress", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--egress may only be provided once");
+                }
+            }
+            "--expires-in-seconds" => {
+                if expires_in
+                    .replace(parse_approval_ttl(&required_arg(
+                        "--expires-in-seconds",
+                        args.next(),
+                    )?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--expires-in-seconds may only be provided once");
+                }
+            }
+            "--secret" | "--value" | "--raw-value" | "--permit" => {
+                anyhow::bail!("approve issue accepts only value-free approval scope fields")
+            }
+            other if other.starts_with('-') => anyhow::bail!("unsupported janusd approve flag"),
+            _ => anyhow::bail!("unsupported janusd approve argument"),
+        }
+    }
+
+    Ok(ApproveIssueConfig {
+        secret_ref: secret_ref.context("--secret-ref is required")?,
+        profile_id: profile_id.context("--profile is required")?,
+        purpose: purpose.context("--purpose is required")?,
+        reason: reason.context("--reason is required")?,
+        egress: egress.context("--egress is required")?,
+        expires_in: expires_in.context("--expires-in-seconds is required")?,
+    })
+}
+
+fn parse_approve_revoke(args: impl IntoIterator<Item = String>) -> Result<ApproveRevokeConfig> {
+    let mut approval = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--approval" => {
+                if approval
+                    .replace(ApprovalToken::new(required_arg(
+                        "--approval",
+                        args.next(),
+                    )?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--approval may only be provided once");
+                }
+            }
+            "--value" | "--secret" | "--secret-ref" => {
+                anyhow::bail!("approve revoke accepts only an approval id")
+            }
+            other if other.starts_with('-') => anyhow::bail!("unsupported janusd approve flag"),
+            _ => anyhow::bail!("unsupported janusd approve argument"),
+        }
+    }
+    Ok(ApproveRevokeConfig {
+        approval: approval.context("--approval is required")?,
+    })
+}
+
+fn parse_approval_ttl(value: &str) -> Result<Duration> {
+    let seconds = value
+        .parse::<u64>()
+        .context("invalid --expires-in-seconds")?;
+    if seconds == 0 || seconds > MAX_APPROVAL_TTL_SECONDS {
+        anyhow::bail!("approval expiry must be between 1 and 3600 seconds");
+    }
+    Ok(Duration::from_secs(seconds))
 }
 
 fn parse_run_managed(args: impl IntoIterator<Item = String>) -> Result<RunManagedCommandConfig> {
@@ -903,6 +1217,12 @@ fn run_permit_registry_dir() -> Result<PathBuf> {
         .context("JANUS_RUN_PERMIT_DIR is required")
 }
 
+fn approval_registry_dir() -> Result<PathBuf> {
+    env_first(&["JANUS_APPROVAL_DIR", "JANUS_RUN_APPROVAL_DIR"])
+        .map(PathBuf::from)
+        .context("JANUS_APPROVAL_DIR is required")
+}
+
 fn run_principal_from_env() -> Result<PrincipalChain> {
     let executor = env_first(&["JANUS_RUN_EXECUTOR", "JANUS_WARDEN_EXECUTOR"])
         .unwrap_or_else(|| "warden-stdio".to_string());
@@ -940,7 +1260,7 @@ fn load_age_store_from_env() -> Result<AgeSecretStore> {
         recipients,
         metadata.as_ref(),
     )
-    .context("failed to load age backend for janusd forge")
+    .context("failed to load age backend for janusd")
 }
 
 fn metadata_overlay_from_env(keys: &[&'static str]) -> Result<Option<SecretMetadataOverlay>> {
@@ -1026,7 +1346,7 @@ fn env_first(keys: &[&str]) -> Option<String> {
 
 fn print_usage() {
     eprintln!(
-        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
+        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve list\n  approve revoke --approval appr_...\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, and approvals from JANUS_APPROVAL_DIR.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
 }
 
@@ -1050,6 +1370,7 @@ mod tests {
             Command::ForgeRotateGenerated(config) => config,
             Command::Help => panic!("expected forge config"),
             Command::RunManaged(_) => panic!("expected forge config"),
+            Command::Approve(_) => panic!("expected forge config"),
         }
     }
 
@@ -1058,6 +1379,27 @@ mod tests {
             Command::RunManaged(config) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected run config"),
             Command::Help => panic!("expected run config"),
+            Command::Approve(_) => panic!("expected run config"),
+        }
+    }
+
+    fn parse_approve_issue_ok(args: &[&str]) -> ApproveIssueConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::Approve(ApproveCommand::Issue(config)) => config,
+            Command::ForgeRotateGenerated(_) => panic!("expected approve issue config"),
+            Command::RunManaged(_) => panic!("expected approve issue config"),
+            Command::Approve(_) => panic!("expected approve issue config"),
+            Command::Help => panic!("expected approve issue config"),
+        }
+    }
+
+    fn parse_approve_revoke_ok(args: &[&str]) -> ApproveRevokeConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::Approve(ApproveCommand::Revoke(config)) => config,
+            Command::ForgeRotateGenerated(_) => panic!("expected approve revoke config"),
+            Command::RunManaged(_) => panic!("expected approve revoke config"),
+            Command::Approve(_) => panic!("expected approve revoke config"),
+            Command::Help => panic!("expected approve revoke config"),
         }
     }
 
@@ -1078,6 +1420,87 @@ mod tests {
         assert_eq!(config.permit.as_str(), "use_abc123");
         assert_eq!(config.requested_args, vec!["release", "upload"]);
         assert!(!format!("{config:?}").contains("use_abc123"));
+    }
+
+    #[test]
+    fn parses_approve_issue_and_revoke_without_literal_inputs() {
+        let config = parse_approve_issue_ok(&[
+            "approve",
+            "issue",
+            "--secret-ref",
+            "sec_fixture",
+            "--profile",
+            "profile.canary",
+            "--purpose",
+            "emergency deploy",
+            "--reason",
+            "JANUS-229 approval",
+            "--egress",
+            "proxy_enforced",
+            "--expires-in-seconds",
+            "120",
+        ]);
+
+        assert_eq!(config.secret_ref.as_str(), "sec_fixture");
+        assert_eq!(config.profile_id.as_str(), "profile.canary");
+        assert_eq!(config.purpose.as_str(), "emergency deploy");
+        assert_eq!(config.reason.as_str(), "JANUS-229 approval");
+        assert_eq!(config.egress, EgressMode::ProxyEnforced);
+        assert_eq!(config.expires_in, Duration::from_secs(120));
+
+        let revoke = parse_approve_revoke_ok(&["approve", "revoke", "--approval", "appr_abc123"]);
+        assert_eq!(revoke.approval.as_str(), "appr_abc123");
+        assert!(!format!("{revoke:?}").contains("appr_abc123"));
+    }
+
+    #[test]
+    fn approve_issue_rejects_literals_and_invalid_ttl_without_echoing_values() {
+        let err = parse_args(
+            [
+                "approve",
+                "issue",
+                "--secret-ref",
+                "sec_fixture",
+                "--profile",
+                "profile.canary",
+                "--purpose",
+                "emergency deploy",
+                "--reason",
+                "JANUS-229",
+                "--egress",
+                "connector",
+                "--value",
+                "do-not-echo-me",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("value-free"));
+        assert!(!err.to_string().contains("do-not-echo-me"));
+
+        let err = parse_args(
+            [
+                "approve",
+                "issue",
+                "--secret-ref",
+                "sec_fixture",
+                "--profile",
+                "profile.canary",
+                "--purpose",
+                "emergency deploy",
+                "--reason",
+                "JANUS-229",
+                "--egress",
+                "connector",
+                "--expires-in-seconds",
+                "0",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("approval expiry"));
     }
 
     #[test]
@@ -1198,6 +1621,53 @@ mod tests {
         assert_eq!(profile.runtime_limits().timeout, Duration::from_secs(30));
         assert_eq!(profile.runtime_limits().max_stdout_bytes, 65536);
         assert_eq!(profile.runtime_limits().max_stderr_bytes, 65536);
+    }
+
+    #[test]
+    fn approve_issue_builds_exact_grant_from_profile_and_metadata() {
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let profiles = ManagedCommandProfileCatalog::parse(&managed_profile_toml(
+            &secret_ref,
+            &["release".to_string(), "upload".to_string()],
+        ))
+        .unwrap();
+        let descriptors = vec![SecretDescriptor {
+            name: SecretName::new("CANARY").unwrap(),
+            secret_ref: secret_ref.clone(),
+            label: SafeLabel::new("Canary token").unwrap(),
+            scope: ScopeRef::new("janus/dev").unwrap(),
+            owner: Some(OwnerRef::new("infra").unwrap()),
+            classification: Some(SecretClass::BreakGlass),
+            required: true,
+            trust_level: TrustLevel::L1,
+            allowed_uses: vec![profile_id.clone()],
+            present: true,
+        }];
+        let config = ApproveIssueConfig {
+            secret_ref: secret_ref.clone(),
+            profile_id: profile_id.clone(),
+            purpose: Purpose::new("emergency deploy").unwrap(),
+            reason: SafeLabel::new("approved fixture").unwrap(),
+            egress: EgressMode::ProxyEnforced,
+            expires_in: Duration::from_secs(120),
+        };
+
+        let approval =
+            build_approval_grant(&config, &profiles, &descriptors, SystemTime::UNIX_EPOCH).unwrap();
+        let snapshot = approval.snapshot();
+
+        assert!(snapshot.approval_id.starts_with("appr_"));
+        assert_eq!(snapshot.secret_ref, secret_ref.as_str());
+        assert_eq!(snapshot.profile_id, profile_id.as_str());
+        assert_eq!(snapshot.executor, "janus-run@fixture");
+        assert_eq!(snapshot.destination, "fixture-destination");
+        assert_eq!(snapshot.class, "break_glass");
+        assert_eq!(snapshot.egress, "proxy_enforced");
+        assert_eq!(snapshot.purpose, "emergency deploy");
+        assert_eq!(snapshot.expires_at_unix_secs, 120);
+        assert_eq!(snapshot.reason, "approved fixture");
+        assert!(!format!("{approval:?}").contains(&snapshot.approval_id));
     }
 
     #[test]

@@ -28,6 +28,11 @@ pub enum JanusError {
         reason_code: &'static str,
         detail: String,
     },
+    /// A presented approval grant is malformed, stale, revoked, or unknown.
+    ApprovalInvalid {
+        reason_code: &'static str,
+        detail: String,
+    },
     /// Required audit evidence could not be written; secret-bearing work fails closed.
     AuditUnavailable { detail: String },
     /// The backend store failed without exposing secret material.
@@ -46,6 +51,14 @@ impl JanusError {
     /// Build a permit validation error with a stable reason code.
     pub fn permit_invalid(reason_code: &'static str, detail: impl Into<String>) -> Self {
         Self::PermitInvalid {
+            reason_code,
+            detail: detail.into(),
+        }
+    }
+
+    /// Build an approval validation error with a stable reason code.
+    pub fn approval_invalid(reason_code: &'static str, detail: impl Into<String>) -> Self {
+        Self::ApprovalInvalid {
             reason_code,
             detail: detail.into(),
         }
@@ -70,6 +83,10 @@ impl fmt::Display for JanusError {
                 reason_code,
                 detail,
             } => write!(f, "permit invalid ({reason_code}): {detail}"),
+            Self::ApprovalInvalid {
+                reason_code,
+                detail,
+            } => write!(f, "approval invalid ({reason_code}): {detail}"),
             Self::AuditUnavailable { detail } => write!(f, "audit unavailable: {detail}"),
             Self::StoreUnavailable { detail } => write!(f, "store unavailable: {detail}"),
         }
