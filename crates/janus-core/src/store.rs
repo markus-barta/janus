@@ -3,8 +3,9 @@
 use async_trait::async_trait;
 
 use crate::{
-    JanusResult, OwnerRef, ProfileId, RotationOutcome, RotationSpec, SafeLabel, ScopeRef,
-    SecretName, SecretRef, SecretValue, TrustLevel,
+    AuditAction, AuditEvent, AuditOutcome, AuditSink, JanusError, JanusResult, OwnerRef,
+    PrincipalChain, ProfileId, RotationOutcome, RotationSpec, SafeLabel, ScopeRef, SecretName,
+    SecretRef, SecretValue, Severity, TrustLevel,
 };
 
 /// Backend capabilities used by manifest/profile requirements.
@@ -166,6 +167,181 @@ impl SecretLifecycle {
                 "secret lifecycle is destroyed and blocked from approved use",
             )),
         }
+    }
+}
+
+/// Value-free record of an accepted lifecycle transition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LifecycleTransition {
+    /// Secret ref being transitioned.
+    secret_ref: SecretRef,
+    /// Prior lifecycle state.
+    from: SecretLifecycle,
+    /// New lifecycle state.
+    to: SecretLifecycle,
+    /// Value-free reason label supplied by the operator/admin path.
+    reason: SafeLabel,
+}
+
+impl LifecycleTransition {
+    fn new(
+        secret_ref: SecretRef,
+        from: SecretLifecycle,
+        to: SecretLifecycle,
+        reason: SafeLabel,
+    ) -> Self {
+        Self {
+            secret_ref,
+            from,
+            to,
+            reason,
+        }
+    }
+
+    /// Secret ref being transitioned.
+    pub fn secret_ref(&self) -> &SecretRef {
+        &self.secret_ref
+    }
+
+    /// Prior lifecycle state.
+    pub fn from(&self) -> SecretLifecycle {
+        self.from
+    }
+
+    /// New lifecycle state.
+    pub fn to(&self) -> SecretLifecycle {
+        self.to
+    }
+
+    /// Value-free transition reason.
+    pub fn reason(&self) -> &SafeLabel {
+        &self.reason
+    }
+}
+
+/// Core lifecycle transition validator/auditor.
+pub struct LifecycleTransitionPolicy;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LifecycleTransitionDecision {
+    outcome: AuditOutcome,
+    reason_code: &'static str,
+    detail: &'static str,
+    severity: Severity,
+}
+
+impl LifecycleTransitionPolicy {
+    /// Validate and audit a lifecycle transition without mutating backend state.
+    pub fn transition<A>(
+        descriptor: &SecretDescriptor,
+        to: SecretLifecycle,
+        reason: SafeLabel,
+        principal: &PrincipalChain,
+        audit: &mut A,
+    ) -> JanusResult<LifecycleTransition>
+    where
+        A: AuditSink,
+    {
+        let from = descriptor.lifecycle;
+        let decision = decide_lifecycle_transition(descriptor, to);
+        audit.record(
+            AuditEvent::new(
+                AuditAction::SecretLifecycle,
+                decision.outcome,
+                decision.reason_code,
+                decision.severity,
+                Some(descriptor.secret_ref.clone()),
+                principal,
+            )
+            .with_evidence(reason.clone()),
+        )?;
+        if decision.outcome == AuditOutcome::Denied {
+            return Err(JanusError::policy_denied(
+                decision.reason_code,
+                decision.detail,
+            ));
+        }
+        Ok(LifecycleTransition::new(
+            descriptor.secret_ref.clone(),
+            from,
+            to,
+            reason,
+        ))
+    }
+}
+
+fn decide_lifecycle_transition(
+    descriptor: &SecretDescriptor,
+    to: SecretLifecycle,
+) -> LifecycleTransitionDecision {
+    let from = descriptor.lifecycle;
+    if from == SecretLifecycle::Destroyed {
+        return lifecycle_transition_deny(
+            "denied_lifecycle_destroyed_final",
+            "destroyed lifecycle cannot transition",
+            Severity::Critical,
+        );
+    }
+    if from == to {
+        return lifecycle_transition_deny(
+            "denied_lifecycle_transition_noop",
+            "lifecycle transition must change state",
+            Severity::Warning,
+        );
+    }
+    if to.allows_normal_use() {
+        if let Some((reason_code, detail)) = descriptor.metadata_use_denial() {
+            return lifecycle_transition_deny(reason_code, detail, Severity::Warning);
+        }
+    }
+
+    match (from, to) {
+        (SecretLifecycle::Draft, SecretLifecycle::Active) => lifecycle_transition_allow(
+            "lifecycle_transition_ok",
+            "lifecycle transition allowed",
+            Severity::Notice,
+        ),
+        (SecretLifecycle::Active, SecretLifecycle::Disabled) => lifecycle_transition_allow(
+            "lifecycle_transition_ok",
+            "lifecycle transition allowed",
+            Severity::High,
+        ),
+        (SecretLifecycle::Disabled, SecretLifecycle::PendingDelete) => lifecycle_transition_allow(
+            "lifecycle_transition_ok",
+            "lifecycle transition allowed",
+            Severity::High,
+        ),
+        _ => lifecycle_transition_deny(
+            "denied_lifecycle_transition_unsupported",
+            "lifecycle transition is not supported by this policy",
+            Severity::Warning,
+        ),
+    }
+}
+
+fn lifecycle_transition_allow(
+    reason_code: &'static str,
+    detail: &'static str,
+    severity: Severity,
+) -> LifecycleTransitionDecision {
+    LifecycleTransitionDecision {
+        outcome: AuditOutcome::Allowed,
+        reason_code,
+        detail,
+        severity,
+    }
+}
+
+fn lifecycle_transition_deny(
+    reason_code: &'static str,
+    detail: &'static str,
+    severity: Severity,
+) -> LifecycleTransitionDecision {
+    LifecycleTransitionDecision {
+        outcome: AuditOutcome::Denied,
+        reason_code,
+        detail,
+        severity,
     }
 }
 
@@ -333,6 +509,37 @@ pub trait SecretStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AuditAction, AuditWrite, Principal, PrincipalId, PrincipalKind};
+
+    fn lifecycle_principal() -> PrincipalChain {
+        PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("admin-cli").unwrap(),
+            ),
+            ScopeRef::new("janus/dev").unwrap(),
+        )
+    }
+
+    fn lifecycle_descriptor(
+        lifecycle: SecretLifecycle,
+        owner: Option<OwnerRef>,
+        classification: Option<SecretClass>,
+    ) -> SecretDescriptor {
+        SecretDescriptor {
+            name: SecretName::new("CANARY").unwrap(),
+            secret_ref: SecretRef::new("sec_lifecycle").unwrap(),
+            label: SafeLabel::new("Canary token").unwrap(),
+            scope: ScopeRef::new("janus/dev").unwrap(),
+            owner,
+            classification,
+            lifecycle,
+            required: true,
+            trust_level: TrustLevel::L1,
+            allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
+            present: true,
+        }
+    }
 
     #[test]
     fn secret_classes_have_stable_text_and_safe_risk_hints() {
@@ -406,5 +613,149 @@ mod tests {
         assert!(!SecretLifecycle::Disabled.allows_normal_use());
         assert!(!SecretLifecycle::PendingDelete.allows_normal_use());
         assert!(!SecretLifecycle::Destroyed.allows_normal_use());
+    }
+
+    #[test]
+    fn lifecycle_transition_policy_allows_initial_reasoned_paths() {
+        for (from, to, expected_severity) in [
+            (
+                SecretLifecycle::Draft,
+                SecretLifecycle::Active,
+                Severity::Notice,
+            ),
+            (
+                SecretLifecycle::Active,
+                SecretLifecycle::Disabled,
+                Severity::High,
+            ),
+            (
+                SecretLifecycle::Disabled,
+                SecretLifecycle::PendingDelete,
+                Severity::High,
+            ),
+        ] {
+            let descriptor = lifecycle_descriptor(
+                from,
+                Some(OwnerRef::new("infra").unwrap()),
+                Some(SecretClass::Normal),
+            );
+            let principal = lifecycle_principal();
+            let mut audit = AuditWrite::accepting();
+            let reason = SafeLabel::new("reviewed lifecycle change").unwrap();
+
+            let transition = LifecycleTransitionPolicy::transition(
+                &descriptor,
+                to,
+                reason.clone(),
+                &principal,
+                &mut audit,
+            )
+            .unwrap();
+
+            assert_eq!(transition.secret_ref(), &descriptor.secret_ref);
+            assert_eq!(transition.from(), from);
+            assert_eq!(transition.to(), to);
+            assert_eq!(transition.reason(), &reason);
+            assert_eq!(audit.events().len(), 1);
+            let event = &audit.events()[0];
+            assert_eq!(event.action, AuditAction::SecretLifecycle);
+            assert_eq!(event.outcome, AuditOutcome::Allowed);
+            assert_eq!(event.reason_code, "lifecycle_transition_ok");
+            assert_eq!(event.severity, expected_severity);
+            assert_eq!(event.secret_ref.as_ref(), Some(&descriptor.secret_ref));
+            assert_eq!(event.evidence.as_ref(), Some(&reason));
+            assert!(!event.value_returned);
+            assert!(event
+                .event_hash
+                .as_ref()
+                .is_some_and(|hash| hash.len() == 64));
+        }
+    }
+
+    #[test]
+    fn lifecycle_transition_policy_denies_invalid_paths_with_audit() {
+        for (from, to, expected_reason, expected_severity) in [
+            (
+                SecretLifecycle::Active,
+                SecretLifecycle::Active,
+                "denied_lifecycle_transition_noop",
+                Severity::Warning,
+            ),
+            (
+                SecretLifecycle::Disabled,
+                SecretLifecycle::Active,
+                "denied_lifecycle_transition_unsupported",
+                Severity::Warning,
+            ),
+            (
+                SecretLifecycle::Destroyed,
+                SecretLifecycle::Disabled,
+                "denied_lifecycle_destroyed_final",
+                Severity::Critical,
+            ),
+        ] {
+            let descriptor = lifecycle_descriptor(
+                from,
+                Some(OwnerRef::new("infra").unwrap()),
+                Some(SecretClass::Normal),
+            );
+            let principal = lifecycle_principal();
+            let mut audit = AuditWrite::accepting();
+            let reason = SafeLabel::new("reviewed lifecycle change").unwrap();
+
+            let err = LifecycleTransitionPolicy::transition(
+                &descriptor,
+                to,
+                reason.clone(),
+                &principal,
+                &mut audit,
+            )
+            .unwrap_err();
+
+            assert!(matches!(
+                err,
+                JanusError::PolicyDenied { reason_code, .. } if reason_code == expected_reason
+            ));
+            assert_eq!(audit.events().len(), 1);
+            let event = &audit.events()[0];
+            assert_eq!(event.action, AuditAction::SecretLifecycle);
+            assert_eq!(event.outcome, AuditOutcome::Denied);
+            assert_eq!(event.reason_code, expected_reason);
+            assert_eq!(event.severity, expected_severity);
+            assert_eq!(event.evidence.as_ref(), Some(&reason));
+            assert!(!event.value_returned);
+        }
+    }
+
+    #[test]
+    fn lifecycle_transition_policy_requires_metadata_before_activation() {
+        let descriptor =
+            lifecycle_descriptor(SecretLifecycle::Draft, None, Some(SecretClass::Normal));
+        let principal = lifecycle_principal();
+        let mut audit = AuditWrite::accepting();
+        let reason = SafeLabel::new("metadata review attempted").unwrap();
+
+        let err = LifecycleTransitionPolicy::transition(
+            &descriptor,
+            SecretLifecycle::Active,
+            reason.clone(),
+            &principal,
+            &mut audit,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "denied_missing_owner",
+                ..
+            }
+        ));
+        let event = &audit.events()[0];
+        assert_eq!(event.action, AuditAction::SecretLifecycle);
+        assert_eq!(event.outcome, AuditOutcome::Denied);
+        assert_eq!(event.reason_code, "denied_missing_owner");
+        assert_eq!(event.evidence.as_ref(), Some(&reason));
+        assert!(!event.value_returned);
     }
 }

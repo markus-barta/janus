@@ -34,6 +34,8 @@ pub enum AuditAction {
     RotationApprove,
     /// A rotation lifecycle phase advanced or failed.
     RotationLifecycle,
+    /// A secret lifecycle state transition was allowed or denied.
+    SecretLifecycle,
     /// Backend health was checked.
     BackendHealth,
     /// High-risk backend custody material was re-encrypted.
