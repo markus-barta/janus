@@ -4492,6 +4492,231 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn lifecycle_destroy_smoke_walks_metadata_only_operator_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let metadata_file = dir.path().join("metadata.toml");
+        let registry = FileTombstoneRegistry::new(dir.path().join("tombstones"));
+        std::fs::write(
+            &metadata_file,
+            r#"
+            [defaults]
+            owner = "infra"
+            classification = "normal"
+            lifecycle = "active"
+
+            [[secrets]]
+            name = "CANARY"
+            owner = "security"
+            classification = "high_value"
+            lifecycle = "active"
+            "#,
+        )
+        .unwrap();
+        let project = ProjectId::new("janus").unwrap();
+        let name = SecretName::new("CANARY").unwrap();
+        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let principal = fixture_principal();
+
+        let disable_config = LifecycleTransitionConfig {
+            secret_ref: secret_ref.clone(),
+            to: SecretLifecycle::Disabled,
+            reason: SafeLabel::new("reviewed disable").unwrap(),
+            metadata_file: Some(metadata_file.clone()),
+        };
+        let mut disable_audit = AuditWrite::accepting();
+        let disable = apply_lifecycle_transition_with(
+            &disable_config,
+            &metadata_file,
+            fixture_store_from_metadata_overlay(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::HighValue,
+                &metadata_file,
+            ),
+            &principal,
+            &mut disable_audit,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(disable.from, "active");
+        assert_eq!(disable.to, "disabled");
+        assert_eq!(disable.reason_code, "lifecycle_transition_ok");
+        assert!(!disable.value_returned);
+        assert_eq!(
+            fixture_lifecycle_from_metadata_overlay(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::HighValue,
+                &metadata_file,
+            ),
+            SecretLifecycle::Disabled
+        );
+
+        let pending_config = LifecycleTransitionConfig {
+            secret_ref: secret_ref.clone(),
+            to: SecretLifecycle::PendingDelete,
+            reason: SafeLabel::new("reviewed pending delete").unwrap(),
+            metadata_file: Some(metadata_file.clone()),
+        };
+        let mut pending_audit = AuditWrite::accepting();
+        let pending = apply_lifecycle_transition_with(
+            &pending_config,
+            &metadata_file,
+            fixture_store_from_metadata_overlay(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::HighValue,
+                &metadata_file,
+            ),
+            &principal,
+            &mut pending_audit,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(pending.from, "disabled");
+        assert_eq!(pending.to, "pending_delete");
+        assert_eq!(pending.reason_code, "lifecycle_transition_ok");
+        assert!(!pending.value_returned);
+        assert_eq!(
+            fixture_lifecycle_from_metadata_overlay(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::HighValue,
+                &metadata_file,
+            ),
+            SecretLifecycle::PendingDelete
+        );
+
+        let record_config = LifecycleDestroyRecordConfig {
+            secret_ref: secret_ref.clone(),
+            reason: SafeLabel::new("reviewed destroy record").unwrap(),
+            retain_for: Duration::from_secs(24 * 60 * 60),
+            metadata_file: Some(metadata_file.clone()),
+        };
+        let mut record_audit = AuditWrite::accepting();
+        let record = record_lifecycle_destroy_with(
+            &record_config,
+            fixture_store_from_metadata_overlay(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::HighValue,
+                &metadata_file,
+            ),
+            &registry,
+            &principal,
+            &mut record_audit,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(record.from, "pending_delete");
+        assert_eq!(record.to, "destroyed");
+        assert_eq!(record.reason_code, "tombstone_recorded");
+        assert!(!record.value_returned);
+        assert!(!record.provider_deleted);
+        let tombstones = janus_local::TombstoneRegistry::list(&registry).unwrap();
+        assert_eq!(tombstones.len(), 1);
+        assert_eq!(tombstones[0].secret_ref, secret_ref);
+        assert_eq!(tombstones[0].reason.as_str(), "reviewed destroy record");
+
+        let finalize_config = LifecycleDestroyFinalizeConfig {
+            secret_ref: secret_ref.clone(),
+            metadata_file: Some(metadata_file.clone()),
+        };
+        let mut finalize_audit = AuditWrite::accepting();
+        let finalized = finalize_lifecycle_destroy_with(
+            &finalize_config,
+            &metadata_file,
+            fixture_store_from_metadata_overlay(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::HighValue,
+                &metadata_file,
+            ),
+            &registry,
+            &principal,
+            &mut finalize_audit,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(finalized.from, "pending_delete");
+        assert_eq!(finalized.to, "destroyed");
+        assert_eq!(finalized.reason_code, "destroy_metadata_finalized");
+        assert!(finalized.metadata_finalized);
+        assert!(!finalized.value_returned);
+        assert!(!finalized.provider_deleted);
+        assert_eq!(
+            fixture_lifecycle_from_metadata_overlay(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::HighValue,
+                &metadata_file,
+            ),
+            SecretLifecycle::Destroyed
+        );
+
+        let mut reconcile_audit = AuditWrite::accepting();
+        let rows = build_lifecycle_destroy_reconcile_with(
+            fixture_store_from_metadata_overlay(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::HighValue,
+                &metadata_file,
+            ),
+            &registry,
+            &principal,
+            &mut reconcile_audit,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].secret_ref, secret_ref);
+        assert_eq!(rows[0].status, "ok");
+        assert_eq!(rows[0].reason_code, "destroy_tombstone_reconcile_ok");
+        assert_eq!(rows[0].metadata_lifecycle, "destroyed");
+        assert_eq!(rows[0].tombstone_state, "present");
+        assert_eq!(rows[0].action, "none");
+        assert!(!rows[0].action_required);
+        assert!(!rows[0].value_returned);
+        assert!(!rows[0].provider_deleted);
+
+        assert!(
+            !format!("{disable:?}{pending:?}{record:?}{finalized:?}{rows:?}")
+                .contains("expected-canary")
+        );
+        assert_eq!(disable_audit.events().len(), 1);
+        assert_eq!(pending_audit.events().len(), 1);
+        assert_eq!(record_audit.events().len(), 1);
+        assert_eq!(finalize_audit.events().len(), 1);
+        assert_eq!(reconcile_audit.events().len(), 1);
+        for event in disable_audit
+            .events()
+            .iter()
+            .chain(pending_audit.events())
+            .chain(record_audit.events())
+            .chain(finalize_audit.events())
+            .chain(reconcile_audit.events())
+        {
+            assert!(!event.value_returned);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn lifecycle_stale_report_reports_value_free_rows_and_audit() {
         let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
@@ -5038,6 +5263,65 @@ mod tests {
         MockStore::new(catalog)
             .with_value(name.clone(), b"expected-canary".to_vec())
             .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn fixture_store_from_metadata_overlay(
+        secret_ref: &SecretRef,
+        name: &SecretName,
+        profile_id: &ProfileId,
+        class: SecretClass,
+        metadata_file: &Path,
+    ) -> MockStore {
+        let entries = fixture_metadata_entries_from_overlay(
+            secret_ref,
+            name,
+            profile_id,
+            class,
+            metadata_file,
+        );
+        MockStore::new(ManifestCatalog::new(entries).unwrap())
+            .with_value(name.clone(), b"expected-canary".to_vec())
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn fixture_lifecycle_from_metadata_overlay(
+        secret_ref: &SecretRef,
+        name: &SecretName,
+        profile_id: &ProfileId,
+        class: SecretClass,
+        metadata_file: &Path,
+    ) -> SecretLifecycle {
+        fixture_metadata_entries_from_overlay(secret_ref, name, profile_id, class, metadata_file)[0]
+            .lifecycle
+    }
+
+    #[cfg(unix)]
+    fn fixture_metadata_entries_from_overlay(
+        secret_ref: &SecretRef,
+        name: &SecretName,
+        profile_id: &ProfileId,
+        class: SecretClass,
+        metadata_file: &Path,
+    ) -> Vec<SecretMeta> {
+        let mut entries = vec![SecretMeta {
+            secret_ref: secret_ref.clone(),
+            name: name.clone(),
+            label: SafeLabel::new("Canary token").unwrap(),
+            scope: ScopeRef::new("janus/dev").unwrap(),
+            owner: Some(OwnerRef::new("infra").unwrap()),
+            classification: Some(class),
+            lifecycle: SecretLifecycle::Active,
+            required: true,
+            trust_level: TrustLevel::L1,
+            allowed_uses: vec![profile_id.clone()],
+        }];
+        SecretMetadataOverlay::load_toml_file(metadata_file)
+            .unwrap()
+            .apply_to_entries(&mut entries)
+            .unwrap();
+        entries
     }
 
     #[cfg(unix)]
