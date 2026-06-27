@@ -19,6 +19,7 @@ pub mod refs;
 pub mod rotation;
 pub mod stale;
 pub mod store;
+pub mod tombstone;
 pub mod value;
 
 pub use audit::{AuditAction, AuditEvent, AuditOutcome, AuditSink, AuditWrite, Severity};
@@ -51,4 +52,5 @@ pub use store::{
     HealthStatus, LifecycleTransition, LifecycleTransitionPolicy, SecretClass, SecretDescriptor,
     SecretLifecycle, SecretMeta, SecretStore, StoreCapabilities,
 };
+pub use tombstone::{SecretTombstone, SecretTombstoneRequest, TombstonePolicy};
 pub use value::SecretValue;

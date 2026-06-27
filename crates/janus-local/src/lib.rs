@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use janus_core::{
-    ApprovalGrant, ApprovalGrantSnapshot, JanusError, JanusResult, SecretAgeEvidence, SecretRef,
-    UsePermit, UsePermitSnapshot,
+    ApprovalGrant, ApprovalGrantSnapshot, JanusError, JanusResult, PrincipalChain, SafeLabel,
+    SecretAgeEvidence, SecretRef, SecretTombstone, UsePermit, UsePermitSnapshot,
 };
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +60,33 @@ pub trait LifecycleEvidenceRegistry {
     fn list(&self) -> JanusResult<Vec<SecretAgeEvidence>>;
 }
 
+/// Local registry for value-free destroy tombstones.
+pub trait TombstoneRegistry {
+    /// Persist one immutable tombstone record.
+    fn record(&self, tombstone: &SecretTombstone, principal: &PrincipalChain) -> JanusResult<()>;
+
+    /// Read one tombstone by opaque secret ref.
+    fn get(&self, secret_ref: &SecretRef) -> JanusResult<SecretTombstoneRecord>;
+
+    /// List all locally stored tombstones.
+    fn list(&self) -> JanusResult<Vec<SecretTombstoneRecord>>;
+}
+
+/// Value-free locally persisted destroy tombstone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecretTombstoneRecord {
+    /// Opaque secret ref.
+    pub secret_ref: SecretRef,
+    /// Value-free operator/admin reason label.
+    pub reason: SafeLabel,
+    /// Timestamp when Janus recorded the destroy tombstone.
+    pub destroyed_at: SystemTime,
+    /// Timestamp until which the tombstone must be retained.
+    pub retain_until: SystemTime,
+    /// Value-free principal binding that recorded the tombstone.
+    pub principal_binding: String,
+}
+
 /// Permit sink used when no local handoff registry is configured.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoopPermitStore;
@@ -85,6 +112,12 @@ pub struct FileApprovalRegistry {
 /// File-backed local lifecycle evidence registry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileLifecycleEvidenceRegistry {
+    dir: PathBuf,
+}
+
+/// File-backed local destroy tombstone registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileTombstoneRegistry {
     dir: PathBuf,
 }
 
@@ -249,6 +282,52 @@ impl FileLifecycleEvidenceRegistry {
     }
 }
 
+impl FileTombstoneRegistry {
+    /// Build a registry rooted at a private directory.
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    /// Registry root directory.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn ensure_dir(&self) -> JanusResult<()> {
+        fs::create_dir_all(&self.dir)
+            .map_err(|_| store_unavailable("tombstone registry unavailable"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.dir, fs::Permissions::from_mode(0o700))
+                .map_err(|_| store_unavailable("tombstone registry permissions unavailable"))?;
+        }
+
+        let metadata = fs::symlink_metadata(&self.dir)
+            .map_err(|_| store_unavailable("tombstone registry unavailable"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(store_unavailable(
+                "tombstone registry path is not a directory",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(store_unavailable(
+                    "tombstone registry directory must be private",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn path_for(&self, secret_ref: &SecretRef) -> JanusResult<PathBuf> {
+        validate_secret_ref_file_token(secret_ref.as_str())?;
+        Ok(self.dir.join(format!("{}.json", secret_ref.as_str())))
+    }
+}
+
 impl PermitStore for FilePermitRegistry {
     fn store(&self, permit: &UsePermit) -> JanusResult<()> {
         self.ensure_dir()?;
@@ -405,6 +484,54 @@ impl LifecycleEvidenceRegistry for FileLifecycleEvidenceRegistry {
     }
 }
 
+impl TombstoneRegistry for FileTombstoneRegistry {
+    fn record(&self, tombstone: &SecretTombstone, principal: &PrincipalChain) -> JanusResult<()> {
+        self.ensure_dir()?;
+        let path = self.path_for(tombstone.secret_ref())?;
+        let record = SecretTombstoneFileRecord::from_tombstone(tombstone, principal);
+        let file = create_secure_new_tombstone_file(&path)?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, &record)
+            .map_err(|_| store_unavailable("failed to encode tombstone registry entry"))?;
+        writer
+            .write_all(b"\n")
+            .map_err(|_| store_unavailable("failed to write tombstone registry entry"))?;
+        writer
+            .flush()
+            .map_err(|_| store_unavailable("failed to flush tombstone registry entry"))?;
+        Ok(())
+    }
+
+    fn get(&self, secret_ref: &SecretRef) -> JanusResult<SecretTombstoneRecord> {
+        self.ensure_dir()?;
+        let path = self.path_for(secret_ref)?;
+        read_tombstone(&path, secret_ref)
+    }
+
+    fn list(&self) -> JanusResult<Vec<SecretTombstoneRecord>> {
+        self.ensure_dir()?;
+        let mut records = Vec::new();
+        let entries = fs::read_dir(&self.dir)
+            .map_err(|_| store_unavailable("failed to list tombstone registry"))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|_| store_unavailable("failed to list tombstone registry entry"))?;
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                return Err(store_unavailable("tombstone entry name is malformed"));
+            };
+            let Some(secret_ref_text) = file_name.strip_suffix(".json") else {
+                continue;
+            };
+            validate_secret_ref_file_token(secret_ref_text)?;
+            let secret_ref = SecretRef::new(secret_ref_text)?;
+            records.push(read_tombstone(&path, &secret_ref)?);
+        }
+        records.sort_by(|left, right| left.secret_ref.as_str().cmp(right.secret_ref.as_str()));
+        Ok(records)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PermitFileRecord {
@@ -446,6 +573,17 @@ struct LifecycleEvidenceFileRecord {
     declared_at_unix_secs: Option<u64>,
     last_used_at_unix_secs: Option<u64>,
     last_rotated_at_unix_secs: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SecretTombstoneFileRecord {
+    version: u8,
+    secret_ref: String,
+    reason: String,
+    destroyed_at_unix_secs: u64,
+    retain_until_unix_secs: u64,
+    principal_binding: String,
 }
 
 impl From<UsePermitSnapshot> for PermitFileRecord {
@@ -556,6 +694,34 @@ impl LifecycleEvidenceFileRecord {
     }
 }
 
+impl SecretTombstoneFileRecord {
+    fn from_tombstone(tombstone: &SecretTombstone, principal: &PrincipalChain) -> Self {
+        Self {
+            version: 1,
+            secret_ref: tombstone.secret_ref().as_str().to_string(),
+            reason: tombstone.reason().as_str().to_string(),
+            destroyed_at_unix_secs: unix_seconds(tombstone.destroyed_at()),
+            retain_until_unix_secs: unix_seconds(tombstone.retain_until()),
+            principal_binding: principal.binding_key(),
+        }
+    }
+
+    fn into_record(self) -> JanusResult<SecretTombstoneRecord> {
+        if self.version != 1 {
+            return Err(store_unavailable(
+                "tombstone registry entry version is unsupported",
+            ));
+        }
+        Ok(SecretTombstoneRecord {
+            secret_ref: SecretRef::new(self.secret_ref)?,
+            reason: SafeLabel::new(self.reason)?,
+            destroyed_at: unix_time(self.destroyed_at_unix_secs),
+            retain_until: unix_time(self.retain_until_unix_secs),
+            principal_binding: self.principal_binding,
+        })
+    }
+}
+
 fn read_claimed_permit(path: &Path, requested_permit_id: &str) -> JanusResult<UsePermit> {
     check_secure_file(path)?;
     let file =
@@ -650,6 +816,29 @@ fn read_lifecycle_evidence(
         ));
     }
     Ok(evidence)
+}
+
+fn read_tombstone(
+    path: &Path,
+    requested_secret_ref: &SecretRef,
+) -> JanusResult<SecretTombstoneRecord> {
+    check_secure_tombstone_file(path)?;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(store_unavailable("tombstone registry entry was not found"))
+        }
+        Err(_) => return Err(store_unavailable("failed to open tombstone registry entry")),
+    };
+    let record: SecretTombstoneFileRecord = serde_json::from_reader(BufReader::new(file))
+        .map_err(|_| store_unavailable("tombstone registry entry is malformed"))?;
+    let record = record.into_record()?;
+    if &record.secret_ref != requested_secret_ref {
+        return Err(store_unavailable(
+            "tombstone registry entry does not match the requested secret ref",
+        ));
+    }
+    Ok(record)
 }
 
 fn validate_permit_file_token(permit_id: &str) -> JanusResult<()> {
@@ -752,6 +941,34 @@ fn create_secure_new_approval_file(path: &Path) -> JanusResult<File> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .map_err(|_| store_unavailable("approval registry file permissions unavailable"))?;
+    }
+    Ok(file)
+}
+
+fn create_secure_new_tombstone_file(path: &Path) -> JanusResult<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(store_unavailable("tombstone registry entry already exists"))
+        }
+        Err(_) => {
+            return Err(store_unavailable(
+                "failed to create tombstone registry entry",
+            ))
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|_| store_unavailable("tombstone registry file permissions unavailable"))?;
     }
     Ok(file)
 }
@@ -892,6 +1109,29 @@ fn check_secure_lifecycle_evidence_file(path: &Path) -> JanusResult<()> {
     Ok(())
 }
 
+fn check_secure_tombstone_file(path: &Path) -> JanusResult<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(store_unavailable("tombstone registry entry was not found"))
+        }
+        Err(_) => return Err(store_unavailable("tombstone registry entry unavailable")),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(store_unavailable(
+            "tombstone registry entry is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(store_unavailable("tombstone registry entry is not private"));
+        }
+    }
+    Ok(())
+}
+
 fn unix_seconds(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -920,9 +1160,10 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use janus_core::{
-        ApprovalGrant, AuditWrite, Destination, EgressMode, ExecutorRef, PermitIssuer, Principal,
-        PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose, SafeLabel,
-        ScopeRef, SecretClass, SecretRef, TrustLevel, UseProfile, UseRequest,
+        ApprovalGrant, AuditWrite, Destination, EgressMode, ExecutorRef, OwnerRef, PermitIssuer,
+        Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose,
+        SafeLabel, ScopeRef, SecretClass, SecretDescriptor, SecretLifecycle, SecretName, SecretRef,
+        TombstonePolicy, TrustLevel, UseProfile, UseRequest,
     };
 
     use super::*;
@@ -990,6 +1231,41 @@ mod tests {
             expires_at,
             SafeLabel::new("approved fixture").unwrap(),
         )
+    }
+
+    fn fixture_tombstone(
+        secret_ref: &SecretRef,
+        destroyed_at: SystemTime,
+        retain_until: SystemTime,
+    ) -> SecretTombstone {
+        let descriptor = SecretDescriptor {
+            name: SecretName::new("CANARY").unwrap(),
+            secret_ref: secret_ref.clone(),
+            label: SafeLabel::new("Canary token").unwrap(),
+            scope: ScopeRef::new("janus/dev").unwrap(),
+            owner: Some(OwnerRef::new("infra").unwrap()),
+            classification: Some(SecretClass::Normal),
+            lifecycle: SecretLifecycle::PendingDelete,
+            required: true,
+            trust_level: TrustLevel::L1,
+            allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
+            present: false,
+        };
+        let principal = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("admin-cli").unwrap(),
+            ),
+            ScopeRef::new("janus/dev").unwrap(),
+        );
+        let request = janus_core::SecretTombstoneRequest::new(
+            secret_ref.clone(),
+            SafeLabel::new("reviewed destroy record").unwrap(),
+            destroyed_at,
+            retain_until,
+        );
+        let mut audit = AuditWrite::accepting();
+        TombstonePolicy::record(&descriptor, request, &principal, &mut audit).unwrap()
     }
 
     #[test]
@@ -1124,6 +1400,81 @@ mod tests {
         let secret_ref = SecretRef::new("sec_../escape").unwrap();
 
         let err = registry.record_used(&secret_ref, UNIX_EPOCH).unwrap_err();
+
+        assert!(matches!(
+            err,
+            JanusError::InvalidIdentifier { kind: "secret_ref" }
+        ));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn tombstone_registry_round_trips_lists_and_rejects_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileTombstoneRegistry::new(dir.path());
+        let principal = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("admin-cli").unwrap(),
+            ),
+            ScopeRef::new("janus/dev").unwrap(),
+        );
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let other_ref = SecretRef::new("sec_other").unwrap();
+        let destroyed_at = UNIX_EPOCH + Duration::from_secs(10);
+        let retain_until = UNIX_EPOCH + Duration::from_secs(20);
+        let tombstone = fixture_tombstone(&secret_ref, destroyed_at, retain_until);
+        let other = fixture_tombstone(
+            &other_ref,
+            UNIX_EPOCH + Duration::from_secs(30),
+            UNIX_EPOCH + Duration::from_secs(40),
+        );
+
+        TombstoneRegistry::record(&registry, &other, &principal).unwrap();
+        TombstoneRegistry::record(&registry, &tombstone, &principal).unwrap();
+
+        let rehydrated = TombstoneRegistry::get(&registry, &secret_ref).unwrap();
+        assert_eq!(rehydrated.secret_ref, secret_ref);
+        assert_eq!(rehydrated.reason.as_str(), "reviewed destroy record");
+        assert_eq!(rehydrated.destroyed_at, destroyed_at);
+        assert_eq!(rehydrated.retain_until, retain_until);
+        assert_eq!(
+            rehydrated.principal_binding,
+            "executor:admin-cli|scope:janus/dev"
+        );
+        assert!(!format!("{rehydrated:?}").contains("expected-canary"));
+
+        let listed = TombstoneRegistry::list(&registry).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].secret_ref.as_str(), "sec_fixture");
+        assert_eq!(listed[1].secret_ref.as_str(), "sec_other");
+
+        let err = TombstoneRegistry::record(&registry, &tombstone, &principal).unwrap_err();
+        assert!(matches!(
+            err,
+            JanusError::StoreUnavailable { detail } if detail.contains("already exists")
+        ));
+    }
+
+    #[test]
+    fn tombstone_registry_rejects_path_like_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileTombstoneRegistry::new(dir.path());
+        let principal = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("admin-cli").unwrap(),
+            ),
+            ScopeRef::new("janus/dev").unwrap(),
+        );
+        let secret_ref = SecretRef::new("sec_../escape").unwrap();
+        let tombstone = fixture_tombstone(
+            &secret_ref,
+            UNIX_EPOCH + Duration::from_secs(10),
+            UNIX_EPOCH + Duration::from_secs(20),
+        );
+
+        let err = TombstoneRegistry::record(&registry, &tombstone, &principal).unwrap_err();
 
         assert!(matches!(
             err,

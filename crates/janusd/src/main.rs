@@ -24,9 +24,9 @@ use janus_core::{
     JanusError, LifecycleTransitionPolicy, OwnerRef, Principal, PrincipalChain, PrincipalId,
     PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReloadMethod, RotationOutcome, SafeLabel,
     ScopeRef, SecretAgeEvidence, SecretBroker, SecretDescriptor, SecretLifecycle, SecretMeta,
-    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, StaleSecretPolicy,
-    StaleSecretReportRow, StaleSecretReporter, TrustLevel, UsePermit, UseProfile, UseRequest,
-    ValidationProbe,
+    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretTombstoneRequest,
+    StaleSecretPolicy, StaleSecretReportRow, StaleSecretReporter, TombstonePolicy, TrustLevel,
+    UsePermit, UseProfile, UseRequest, ValidationProbe,
 };
 use janus_executor::{
     ApprovedUseExecutor, ManagedCommandProfile, ManagedCommandProfileSpec, ManagedCommandRequest,
@@ -38,9 +38,10 @@ use janus_forge::{
 };
 use janus_local::{
     ApprovalRegistry as SharedApprovalRegistry, FileApprovalRegistry,
-    FileLifecycleEvidenceRegistry, FilePermitRegistry,
+    FileLifecycleEvidenceRegistry, FilePermitRegistry, FileTombstoneRegistry,
     LifecycleEvidenceRegistry as SharedLifecycleEvidenceRegistry,
     PermitRegistry as SharedPermitRegistry, PermitStore as SharedPermitStore,
+    TombstoneRegistry as SharedTombstoneRegistry,
 };
 use janus_provider_age::AgeSecretStore;
 use serde::Deserialize;
@@ -69,6 +70,7 @@ async fn main() -> Result<()> {
         Command::Approve(command) => run_approve(command).await,
         Command::LifecycleTransition(config) => run_lifecycle_transition(config).await,
         Command::LifecycleStaleReport(config) => run_lifecycle_stale_report(config).await,
+        Command::LifecycleDestroyRecord(config) => run_lifecycle_destroy_record(config).await,
     }
 }
 
@@ -80,6 +82,7 @@ enum Command {
     Approve(ApproveCommand),
     LifecycleTransition(LifecycleTransitionConfig),
     LifecycleStaleReport(LifecycleStaleReportConfig),
+    LifecycleDestroyRecord(LifecycleDestroyRecordConfig),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,6 +150,14 @@ struct LifecycleStaleReportConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct LifecycleDestroyRecordConfig {
+    secret_ref: SecretRef,
+    reason: SafeLabel,
+    retain_for: Duration,
+    metadata_file: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ApprovedPermitIssueOutcome {
     permit_id: String,
     approval_id: String,
@@ -165,6 +176,17 @@ struct LifecycleTransitionCliOutcome {
     to: &'static str,
     reason_code: &'static str,
     value_returned: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LifecycleDestroyRecordCliOutcome {
+    secret_ref: String,
+    from: &'static str,
+    to: &'static str,
+    reason_code: &'static str,
+    retain_until_unix_secs: u64,
+    value_returned: bool,
+    provider_deleted: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -387,6 +409,24 @@ async fn run_lifecycle_stale_report(config: LifecycleStaleReportConfig) -> Resul
     Ok(())
 }
 
+async fn run_lifecycle_destroy_record(config: LifecycleDestroyRecordConfig) -> Result<()> {
+    let store = load_age_store_from_env_with_metadata_path(config.metadata_file.as_deref())?;
+    let principal = lifecycle_principal_from_env()?;
+    let registry = FileTombstoneRegistry::new(lifecycle_tombstone_registry_dir());
+    let mut audit = AuditWrite::accepting();
+    let outcome = record_lifecycle_destroy_with(
+        &config,
+        store,
+        &registry,
+        &principal,
+        &mut audit,
+        SystemTime::now(),
+    )
+    .await?;
+    emit_lifecycle_destroy_record_outcome(&outcome);
+    Ok(())
+}
+
 async fn build_lifecycle_stale_report_with<S, A>(
     config: &LifecycleStaleReportConfig,
     store: S,
@@ -407,6 +447,52 @@ where
     StaleSecretReporter::new(policy)
         .report(&descriptors, evidence, now, principal, audit)
         .map_err(Into::into)
+}
+
+async fn record_lifecycle_destroy_with<S, R, A>(
+    config: &LifecycleDestroyRecordConfig,
+    store: S,
+    registry: &R,
+    principal: &PrincipalChain,
+    audit: &mut A,
+    now: SystemTime,
+) -> Result<LifecycleDestroyRecordCliOutcome>
+where
+    S: SecretStore,
+    R: SharedTombstoneRegistry,
+    A: AuditSink,
+{
+    let descriptors = store
+        .list()
+        .await
+        .context("failed to list descriptors for lifecycle destroy-record")?;
+    let descriptor = descriptors
+        .iter()
+        .find(|descriptor| descriptor.secret_ref == config.secret_ref)
+        .ok_or_else(|| JanusError::NotInManifest {
+            name: config.secret_ref.as_str().to_string(),
+        })?;
+    let retain_until = now
+        .checked_add(config.retain_for)
+        .context("destroy-record retention window is too large")?;
+    let request = SecretTombstoneRequest::new(
+        config.secret_ref.clone(),
+        config.reason.clone(),
+        now,
+        retain_until,
+    );
+    let tombstone = TombstonePolicy::record(descriptor, request, principal, audit)?;
+    SharedTombstoneRegistry::record(registry, &tombstone, principal)?;
+
+    Ok(LifecycleDestroyRecordCliOutcome {
+        secret_ref: tombstone.secret_ref().as_str().to_string(),
+        from: tombstone.from().as_str(),
+        to: tombstone.to().as_str(),
+        reason_code: "tombstone_recorded",
+        retain_until_unix_secs: unix_seconds(tombstone.retain_until()),
+        value_returned: false,
+        provider_deleted: false,
+    })
 }
 
 async fn apply_lifecycle_transition_with<S, A>(
@@ -509,6 +595,19 @@ fn emit_lifecycle_stale_report(rows: &[StaleSecretReportRow]) {
             row.value_returned
         );
     }
+}
+
+fn emit_lifecycle_destroy_record_outcome(outcome: &LifecycleDestroyRecordCliOutcome) {
+    println!(
+        "janusd lifecycle destroy-record ok secret_ref={} from={} to={} reason_code={} retain_until_unix_secs={} value_returned={} provider_deleted={}",
+        outcome.secret_ref,
+        outcome.from,
+        outcome.to,
+        outcome.reason_code,
+        outcome.retain_until_unix_secs,
+        outcome.value_returned,
+        outcome.provider_deleted
+    );
 }
 
 fn record_managed_command_evidence<R>(
@@ -1319,6 +1418,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         {
             parse_lifecycle_stale_report(rest.iter().cloned()).map(Command::LifecycleStaleReport)
         }
+        [lifecycle, destroy_record, rest @ ..]
+            if lifecycle == "lifecycle" && destroy_record == "destroy-record" =>
+        {
+            parse_lifecycle_destroy_record(rest.iter().cloned())
+                .map(Command::LifecycleDestroyRecord)
+        }
         _ => anyhow::bail!("unsupported janusd command; run `janusd --help`"),
     }
 }
@@ -1435,6 +1540,71 @@ fn parse_lifecycle_stale_report(
         evidence_file,
         stale_after,
         missing_evidence_after,
+    })
+}
+
+fn parse_lifecycle_destroy_record(
+    args: impl IntoIterator<Item = String>,
+) -> Result<LifecycleDestroyRecordConfig> {
+    let mut secret_ref = None;
+    let mut reason = None;
+    let mut retain_for = None;
+    let mut metadata_file = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--secret-ref" => {
+                if secret_ref
+                    .replace(SecretRef::new(required_arg("--secret-ref", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--secret-ref may only be provided once");
+                }
+            }
+            "--reason" => {
+                if reason
+                    .replace(SafeLabel::new(required_arg("--reason", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--reason may only be provided once");
+                }
+            }
+            "--retain-for-days" => {
+                if retain_for
+                    .replace(parse_positive_days(
+                        "--retain-for-days",
+                        &required_arg("--retain-for-days", args.next())?,
+                    )?)
+                    .is_some()
+                {
+                    anyhow::bail!("--retain-for-days may only be provided once");
+                }
+            }
+            "--metadata-file" => {
+                if metadata_file
+                    .replace(PathBuf::from(required_arg("--metadata-file", args.next())?))
+                    .is_some()
+                {
+                    anyhow::bail!("--metadata-file may only be provided once");
+                }
+            }
+            "--secret" | "--name" | "--value" | "--raw-value" | "--to" | "--delete"
+            | "--provider-delete" => {
+                anyhow::bail!(
+                    "lifecycle destroy-record accepts only value-free tombstone evidence fields"
+                )
+            }
+            other if other.starts_with('-') => anyhow::bail!("unsupported janusd lifecycle flag"),
+            _ => anyhow::bail!("unsupported janusd lifecycle argument"),
+        }
+    }
+
+    Ok(LifecycleDestroyRecordConfig {
+        secret_ref: secret_ref.context("--secret-ref is required")?,
+        reason: reason.context("--reason is required")?,
+        retain_for: retain_for.context("--retain-for-days is required")?,
+        metadata_file,
     })
 }
 
@@ -1830,6 +2000,12 @@ fn lifecycle_evidence_registry_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/var/lib/janus/lifecycle-evidence"))
 }
 
+fn lifecycle_tombstone_registry_dir() -> PathBuf {
+    env_first(&["JANUS_LIFECYCLE_TOMBSTONE_DIR", "JANUS_TOMBSTONE_DIR"])
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/janus/tombstones"))
+}
+
 fn run_principal_from_env() -> Result<PrincipalChain> {
     let executor = env_first(&["JANUS_RUN_EXECUTOR", "JANUS_WARDEN_EXECUTOR"])
         .unwrap_or_else(|| "warden-stdio".to_string());
@@ -2024,6 +2200,12 @@ fn unix_time(seconds: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(seconds)
 }
 
+fn unix_seconds(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LifecycleStaleEvidenceToml {
@@ -2122,7 +2304,7 @@ fn env_first(keys: &[&str]) -> Option<String> {
 
 fn print_usage() {
     eprintln!(
-        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
+        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
 }
 
@@ -2150,6 +2332,7 @@ mod tests {
             Command::Approve(_) => panic!("expected forge config"),
             Command::LifecycleTransition(_) => panic!("expected forge config"),
             Command::LifecycleStaleReport(_) => panic!("expected forge config"),
+            Command::LifecycleDestroyRecord(_) => panic!("expected forge config"),
         }
     }
 
@@ -2161,6 +2344,7 @@ mod tests {
             Command::Approve(_) => panic!("expected run config"),
             Command::LifecycleTransition(_) => panic!("expected run config"),
             Command::LifecycleStaleReport(_) => panic!("expected run config"),
+            Command::LifecycleDestroyRecord(_) => panic!("expected run config"),
         }
     }
 
@@ -2173,6 +2357,7 @@ mod tests {
             Command::Help => panic!("expected approve issue config"),
             Command::LifecycleTransition(_) => panic!("expected approve issue config"),
             Command::LifecycleStaleReport(_) => panic!("expected approve issue config"),
+            Command::LifecycleDestroyRecord(_) => panic!("expected approve issue config"),
         }
     }
 
@@ -2185,6 +2370,7 @@ mod tests {
             Command::Help => panic!("expected approve permit config"),
             Command::LifecycleTransition(_) => panic!("expected approve permit config"),
             Command::LifecycleStaleReport(_) => panic!("expected approve permit config"),
+            Command::LifecycleDestroyRecord(_) => panic!("expected approve permit config"),
         }
     }
 
@@ -2197,6 +2383,7 @@ mod tests {
             Command::Help => panic!("expected approve revoke config"),
             Command::LifecycleTransition(_) => panic!("expected approve revoke config"),
             Command::LifecycleStaleReport(_) => panic!("expected approve revoke config"),
+            Command::LifecycleDestroyRecord(_) => panic!("expected approve revoke config"),
         }
     }
 
@@ -2208,6 +2395,7 @@ mod tests {
             Command::Approve(_) => panic!("expected lifecycle config"),
             Command::Help => panic!("expected lifecycle config"),
             Command::LifecycleStaleReport(_) => panic!("expected lifecycle config"),
+            Command::LifecycleDestroyRecord(_) => panic!("expected lifecycle config"),
         }
     }
 
@@ -2219,6 +2407,21 @@ mod tests {
             Command::RunManaged(_) => panic!("expected lifecycle stale-report config"),
             Command::Approve(_) => panic!("expected lifecycle stale-report config"),
             Command::Help => panic!("expected lifecycle stale-report config"),
+            Command::LifecycleDestroyRecord(_) => panic!("expected lifecycle stale-report config"),
+        }
+    }
+
+    fn parse_lifecycle_destroy_record_ok(args: &[&str]) -> LifecycleDestroyRecordConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::LifecycleDestroyRecord(config) => config,
+            Command::LifecycleTransition(_) => panic!("expected lifecycle destroy-record config"),
+            Command::LifecycleStaleReport(_) => {
+                panic!("expected lifecycle destroy-record config")
+            }
+            Command::ForgeRotateGenerated(_) => panic!("expected lifecycle destroy-record config"),
+            Command::RunManaged(_) => panic!("expected lifecycle destroy-record config"),
+            Command::Approve(_) => panic!("expected lifecycle destroy-record config"),
+            Command::Help => panic!("expected lifecycle destroy-record config"),
         }
     }
 
@@ -2466,6 +2669,67 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("--stale-after-days"));
+    }
+
+    #[test]
+    fn parses_lifecycle_destroy_record_without_literal_inputs() {
+        let config = parse_lifecycle_destroy_record_ok(&[
+            "lifecycle",
+            "destroy-record",
+            "--secret-ref",
+            "sec_fixture",
+            "--reason",
+            "reviewed destroy record",
+            "--retain-for-days",
+            "365",
+            "--metadata-file",
+            "/tmp/janus-metadata.toml",
+        ]);
+
+        assert_eq!(config.secret_ref.as_str(), "sec_fixture");
+        assert_eq!(config.reason.as_str(), "reviewed destroy record");
+        assert_eq!(config.retain_for, Duration::from_secs(365 * 24 * 60 * 60));
+        assert_eq!(
+            config.metadata_file,
+            Some(PathBuf::from("/tmp/janus-metadata.toml"))
+        );
+
+        let err = parse_args(
+            [
+                "lifecycle",
+                "destroy-record",
+                "--secret-ref",
+                "sec_fixture",
+                "--reason",
+                "reviewed destroy record",
+                "--retain-for-days",
+                "365",
+                "--value",
+                "do-not-echo-me",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("value-free"));
+        assert!(!err.to_string().contains("do-not-echo-me"));
+
+        let err = parse_args(
+            [
+                "lifecycle",
+                "destroy-record",
+                "--secret-ref",
+                "sec_fixture",
+                "--reason",
+                "reviewed destroy record",
+                "--retain-for-days",
+                "0",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--retain-for-days"));
     }
 
     #[test]
@@ -3032,6 +3296,129 @@ mod tests {
             assert_eq!(event.reason_code, expected_reason);
             assert!(!event.value_returned);
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_destroy_record_writes_tombstone_without_provider_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileTombstoneRegistry::new(dir.path());
+        let project = ProjectId::new("janus").unwrap();
+        let name = SecretName::new("CANARY").unwrap();
+        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        let config = LifecycleDestroyRecordConfig {
+            secret_ref: secret_ref.clone(),
+            reason: SafeLabel::new("reviewed destroy record").unwrap(),
+            retain_for: Duration::from_secs(24 * 60 * 60),
+            metadata_file: None,
+        };
+        let mut audit = AuditWrite::accepting();
+
+        let outcome = record_lifecycle_destroy_with(
+            &config,
+            fixture_store_with_class_and_lifecycle(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::Normal,
+                SecretLifecycle::PendingDelete,
+            ),
+            &registry,
+            &fixture_principal(),
+            &mut audit,
+            now,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.secret_ref, secret_ref.as_str());
+        assert_eq!(outcome.from, "pending_delete");
+        assert_eq!(outcome.to, "destroyed");
+        assert_eq!(outcome.reason_code, "tombstone_recorded");
+        assert_eq!(outcome.retain_until_unix_secs, 24 * 60 * 60 + 10);
+        assert!(!outcome.value_returned);
+        assert!(!outcome.provider_deleted);
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
+
+        let records = janus_local::TombstoneRegistry::list(&registry).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].secret_ref, secret_ref);
+        assert_eq!(records[0].reason.as_str(), "reviewed destroy record");
+        assert_eq!(records[0].destroyed_at, now);
+        assert_eq!(
+            records[0].retain_until,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(24 * 60 * 60 + 10)
+        );
+        assert_eq!(
+            records[0].principal_binding,
+            "executor:janus-run@fixture|scope:janus/dev"
+        );
+        assert_eq!(audit.events().len(), 1);
+        let event = &audit.events()[0];
+        assert_eq!(event.action, AuditAction::SecretLifecycle);
+        assert_eq!(event.outcome, AuditOutcome::Allowed);
+        assert_eq!(event.reason_code, "tombstone_recorded");
+        assert_eq!(event.evidence.as_ref(), Some(&config.reason));
+        assert!(!event.value_returned);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_destroy_record_requires_pending_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileTombstoneRegistry::new(dir.path());
+        let project = ProjectId::new("janus").unwrap();
+        let name = SecretName::new("CANARY").unwrap();
+        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let config = LifecycleDestroyRecordConfig {
+            secret_ref: secret_ref.clone(),
+            reason: SafeLabel::new("reviewed destroy attempt").unwrap(),
+            retain_for: Duration::from_secs(24 * 60 * 60),
+            metadata_file: None,
+        };
+        let mut audit = AuditWrite::accepting();
+
+        let err = record_lifecycle_destroy_with(
+            &config,
+            fixture_store_with_class_and_lifecycle(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::Normal,
+                SecretLifecycle::Disabled,
+            ),
+            &registry,
+            &fixture_principal(),
+            &mut audit,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+        )
+        .await
+        .unwrap_err();
+
+        let janus_err = err.downcast_ref::<JanusError>().unwrap();
+        assert!(matches!(
+            janus_err,
+            JanusError::PolicyDenied {
+                reason_code: "denied_destroy_requires_pending_delete",
+                ..
+            }
+        ));
+        assert_eq!(
+            janus_local::TombstoneRegistry::list(&registry)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(audit.events().len(), 1);
+        assert_eq!(audit.events()[0].outcome, AuditOutcome::Denied);
+        assert_eq!(
+            audit.events()[0].reason_code,
+            "denied_destroy_requires_pending_delete"
+        );
+        assert!(!audit.events()[0].value_returned);
     }
 
     #[cfg(unix)]
