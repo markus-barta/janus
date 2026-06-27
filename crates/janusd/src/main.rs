@@ -19,14 +19,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use janus_core::{
-    ApprovalGrant, AuditSink, AuditWrite, BlastRadius, ClassPermitPolicy, ConsumerDescriptor,
-    ConsumerKind, ConsumerRef, ConsumerRegistry, Destination, EgressMode, Environment, ExecutorRef,
-    JanusError, LifecycleTransitionPolicy, OwnerRef, Principal, PrincipalChain, PrincipalId,
-    PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReloadMethod, RotationOutcome, SafeLabel,
-    ScopeRef, SecretAgeEvidence, SecretBroker, SecretDescriptor, SecretLifecycle, SecretMeta,
-    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretTombstoneRequest,
-    StaleSecretPolicy, StaleSecretReportRow, StaleSecretReporter, TombstonePolicy, TrustLevel,
-    UsePermit, UseProfile, UseRequest, ValidationProbe,
+    ApprovalGrant, AuditAction, AuditEvent, AuditOutcome, AuditSink, AuditWrite, BlastRadius,
+    ClassPermitPolicy, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry,
+    Destination, EgressMode, Environment, ExecutorRef, JanusError, LifecycleTransitionPolicy,
+    OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy,
+    Purpose, ReloadMethod, RotationOutcome, SafeLabel, ScopeRef, SecretAgeEvidence, SecretBroker,
+    SecretDescriptor, SecretLifecycle, SecretMeta, SecretMetadataOverlay, SecretName, SecretRef,
+    SecretStore, SecretTombstoneRequest, Severity, StaleSecretPolicy, StaleSecretReportRow,
+    StaleSecretReporter, TombstonePolicy, TrustLevel, UsePermit, UseProfile, UseRequest,
+    ValidationProbe,
 };
 use janus_executor::{
     ApprovedUseExecutor, ManagedCommandProfile, ManagedCommandProfileSpec, ManagedCommandRequest,
@@ -71,6 +72,7 @@ async fn main() -> Result<()> {
         Command::LifecycleTransition(config) => run_lifecycle_transition(config).await,
         Command::LifecycleStaleReport(config) => run_lifecycle_stale_report(config).await,
         Command::LifecycleDestroyRecord(config) => run_lifecycle_destroy_record(config).await,
+        Command::LifecycleDestroyFinalize(config) => run_lifecycle_destroy_finalize(config).await,
     }
 }
 
@@ -83,6 +85,7 @@ enum Command {
     LifecycleTransition(LifecycleTransitionConfig),
     LifecycleStaleReport(LifecycleStaleReportConfig),
     LifecycleDestroyRecord(LifecycleDestroyRecordConfig),
+    LifecycleDestroyFinalize(LifecycleDestroyFinalizeConfig),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,6 +161,12 @@ struct LifecycleDestroyRecordConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct LifecycleDestroyFinalizeConfig {
+    secret_ref: SecretRef,
+    metadata_file: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ApprovedPermitIssueOutcome {
     permit_id: String,
     approval_id: String,
@@ -185,6 +194,17 @@ struct LifecycleDestroyRecordCliOutcome {
     to: &'static str,
     reason_code: &'static str,
     retain_until_unix_secs: u64,
+    value_returned: bool,
+    provider_deleted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LifecycleDestroyFinalizeCliOutcome {
+    secret_ref: String,
+    from: &'static str,
+    to: &'static str,
+    reason_code: &'static str,
+    metadata_finalized: bool,
     value_returned: bool,
     provider_deleted: bool,
 }
@@ -427,6 +447,26 @@ async fn run_lifecycle_destroy_record(config: LifecycleDestroyRecordConfig) -> R
     Ok(())
 }
 
+async fn run_lifecycle_destroy_finalize(config: LifecycleDestroyFinalizeConfig) -> Result<()> {
+    let metadata_file =
+        lifecycle_metadata_file_path(config.metadata_file.as_deref(), METADATA_ENV_KEYS)?;
+    let store = load_age_store_from_env_with_metadata_path(Some(&metadata_file))?;
+    let principal = lifecycle_principal_from_env()?;
+    let registry = FileTombstoneRegistry::new(lifecycle_tombstone_registry_dir());
+    let mut audit = AuditWrite::accepting();
+    let outcome = finalize_lifecycle_destroy_with(
+        &config,
+        &metadata_file,
+        store,
+        &registry,
+        &principal,
+        &mut audit,
+    )
+    .await?;
+    emit_lifecycle_destroy_finalize_outcome(&outcome);
+    Ok(())
+}
+
 async fn build_lifecycle_stale_report_with<S, A>(
     config: &LifecycleStaleReportConfig,
     store: S,
@@ -490,6 +530,109 @@ where
         to: tombstone.to().as_str(),
         reason_code: "tombstone_recorded",
         retain_until_unix_secs: unix_seconds(tombstone.retain_until()),
+        value_returned: false,
+        provider_deleted: false,
+    })
+}
+
+async fn finalize_lifecycle_destroy_with<S, R, A>(
+    config: &LifecycleDestroyFinalizeConfig,
+    metadata_file: &Path,
+    store: S,
+    registry: &R,
+    principal: &PrincipalChain,
+    audit: &mut A,
+) -> Result<LifecycleDestroyFinalizeCliOutcome>
+where
+    S: SecretStore,
+    R: SharedTombstoneRegistry,
+    A: AuditSink,
+{
+    let descriptors = store
+        .list()
+        .await
+        .context("failed to list descriptors for lifecycle destroy-finalize")?;
+    let descriptor = descriptors
+        .iter()
+        .find(|descriptor| descriptor.secret_ref == config.secret_ref)
+        .ok_or_else(|| JanusError::NotInManifest {
+            name: config.secret_ref.as_str().to_string(),
+        })?;
+    let tombstone = SharedTombstoneRegistry::get(registry, &config.secret_ref)
+        .context("destroy tombstone is required before metadata finalization")?;
+
+    if descriptor.lifecycle == SecretLifecycle::Destroyed {
+        audit.record(
+            AuditEvent::new(
+                AuditAction::SecretLifecycle,
+                AuditOutcome::Allowed,
+                "destroy_metadata_already_finalized",
+                Severity::Notice,
+                Some(config.secret_ref.clone()),
+                principal,
+            )
+            .with_evidence(tombstone.reason.clone()),
+        )?;
+        return Ok(LifecycleDestroyFinalizeCliOutcome {
+            secret_ref: config.secret_ref.as_str().to_string(),
+            from: SecretLifecycle::Destroyed.as_str(),
+            to: SecretLifecycle::Destroyed.as_str(),
+            reason_code: "destroy_metadata_already_finalized",
+            metadata_finalized: false,
+            value_returned: false,
+            provider_deleted: false,
+        });
+    }
+
+    if descriptor.lifecycle != SecretLifecycle::PendingDelete {
+        audit.record(
+            AuditEvent::new(
+                AuditAction::SecretLifecycle,
+                AuditOutcome::Denied,
+                "denied_destroy_finalize_requires_pending_delete",
+                Severity::High,
+                Some(config.secret_ref.clone()),
+                principal,
+            )
+            .with_evidence(tombstone.reason.clone()),
+        )?;
+        return Err(JanusError::policy_denied(
+            "denied_destroy_finalize_requires_pending_delete",
+            "destroy metadata finalization requires pending_delete lifecycle",
+        )
+        .into());
+    }
+
+    audit.record(
+        AuditEvent::new(
+            AuditAction::SecretLifecycle,
+            AuditOutcome::Allowed,
+            "destroy_metadata_finalized",
+            Severity::Critical,
+            Some(config.secret_ref.clone()),
+            principal,
+        )
+        .with_evidence(tombstone.reason.clone()),
+    )?;
+
+    let mut overlay = SecretMetadataOverlay::load_toml_file(metadata_file)
+        .with_context(|| "failed to load lifecycle metadata overlay")?;
+    overlay.set_secret_lifecycle(descriptor.name.clone(), SecretLifecycle::Destroyed);
+    let mut metadata_entries = descriptors
+        .iter()
+        .map(secret_meta_from_descriptor)
+        .collect::<Vec<_>>();
+    overlay
+        .apply_to_entries(&mut metadata_entries)
+        .context("lifecycle metadata overlay no longer matches manifest")?;
+    write_metadata_overlay_atomic(metadata_file, &overlay.to_toml_string()?)?;
+
+    Ok(LifecycleDestroyFinalizeCliOutcome {
+        secret_ref: config.secret_ref.as_str().to_string(),
+        from: SecretLifecycle::PendingDelete.as_str(),
+        to: SecretLifecycle::Destroyed.as_str(),
+        reason_code: "destroy_metadata_finalized",
+        metadata_finalized: true,
         value_returned: false,
         provider_deleted: false,
     })
@@ -605,6 +748,19 @@ fn emit_lifecycle_destroy_record_outcome(outcome: &LifecycleDestroyRecordCliOutc
         outcome.to,
         outcome.reason_code,
         outcome.retain_until_unix_secs,
+        outcome.value_returned,
+        outcome.provider_deleted
+    );
+}
+
+fn emit_lifecycle_destroy_finalize_outcome(outcome: &LifecycleDestroyFinalizeCliOutcome) {
+    println!(
+        "janusd lifecycle destroy-finalize ok secret_ref={} from={} to={} reason_code={} metadata_finalized={} value_returned={} provider_deleted={}",
+        outcome.secret_ref,
+        outcome.from,
+        outcome.to,
+        outcome.reason_code,
+        outcome.metadata_finalized,
         outcome.value_returned,
         outcome.provider_deleted
     );
@@ -1424,6 +1580,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
             parse_lifecycle_destroy_record(rest.iter().cloned())
                 .map(Command::LifecycleDestroyRecord)
         }
+        [lifecycle, destroy_finalize, rest @ ..]
+            if lifecycle == "lifecycle" && destroy_finalize == "destroy-finalize" =>
+        {
+            parse_lifecycle_destroy_finalize(rest.iter().cloned())
+                .map(Command::LifecycleDestroyFinalize)
+        }
         _ => anyhow::bail!("unsupported janusd command; run `janusd --help`"),
     }
 }
@@ -1604,6 +1766,48 @@ fn parse_lifecycle_destroy_record(
         secret_ref: secret_ref.context("--secret-ref is required")?,
         reason: reason.context("--reason is required")?,
         retain_for: retain_for.context("--retain-for-days is required")?,
+        metadata_file,
+    })
+}
+
+fn parse_lifecycle_destroy_finalize(
+    args: impl IntoIterator<Item = String>,
+) -> Result<LifecycleDestroyFinalizeConfig> {
+    let mut secret_ref = None;
+    let mut metadata_file = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--secret-ref" => {
+                if secret_ref
+                    .replace(SecretRef::new(required_arg("--secret-ref", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--secret-ref may only be provided once");
+                }
+            }
+            "--metadata-file" => {
+                if metadata_file
+                    .replace(PathBuf::from(required_arg("--metadata-file", args.next())?))
+                    .is_some()
+                {
+                    anyhow::bail!("--metadata-file may only be provided once");
+                }
+            }
+            "--secret" | "--name" | "--value" | "--raw-value" | "--reason" | "--to"
+            | "--delete" | "--provider-delete" => {
+                anyhow::bail!(
+                    "lifecycle destroy-finalize accepts only value-free finalization controls"
+                )
+            }
+            other if other.starts_with('-') => anyhow::bail!("unsupported janusd lifecycle flag"),
+            _ => anyhow::bail!("unsupported janusd lifecycle argument"),
+        }
+    }
+
+    Ok(LifecycleDestroyFinalizeConfig {
+        secret_ref: secret_ref.context("--secret-ref is required")?,
         metadata_file,
     })
 }
@@ -2304,7 +2508,7 @@ fn env_first(keys: &[&str]) -> Option<String> {
 
 fn print_usage() {
     eprintln!(
-        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
+        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  lifecycle destroy-finalize --secret-ref REF [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\njanusd lifecycle destroy-finalize requires a tombstone and writes destroyed metadata only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
 }
 
@@ -2333,6 +2537,7 @@ mod tests {
             Command::LifecycleTransition(_) => panic!("expected forge config"),
             Command::LifecycleStaleReport(_) => panic!("expected forge config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected forge config"),
+            Command::LifecycleDestroyFinalize(_) => panic!("expected forge config"),
         }
     }
 
@@ -2345,6 +2550,7 @@ mod tests {
             Command::LifecycleTransition(_) => panic!("expected run config"),
             Command::LifecycleStaleReport(_) => panic!("expected run config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected run config"),
+            Command::LifecycleDestroyFinalize(_) => panic!("expected run config"),
         }
     }
 
@@ -2358,6 +2564,7 @@ mod tests {
             Command::LifecycleTransition(_) => panic!("expected approve issue config"),
             Command::LifecycleStaleReport(_) => panic!("expected approve issue config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected approve issue config"),
+            Command::LifecycleDestroyFinalize(_) => panic!("expected approve issue config"),
         }
     }
 
@@ -2371,6 +2578,7 @@ mod tests {
             Command::LifecycleTransition(_) => panic!("expected approve permit config"),
             Command::LifecycleStaleReport(_) => panic!("expected approve permit config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected approve permit config"),
+            Command::LifecycleDestroyFinalize(_) => panic!("expected approve permit config"),
         }
     }
 
@@ -2384,6 +2592,7 @@ mod tests {
             Command::LifecycleTransition(_) => panic!("expected approve revoke config"),
             Command::LifecycleStaleReport(_) => panic!("expected approve revoke config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected approve revoke config"),
+            Command::LifecycleDestroyFinalize(_) => panic!("expected approve revoke config"),
         }
     }
 
@@ -2396,6 +2605,7 @@ mod tests {
             Command::Help => panic!("expected lifecycle config"),
             Command::LifecycleStaleReport(_) => panic!("expected lifecycle config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected lifecycle config"),
+            Command::LifecycleDestroyFinalize(_) => panic!("expected lifecycle config"),
         }
     }
 
@@ -2408,6 +2618,9 @@ mod tests {
             Command::Approve(_) => panic!("expected lifecycle stale-report config"),
             Command::Help => panic!("expected lifecycle stale-report config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected lifecycle stale-report config"),
+            Command::LifecycleDestroyFinalize(_) => {
+                panic!("expected lifecycle stale-report config")
+            }
         }
     }
 
@@ -2422,6 +2635,28 @@ mod tests {
             Command::RunManaged(_) => panic!("expected lifecycle destroy-record config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-record config"),
             Command::Help => panic!("expected lifecycle destroy-record config"),
+            Command::LifecycleDestroyFinalize(_) => {
+                panic!("expected lifecycle destroy-record config")
+            }
+        }
+    }
+
+    fn parse_lifecycle_destroy_finalize_ok(args: &[&str]) -> LifecycleDestroyFinalizeConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::LifecycleDestroyFinalize(config) => config,
+            Command::LifecycleTransition(_) => panic!("expected lifecycle destroy-finalize config"),
+            Command::LifecycleStaleReport(_) => {
+                panic!("expected lifecycle destroy-finalize config")
+            }
+            Command::LifecycleDestroyRecord(_) => {
+                panic!("expected lifecycle destroy-finalize config")
+            }
+            Command::ForgeRotateGenerated(_) => {
+                panic!("expected lifecycle destroy-finalize config")
+            }
+            Command::RunManaged(_) => panic!("expected lifecycle destroy-finalize config"),
+            Command::Approve(_) => panic!("expected lifecycle destroy-finalize config"),
+            Command::Help => panic!("expected lifecycle destroy-finalize config"),
         }
     }
 
@@ -2730,6 +2965,58 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("--retain-for-days"));
+    }
+
+    #[test]
+    fn parses_lifecycle_destroy_finalize_without_literal_inputs() {
+        let config = parse_lifecycle_destroy_finalize_ok(&[
+            "lifecycle",
+            "destroy-finalize",
+            "--secret-ref",
+            "sec_fixture",
+            "--metadata-file",
+            "/tmp/janus-metadata.toml",
+        ]);
+
+        assert_eq!(config.secret_ref.as_str(), "sec_fixture");
+        assert_eq!(
+            config.metadata_file,
+            Some(PathBuf::from("/tmp/janus-metadata.toml"))
+        );
+
+        let err = parse_args(
+            [
+                "lifecycle",
+                "destroy-finalize",
+                "--secret-ref",
+                "sec_fixture",
+                "--metadata-file",
+                "/tmp/janus-metadata.toml",
+                "--value",
+                "do-not-echo-me",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("value-free"));
+        assert!(!err.to_string().contains("do-not-echo-me"));
+
+        let err = parse_args(
+            [
+                "lifecycle",
+                "destroy-finalize",
+                "--secret-ref",
+                "sec_fixture",
+                "--reason",
+                "do-not-echo-me",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("value-free"));
+        assert!(!err.to_string().contains("do-not-echo-me"));
     }
 
     #[test]
@@ -3417,6 +3704,342 @@ mod tests {
         assert_eq!(
             audit.events()[0].reason_code,
             "denied_destroy_requires_pending_delete"
+        );
+        assert!(!audit.events()[0].value_returned);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_destroy_finalize_marks_overlay_destroyed_without_provider_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileTombstoneRegistry::new(dir.path().join("tombstones"));
+        let metadata_file = dir.path().join("metadata.toml");
+        std::fs::write(
+            &metadata_file,
+            r#"
+            [defaults]
+            owner = "infra"
+            classification = "normal"
+            lifecycle = "active"
+
+            [[secrets]]
+            name = "CANARY"
+            owner = "security"
+            classification = "high_value"
+            lifecycle = "pending_delete"
+            "#,
+        )
+        .unwrap();
+        let project = ProjectId::new("janus").unwrap();
+        let name = SecretName::new("CANARY").unwrap();
+        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let record_config = LifecycleDestroyRecordConfig {
+            secret_ref: secret_ref.clone(),
+            reason: SafeLabel::new("reviewed destroy record").unwrap(),
+            retain_for: Duration::from_secs(24 * 60 * 60),
+            metadata_file: None,
+        };
+        let mut record_audit = AuditWrite::accepting();
+        record_lifecycle_destroy_with(
+            &record_config,
+            fixture_store_with_class_and_lifecycle(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::HighValue,
+                SecretLifecycle::PendingDelete,
+            ),
+            &registry,
+            &fixture_principal(),
+            &mut record_audit,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        let config = LifecycleDestroyFinalizeConfig {
+            secret_ref: secret_ref.clone(),
+            metadata_file: Some(metadata_file.clone()),
+        };
+        let mut audit = AuditWrite::accepting();
+
+        let outcome = finalize_lifecycle_destroy_with(
+            &config,
+            &metadata_file,
+            fixture_store_with_class_and_lifecycle(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::HighValue,
+                SecretLifecycle::PendingDelete,
+            ),
+            &registry,
+            &fixture_principal(),
+            &mut audit,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.secret_ref, secret_ref.as_str());
+        assert_eq!(outcome.from, "pending_delete");
+        assert_eq!(outcome.to, "destroyed");
+        assert_eq!(outcome.reason_code, "destroy_metadata_finalized");
+        assert!(outcome.metadata_finalized);
+        assert!(!outcome.value_returned);
+        assert!(!outcome.provider_deleted);
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
+
+        let overlay = SecretMetadataOverlay::load_toml_file(&metadata_file).unwrap();
+        let mut entries = vec![SecretMeta {
+            secret_ref: secret_ref.clone(),
+            name: name.clone(),
+            label: SafeLabel::new("Canary token").unwrap(),
+            scope: ScopeRef::new("janus/dev").unwrap(),
+            owner: None,
+            classification: None,
+            lifecycle: SecretLifecycle::Active,
+            required: true,
+            trust_level: TrustLevel::L1,
+            allowed_uses: vec![profile_id],
+        }];
+        overlay.apply_to_entries(&mut entries).unwrap();
+        assert_eq!(entries[0].owner.as_ref().unwrap().as_str(), "security");
+        assert_eq!(entries[0].classification, Some(SecretClass::HighValue));
+        assert_eq!(entries[0].lifecycle, SecretLifecycle::Destroyed);
+
+        assert_eq!(audit.events().len(), 1);
+        let event = &audit.events()[0];
+        assert_eq!(event.action, AuditAction::SecretLifecycle);
+        assert_eq!(event.outcome, AuditOutcome::Allowed);
+        assert_eq!(event.reason_code, "destroy_metadata_finalized");
+        assert_eq!(event.evidence.as_ref(), Some(&record_config.reason));
+        assert!(!event.value_returned);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_destroy_finalize_is_retry_safe_when_already_destroyed() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileTombstoneRegistry::new(dir.path().join("tombstones"));
+        let metadata_file = dir.path().join("metadata.toml");
+        std::fs::write(
+            &metadata_file,
+            r#"
+            [defaults]
+            owner = "infra"
+            classification = "normal"
+            lifecycle = "active"
+
+            [[secrets]]
+            name = "CANARY"
+            lifecycle = "destroyed"
+            "#,
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&metadata_file).unwrap();
+        let project = ProjectId::new("janus").unwrap();
+        let name = SecretName::new("CANARY").unwrap();
+        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let record_config = LifecycleDestroyRecordConfig {
+            secret_ref: secret_ref.clone(),
+            reason: SafeLabel::new("reviewed destroy record").unwrap(),
+            retain_for: Duration::from_secs(24 * 60 * 60),
+            metadata_file: None,
+        };
+        let mut record_audit = AuditWrite::accepting();
+        record_lifecycle_destroy_with(
+            &record_config,
+            fixture_store_with_class_and_lifecycle(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::Normal,
+                SecretLifecycle::PendingDelete,
+            ),
+            &registry,
+            &fixture_principal(),
+            &mut record_audit,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        let config = LifecycleDestroyFinalizeConfig {
+            secret_ref: secret_ref.clone(),
+            metadata_file: Some(metadata_file.clone()),
+        };
+        let mut audit = AuditWrite::accepting();
+
+        let outcome = finalize_lifecycle_destroy_with(
+            &config,
+            &metadata_file,
+            fixture_store_with_class_and_lifecycle(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::Normal,
+                SecretLifecycle::Destroyed,
+            ),
+            &registry,
+            &fixture_principal(),
+            &mut audit,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.from, "destroyed");
+        assert_eq!(outcome.to, "destroyed");
+        assert_eq!(outcome.reason_code, "destroy_metadata_already_finalized");
+        assert!(!outcome.metadata_finalized);
+        assert!(!outcome.value_returned);
+        assert!(!outcome.provider_deleted);
+        assert_eq!(std::fs::read_to_string(&metadata_file).unwrap(), before);
+        assert_eq!(audit.events().len(), 1);
+        assert_eq!(audit.events()[0].outcome, AuditOutcome::Allowed);
+        assert_eq!(
+            audit.events()[0].reason_code,
+            "destroy_metadata_already_finalized"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_destroy_finalize_requires_tombstone_before_overlay_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileTombstoneRegistry::new(dir.path().join("tombstones"));
+        let metadata_file = dir.path().join("metadata.toml");
+        std::fs::write(
+            &metadata_file,
+            r#"
+            [defaults]
+            owner = "infra"
+            classification = "normal"
+            lifecycle = "active"
+
+            [[secrets]]
+            name = "CANARY"
+            lifecycle = "pending_delete"
+            "#,
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&metadata_file).unwrap();
+        let project = ProjectId::new("janus").unwrap();
+        let name = SecretName::new("CANARY").unwrap();
+        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let config = LifecycleDestroyFinalizeConfig {
+            secret_ref: secret_ref.clone(),
+            metadata_file: Some(metadata_file.clone()),
+        };
+        let mut audit = AuditWrite::accepting();
+
+        let err = finalize_lifecycle_destroy_with(
+            &config,
+            &metadata_file,
+            fixture_store_with_class_and_lifecycle(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::Normal,
+                SecretLifecycle::PendingDelete,
+            ),
+            &registry,
+            &fixture_principal(),
+            &mut audit,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("tombstone"));
+        assert_eq!(std::fs::read_to_string(&metadata_file).unwrap(), before);
+        assert_eq!(audit.events().len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_destroy_finalize_denies_non_pending_lifecycle_without_overlay_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileTombstoneRegistry::new(dir.path().join("tombstones"));
+        let metadata_file = dir.path().join("metadata.toml");
+        std::fs::write(
+            &metadata_file,
+            r#"
+            [defaults]
+            owner = "infra"
+            classification = "normal"
+            lifecycle = "active"
+
+            [[secrets]]
+            name = "CANARY"
+            lifecycle = "disabled"
+            "#,
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&metadata_file).unwrap();
+        let project = ProjectId::new("janus").unwrap();
+        let name = SecretName::new("CANARY").unwrap();
+        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let record_config = LifecycleDestroyRecordConfig {
+            secret_ref: secret_ref.clone(),
+            reason: SafeLabel::new("reviewed destroy record").unwrap(),
+            retain_for: Duration::from_secs(24 * 60 * 60),
+            metadata_file: None,
+        };
+        let mut record_audit = AuditWrite::accepting();
+        record_lifecycle_destroy_with(
+            &record_config,
+            fixture_store_with_class_and_lifecycle(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::Normal,
+                SecretLifecycle::PendingDelete,
+            ),
+            &registry,
+            &fixture_principal(),
+            &mut record_audit,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        let config = LifecycleDestroyFinalizeConfig {
+            secret_ref: secret_ref.clone(),
+            metadata_file: Some(metadata_file.clone()),
+        };
+        let mut audit = AuditWrite::accepting();
+
+        let err = finalize_lifecycle_destroy_with(
+            &config,
+            &metadata_file,
+            fixture_store_with_class_and_lifecycle(
+                &secret_ref,
+                &name,
+                &profile_id,
+                SecretClass::Normal,
+                SecretLifecycle::Disabled,
+            ),
+            &registry,
+            &fixture_principal(),
+            &mut audit,
+        )
+        .await
+        .unwrap_err();
+
+        let janus_err = err.downcast_ref::<JanusError>().unwrap();
+        assert!(matches!(
+            janus_err,
+            JanusError::PolicyDenied {
+                reason_code: "denied_destroy_finalize_requires_pending_delete",
+                ..
+            }
+        ));
+        assert_eq!(std::fs::read_to_string(&metadata_file).unwrap(), before);
+        assert_eq!(audit.events().len(), 1);
+        assert_eq!(audit.events()[0].outcome, AuditOutcome::Denied);
+        assert_eq!(
+            audit.events()[0].reason_code,
+            "denied_destroy_finalize_requires_pending_delete"
         );
         assert!(!audit.events()[0].value_returned);
     }
