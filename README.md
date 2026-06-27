@@ -57,6 +57,7 @@ janus/
 ├── docs/
 │   ├── destroy-lifecycle-runbook.md  # metadata-only destroy operator flow
 │   └── extraction-cutover.md         # how to repoint the live nixcfg deploy at a published image
+├── scripts/                 # repo-local smoke and operator helpers
 ├── Cargo.toml               # Rust workspace
 └── .github/workflows/       # rust CI + go-envelope build+sign+SBOM+provenance
 ```
@@ -77,6 +78,16 @@ cargo build              # workspace build (skeleton until the engine tickets la
 cargo test --workspace --locked
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+**Local Warden MCP smoke:**
+```bash
+devenv shell -- python3 scripts/smoke-warden-mcp.py
+```
+
+The smoke launches `janus-warden` as a real MCP stdio process against a
+disposable `secretspec`/dotenv fixture, then verifies `initialize`,
+`tools/list`, `health`, `list_secrets`, `describe_secret`, and `request_use`.
+It asserts the transcript never contains the fixture secret value.
 
 **Engine image:**
 Publish a signed Rust engine image by creating a GitHub Release whose tag

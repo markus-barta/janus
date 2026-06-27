@@ -11,6 +11,10 @@ Cargo.lock.bak
 /devenv.lock
 /devenv.local.nix
 
+# Python smoke helpers
+__pycache__/
+*.py[cod]
+
 # editor / OS
 .DS_Store
 *.swp

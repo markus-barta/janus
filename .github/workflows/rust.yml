@@ -7,6 +7,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'scripts/**'
       - 'Dockerfile.engine'
       - 'Dockerfile.engine.dockerignore'
       - '.github/workflows/rust.yml'
@@ -16,6 +17,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'scripts/**'
       - 'Dockerfile.engine'
       - 'Dockerfile.engine.dockerignore'
       - '.github/workflows/rust.yml'
@@ -45,6 +47,8 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: build
         run: cargo build --all-targets --locked
+      - name: warden MCP smoke
+        run: python3 scripts/smoke-warden-mcp.py
       - name: test
         run: cargo test --all --locked
 
