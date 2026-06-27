@@ -88,6 +88,87 @@ impl SecretClass {
     }
 }
 
+/// Lifecycle state for a manifest/catalog secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecretLifecycle {
+    /// Draft secret metadata exists, but normal use is blocked.
+    Draft,
+    /// Active secret available for normal approved use.
+    Active,
+    /// Secret is actively rotating; existing approved-use paths may continue.
+    Rotating,
+    /// Deprecated secret should be migrated away and is blocked from normal use.
+    Deprecated,
+    /// Disabled secret cannot be used through normal paths.
+    Disabled,
+    /// Secret is awaiting deletion and cannot be used through normal paths.
+    PendingDelete,
+    /// Destroyed secret is represented only by value-free metadata/tombstone.
+    Destroyed,
+}
+
+impl SecretLifecycle {
+    /// Parse stable manifest/API text for the lifecycle state.
+    pub fn parse(value: &str) -> JanusResult<Self> {
+        match value {
+            "draft" => Ok(Self::Draft),
+            "active" => Ok(Self::Active),
+            "rotating" => Ok(Self::Rotating),
+            "deprecated" => Ok(Self::Deprecated),
+            "disabled" => Ok(Self::Disabled),
+            "pending_delete" => Ok(Self::PendingDelete),
+            "destroyed" => Ok(Self::Destroyed),
+            _ => Err(crate::JanusError::InvalidIdentifier {
+                kind: "secret_lifecycle",
+            }),
+        }
+    }
+
+    /// Stable manifest/API text for the lifecycle state.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Active => "active",
+            Self::Rotating => "rotating",
+            Self::Deprecated => "deprecated",
+            Self::Disabled => "disabled",
+            Self::PendingDelete => "pending_delete",
+            Self::Destroyed => "destroyed",
+        }
+    }
+
+    /// Whether this lifecycle state permits normal approved-use paths.
+    pub fn allows_normal_use(self) -> bool {
+        matches!(self, Self::Active | Self::Rotating)
+    }
+
+    fn use_denial(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Active | Self::Rotating => None,
+            Self::Draft => Some((
+                "denied_lifecycle_draft",
+                "secret lifecycle is draft and not active for approved use",
+            )),
+            Self::Deprecated => Some((
+                "denied_lifecycle_deprecated",
+                "secret lifecycle is deprecated and blocked from approved use",
+            )),
+            Self::Disabled => Some((
+                "denied_lifecycle_disabled",
+                "secret lifecycle is disabled and blocked from approved use",
+            )),
+            Self::PendingDelete => Some((
+                "denied_lifecycle_pending_delete",
+                "secret lifecycle is pending delete and blocked from approved use",
+            )),
+            Self::Destroyed => Some((
+                "denied_lifecycle_destroyed",
+                "secret lifecycle is destroyed and blocked from approved use",
+            )),
+        }
+    }
+}
+
 /// Manifest/catalog metadata for one secret.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecretMeta {
@@ -103,6 +184,8 @@ pub struct SecretMeta {
     pub owner: Option<OwnerRef>,
     /// Risk classification. Missing classification blocks normal approved use.
     pub classification: Option<SecretClass>,
+    /// Lifecycle state. Normal approved use requires an active/rotating state.
+    pub lifecycle: SecretLifecycle,
     /// Whether the manifest marks this secret required.
     pub required: bool,
     /// Minimum trust level for literal-producing use paths.
@@ -121,6 +204,7 @@ impl SecretMeta {
             scope: self.scope.clone(),
             owner: self.owner.clone(),
             classification: self.classification,
+            lifecycle: self.lifecycle,
             required: self.required,
             trust_level: self.trust_level,
             allowed_uses: self.allowed_uses.clone(),
@@ -144,6 +228,8 @@ pub struct SecretDescriptor {
     pub owner: Option<OwnerRef>,
     /// Risk classification. Internal/admin-facing, not model-facing by default.
     pub classification: Option<SecretClass>,
+    /// Lifecycle state. Internal/admin-facing state, exposed to Warden as safe text.
+    pub lifecycle: SecretLifecycle,
     /// Whether the manifest marks this secret required.
     pub required: bool,
     /// Minimum trust level for literal-producing use paths.
@@ -177,6 +263,22 @@ impl SecretDescriptor {
                 "secret classification is required before approved use",
             )),
         }
+    }
+
+    /// Stable denial for normal approved-use paths when lifecycle blocks use.
+    pub fn lifecycle_use_denial(&self) -> Option<(&'static str, &'static str)> {
+        self.lifecycle.use_denial()
+    }
+
+    /// Stable denial for normal approved-use paths.
+    pub fn normal_use_denial(&self) -> Option<(&'static str, &'static str)> {
+        self.metadata_use_denial()
+            .or_else(|| self.lifecycle_use_denial())
+    }
+
+    /// Whether normal approved-use paths are currently allowed.
+    pub fn normal_use_allowed(&self) -> bool {
+        self.metadata_complete() && self.lifecycle.allows_normal_use()
     }
 
     /// Safe model-facing metadata state.
@@ -255,5 +357,54 @@ mod tests {
         assert_eq!(SecretClass::Normal.risk_hint(), "standard");
         assert_eq!(SecretClass::HighValue.risk_hint(), "elevated_controls");
         assert_eq!(SecretClass::BreakGlass.risk_hint(), "emergency_only");
+    }
+
+    #[test]
+    fn secret_lifecycle_has_stable_text_and_use_gates() {
+        assert_eq!(
+            SecretLifecycle::parse("draft").unwrap(),
+            SecretLifecycle::Draft
+        );
+        assert_eq!(
+            SecretLifecycle::parse("active").unwrap(),
+            SecretLifecycle::Active
+        );
+        assert_eq!(
+            SecretLifecycle::parse("rotating").unwrap(),
+            SecretLifecycle::Rotating
+        );
+        assert_eq!(
+            SecretLifecycle::parse("deprecated").unwrap(),
+            SecretLifecycle::Deprecated
+        );
+        assert_eq!(
+            SecretLifecycle::parse("disabled").unwrap(),
+            SecretLifecycle::Disabled
+        );
+        assert_eq!(
+            SecretLifecycle::parse("pending_delete").unwrap(),
+            SecretLifecycle::PendingDelete
+        );
+        assert_eq!(
+            SecretLifecycle::parse("destroyed").unwrap(),
+            SecretLifecycle::Destroyed
+        );
+        assert!(SecretLifecycle::parse("deleted").is_err());
+
+        assert_eq!(SecretLifecycle::Draft.as_str(), "draft");
+        assert_eq!(SecretLifecycle::Active.as_str(), "active");
+        assert_eq!(SecretLifecycle::Rotating.as_str(), "rotating");
+        assert_eq!(SecretLifecycle::Deprecated.as_str(), "deprecated");
+        assert_eq!(SecretLifecycle::Disabled.as_str(), "disabled");
+        assert_eq!(SecretLifecycle::PendingDelete.as_str(), "pending_delete");
+        assert_eq!(SecretLifecycle::Destroyed.as_str(), "destroyed");
+
+        assert!(!SecretLifecycle::Draft.allows_normal_use());
+        assert!(SecretLifecycle::Active.allows_normal_use());
+        assert!(SecretLifecycle::Rotating.allows_normal_use());
+        assert!(!SecretLifecycle::Deprecated.allows_normal_use());
+        assert!(!SecretLifecycle::Disabled.allows_normal_use());
+        assert!(!SecretLifecycle::PendingDelete.allows_normal_use());
+        assert!(!SecretLifecycle::Destroyed.allows_normal_use());
     }
 }

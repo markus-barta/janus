@@ -152,7 +152,7 @@ where
             });
         };
 
-        if let Some((reason_code, detail)) = descriptor.metadata_use_denial() {
+        if let Some((reason_code, detail)) = descriptor.normal_use_denial() {
             self.audit.record(AuditEvent::new(
                 AuditAction::SecretUse,
                 AuditOutcome::Denied,
@@ -221,7 +221,7 @@ where
             });
         };
 
-        if let Some((reason_code, detail)) = descriptor.metadata_use_denial() {
+        if let Some((reason_code, detail)) = descriptor.normal_use_denial() {
             self.audit.record(AuditEvent::new(
                 AuditAction::PermitDeny,
                 AuditOutcome::Denied,
@@ -235,7 +235,7 @@ where
 
         let class = descriptor
             .classification
-            .expect("metadata_use_denial guarantees classification is present");
+            .expect("normal_use_denial guarantees classification is present");
         let mut issuer = PermitIssuer::new(&self.policy, &mut self.audit);
         issuer.issue_for_class_with_approval(req, principal, now, class, approval)
     }
@@ -321,7 +321,7 @@ where
             });
         };
 
-        if let Some((reason_code, detail)) = descriptor.metadata_use_denial() {
+        if let Some((reason_code, detail)) = descriptor.normal_use_denial() {
             self.audit.record(AuditEvent::new(
                 AuditAction::SecretUse,
                 AuditOutcome::Denied,
@@ -335,7 +335,7 @@ where
 
         let class = descriptor
             .classification
-            .expect("metadata_use_denial guarantees classification is present");
+            .expect("normal_use_denial guarantees classification is present");
         let class_policy = ClassPermitPolicy::for_class(class);
         if let PolicyDecision::Deny {
             reason_code,

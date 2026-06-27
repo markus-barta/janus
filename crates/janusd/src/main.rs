@@ -458,12 +458,12 @@ fn build_approval_grant(
     {
         anyhow::bail!("approval profile is not allowed by secret metadata");
     }
-    if let Some((reason_code, detail)) = descriptor.metadata_use_denial() {
+    if let Some((reason_code, detail)) = descriptor.normal_use_denial() {
         return Err(JanusError::policy_denied(reason_code, detail).into());
     }
     let class = descriptor
         .classification
-        .expect("metadata_use_denial guarantees classification is present");
+        .expect("normal_use_denial guarantees classification is present");
     let use_profile = UseProfile {
         id: profile.profile_id().clone(),
         secret_ref: profile.secret_ref().clone(),
@@ -1594,7 +1594,7 @@ mod tests {
     #[cfg(unix)]
     use janus_core::{
         AuditWrite, Destination, EgressMode, ExecutorRef, ManifestCatalog, ProjectId, Purpose,
-        SecretClass, SecretMeta, SecretRef, TrustLevel, UseProfile, UseRequest,
+        SecretClass, SecretLifecycle, SecretMeta, SecretRef, TrustLevel, UseProfile, UseRequest,
     };
     #[cfg(unix)]
     use janus_mock::MockStore;
@@ -1933,6 +1933,7 @@ mod tests {
             scope: ScopeRef::new("janus/dev").unwrap(),
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(SecretClass::BreakGlass),
+            lifecycle: SecretLifecycle::Active,
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],
@@ -2303,6 +2304,7 @@ mod tests {
                 scope: ScopeRef::new("janus/dev").unwrap(),
                 owner: Some(OwnerRef::new("infra").unwrap()),
                 classification: Some(SecretClass::Normal),
+                lifecycle: SecretLifecycle::Active,
                 required: true,
                 trust_level: TrustLevel::L1,
                 allowed_uses: vec![profile_id.clone()],
@@ -2539,6 +2541,7 @@ mod tests {
             scope: ScopeRef::new("janus/dev").unwrap(),
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(class),
+            lifecycle: SecretLifecycle::Active,
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],

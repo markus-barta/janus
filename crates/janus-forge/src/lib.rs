@@ -556,8 +556,8 @@ mod tests {
     use super::*;
     use janus_core::{
         AuditWrite, BlastRadius, ConsumerKind, Environment, HealthStatus, OwnerRef, ProfileId,
-        ProjectId, RotationSpec, SafeLabel, ScopeRef, SecretClass, SecretDescriptor, SecretMeta,
-        StoreCapabilities, TrustLevel,
+        ProjectId, RotationSpec, SafeLabel, ScopeRef, SecretClass, SecretDescriptor,
+        SecretLifecycle, SecretMeta, StoreCapabilities, TrustLevel,
     };
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -585,6 +585,7 @@ mod tests {
                 scope: ScopeRef::new("janus/dev").unwrap(),
                 owner: Some(OwnerRef::new("infra").unwrap()),
                 classification: Some(SecretClass::Normal),
+                lifecycle: SecretLifecycle::Active,
                 required: true,
                 trust_level: TrustLevel::L1,
                 allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],

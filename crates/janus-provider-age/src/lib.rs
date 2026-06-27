@@ -203,6 +203,7 @@ impl AgeSecretStore {
                 scope: ScopeRef::new(format!("{}/{}", project.as_str(), profile))?,
                 owner: None,
                 classification: None,
+                lifecycle: janus_core::SecretLifecycle::Active,
                 required,
                 trust_level: TrustLevel::L1,
                 allowed_uses: vec![ProfileId::new(format!("profile.{}", name.as_str()))?],
@@ -1153,7 +1154,7 @@ mod tests {
     use age::secrecy::ExposeSecret;
     use janus_core::{
         AuditWrite, ManifestCatalog, OwnerRef, Principal, PrincipalId, PrincipalKind, SecretClass,
-        SecretRef,
+        SecretLifecycle, SecretRef,
     };
     use tempfile::TempDir;
 
@@ -1186,6 +1187,7 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             scope: ScopeRef::new("janus/default").unwrap(),
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(SecretClass::Normal),
+            lifecycle: SecretLifecycle::Active,
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.CANARY").unwrap()],

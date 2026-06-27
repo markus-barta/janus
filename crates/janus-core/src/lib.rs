@@ -43,6 +43,7 @@ pub use rotation::{
     RotationSpec, RotationStrategy, ValidationProbe,
 };
 pub use store::{
-    HealthStatus, SecretClass, SecretDescriptor, SecretMeta, SecretStore, StoreCapabilities,
+    HealthStatus, SecretClass, SecretDescriptor, SecretLifecycle, SecretMeta, SecretStore,
+    StoreCapabilities,
 };
 pub use value::SecretValue;

@@ -6,7 +6,9 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::{JanusError, JanusResult, OwnerRef, SecretClass, SecretMeta, SecretName};
+use crate::{
+    JanusError, JanusResult, OwnerRef, SecretClass, SecretLifecycle, SecretMeta, SecretName,
+};
 
 /// Optional owner/class metadata patch.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -15,6 +17,8 @@ pub struct SecretMetadataPatch {
     pub owner: Option<OwnerRef>,
     /// Risk classification.
     pub classification: Option<SecretClass>,
+    /// Lifecycle state.
+    pub lifecycle: Option<SecretLifecycle>,
 }
 
 impl SecretMetadataPatch {
@@ -24,6 +28,9 @@ impl SecretMetadataPatch {
         }
         if let Some(classification) = self.classification {
             meta.classification = Some(classification);
+        }
+        if let Some(lifecycle) = self.lifecycle {
+            meta.lifecycle = lifecycle;
         }
     }
 }
@@ -55,6 +62,7 @@ impl SecretMetadataOverlay {
             let patch = SecretMetadataPatch::try_from(SecretMetadataPatchToml {
                 owner: entry.owner,
                 classification: entry.classification,
+                lifecycle: entry.lifecycle,
             })?;
             if secrets.insert(name.clone(), patch).is_some() {
                 return Err(JanusError::InvalidManifest {
@@ -110,6 +118,11 @@ impl TryFrom<SecretMetadataPatchToml> for SecretMetadataPatch {
                 .as_deref()
                 .map(SecretClass::parse)
                 .transpose()?,
+            lifecycle: value
+                .lifecycle
+                .as_deref()
+                .map(SecretLifecycle::parse)
+                .transpose()?,
         })
     }
 }
@@ -128,6 +141,7 @@ struct SecretMetadataOverlayToml {
 struct SecretMetadataPatchToml {
     owner: Option<String>,
     classification: Option<String>,
+    lifecycle: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -136,6 +150,7 @@ struct SecretMetadataEntryToml {
     name: String,
     owner: Option<String>,
     classification: Option<String>,
+    lifecycle: Option<String>,
 }
 
 #[cfg(test)]
@@ -153,6 +168,7 @@ mod tests {
             scope: ScopeRef::new("janus/dev").unwrap(),
             owner: None,
             classification: None,
+            lifecycle: SecretLifecycle::Active,
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
@@ -166,11 +182,13 @@ mod tests {
             [defaults]
             owner = "infra"
             classification = "normal"
+            lifecycle = "active"
 
             [[secrets]]
             name = "CANARY"
             owner = "security"
             classification = "high_value"
+            lifecycle = "disabled"
             "#,
         )
         .unwrap();
@@ -180,8 +198,10 @@ mod tests {
 
         assert_eq!(entries[0].owner.as_ref().unwrap().as_str(), "security");
         assert_eq!(entries[0].classification, Some(SecretClass::HighValue));
+        assert_eq!(entries[0].lifecycle, SecretLifecycle::Disabled);
         assert_eq!(entries[1].owner.as_ref().unwrap().as_str(), "infra");
         assert_eq!(entries[1].classification, Some(SecretClass::Normal));
+        assert_eq!(entries[1].lifecycle, SecretLifecycle::Active);
     }
 
     #[test]
@@ -221,5 +241,17 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(invalid, JanusError::InvalidIdentifier { .. }));
+
+        let invalid_lifecycle = SecretMetadataOverlay::parse_toml(
+            r#"
+            [defaults]
+            lifecycle = "deleted"
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            invalid_lifecycle,
+            JanusError::InvalidIdentifier { .. }
+        ));
     }
 }

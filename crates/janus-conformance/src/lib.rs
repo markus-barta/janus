@@ -135,7 +135,8 @@ mod tests {
         ApprovalGrant, AuditAction, BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef,
         ConsumerRegistry, Environment, ManifestCatalog, OwnerRef, ProjectId, ReloadMethod,
         RotationDecision, RotationPlanner, SafeLabel, ScopeRef, SecretBroker, SecretClass,
-        SecretMeta, SecretRef, Severity, StoreCapabilities, TrustLevel, ValidationProbe,
+        SecretLifecycle, SecretMeta, SecretRef, Severity, StoreCapabilities, TrustLevel,
+        ValidationProbe,
     };
     use janus_mock::MockStore;
 
@@ -150,6 +151,14 @@ mod tests {
         owner: Option<OwnerRef>,
         classification: Option<SecretClass>,
     ) -> (MockStore, StoreFixture) {
+        mock_store_with_metadata_and_lifecycle(owner, classification, SecretLifecycle::Active)
+    }
+
+    fn mock_store_with_metadata_and_lifecycle(
+        owner: Option<OwnerRef>,
+        classification: Option<SecretClass>,
+        lifecycle: SecretLifecycle,
+    ) -> (MockStore, StoreFixture) {
         let project = ProjectId::new("janus").unwrap();
         let canary = SecretName::new("CANARY").unwrap();
         let secret_ref = SecretRef::for_manifest_entry(&project, &canary);
@@ -160,6 +169,7 @@ mod tests {
             scope: ScopeRef::new("janus/dev").unwrap(),
             owner,
             classification,
+            lifecycle,
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
@@ -321,6 +331,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn broker_denies_normal_use_for_blocked_lifecycle_states() {
+        for (lifecycle, expected) in [
+            (SecretLifecycle::Draft, "denied_lifecycle_draft"),
+            (SecretLifecycle::Deprecated, "denied_lifecycle_deprecated"),
+            (SecretLifecycle::Disabled, "denied_lifecycle_disabled"),
+            (
+                SecretLifecycle::PendingDelete,
+                "denied_lifecycle_pending_delete",
+            ),
+            (SecretLifecycle::Destroyed, "denied_lifecycle_destroyed"),
+        ] {
+            let (store, _) = mock_store_with_metadata_and_lifecycle(
+                Some(OwnerRef::new("infra").unwrap()),
+                Some(SecretClass::Normal),
+                lifecycle,
+            );
+            let descriptor = store.list().await.unwrap().remove(0);
+            assert!(!descriptor.normal_use_allowed());
+            let principal_chain = principal("runner-a", "janus/dev");
+            let mut broker = SecretBroker::new(
+                store,
+                ProfilePolicy::new(vec![use_profile(
+                    descriptor.secret_ref.clone(),
+                    true,
+                    "runner-a",
+                    "deploy-api",
+                )]),
+                AuditWrite::accepting(),
+            );
+
+            let err = broker
+                .request_use(
+                    &use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                    &principal_chain,
+                    SystemTime::UNIX_EPOCH,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                JanusError::PolicyDenied { reason_code, .. } if reason_code == expected
+            ));
+            let (_store, _policy, audit) = broker.into_parts();
+            assert!(audit.events().iter().any(|event| {
+                event.action == AuditAction::PermitDeny
+                    && event.reason_code == expected
+                    && event.outcome == AuditOutcome::Denied
+                    && !event.value_returned
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn broker_allows_active_and_rotating_lifecycle_states() {
+        for lifecycle in [SecretLifecycle::Active, SecretLifecycle::Rotating] {
+            let (store, _) = mock_store_with_metadata_and_lifecycle(
+                Some(OwnerRef::new("infra").unwrap()),
+                Some(SecretClass::Normal),
+                lifecycle,
+            );
+            let descriptor = store.list().await.unwrap().remove(0);
+            assert!(descriptor.normal_use_allowed());
+            let principal_chain = principal("runner-a", "janus/dev");
+            let mut broker = SecretBroker::new(
+                store,
+                ProfilePolicy::new(vec![use_profile(
+                    descriptor.secret_ref.clone(),
+                    true,
+                    "runner-a",
+                    "deploy-api",
+                )]),
+                AuditWrite::accepting(),
+            );
+
+            broker
+                .request_use(
+                    &use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                    &principal_chain,
+                    SystemTime::UNIX_EPOCH,
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn broker_rechecks_metadata_before_permit_consumption() {
         let (complete_store, _) = mock_store();
         let descriptor = complete_store.list().await.unwrap().remove(0);
@@ -378,6 +474,76 @@ mod tests {
         assert!(audit.events().iter().any(|event| {
             event.action == AuditAction::SecretUse
                 && event.reason_code == "denied_missing_classification"
+                && event.outcome == AuditOutcome::Denied
+                && !event.value_returned
+        }));
+    }
+
+    #[tokio::test]
+    async fn broker_rechecks_lifecycle_before_permit_consumption() {
+        let (active_store, _) = mock_store_with_metadata_and_lifecycle(
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::Normal),
+            SecretLifecycle::Active,
+        );
+        let descriptor = active_store.list().await.unwrap().remove(0);
+        let principal_chain = principal("runner-a", "janus/dev");
+        let executor = ExecutorRef::new("runner-a").unwrap();
+        let destination = Destination::new("deploy-api").unwrap();
+        let profile = use_profile(
+            descriptor.secret_ref.clone(),
+            true,
+            "runner-a",
+            "deploy-api",
+        );
+        let mut issuing_broker = SecretBroker::new(
+            active_store,
+            ProfilePolicy::new(vec![profile.clone()]),
+            AuditWrite::accepting(),
+        );
+        let permit = issuing_broker
+            .request_use(
+                &use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                &principal_chain,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+
+        let (disabled_store, _) = mock_store_with_metadata_and_lifecycle(
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::Normal),
+            SecretLifecycle::Disabled,
+        );
+        let mut consuming_broker = SecretBroker::new(
+            disabled_store,
+            ProfilePolicy::new(vec![profile]),
+            AuditWrite::accepting(),
+        );
+        let err = match consuming_broker
+            .use_permit(
+                &permit,
+                &principal_chain,
+                &executor,
+                &destination,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            )
+            .await
+        {
+            Ok(_) => panic!("disabled lifecycle permit consumption should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "denied_lifecycle_disabled",
+                ..
+            }
+        ));
+        let (_store, _policy, audit) = consuming_broker.into_parts();
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::SecretUse
+                && event.reason_code == "denied_lifecycle_disabled"
                 && event.outcome == AuditOutcome::Denied
                 && !event.value_returned
         }));

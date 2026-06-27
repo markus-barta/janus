@@ -85,6 +85,7 @@ impl SecretspecStore {
                 scope: ScopeRef::new(format!("{}/{}", project.as_str(), profile))?,
                 owner: None,
                 classification: None,
+                lifecycle: janus_core::SecretLifecycle::Active,
                 required,
                 trust_level: TrustLevel::L1,
                 allowed_uses: vec![ProfileId::new(format!("profile.{}", name.as_str()))?],

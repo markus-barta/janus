@@ -107,7 +107,9 @@ pub struct SecretDescriptorView {
     pub metadata_state: &'static str,
     /// Safe risk hint derived from classification without exposing raw owner.
     pub risk_hint: &'static str,
-    /// Whether normal approved-use paths are allowed by metadata completeness.
+    /// Safe lifecycle state.
+    pub lifecycle_state: &'static str,
+    /// Whether normal approved-use paths are allowed by metadata and lifecycle.
     pub normal_use_allowed: bool,
     /// Invariant marker.
     pub value_returned: bool,
@@ -418,7 +420,8 @@ fn descriptor_view(descriptor: SecretDescriptor) -> SecretDescriptorView {
             .collect(),
         metadata_state: descriptor.metadata_state(),
         risk_hint: descriptor.risk_hint(),
-        normal_use_allowed: descriptor.metadata_complete(),
+        lifecycle_state: descriptor.lifecycle.as_str(),
+        normal_use_allowed: descriptor.normal_use_allowed(),
         value_returned: false,
     }
 }
@@ -631,7 +634,8 @@ mod tests {
         AuditAction, AuditOutcome, AuditWrite, Destination, EgressMode, ExecutorRef, JanusError,
         ManifestCatalog, OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind,
         ProfileId, ProfilePolicy, ProjectId, Purpose, SafeLabel, ScopeRef, SecretBroker,
-        SecretClass, SecretMeta, SecretName, SecretRef, Severity, TrustLevel, UseProfile,
+        SecretClass, SecretLifecycle, SecretMeta, SecretName, SecretRef, Severity, TrustLevel,
+        UseProfile,
     };
     use janus_mock::MockStore;
     use serde_json::json;
@@ -693,6 +697,7 @@ mod tests {
             profile_enabled,
             Some(OwnerRef::new("infra").unwrap()),
             Some(SecretClass::Normal),
+            SecretLifecycle::Active,
             permits,
         )
     }
@@ -701,13 +706,22 @@ mod tests {
         owner: Option<OwnerRef>,
         classification: Option<SecretClass>,
     ) -> (WardenRuntime<MockStore, AuditWrite>, SecretRef) {
-        runtime_with_metadata_and_permits(true, owner, classification, NoopPermitStore)
+        runtime_with_metadata_and_lifecycle(owner, classification, SecretLifecycle::Active)
+    }
+
+    fn runtime_with_metadata_and_lifecycle(
+        owner: Option<OwnerRef>,
+        classification: Option<SecretClass>,
+        lifecycle: SecretLifecycle,
+    ) -> (WardenRuntime<MockStore, AuditWrite>, SecretRef) {
+        runtime_with_metadata_and_permits(true, owner, classification, lifecycle, NoopPermitStore)
     }
 
     fn runtime_with_metadata_and_permits<P>(
         profile_enabled: bool,
         owner: Option<OwnerRef>,
         classification: Option<SecretClass>,
+        lifecycle: SecretLifecycle,
         permits: P,
     ) -> (WardenRuntime<MockStore, AuditWrite, P>, SecretRef)
     where
@@ -723,6 +737,7 @@ mod tests {
             scope: ScopeRef::new("janus/dev").unwrap(),
             owner,
             classification,
+            lifecycle,
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
@@ -879,6 +894,7 @@ mod tests {
         assert_eq!(listed.secrets[0].label, "Canary token");
         assert_eq!(listed.secrets[0].metadata_state, "complete");
         assert_eq!(listed.secrets[0].risk_hint, "standard");
+        assert_eq!(listed.secrets[0].lifecycle_state, "active");
         assert!(listed.secrets[0].normal_use_allowed);
         assert!(!listed.value_returned);
 
@@ -889,6 +905,7 @@ mod tests {
         assert_eq!(described.secret.secret_ref, secret_ref.as_str());
         assert_eq!(described.secret.metadata_state, "complete");
         assert_eq!(described.secret.risk_hint, "standard");
+        assert_eq!(described.secret.lifecycle_state, "active");
         assert!(described.secret.normal_use_allowed);
         assert!(!described.value_returned);
 
@@ -939,6 +956,7 @@ mod tests {
             assert_eq!(listed.secrets[0].label, "Canary token");
             assert_eq!(listed.secrets[0].metadata_state, "incomplete");
             assert_eq!(listed.secrets[0].risk_hint, expected_risk_hint);
+            assert_eq!(listed.secrets[0].lifecycle_state, "active");
             assert!(!listed.secrets[0].normal_use_allowed);
             assert!(!listed.value_returned);
 
@@ -948,6 +966,7 @@ mod tests {
                 .unwrap();
             assert_eq!(described.secret.metadata_state, "incomplete");
             assert_eq!(described.secret.risk_hint, expected_risk_hint);
+            assert_eq!(described.secret.lifecycle_state, "active");
             assert!(!described.secret.normal_use_allowed);
             assert!(!described.value_returned);
 
@@ -986,6 +1005,83 @@ mod tests {
             let rendered = serde_json::to_string(&json!({
                 "listed": listed,
                 "described": described,
+                "denied": denied,
+            }))
+            .unwrap();
+            for forbidden in [
+                "expected-canary",
+                "CANARY",
+                "infra",
+                "\"owner\"",
+                "\"classification\"",
+                "\"normal\"",
+                "backend_path",
+            ] {
+                assert!(!rendered.contains(forbidden), "{forbidden} leaked");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_lifecycle_is_visible_without_value_exposure() {
+        let cases = [
+            (SecretLifecycle::Draft, "draft", "denied_lifecycle_draft"),
+            (
+                SecretLifecycle::Deprecated,
+                "deprecated",
+                "denied_lifecycle_deprecated",
+            ),
+            (
+                SecretLifecycle::Disabled,
+                "disabled",
+                "denied_lifecycle_disabled",
+            ),
+            (
+                SecretLifecycle::PendingDelete,
+                "pending_delete",
+                "denied_lifecycle_pending_delete",
+            ),
+            (
+                SecretLifecycle::Destroyed,
+                "destroyed",
+                "denied_lifecycle_destroyed",
+            ),
+        ];
+
+        for (lifecycle, expected_state, expected_reason) in cases {
+            let (mut runtime, secret_ref) = runtime_with_metadata_and_lifecycle(
+                Some(OwnerRef::new("infra").unwrap()),
+                Some(SecretClass::Normal),
+                lifecycle,
+            );
+            let principal = principal();
+
+            let listed = runtime.list_secrets(&principal).await.unwrap();
+            assert_eq!(listed.secrets[0].metadata_state, "complete");
+            assert_eq!(listed.secrets[0].risk_hint, "standard");
+            assert_eq!(listed.secrets[0].lifecycle_state, expected_state);
+            assert!(!listed.secrets[0].normal_use_allowed);
+            assert!(!listed.value_returned);
+
+            let denied = runtime
+                .call_tool_json(
+                    "request_use",
+                    json!({
+                        "secret_ref": secret_ref.as_str(),
+                        "profile_id": "profile.canary",
+                        "purpose": "deploy canary"
+                    }),
+                    &principal,
+                    SystemTime::UNIX_EPOCH,
+                )
+                .await;
+            assert!(!denied.ok);
+            assert!(denied.result.is_none());
+            assert!(!denied.value_returned);
+            assert_eq!(denied.error.as_ref().unwrap().reason_code, expected_reason);
+
+            let rendered = serde_json::to_string(&json!({
+                "listed": listed,
                 "denied": denied,
             }))
             .unwrap();

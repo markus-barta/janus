@@ -662,8 +662,8 @@ mod tests {
         AuditAction, AuditOutcome, AuditWrite, BlastRadius, ConsumerDescriptor, ConsumerKind,
         ConsumerRef, EgressMode, Environment, JanusError, ManifestCatalog, OwnerRef, Principal,
         PrincipalId, PrincipalKind, ProfilePolicy, ProjectId, Purpose, ReloadMethod, SafeLabel,
-        ScopeRef, SecretClass, SecretMeta, SecretName, TrustLevel, UseProfile, UseRequest,
-        ValidationProbe,
+        ScopeRef, SecretClass, SecretLifecycle, SecretMeta, SecretName, TrustLevel, UseProfile,
+        UseRequest, ValidationProbe,
     };
     use janus_mock::MockStore;
 
@@ -701,6 +701,7 @@ mod tests {
             scope: ScopeRef::new("janus/dev").unwrap(),
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(SecretClass::Normal),
+            lifecycle: SecretLifecycle::Active,
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],
