@@ -55,7 +55,8 @@ janus/
 │   └── janusd/              # the daemon that supersedes the envelope's serving
 ├── go-envelope/             # the shipped Go REST envelope (frozen, transitional)
 ├── docs/
-│   └── extraction-cutover.md  # how to repoint the live nixcfg deploy at a published image
+│   ├── destroy-lifecycle-runbook.md  # metadata-only destroy operator flow
+│   └── extraction-cutover.md         # how to repoint the live nixcfg deploy at a published image
 ├── Cargo.toml               # Rust workspace
 └── .github/workflows/       # rust CI + go-envelope build+sign+SBOM+provenance
 ```
