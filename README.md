@@ -135,7 +135,24 @@ export JANUS_RUN_EXECUTOR=janus-run@csb1
 export JANUS_WARDEN_SCOPE=janus/prod
 export JANUS_RUN_SCOPE=janus/prod
 export JANUS_WARDEN_DESTINATION=deploy-api
+export JANUS_WARDEN_METADATA_FILE=/etc/janus/metadata.toml
+export JANUS_AGE_METADATA_FILE=/etc/janus/metadata.toml
 export JANUS_RUN_PROFILE_MANIFEST=/etc/janus/managed-commands.toml
+```
+
+Owner/class metadata is a Janus overlay loaded beside the secretspec allowlist.
+Without it, list/describe stay value-free but normal approved-use paths fail
+closed until every manifest entry has owner and class metadata:
+
+```toml
+[defaults]
+owner = "platform"
+classification = "normal"
+
+[[secrets]]
+name = "DEPLOY_TOKEN"
+owner = "release"
+classification = "high_value"
 ```
 
 The managed command profile owns executor, destination, secret ref, binary, and

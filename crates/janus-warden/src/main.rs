@@ -15,8 +15,8 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use janus_core::{
     AuditWrite, Destination, EgressMode, ExecutorRef, Principal, PrincipalChain, PrincipalId,
-    PrincipalKind, ProfilePolicy, ScopeRef, SecretBroker, SecretDescriptor, SecretStore,
-    TrustLevel, UseProfile,
+    PrincipalKind, ProfilePolicy, ScopeRef, SecretBroker, SecretDescriptor, SecretMetadataOverlay,
+    SecretStore, TrustLevel, UseProfile,
 };
 use janus_local::{FilePermitRegistry, NoopPermitStore, PermitStore};
 use janus_provider_age::AgeSecretStore;
@@ -231,7 +231,12 @@ fn load_secretspec_store() -> Result<SecretspecStore> {
     let manifest = required_env("JANUS_WARDEN_SECRETSPEC_FILE")?;
     let profile = env::var("JANUS_WARDEN_SECRETSPEC_PROFILE").unwrap_or_else(|_| "default".into());
     let provider_uri = required_env("JANUS_WARDEN_SECRETSPEC_PROVIDER_URI")?;
-    SecretspecStore::load_from(manifest, profile, provider_uri)
+    let metadata = metadata_overlay_from_env(&[
+        "JANUS_WARDEN_SECRETSPEC_METADATA_FILE",
+        "JANUS_WARDEN_METADATA_FILE",
+        "JANUS_METADATA_FILE",
+    ])?;
+    SecretspecStore::load_from_with_metadata(manifest, profile, provider_uri, metadata.as_ref())
         .context("failed to load JANUS_WARDEN_SECRETSPEC_* backend")
 }
 
@@ -246,14 +251,31 @@ fn load_age_store() -> Result<AgeSecretStore> {
         env::var("JANUS_WARDEN_AGE_STORE_DIR").unwrap_or_else(|_| "/var/lib/janus/secrets".into());
     let identity_files = age_identity_files_from_env()?;
     let recipients = age_recipients_from_env()?;
-    AgeSecretStore::load_from_secretspec_manifest(
+    let metadata = metadata_overlay_from_env(&[
+        "JANUS_WARDEN_AGE_METADATA_FILE",
+        "JANUS_WARDEN_METADATA_FILE",
+        "JANUS_METADATA_FILE",
+    ])?;
+    AgeSecretStore::load_from_secretspec_manifest_with_metadata(
         manifest,
         profile,
         store_dir,
         identity_files,
         recipients,
+        metadata.as_ref(),
     )
     .context("failed to load JANUS_WARDEN_BACKEND=age backend")
+}
+
+fn metadata_overlay_from_env(keys: &[&'static str]) -> Result<Option<SecretMetadataOverlay>> {
+    for key in keys {
+        if let Ok(path) = env::var(key) {
+            return SecretMetadataOverlay::load_toml_file(path)
+                .map(Some)
+                .with_context(|| format!("failed to load {key}"));
+        }
+    }
+    Ok(None)
 }
 
 fn policy_from_env(descriptors: &[SecretDescriptor]) -> Result<ProfilePolicy> {

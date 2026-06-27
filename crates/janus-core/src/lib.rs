@@ -12,6 +12,7 @@ pub mod broker;
 pub mod consumer;
 pub mod error;
 pub mod manifest;
+pub mod metadata;
 pub mod policy;
 pub mod principal;
 pub mod refs;
@@ -27,6 +28,7 @@ pub use consumer::{
 };
 pub use error::{JanusError, JanusResult};
 pub use manifest::ManifestCatalog;
+pub use metadata::{SecretMetadataOverlay, SecretMetadataPatch};
 pub use policy::{
     EgressMode, PermitId, PermitIssuer, PolicyDecision, ProfileId, ProfilePolicy, Purpose,
     TrustLevel, UsePermit, UsePermitSnapshot, UseProfile, UseRequest,

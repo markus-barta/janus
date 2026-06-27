@@ -14,7 +14,9 @@ workspace = true
 [dependencies]
 async-trait = "0.1"
 hex = "0.4"
+serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
+toml = "0.8"
 zeroize = "1"
 
 [dev-dependencies]

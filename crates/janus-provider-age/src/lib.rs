@@ -15,9 +15,9 @@ use async_trait::async_trait;
 use fs2::FileExt;
 use janus_core::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, HealthStatus, JanusError, JanusResult,
-    ManifestCatalog, OwnerRef, PrincipalChain, ProfileId, ProjectId, RotationOutcome, RotationSpec,
-    RotationStrategy, SafeLabel, ScopeRef, SecretClass, SecretDescriptor, SecretMeta, SecretName,
-    SecretRef, SecretStore, SecretValue, Severity, StoreCapabilities, TrustLevel,
+    ManifestCatalog, PrincipalChain, ProfileId, ProjectId, RotationOutcome, RotationSpec,
+    RotationStrategy, SafeLabel, ScopeRef, SecretDescriptor, SecretMeta, SecretMetadataOverlay,
+    SecretName, SecretRef, SecretStore, SecretValue, Severity, StoreCapabilities, TrustLevel,
 };
 use secretspec as secretspec_crate;
 use zeroize::Zeroize;
@@ -140,6 +140,25 @@ impl AgeSecretStore {
         identity_files: Vec<PathBuf>,
         recipients: Vec<String>,
     ) -> JanusResult<Self> {
+        Self::load_from_secretspec_manifest_with_metadata(
+            config_path,
+            profile,
+            root_dir,
+            identity_files,
+            recipients,
+            None,
+        )
+    }
+
+    /// Load a `secretspec.toml` allowlist with an optional Janus metadata overlay.
+    pub fn load_from_secretspec_manifest_with_metadata(
+        config_path: impl AsRef<Path>,
+        profile: impl Into<String>,
+        root_dir: impl Into<PathBuf>,
+        identity_files: Vec<PathBuf>,
+        recipients: Vec<String>,
+        metadata: Option<&SecretMetadataOverlay>,
+    ) -> JanusResult<Self> {
         let profile = profile.into();
         let config = secretspec_crate::Config::try_from(config_path.as_ref()).map_err(|err| {
             JanusError::StoreUnavailable {
@@ -182,16 +201,15 @@ impl AgeSecretStore {
                         .unwrap_or_else(|| "Manifest-declared secret".to_string()),
                 )?,
                 scope: ScopeRef::new(format!("{}/{}", project.as_str(), profile))?,
-                owner: Some(OwnerRef::new(format!(
-                    "secretspec:{}/{}",
-                    project.as_str(),
-                    profile
-                ))?),
-                classification: Some(SecretClass::Normal),
+                owner: None,
+                classification: None,
                 required,
                 trust_level: TrustLevel::L1,
                 allowed_uses: vec![ProfileId::new(format!("profile.{}", name.as_str()))?],
             });
+        }
+        if let Some(metadata) = metadata {
+            metadata.apply_to_entries(&mut entries)?;
         }
 
         Self::from_catalog(
@@ -1134,7 +1152,8 @@ mod tests {
     use super::*;
     use age::secrecy::ExposeSecret;
     use janus_core::{
-        AuditWrite, ManifestCatalog, Principal, PrincipalId, PrincipalKind, SecretRef,
+        AuditWrite, ManifestCatalog, OwnerRef, Principal, PrincipalId, PrincipalKind, SecretClass,
+        SecretRef,
     };
     use tempfile::TempDir;
 
@@ -1209,6 +1228,17 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             fixture.catalog.clone(),
             vec![identity_file],
             fixture.recipients.clone(),
+        )
+        .unwrap()
+    }
+
+    fn metadata_overlay() -> SecretMetadataOverlay {
+        SecretMetadataOverlay::parse_toml(
+            r#"
+            [defaults]
+            owner = "infra"
+            classification = "normal"
+            "#,
         )
         .unwrap()
     }
@@ -1817,12 +1847,26 @@ CANARY = { description = "Canary token", required = true }
 "#,
         )
         .unwrap();
-        let mut store = AgeSecretStore::load_from_secretspec_manifest(
+        let incomplete = AgeSecretStore::load_from_secretspec_manifest(
             &manifest,
             "default",
             fixture.store_dir.clone(),
             vec![fixture.identity_file.clone()],
             fixture.recipients.clone(),
+        )
+        .unwrap();
+        let incomplete_listed = incomplete.list().await.unwrap();
+        assert_eq!(incomplete_listed.len(), 1);
+        assert!(!incomplete_listed[0].metadata_complete());
+
+        let metadata = metadata_overlay();
+        let mut store = AgeSecretStore::load_from_secretspec_manifest_with_metadata(
+            &manifest,
+            "default",
+            fixture.store_dir.clone(),
+            vec![fixture.identity_file.clone()],
+            fixture.recipients.clone(),
+            Some(&metadata),
         )
         .unwrap();
         store
@@ -1837,6 +1881,7 @@ CANARY = { description = "Canary token", required = true }
         assert_eq!(listed.len(), 1);
         assert!(listed[0].present);
         assert_eq!(listed[0].label.as_str(), "Canary token");
+        assert!(listed[0].metadata_complete());
         assert!(!format!("{listed:?}").contains("manifest-canary"));
     }
 

@@ -1234,8 +1234,10 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "hex",
+ "serde",
  "sha2",
  "tokio",
+ "toml 0.8.23",
  "zeroize",
 ]
 

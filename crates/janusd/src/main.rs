@@ -20,7 +20,8 @@ use janus_core::{
     AuditSink, AuditWrite, BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef,
     ConsumerRegistry, Destination, Environment, ExecutorRef, JanusError, OwnerRef, Principal,
     PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, ReloadMethod, SafeLabel,
-    ScopeRef, SecretBroker, SecretName, SecretRef, SecretStore, UsePermit, ValidationProbe,
+    ScopeRef, SecretBroker, SecretMetadataOverlay, SecretName, SecretRef, SecretStore, UsePermit,
+    ValidationProbe,
 };
 use janus_executor::{
     ApprovedUseExecutor, ManagedCommandProfile, ManagedCommandProfileSpec, ManagedCommandRequest,
@@ -926,14 +927,31 @@ fn load_age_store_from_env() -> Result<AgeSecretStore> {
         .unwrap_or_else(|| "/var/lib/janus/secrets".to_string());
     let identity_files = age_identity_files_from_env()?;
     let recipients = age_recipients_from_env()?;
-    AgeSecretStore::load_from_secretspec_manifest(
+    let metadata = metadata_overlay_from_env(&[
+        "JANUS_AGE_METADATA_FILE",
+        "JANUS_WARDEN_AGE_METADATA_FILE",
+        "JANUS_METADATA_FILE",
+    ])?;
+    AgeSecretStore::load_from_secretspec_manifest_with_metadata(
         manifest,
         profile,
         store_dir,
         identity_files,
         recipients,
+        metadata.as_ref(),
     )
     .context("failed to load age backend for janusd forge")
+}
+
+fn metadata_overlay_from_env(keys: &[&'static str]) -> Result<Option<SecretMetadataOverlay>> {
+    for key in keys {
+        if let Ok(path) = env::var(key) {
+            return SecretMetadataOverlay::load_toml_file(path)
+                .map(Some)
+                .with_context(|| format!("failed to load {key}"));
+        }
+    }
+    Ok(None)
 }
 
 fn age_identity_files_from_env() -> Result<Vec<PathBuf>> {

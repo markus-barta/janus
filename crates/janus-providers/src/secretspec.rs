@@ -4,10 +4,10 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use janus_core::{
-    HealthStatus, JanusError, JanusResult, ManifestCatalog, OwnerRef, ProfileId, ProjectId,
-    RotationOutcome, RotationSpec, RotationStrategy, SafeLabel, ScopeRef, SecretClass,
-    SecretDescriptor, SecretMeta, SecretName, SecretRef, SecretStore, SecretValue,
-    StoreCapabilities, TrustLevel,
+    HealthStatus, JanusError, JanusResult, ManifestCatalog, ProfileId, ProjectId, RotationOutcome,
+    RotationSpec, RotationStrategy, SafeLabel, ScopeRef, SecretDescriptor, SecretMeta,
+    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretValue, StoreCapabilities,
+    TrustLevel,
 };
 use secrecy::{ExposeSecret, SecretString};
 use secretspec as secretspec_crate;
@@ -30,6 +30,16 @@ impl SecretspecStore {
         config_path: impl AsRef<Path>,
         profile: impl Into<String>,
         provider_uri: impl Into<String>,
+    ) -> JanusResult<Self> {
+        Self::load_from_with_metadata(config_path, profile, provider_uri, None)
+    }
+
+    /// Load `secretspec.toml` with an optional Janus metadata overlay.
+    pub fn load_from_with_metadata(
+        config_path: impl AsRef<Path>,
+        profile: impl Into<String>,
+        provider_uri: impl Into<String>,
+        metadata: Option<&SecretMetadataOverlay>,
     ) -> JanusResult<Self> {
         let profile = profile.into();
         let config = secretspec_crate::Config::try_from(config_path.as_ref()).map_err(|err| {
@@ -73,16 +83,15 @@ impl SecretspecStore {
                         .unwrap_or_else(|| "Manifest-declared secret".to_string()),
                 )?,
                 scope: ScopeRef::new(format!("{}/{}", project.as_str(), profile))?,
-                owner: Some(OwnerRef::new(format!(
-                    "secretspec:{}/{}",
-                    project.as_str(),
-                    profile
-                ))?),
-                classification: Some(SecretClass::Normal),
+                owner: None,
+                classification: None,
                 required,
                 trust_level: TrustLevel::L1,
                 allowed_uses: vec![ProfileId::new(format!("profile.{}", name.as_str()))?],
             });
+        }
+        if let Some(metadata) = metadata {
+            metadata.apply_to_entries(&mut entries)?;
         }
 
         let provider_uri = provider_uri.into();
@@ -265,13 +274,26 @@ CANARY = { description = "Canary token", required = true }
         }
     }
 
+    fn metadata_overlay() -> SecretMetadataOverlay {
+        SecretMetadataOverlay::parse_toml(
+            r#"
+            [defaults]
+            owner = "infra"
+            classification = "normal"
+            "#,
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn dotenv_secretspec_store_reads_manifest_declared_canary() {
         let fixture = dotenv_fixture();
-        let mut store = SecretspecStore::load_from(
+        let metadata = metadata_overlay();
+        let mut store = SecretspecStore::load_from_with_metadata(
             &fixture.manifest,
             "default",
             format!("dotenv:{}", fixture.env_file.display()),
+            Some(&metadata),
         )
         .unwrap();
         let listed = store.list().await.unwrap();
@@ -307,12 +329,31 @@ CANARY = { description = "Canary token", required = true }
     }
 
     #[tokio::test]
-    async fn dotenv_tracer_points_1_to_6_work_through_broker() {
+    async fn secretspec_store_without_metadata_lists_incomplete_descriptors() {
         let fixture = dotenv_fixture();
         let store = SecretspecStore::load_from(
             &fixture.manifest,
             "default",
             format!("dotenv:{}", fixture.env_file.display()),
+        )
+        .unwrap();
+        let listed = store.list().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].present);
+        assert!(!listed[0].metadata_complete());
+        assert_eq!(listed[0].metadata_state(), "incomplete");
+        assert_eq!(listed[0].risk_hint(), "blocked_metadata_incomplete");
+    }
+
+    #[tokio::test]
+    async fn dotenv_tracer_points_1_to_6_work_through_broker() {
+        let fixture = dotenv_fixture();
+        let metadata = metadata_overlay();
+        let store = SecretspecStore::load_from_with_metadata(
+            &fixture.manifest,
+            "default",
+            format!("dotenv:{}", fixture.env_file.display()),
+            Some(&metadata),
         )
         .unwrap();
         let descriptor = store.list().await.unwrap().remove(0);

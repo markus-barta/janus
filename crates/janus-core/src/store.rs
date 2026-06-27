@@ -53,6 +53,19 @@ pub enum SecretClass {
 }
 
 impl SecretClass {
+    /// Parse stable manifest/API text for the class.
+    pub fn parse(value: &str) -> JanusResult<Self> {
+        match value {
+            "low" => Ok(Self::Low),
+            "normal" => Ok(Self::Normal),
+            "high_value" => Ok(Self::HighValue),
+            "break_glass" => Ok(Self::BreakGlass),
+            _ => Err(crate::JanusError::InvalidIdentifier {
+                kind: "secret_class",
+            }),
+        }
+    }
+
     /// Stable manifest/API text for the class. This is internal/admin-facing,
     /// not the default model-facing shape.
     pub fn as_str(self) -> &'static str {
@@ -221,6 +234,18 @@ mod tests {
 
     #[test]
     fn secret_classes_have_stable_text_and_safe_risk_hints() {
+        assert_eq!(SecretClass::parse("low").unwrap(), SecretClass::Low);
+        assert_eq!(SecretClass::parse("normal").unwrap(), SecretClass::Normal);
+        assert_eq!(
+            SecretClass::parse("high_value").unwrap(),
+            SecretClass::HighValue
+        );
+        assert_eq!(
+            SecretClass::parse("break_glass").unwrap(),
+            SecretClass::BreakGlass
+        );
+        assert!(SecretClass::parse("critical").is_err());
+
         assert_eq!(SecretClass::Low.as_str(), "low");
         assert_eq!(SecretClass::Normal.as_str(), "normal");
         assert_eq!(SecretClass::HighValue.as_str(), "high_value");
