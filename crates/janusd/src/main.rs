@@ -12,15 +12,15 @@ use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use janus_core::{
-    ApprovalGrant, AuditSink, AuditWrite, BlastRadius, ConsumerDescriptor, ConsumerKind,
-    ConsumerRef, ConsumerRegistry, Destination, EgressMode, Environment, ExecutorRef, JanusError,
-    OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy,
-    Purpose, ReloadMethod, SafeLabel, ScopeRef, SecretBroker, SecretDescriptor,
+    ApprovalGrant, AuditSink, AuditWrite, BlastRadius, ClassPermitPolicy, ConsumerDescriptor,
+    ConsumerKind, ConsumerRef, ConsumerRegistry, Destination, EgressMode, Environment, ExecutorRef,
+    JanusError, OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId,
+    ProfilePolicy, Purpose, ReloadMethod, SafeLabel, ScopeRef, SecretBroker, SecretDescriptor,
     SecretMetadataOverlay, SecretName, SecretRef, SecretStore, TrustLevel, UsePermit, UseProfile,
     UseRequest, ValidationProbe,
 };
@@ -34,7 +34,7 @@ use janus_forge::{
 };
 use janus_local::{
     ApprovalRegistry as SharedApprovalRegistry, FileApprovalRegistry, FilePermitRegistry,
-    PermitRegistry as SharedPermitRegistry,
+    PermitRegistry as SharedPermitRegistry, PermitStore as SharedPermitStore,
 };
 use janus_provider_age::AgeSecretStore;
 use serde::Deserialize;
@@ -68,6 +68,7 @@ enum Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ApproveCommand {
     Issue(ApproveIssueConfig),
+    Permit(ApprovePermitConfig),
     List,
     Revoke(ApproveRevokeConfig),
 }
@@ -102,8 +103,27 @@ struct ApproveIssueConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct ApprovePermitConfig {
+    approval: ApprovalToken,
+    permit_ttl: Option<Duration>,
+    revoke_approval: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ApproveRevokeConfig {
     approval: ApprovalToken,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ApprovedPermitIssueOutcome {
+    permit_id: String,
+    approval_id: String,
+    secret_ref: String,
+    profile_id: String,
+    executor: String,
+    destination: String,
+    approval_revoked: bool,
+    value_returned: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -263,6 +283,21 @@ async fn run_approve(command: ApproveCommand) -> Result<()> {
             SharedApprovalRegistry::store(&registry, &approval)?;
             emit_approve_issue_outcome(&approval);
         }
+        ApproveCommand::Permit(config) => {
+            let permits = FilePermitRegistry::new(run_permit_registry_dir()?);
+            let store = load_age_store_from_env()?;
+            let principal = run_principal_from_env()?;
+            let outcome = issue_approved_permit_with(
+                &config,
+                &registry,
+                &permits,
+                store,
+                &principal,
+                SystemTime::now(),
+            )
+            .await?;
+            emit_approve_permit_outcome(&outcome);
+        }
         ApproveCommand::List => {
             let approvals = SharedApprovalRegistry::list(&registry)?;
             emit_approve_list_outcome(&approvals);
@@ -273,6 +308,129 @@ async fn run_approve(command: ApproveCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn issue_approved_permit_with<S, R, P>(
+    config: &ApprovePermitConfig,
+    approvals: &R,
+    permits: &P,
+    store: S,
+    principal: &PrincipalChain,
+    now: SystemTime,
+) -> Result<ApprovedPermitIssueOutcome>
+where
+    S: SecretStore,
+    R: SharedApprovalRegistry,
+    P: SharedPermitStore,
+{
+    let approval = approvals.get(config.approval.as_str())?;
+    let ttl = permit_ttl_for_approval(&approval, config.permit_ttl, now)?;
+    let profile = use_profile_for_approval(&approval, ttl);
+    let request = use_request_for_approval(&approval);
+    let mut broker = SecretBroker::new(
+        store,
+        ProfilePolicy::new(vec![profile]),
+        AuditWrite::accepting(),
+    );
+    let permit = broker
+        .request_use_with_approval(&request, principal, now, Some(&approval))
+        .await?;
+    if permit.approval().is_none() {
+        return Err(JanusError::policy_denied(
+            "approval_not_required",
+            "stored approval did not bind to this permit path",
+        )
+        .into());
+    }
+    permits.store(&permit)?;
+    if config.revoke_approval {
+        approvals.revoke(config.approval.as_str())?;
+    }
+    Ok(ApprovedPermitIssueOutcome {
+        permit_id: permit.id().as_str().to_string(),
+        approval_id: approval.id().as_str().to_string(),
+        secret_ref: permit.secret_ref().as_str().to_string(),
+        profile_id: permit.profile_id().as_str().to_string(),
+        executor: permit.executor().as_str().to_string(),
+        destination: permit.destination().as_str().to_string(),
+        approval_revoked: config.revoke_approval,
+        value_returned: false,
+    })
+}
+
+fn permit_ttl_for_approval(
+    approval: &ApprovalGrant,
+    requested_ttl: Option<Duration>,
+    now: SystemTime,
+) -> Result<Duration> {
+    let expires_at = approval_expires_at(approval)?;
+    let remaining = expires_at.duration_since(now).map_err(|_| {
+        JanusError::approval_invalid("approval_expired", "approval grant is expired")
+    })?;
+    if remaining.is_zero() {
+        return Err(
+            JanusError::approval_invalid("approval_expired", "approval grant is expired").into(),
+        );
+    }
+    let class_policy = ClassPermitPolicy::for_class(approval.scope().class);
+    let class_limit = class_policy.max_ttl();
+    let default_ttl = class_limit
+        .map(|max_ttl| remaining.min(max_ttl))
+        .unwrap_or(remaining);
+    let ttl = requested_ttl.unwrap_or(default_ttl);
+    if ttl.is_zero() {
+        anyhow::bail!("permit ttl must be greater than zero");
+    }
+    if ttl > remaining {
+        anyhow::bail!("permit ttl exceeds approval remaining lifetime");
+    }
+    if let Some(max_ttl) = class_limit {
+        if ttl > max_ttl {
+            anyhow::bail!("permit ttl exceeds secret class limit");
+        }
+    }
+    Ok(ttl)
+}
+
+fn approval_expires_at(approval: &ApprovalGrant) -> Result<SystemTime> {
+    let snapshot = approval.snapshot();
+    if snapshot.expires_at_subsec_nanos >= 1_000_000_000 {
+        return Err(JanusError::approval_invalid(
+            "denied_malformed_approval",
+            "approval registry entry is malformed",
+        )
+        .into());
+    }
+    Ok(UNIX_EPOCH
+        + Duration::new(
+            snapshot.expires_at_unix_secs,
+            snapshot.expires_at_subsec_nanos,
+        ))
+}
+
+fn use_profile_for_approval(approval: &ApprovalGrant, ttl: Duration) -> UseProfile {
+    let scope = approval.scope();
+    UseProfile {
+        id: scope.profile_id.clone(),
+        secret_ref: scope.secret_ref.clone(),
+        executor: scope.executor.clone(),
+        destination: scope.destination.clone(),
+        egress: scope.egress,
+        trust_level: TrustLevel::L2,
+        ttl,
+        single_use: true,
+        enabled: true,
+    }
+}
+
+fn use_request_for_approval(approval: &ApprovalGrant) -> UseRequest {
+    let scope = approval.scope();
+    UseRequest {
+        secret_ref: scope.secret_ref.clone(),
+        profile_id: scope.profile_id.clone(),
+        destination: scope.destination.clone(),
+        purpose: scope.purpose.clone(),
+    }
 }
 
 fn build_approval_grant(
@@ -342,6 +500,20 @@ fn emit_approve_issue_outcome(approval: &ApprovalGrant) {
         snapshot.class,
         snapshot.egress,
         snapshot.expires_at_unix_secs
+    );
+}
+
+fn emit_approve_permit_outcome(outcome: &ApprovedPermitIssueOutcome) {
+    println!(
+        "janusd approve permit ok permit_id={} approval_id={} secret_ref={} profile_id={} executor={} destination={} approval_revoked={} value_returned={}",
+        outcome.permit_id,
+        outcome.approval_id,
+        outcome.secret_ref,
+        outcome.profile_id,
+        outcome.executor,
+        outcome.destination,
+        outcome.approval_revoked,
+        outcome.value_returned
     );
 }
 
@@ -897,6 +1069,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
                 .map(ApproveCommand::Issue)
                 .map(Command::Approve)
         }
+        [approve, permit, rest @ ..] if approve == "approve" && permit == "permit" => {
+            parse_approve_permit(rest.iter().cloned())
+                .map(ApproveCommand::Permit)
+                .map(Command::Approve)
+        }
         [approve, list] if approve == "approve" && list == "list" => {
             Ok(Command::Approve(ApproveCommand::List))
         }
@@ -989,6 +1166,55 @@ fn parse_approve_issue(args: impl IntoIterator<Item = String>) -> Result<Approve
     })
 }
 
+fn parse_approve_permit(args: impl IntoIterator<Item = String>) -> Result<ApprovePermitConfig> {
+    let mut approval = None;
+    let mut permit_ttl = None;
+    let mut revoke_approval = false;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--approval" => {
+                if approval
+                    .replace(ApprovalToken::new(required_arg(
+                        "--approval",
+                        args.next(),
+                    )?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--approval may only be provided once");
+                }
+            }
+            "--permit-ttl-seconds" => {
+                if permit_ttl
+                    .replace(parse_positive_duration(
+                        "--permit-ttl-seconds",
+                        &required_arg("--permit-ttl-seconds", args.next())?,
+                    )?)
+                    .is_some()
+                {
+                    anyhow::bail!("--permit-ttl-seconds may only be provided once");
+                }
+            }
+            "--revoke-approval" => {
+                if revoke_approval {
+                    anyhow::bail!("--revoke-approval may only be provided once");
+                }
+                revoke_approval = true;
+            }
+            "--secret" | "--secret-ref" | "--value" | "--raw-value" | "--profile" => {
+                anyhow::bail!("approve permit accepts only an approval id and permit controls")
+            }
+            other if other.starts_with('-') => anyhow::bail!("unsupported janusd approve flag"),
+            _ => anyhow::bail!("unsupported janusd approve argument"),
+        }
+    }
+    Ok(ApprovePermitConfig {
+        approval: approval.context("--approval is required")?,
+        permit_ttl,
+        revoke_approval,
+    })
+}
+
 fn parse_approve_revoke(args: impl IntoIterator<Item = String>) -> Result<ApproveRevokeConfig> {
     let mut approval = None;
     let mut args = args.into_iter();
@@ -1023,6 +1249,16 @@ fn parse_approval_ttl(value: &str) -> Result<Duration> {
         .context("invalid --expires-in-seconds")?;
     if seconds == 0 || seconds > MAX_APPROVAL_TTL_SECONDS {
         anyhow::bail!("approval expiry must be between 1 and 3600 seconds");
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+fn parse_positive_duration(flag: &'static str, value: &str) -> Result<Duration> {
+    let seconds = value
+        .parse::<u64>()
+        .with_context(|| format!("invalid {flag}"))?;
+    if seconds == 0 {
+        anyhow::bail!("{flag} must be greater than zero");
     }
     Ok(Duration::from_secs(seconds))
 }
@@ -1346,7 +1582,7 @@ fn env_first(keys: &[&str]) -> Option<String> {
 
 fn print_usage() {
     eprintln!(
-        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve list\n  approve revoke --approval appr_...\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, and approvals from JANUS_APPROVAL_DIR.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
+        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
 }
 
@@ -1390,6 +1626,16 @@ mod tests {
             Command::RunManaged(_) => panic!("expected approve issue config"),
             Command::Approve(_) => panic!("expected approve issue config"),
             Command::Help => panic!("expected approve issue config"),
+        }
+    }
+
+    fn parse_approve_permit_ok(args: &[&str]) -> ApprovePermitConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::Approve(ApproveCommand::Permit(config)) => config,
+            Command::ForgeRotateGenerated(_) => panic!("expected approve permit config"),
+            Command::RunManaged(_) => panic!("expected approve permit config"),
+            Command::Approve(_) => panic!("expected approve permit config"),
+            Command::Help => panic!("expected approve permit config"),
         }
     }
 
@@ -1451,6 +1697,20 @@ mod tests {
         let revoke = parse_approve_revoke_ok(&["approve", "revoke", "--approval", "appr_abc123"]);
         assert_eq!(revoke.approval.as_str(), "appr_abc123");
         assert!(!format!("{revoke:?}").contains("appr_abc123"));
+
+        let permit = parse_approve_permit_ok(&[
+            "approve",
+            "permit",
+            "--approval",
+            "appr_abc123",
+            "--permit-ttl-seconds",
+            "30",
+            "--revoke-approval",
+        ]);
+        assert_eq!(permit.approval.as_str(), "appr_abc123");
+        assert_eq!(permit.permit_ttl, Some(Duration::from_secs(30)));
+        assert!(permit.revoke_approval);
+        assert!(!format!("{permit:?}").contains("appr_abc123"));
     }
 
     #[test]
@@ -1501,6 +1761,40 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("approval expiry"));
+    }
+
+    #[test]
+    fn approve_permit_rejects_literals_and_invalid_ttl_without_echoing_values() {
+        let err = parse_args(
+            [
+                "approve",
+                "permit",
+                "--approval",
+                "appr_abc123",
+                "--value",
+                "do-not-echo-me",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("approval id"));
+        assert!(!err.to_string().contains("do-not-echo-me"));
+
+        let err = parse_args(
+            [
+                "approve",
+                "permit",
+                "--approval",
+                "appr_abc123",
+                "--permit-ttl-seconds",
+                "0",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--permit-ttl-seconds"));
     }
 
     #[test]
@@ -1668,6 +1962,162 @@ mod tests {
         assert_eq!(snapshot.expires_at_unix_secs, 120);
         assert_eq!(snapshot.reason, "approved fixture");
         assert!(!format!("{approval:?}").contains(&snapshot.approval_id));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn approve_permit_ttl_is_limited_by_approval_and_class() {
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let approval = fixture_approval(
+            &secret_ref,
+            &profile_id,
+            SecretClass::BreakGlass,
+            EgressMode::Connector,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(120),
+        );
+
+        assert_eq!(
+            permit_ttl_for_approval(
+                &approval,
+                None,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            )
+            .unwrap(),
+            Duration::from_secs(60)
+        );
+
+        let err = permit_ttl_for_approval(
+            &approval,
+            Some(Duration::from_secs(61)),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("class limit"));
+
+        let err = permit_ttl_for_approval(
+            &approval,
+            Some(Duration::from_secs(120)),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("remaining lifetime"));
+
+        let err = permit_ttl_for_approval(
+            &approval,
+            None,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(120),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("approval_expired"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn approve_permit_issues_registry_permit_from_stored_approval_and_revokes() {
+        let approval_dir = tempfile::tempdir().unwrap();
+        let permit_dir = tempfile::tempdir().unwrap();
+        let approvals = FileApprovalRegistry::new(approval_dir.path());
+        let permits = FilePermitRegistry::new(permit_dir.path());
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let name = SecretName::new("CANARY").unwrap();
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let approval = fixture_approval(
+            &secret_ref,
+            &profile_id,
+            SecretClass::BreakGlass,
+            EgressMode::Connector,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(120),
+        );
+        SharedApprovalRegistry::store(&approvals, &approval).unwrap();
+
+        let outcome = issue_approved_permit_with(
+            &ApprovePermitConfig {
+                approval: ApprovalToken::new(approval.id().as_str()).unwrap(),
+                permit_ttl: Some(Duration::from_secs(30)),
+                revoke_approval: true,
+            },
+            &approvals,
+            &permits,
+            fixture_store_with_class(&secret_ref, &name, &profile_id, SecretClass::BreakGlass),
+            &fixture_principal(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.approval_id, approval.id().as_str());
+        assert_eq!(outcome.secret_ref, secret_ref.as_str());
+        assert_eq!(outcome.profile_id, profile_id.as_str());
+        assert_eq!(outcome.executor, "janus-run@fixture");
+        assert_eq!(outcome.destination, "fixture-destination");
+        assert!(outcome.approval_revoked);
+        assert!(!outcome.value_returned);
+
+        let permit = SharedPermitRegistry::take(&permits, &outcome.permit_id).unwrap();
+        assert_eq!(permit.secret_ref(), &secret_ref);
+        assert_eq!(permit.profile_id(), &profile_id);
+        assert_eq!(permit.executor().as_str(), "janus-run@fixture");
+        assert_eq!(permit.destination().as_str(), "fixture-destination");
+        assert_eq!(
+            permit.remaining_ttl_at(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+            Duration::from_secs(30)
+        );
+        assert!(permit.approval().is_some());
+
+        let err = SharedApprovalRegistry::get(&approvals, approval.id().as_str()).unwrap_err();
+        assert!(matches!(
+            err,
+            JanusError::ApprovalInvalid {
+                reason_code: "denied_unknown_approval",
+                ..
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn approve_permit_rejects_approval_when_policy_does_not_need_it() {
+        let approval_dir = tempfile::tempdir().unwrap();
+        let permit_dir = tempfile::tempdir().unwrap();
+        let approvals = FileApprovalRegistry::new(approval_dir.path());
+        let permits = FilePermitRegistry::new(permit_dir.path());
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let name = SecretName::new("CANARY").unwrap();
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let approval = fixture_approval(
+            &secret_ref,
+            &profile_id,
+            SecretClass::HighValue,
+            EgressMode::Connector,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(120),
+        );
+        SharedApprovalRegistry::store(&approvals, &approval).unwrap();
+
+        let err = issue_approved_permit_with(
+            &ApprovePermitConfig {
+                approval: ApprovalToken::new(approval.id().as_str()).unwrap(),
+                permit_ttl: Some(Duration::from_secs(30)),
+                revoke_approval: true,
+            },
+            &approvals,
+            &permits,
+            fixture_store_with_class(&secret_ref, &name, &profile_id, SecretClass::HighValue),
+            &fixture_principal(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        let err = err.downcast_ref::<JanusError>().unwrap();
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "approval_not_required",
+                ..
+            }
+        ));
+        assert!(SharedApprovalRegistry::get(&approvals, approval.id().as_str()).is_ok());
+        assert_eq!(std::fs::read_dir(permit_dir.path()).unwrap().count(), 0);
     }
 
     #[test]
@@ -2072,13 +2522,23 @@ mod tests {
         name: &SecretName,
         profile_id: &ProfileId,
     ) -> MockStore {
+        fixture_store_with_class(secret_ref, name, profile_id, SecretClass::Normal)
+    }
+
+    #[cfg(unix)]
+    fn fixture_store_with_class(
+        secret_ref: &SecretRef,
+        name: &SecretName,
+        profile_id: &ProfileId,
+        class: SecretClass,
+    ) -> MockStore {
         let catalog = ManifestCatalog::new(vec![SecretMeta {
             secret_ref: secret_ref.clone(),
             name: name.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
             scope: ScopeRef::new("janus/dev").unwrap(),
             owner: Some(OwnerRef::new("infra").unwrap()),
-            classification: Some(SecretClass::Normal),
+            classification: Some(class),
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],
@@ -2087,6 +2547,40 @@ mod tests {
         MockStore::new(catalog)
             .with_value(name.clone(), b"expected-canary".to_vec())
             .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn fixture_approval(
+        secret_ref: &SecretRef,
+        profile_id: &ProfileId,
+        class: SecretClass,
+        egress: EgressMode,
+        expires_at: SystemTime,
+    ) -> ApprovalGrant {
+        let profile = UseProfile {
+            id: profile_id.clone(),
+            secret_ref: secret_ref.clone(),
+            executor: ExecutorRef::new("janus-run@fixture").unwrap(),
+            destination: Destination::new("fixture-destination").unwrap(),
+            egress,
+            trust_level: TrustLevel::L2,
+            ttl: Duration::from_secs(60),
+            single_use: true,
+            enabled: true,
+        };
+        let request = UseRequest {
+            secret_ref: secret_ref.clone(),
+            profile_id: profile_id.clone(),
+            destination: Destination::new("fixture-destination").unwrap(),
+            purpose: Purpose::new("emergency deploy").unwrap(),
+        };
+        ApprovalGrant::for_request(
+            &request,
+            &profile,
+            class,
+            expires_at,
+            SafeLabel::new("fixture approval").unwrap(),
+        )
     }
 
     #[test]
