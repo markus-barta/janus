@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, Destination, ExecutorRef, JanusError,
-    JanusResult, PrincipalChain, SecretRef, Severity,
+    JanusResult, PrincipalChain, SecretClass, SecretRef, Severity,
 };
 use sha2::{Digest, Sha256};
 
@@ -33,6 +33,41 @@ pub enum EgressMode {
     HookGuarded,
     /// Declaration only; local/dev or low-risk use only.
     DeclaredOnly,
+}
+
+impl EgressMode {
+    /// Parse stable manifest/API text for the egress mode.
+    pub fn parse(value: &str) -> JanusResult<Self> {
+        match value {
+            "connector" => Ok(Self::Connector),
+            "sandboxed" => Ok(Self::Sandboxed),
+            "proxy_enforced" => Ok(Self::ProxyEnforced),
+            "hook_guarded" => Ok(Self::HookGuarded),
+            "declared_only" => Ok(Self::DeclaredOnly),
+            _ => Err(JanusError::InvalidIdentifier {
+                kind: "egress_mode",
+            }),
+        }
+    }
+
+    /// Stable manifest/API text for the egress mode.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Connector => "connector",
+            Self::Sandboxed => "sandboxed",
+            Self::ProxyEnforced => "proxy_enforced",
+            Self::HookGuarded => "hook_guarded",
+            Self::DeclaredOnly => "declared_only",
+        }
+    }
+
+    /// Whether the egress posture is strong enough for high-risk classes.
+    pub fn is_strong(self) -> bool {
+        matches!(
+            self,
+            Self::Connector | Self::Sandboxed | Self::ProxyEnforced
+        )
+    }
 }
 
 /// Stable profile identifier.
@@ -113,6 +148,112 @@ pub struct UseRequest {
     pub purpose: Purpose,
 }
 
+/// Secret-class policy requirements for permit-bearing paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClassPermitPolicy {
+    class: SecretClass,
+    max_ttl: Option<Duration>,
+    requires_strong_egress: bool,
+    requires_approval: bool,
+    allow_severity: Severity,
+    deny_severity: Severity,
+}
+
+impl ClassPermitPolicy {
+    /// Build permit requirements for one secret classification.
+    pub fn for_class(class: SecretClass) -> Self {
+        match class {
+            SecretClass::Low | SecretClass::Normal => Self {
+                class,
+                max_ttl: None,
+                requires_strong_egress: false,
+                requires_approval: false,
+                allow_severity: Severity::Notice,
+                deny_severity: Severity::Warning,
+            },
+            SecretClass::HighValue => Self {
+                class,
+                max_ttl: Some(Duration::from_secs(300)),
+                requires_strong_egress: true,
+                requires_approval: false,
+                allow_severity: Severity::High,
+                deny_severity: Severity::High,
+            },
+            SecretClass::BreakGlass => Self {
+                class,
+                max_ttl: Some(Duration::from_secs(60)),
+                requires_strong_egress: true,
+                requires_approval: true,
+                allow_severity: Severity::High,
+                deny_severity: Severity::High,
+            },
+        }
+    }
+
+    /// Secret classification this policy was derived from.
+    pub fn class(self) -> SecretClass {
+        self.class
+    }
+
+    /// Maximum permit lifetime for this class, if capped.
+    pub fn max_ttl(self) -> Option<Duration> {
+        self.max_ttl
+    }
+
+    /// Whether this class requires connector/sandbox/proxy-grade egress.
+    pub fn requires_strong_egress(self) -> bool {
+        self.requires_strong_egress
+    }
+
+    /// Whether this class requires an explicit approval grant.
+    pub fn requires_approval(self) -> bool {
+        self.requires_approval
+    }
+
+    /// Audit severity for approved use of this class.
+    pub fn allow_severity(self) -> Severity {
+        self.allow_severity
+    }
+
+    /// Audit severity for denied use of this class.
+    pub fn deny_severity(self) -> Severity {
+        self.deny_severity
+    }
+
+    fn decide_profile(self, profile: &UseProfile) -> PolicyDecision {
+        self.decide_bound_use(profile.egress, profile.ttl)
+    }
+
+    /// Decide whether a current permit remains acceptable for this class.
+    pub fn decide_permit(self, permit: &UsePermit, now: SystemTime) -> PolicyDecision {
+        self.decide_bound_use(permit.egress(), permit.remaining_ttl_at(now))
+    }
+
+    fn decide_bound_use(self, egress: EgressMode, ttl: Duration) -> PolicyDecision {
+        if self.requires_approval {
+            return PolicyDecision::Deny {
+                reason_code: "approval_missing",
+                detail: "break-glass use requires an explicit approval grant".to_string(),
+            };
+        }
+        if let Some(max_ttl) = self.max_ttl {
+            if ttl > max_ttl {
+                return PolicyDecision::Deny {
+                    reason_code: "denied_ttl_exceeds_class_limit",
+                    detail: "profile permit TTL exceeds secret class limit".to_string(),
+                };
+            }
+        }
+        if self.requires_strong_egress && !egress.is_strong() {
+            return PolicyDecision::Deny {
+                reason_code: "denied_egress_mode_insufficient",
+                detail: "secret class requires stronger egress enforcement".to_string(),
+            };
+        }
+        PolicyDecision::Allow
+    }
+}
+
 /// Policy decision before audit write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PolicyDecision {
@@ -187,6 +328,7 @@ pub struct UsePermit {
     profile_id: ProfileId,
     destination: Destination,
     executor: ExecutorRef,
+    egress: EgressMode,
     principal_binding: String,
     expires_at: SystemTime,
 }
@@ -208,6 +350,8 @@ pub struct UsePermitSnapshot {
     pub destination: String,
     /// Executor this permit is bound to.
     pub executor: String,
+    /// Egress posture this permit was issued under.
+    pub egress: String,
     /// Principal binding key this permit is bound to.
     pub principal_binding: String,
     /// Permit expiry seconds since the Unix epoch.
@@ -224,6 +368,7 @@ impl UsePermit {
             profile_id: profile.id.clone(),
             destination: profile.destination.clone(),
             executor: profile.executor.clone(),
+            egress: profile.egress,
             principal_binding: principal.binding_key(),
             expires_at: now + profile.ttl,
         }
@@ -254,6 +399,16 @@ impl UsePermit {
         &self.executor
     }
 
+    /// Egress posture this permit was issued under.
+    pub fn egress(&self) -> EgressMode {
+        self.egress
+    }
+
+    /// Remaining permit lifetime at a supplied instant.
+    pub fn remaining_ttl_at(&self, now: SystemTime) -> Duration {
+        self.expires_at.duration_since(now).unwrap_or_default()
+    }
+
     /// Whether the permit is expired at the supplied instant.
     pub fn is_expired_at(&self, now: SystemTime) -> bool {
         now >= self.expires_at
@@ -271,6 +426,7 @@ impl UsePermit {
             profile_id: self.profile_id.as_str().to_string(),
             destination: self.destination.as_str().to_string(),
             executor: self.executor.as_str().to_string(),
+            egress: self.egress.as_str().to_string(),
             principal_binding: self.principal_binding.clone(),
             expires_at_unix_secs: expires_at.as_secs(),
             expires_at_subsec_nanos: expires_at.subsec_nanos(),
@@ -297,6 +453,7 @@ impl UsePermit {
             profile_id: ProfileId::new(snapshot.profile_id)?,
             destination: Destination::new(snapshot.destination)?,
             executor: ExecutorRef::new(snapshot.executor)?,
+            egress: EgressMode::parse(&snapshot.egress)?,
             principal_binding: snapshot.principal_binding,
             expires_at: UNIX_EPOCH
                 + Duration::new(
@@ -350,6 +507,7 @@ impl fmt::Debug for UsePermit {
             .field("profile_id", &self.profile_id)
             .field("destination", &self.destination)
             .field("executor", &self.executor)
+            .field("egress", &self.egress)
             .field("principal_binding", &"<redacted>")
             .field("expires_at", &self.expires_at)
             .finish()
@@ -364,6 +522,7 @@ impl fmt::Debug for UsePermitSnapshot {
             .field("profile_id", &self.profile_id)
             .field("destination", &self.destination)
             .field("executor", &self.executor)
+            .field("egress", &self.egress)
             .field("principal_binding", &"<redacted>")
             .field("expires_at_unix_secs", &self.expires_at_unix_secs)
             .field("expires_at_subsec_nanos", &self.expires_at_subsec_nanos)
@@ -413,19 +572,24 @@ impl ProfilePolicy {
                 detail: "requested destination is not approved by profile".to_string(),
             };
         }
-        if matches!(
-            (profile.trust_level, profile.egress),
-            (
-                TrustLevel::L2,
-                EgressMode::DeclaredOnly | EgressMode::HookGuarded
-            )
-        ) {
-            return PolicyDecision::Deny {
-                reason_code: "denied_egress_mode_insufficient",
-                detail: "high-value profile requires stronger egress enforcement".to_string(),
-            };
-        }
         PolicyDecision::Allow
+    }
+
+    /// Decide whether a request matches policy plus secret-class requirements.
+    pub fn decide_for_class(
+        &self,
+        req: &UseRequest,
+        principal: &PrincipalChain,
+        class: SecretClass,
+    ) -> PolicyDecision {
+        let decision = self.decide(req, principal);
+        if !matches!(decision, PolicyDecision::Allow) {
+            return decision;
+        }
+        let profile = self
+            .matching_profile(req)
+            .expect("allow decision requires a matching profile");
+        ClassPermitPolicy::for_class(class).decide_profile(profile)
     }
 
     fn matching_profile(&self, req: &UseRequest) -> Option<&UseProfile> {
@@ -473,13 +637,51 @@ where
         principal: &PrincipalChain,
         now: SystemTime,
     ) -> JanusResult<UsePermit> {
-        match self.policy.as_ref().decide(req, principal) {
+        self.issue_with_decision(
+            req,
+            principal,
+            now,
+            self.policy.as_ref().decide(req, principal),
+            Severity::Notice,
+            Severity::Warning,
+        )
+    }
+
+    /// Issue a permit with additional secret-class requirements.
+    pub fn issue_for_class(
+        &mut self,
+        req: &UseRequest,
+        principal: &PrincipalChain,
+        now: SystemTime,
+        class: SecretClass,
+    ) -> JanusResult<UsePermit> {
+        let class_policy = ClassPermitPolicy::for_class(class);
+        self.issue_with_decision(
+            req,
+            principal,
+            now,
+            self.policy.as_ref().decide_for_class(req, principal, class),
+            class_policy.allow_severity(),
+            class_policy.deny_severity(),
+        )
+    }
+
+    fn issue_with_decision(
+        &mut self,
+        req: &UseRequest,
+        principal: &PrincipalChain,
+        now: SystemTime,
+        decision: PolicyDecision,
+        allow_severity: Severity,
+        deny_severity: Severity,
+    ) -> JanusResult<UsePermit> {
+        match decision {
             PolicyDecision::Allow => {
                 self.audit.record(AuditEvent::new(
                     AuditAction::PermitRequest,
                     AuditOutcome::Allowed,
                     "ok",
-                    Severity::Notice,
+                    allow_severity,
                     Some(req.secret_ref.clone()),
                     principal,
                 ))?;
@@ -487,7 +689,7 @@ where
                     AuditAction::PermitIssue,
                     AuditOutcome::Allowed,
                     "ok",
-                    Severity::Notice,
+                    allow_severity,
                     Some(req.secret_ref.clone()),
                     principal,
                 ))?;
@@ -506,7 +708,7 @@ where
                     AuditAction::PermitDeny,
                     AuditOutcome::Denied,
                     reason_code,
-                    Severity::Warning,
+                    deny_severity,
                     Some(req.secret_ref.clone()),
                     principal,
                 ))?;
@@ -684,11 +886,49 @@ mod tests {
     }
 
     #[test]
-    fn high_value_profiles_reject_weak_egress() {
+    fn class_policy_has_stable_requirements() {
+        let low = ClassPermitPolicy::for_class(SecretClass::Low);
+        assert_eq!(low.class(), SecretClass::Low);
+        assert_eq!(low.max_ttl(), None);
+        assert!(!low.requires_strong_egress());
+        assert!(!low.requires_approval());
+        assert_eq!(low.allow_severity(), Severity::Notice);
+        assert_eq!(low.deny_severity(), Severity::Warning);
+
+        let high = ClassPermitPolicy::for_class(SecretClass::HighValue);
+        assert_eq!(high.max_ttl(), Some(Duration::from_secs(300)));
+        assert!(high.requires_strong_egress());
+        assert!(!high.requires_approval());
+        assert_eq!(high.allow_severity(), Severity::High);
+        assert_eq!(high.deny_severity(), Severity::High);
+
+        let break_glass = ClassPermitPolicy::for_class(SecretClass::BreakGlass);
+        assert_eq!(break_glass.max_ttl(), Some(Duration::from_secs(60)));
+        assert!(break_glass.requires_strong_egress());
+        assert!(break_glass.requires_approval());
+        assert_eq!(break_glass.allow_severity(), Severity::High);
+        assert_eq!(break_glass.deny_severity(), Severity::High);
+    }
+
+    #[test]
+    fn l2_trust_is_not_the_same_as_high_value_class() {
         let mut weak = profile(true);
         weak.egress = EgressMode::DeclaredOnly;
         let policy = ProfilePolicy::new(vec![weak]);
         let decision = policy.decide(&request("deploy-api"), &principal("runner-a"));
+        assert_eq!(decision, PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn high_value_class_rejects_weak_egress_and_long_ttl() {
+        let mut weak = profile(true);
+        weak.egress = EgressMode::DeclaredOnly;
+        let policy = ProfilePolicy::new(vec![weak]);
+        let decision = policy.decide_for_class(
+            &request("deploy-api"),
+            &principal("runner-a"),
+            SecretClass::HighValue,
+        );
         assert!(matches!(
             decision,
             PolicyDecision::Deny {
@@ -696,5 +936,85 @@ mod tests {
                 ..
             }
         ));
+
+        let mut long_ttl = profile(true);
+        long_ttl.ttl = Duration::from_secs(301);
+        let policy = ProfilePolicy::new(vec![long_ttl]);
+        let decision = policy.decide_for_class(
+            &request("deploy-api"),
+            &principal("runner-a"),
+            SecretClass::HighValue,
+        );
+        assert!(matches!(
+            decision,
+            PolicyDecision::Deny {
+                reason_code: "denied_ttl_exceeds_class_limit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn break_glass_class_requires_explicit_approval() {
+        let policy = ProfilePolicy::new(vec![profile(true)]);
+        let decision = policy.decide_for_class(
+            &request("deploy-api"),
+            &principal("runner-a"),
+            SecretClass::BreakGlass,
+        );
+        assert!(matches!(
+            decision,
+            PolicyDecision::Deny {
+                reason_code: "approval_missing",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn issuer_uses_class_aware_audit_severity() {
+        let policy = ProfilePolicy::new(vec![profile(true)]);
+        let mut issuer = PermitIssuer::new(policy, AuditWrite::accepting());
+        issuer
+            .issue_for_class(
+                &request("deploy-api"),
+                &principal("runner-a"),
+                SystemTime::UNIX_EPOCH,
+                SecretClass::HighValue,
+            )
+            .unwrap();
+        let audit = issuer.into_audit();
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::PermitIssue
+                && event.outcome == AuditOutcome::Allowed
+                && event.severity == Severity::High
+                && !event.value_returned
+        }));
+
+        let policy = ProfilePolicy::new(vec![profile(true)]);
+        let mut issuer = PermitIssuer::new(policy, AuditWrite::accepting());
+        let err = issuer
+            .issue_for_class(
+                &request("deploy-api"),
+                &principal("runner-a"),
+                SystemTime::UNIX_EPOCH,
+                SecretClass::BreakGlass,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "approval_missing",
+                ..
+            }
+        ));
+        let audit = issuer.into_audit();
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::PermitDeny
+                && event.outcome == AuditOutcome::Denied
+                && event.reason_code == "approval_missing"
+                && event.severity == Severity::High
+                && !event.value_returned
+        }));
     }
 }

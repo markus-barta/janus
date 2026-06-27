@@ -4,9 +4,9 @@ use std::time::SystemTime;
 
 use crate::{
     consumer::consumer_observe_event, AuditAction, AuditEvent, AuditOutcome, AuditSink,
-    ConsumerDescriptor, Destination, ExecutorRef, JanusError, JanusResult, PermitIssuer,
-    PrincipalChain, ProfilePolicy, SecretDescriptor, SecretName, SecretRef, SecretStore,
-    SecretValue, Severity, UsePermit, UseRequest,
+    ClassPermitPolicy, ConsumerDescriptor, Destination, ExecutorRef, JanusError, JanusResult,
+    PermitIssuer, PolicyDecision, PrincipalChain, ProfilePolicy, SecretDescriptor, SecretName,
+    SecretRef, SecretStore, SecretValue, Severity, UsePermit, UseRequest,
 };
 
 /// Policy/audit wrapper around a backend store.
@@ -168,7 +168,11 @@ where
             AuditAction::SecretUse,
             AuditOutcome::Allowed,
             "ok",
-            Severity::Notice,
+            descriptor
+                .classification
+                .map(ClassPermitPolicy::for_class)
+                .map(ClassPermitPolicy::allow_severity)
+                .unwrap_or(Severity::Notice),
             Some(descriptor.secret_ref),
             principal,
         ))?;
@@ -213,8 +217,11 @@ where
             return Err(JanusError::policy_denied(reason_code, detail));
         }
 
+        let class = descriptor
+            .classification
+            .expect("metadata_use_denial guarantees classification is present");
         let mut issuer = PermitIssuer::new(&self.policy, &mut self.audit);
-        issuer.issue(req, principal, now)
+        issuer.issue_for_class(req, principal, now, class)
     }
 
     /// Request use from only model-acceptable inputs.
@@ -310,11 +317,31 @@ where
             return Err(JanusError::policy_denied(reason_code, detail));
         }
 
+        let class = descriptor
+            .classification
+            .expect("metadata_use_denial guarantees classification is present");
+        let class_policy = ClassPermitPolicy::for_class(class);
+        if let PolicyDecision::Deny {
+            reason_code,
+            detail,
+        } = class_policy.decide_permit(permit, now)
+        {
+            self.audit.record(AuditEvent::new(
+                AuditAction::SecretUse,
+                AuditOutcome::Denied,
+                reason_code,
+                class_policy.deny_severity(),
+                Some(descriptor.secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::policy_denied(reason_code, detail));
+        }
+
         self.audit.record(AuditEvent::new(
             AuditAction::SecretUse,
             AuditOutcome::Allowed,
             "ok",
-            Severity::Notice,
+            class_policy.allow_severity(),
             Some(descriptor.secret_ref.clone()),
             principal,
         ))?;

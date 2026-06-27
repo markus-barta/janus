@@ -135,7 +135,7 @@ mod tests {
         AuditAction, BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry,
         Environment, ManifestCatalog, OwnerRef, ProjectId, ReloadMethod, RotationDecision,
         RotationPlanner, SafeLabel, ScopeRef, SecretBroker, SecretClass, SecretMeta, SecretRef,
-        StoreCapabilities, TrustLevel, ValidationProbe,
+        Severity, StoreCapabilities, TrustLevel, ValidationProbe,
     };
     use janus_mock::MockStore;
 
@@ -363,6 +363,230 @@ mod tests {
         assert!(audit.events().iter().any(|event| {
             event.action == AuditAction::SecretUse
                 && event.reason_code == "denied_missing_classification"
+                && event.outcome == AuditOutcome::Denied
+                && !event.value_returned
+        }));
+    }
+
+    #[tokio::test]
+    async fn broker_applies_class_policy_when_issuing_permits() {
+        let (store, _) = mock_store_with_metadata(
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::HighValue),
+        );
+        let descriptor = store.list().await.unwrap().remove(0);
+        let principal_chain = principal("runner-a", "janus/dev");
+        let mut broker = SecretBroker::new(
+            store,
+            ProfilePolicy::new(vec![use_profile(
+                descriptor.secret_ref.clone(),
+                true,
+                "runner-a",
+                "deploy-api",
+            )]),
+            AuditWrite::accepting(),
+        );
+        broker
+            .request_use(
+                &use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                &principal_chain,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+        let (_store, _policy, audit) = broker.into_parts();
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::PermitIssue
+                && event.outcome == AuditOutcome::Allowed
+                && event.severity == Severity::High
+                && !event.value_returned
+        }));
+
+        let (store, _) = mock_store_with_metadata(
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::HighValue),
+        );
+        let descriptor = store.list().await.unwrap().remove(0);
+        let mut weak_egress = use_profile(
+            descriptor.secret_ref.clone(),
+            true,
+            "runner-a",
+            "deploy-api",
+        );
+        weak_egress.egress = EgressMode::HookGuarded;
+        let mut broker = SecretBroker::new(
+            store,
+            ProfilePolicy::new(vec![weak_egress]),
+            AuditWrite::accepting(),
+        );
+
+        let err = broker
+            .request_use(
+                &use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                &principal_chain,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "denied_egress_mode_insufficient",
+                ..
+            }
+        ));
+        let (_store, _policy, audit) = broker.into_parts();
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::PermitDeny
+                && event.reason_code == "denied_egress_mode_insufficient"
+                && event.severity == Severity::High
+                && event.outcome == AuditOutcome::Denied
+                && !event.value_returned
+        }));
+
+        let (store, _) = mock_store_with_metadata(
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::HighValue),
+        );
+        let descriptor = store.list().await.unwrap().remove(0);
+        let mut long_ttl = use_profile(
+            descriptor.secret_ref.clone(),
+            true,
+            "runner-a",
+            "deploy-api",
+        );
+        long_ttl.ttl = Duration::from_secs(301);
+        let mut broker = SecretBroker::new(
+            store,
+            ProfilePolicy::new(vec![long_ttl]),
+            AuditWrite::accepting(),
+        );
+        let err = broker
+            .request_use(
+                &use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                &principal_chain,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "denied_ttl_exceeds_class_limit",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn broker_blocks_break_glass_permit_issue_without_approval() {
+        let (store, _) = mock_store_with_metadata(
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::BreakGlass),
+        );
+        let descriptor = store.list().await.unwrap().remove(0);
+        let principal_chain = principal("runner-a", "janus/dev");
+        let mut broker = SecretBroker::new(
+            store,
+            ProfilePolicy::new(vec![use_profile(
+                descriptor.secret_ref.clone(),
+                true,
+                "runner-a",
+                "deploy-api",
+            )]),
+            AuditWrite::accepting(),
+        );
+
+        let err = broker
+            .request_use(
+                &use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                &principal_chain,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "approval_missing",
+                ..
+            }
+        ));
+        let (_store, _policy, audit) = broker.into_parts();
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::PermitDeny
+                && event.reason_code == "approval_missing"
+                && event.severity == Severity::High
+                && event.outcome == AuditOutcome::Denied
+                && !event.value_returned
+        }));
+    }
+
+    #[tokio::test]
+    async fn broker_rechecks_class_policy_before_permit_consumption() {
+        let (normal_store, _) = mock_store_with_metadata(
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::Normal),
+        );
+        let descriptor = normal_store.list().await.unwrap().remove(0);
+        let principal_chain = principal("runner-a", "janus/dev");
+        let executor = ExecutorRef::new("runner-a").unwrap();
+        let destination = Destination::new("deploy-api").unwrap();
+        let mut weak_profile = use_profile(
+            descriptor.secret_ref.clone(),
+            true,
+            "runner-a",
+            "deploy-api",
+        );
+        weak_profile.egress = EgressMode::DeclaredOnly;
+        let mut issuing_broker = SecretBroker::new(
+            normal_store,
+            ProfilePolicy::new(vec![weak_profile.clone()]),
+            AuditWrite::accepting(),
+        );
+        let permit = issuing_broker
+            .request_use(
+                &use_request(descriptor.secret_ref.clone(), "deploy-api"),
+                &principal_chain,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+
+        let (high_value_store, _) = mock_store_with_metadata(
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::HighValue),
+        );
+        let mut consuming_broker = SecretBroker::new(
+            high_value_store,
+            ProfilePolicy::new(vec![weak_profile]),
+            AuditWrite::accepting(),
+        );
+        let err = match consuming_broker
+            .use_permit(
+                &permit,
+                &principal_chain,
+                &executor,
+                &destination,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            )
+            .await
+        {
+            Ok(_) => panic!("class policy should be rechecked before permit consumption"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "denied_egress_mode_insufficient",
+                ..
+            }
+        ));
+        let (_store, _policy, audit) = consuming_broker.into_parts();
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::SecretUse
+                && event.reason_code == "denied_egress_mode_insufficient"
+                && event.severity == Severity::High
                 && event.outcome == AuditOutcome::Denied
                 && !event.value_returned
         }));
@@ -733,10 +957,11 @@ mod tests {
             AuditWrite::accepting(),
         );
         let err = issuer
-            .issue(
+            .issue_for_class(
                 &use_request(descriptor.secret_ref.clone(), "deploy-api"),
                 &principal_chain,
                 SystemTime::UNIX_EPOCH,
+                SecretClass::HighValue,
             )
             .unwrap_err();
         assert!(matches!(

@@ -150,6 +150,7 @@ struct PermitFileRecord {
     profile_id: String,
     destination: String,
     executor: String,
+    egress: Option<String>,
     principal_binding: String,
     expires_at_unix_secs: u64,
     expires_at_subsec_nanos: u32,
@@ -158,12 +159,13 @@ struct PermitFileRecord {
 impl From<UsePermitSnapshot> for PermitFileRecord {
     fn from(snapshot: UsePermitSnapshot) -> Self {
         Self {
-            version: 1,
+            version: 2,
             permit_id: snapshot.permit_id,
             secret_ref: snapshot.secret_ref,
             profile_id: snapshot.profile_id,
             destination: snapshot.destination,
             executor: snapshot.executor,
+            egress: Some(snapshot.egress),
             principal_binding: snapshot.principal_binding,
             expires_at_unix_secs: snapshot.expires_at_unix_secs,
             expires_at_subsec_nanos: snapshot.expires_at_subsec_nanos,
@@ -173,7 +175,7 @@ impl From<UsePermitSnapshot> for PermitFileRecord {
 
 impl PermitFileRecord {
     fn into_snapshot(self) -> JanusResult<UsePermitSnapshot> {
-        if self.version != 1 {
+        if !matches!(self.version, 1 | 2) {
             return Err(JanusError::permit_invalid(
                 "denied_unsupported_permit_record",
                 "permit registry entry version is unsupported",
@@ -185,6 +187,7 @@ impl PermitFileRecord {
             profile_id: self.profile_id,
             destination: self.destination,
             executor: self.executor,
+            egress: self.egress.unwrap_or_else(|| "declared_only".to_string()),
             principal_binding: self.principal_binding,
             expires_at_unix_secs: self.expires_at_unix_secs,
             expires_at_subsec_nanos: self.expires_at_subsec_nanos,
