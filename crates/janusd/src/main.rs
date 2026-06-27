@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
         Command::LifecycleStaleReport(config) => run_lifecycle_stale_report(config).await,
         Command::LifecycleDestroyRecord(config) => run_lifecycle_destroy_record(config).await,
         Command::LifecycleDestroyFinalize(config) => run_lifecycle_destroy_finalize(config).await,
+        Command::LifecycleDestroyReconcile(config) => run_lifecycle_destroy_reconcile(config).await,
     }
 }
 
@@ -86,6 +87,7 @@ enum Command {
     LifecycleStaleReport(LifecycleStaleReportConfig),
     LifecycleDestroyRecord(LifecycleDestroyRecordConfig),
     LifecycleDestroyFinalize(LifecycleDestroyFinalizeConfig),
+    LifecycleDestroyReconcile(LifecycleDestroyReconcileConfig),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,6 +169,11 @@ struct LifecycleDestroyFinalizeConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct LifecycleDestroyReconcileConfig {
+    metadata_file: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ApprovedPermitIssueOutcome {
     permit_id: String,
     approval_id: String,
@@ -205,6 +212,19 @@ struct LifecycleDestroyFinalizeCliOutcome {
     to: &'static str,
     reason_code: &'static str,
     metadata_finalized: bool,
+    value_returned: bool,
+    provider_deleted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LifecycleDestroyReconcileRow {
+    secret_ref: SecretRef,
+    metadata_lifecycle: String,
+    tombstone_state: &'static str,
+    status: &'static str,
+    reason_code: &'static str,
+    action_required: bool,
+    action: &'static str,
     value_returned: bool,
     provider_deleted: bool,
 }
@@ -467,6 +487,17 @@ async fn run_lifecycle_destroy_finalize(config: LifecycleDestroyFinalizeConfig) 
     Ok(())
 }
 
+async fn run_lifecycle_destroy_reconcile(config: LifecycleDestroyReconcileConfig) -> Result<()> {
+    let store = load_age_store_from_env_with_metadata_path(config.metadata_file.as_deref())?;
+    let principal = lifecycle_principal_from_env()?;
+    let registry = FileTombstoneRegistry::new(lifecycle_tombstone_registry_dir());
+    let mut audit = AuditWrite::accepting();
+    let rows =
+        build_lifecycle_destroy_reconcile_with(store, &registry, &principal, &mut audit).await?;
+    emit_lifecycle_destroy_reconcile_report(&rows);
+    Ok(())
+}
+
 async fn build_lifecycle_stale_report_with<S, A>(
     config: &LifecycleStaleReportConfig,
     store: S,
@@ -533,6 +564,140 @@ where
         value_returned: false,
         provider_deleted: false,
     })
+}
+
+async fn build_lifecycle_destroy_reconcile_with<S, R, A>(
+    store: S,
+    registry: &R,
+    principal: &PrincipalChain,
+    audit: &mut A,
+) -> Result<Vec<LifecycleDestroyReconcileRow>>
+where
+    S: SecretStore,
+    R: SharedTombstoneRegistry,
+    A: AuditSink,
+{
+    let descriptors = store
+        .list()
+        .await
+        .context("failed to list descriptors for lifecycle destroy-reconcile")?;
+    let tombstones = registry
+        .list()
+        .context("failed to list destroy tombstones for reconcile report")?;
+    let descriptor_by_ref = descriptors
+        .iter()
+        .map(|descriptor| (descriptor.secret_ref.clone(), descriptor))
+        .collect::<BTreeMap<_, _>>();
+    let tombstone_by_ref = tombstones
+        .iter()
+        .map(|tombstone| (tombstone.secret_ref.clone(), tombstone))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut rows = Vec::new();
+    for descriptor in &descriptors {
+        let tombstone = tombstone_by_ref.get(&descriptor.secret_ref);
+        if let Some(row) = reconcile_descriptor_tombstone(descriptor, tombstone.is_some()) {
+            audit_destroy_reconcile_row(&row, principal, audit)?;
+            rows.push(row);
+        }
+    }
+    for tombstone in &tombstones {
+        if !descriptor_by_ref.contains_key(&tombstone.secret_ref) {
+            let row = LifecycleDestroyReconcileRow {
+                secret_ref: tombstone.secret_ref.clone(),
+                metadata_lifecycle: "missing".to_string(),
+                tombstone_state: "present",
+                status: "drift",
+                reason_code: "destroy_tombstone_metadata_missing",
+                action_required: true,
+                action: "investigate_orphan_tombstone",
+                value_returned: false,
+                provider_deleted: false,
+            };
+            audit_destroy_reconcile_row(&row, principal, audit)?;
+            rows.push(row);
+        }
+    }
+    rows.sort_by(|left, right| left.secret_ref.as_str().cmp(right.secret_ref.as_str()));
+    Ok(rows)
+}
+
+fn reconcile_descriptor_tombstone(
+    descriptor: &SecretDescriptor,
+    tombstone_present: bool,
+) -> Option<LifecycleDestroyReconcileRow> {
+    let metadata_lifecycle = descriptor.lifecycle.as_str().to_string();
+    let tombstone_state = if tombstone_present {
+        "present"
+    } else {
+        "missing"
+    };
+    let (status, reason_code, action_required, action) =
+        match (descriptor.lifecycle, tombstone_present) {
+            (SecretLifecycle::PendingDelete, true) => (
+                "needs_finalize",
+                "destroy_tombstone_pending_finalize",
+                true,
+                "run_destroy_finalize",
+            ),
+            (SecretLifecycle::Destroyed, true) => {
+                ("ok", "destroy_tombstone_reconcile_ok", false, "none")
+            }
+            (SecretLifecycle::Destroyed, false) => (
+                "drift",
+                "destroyed_missing_tombstone",
+                true,
+                "restore_tombstone_or_investigate",
+            ),
+            (lifecycle, true)
+                if lifecycle != SecretLifecycle::PendingDelete
+                    && lifecycle != SecretLifecycle::Destroyed =>
+            {
+                (
+                    "drift",
+                    "destroy_tombstone_lifecycle_mismatch",
+                    true,
+                    "investigate_destroy_lifecycle",
+                )
+            }
+            _ => return None,
+        };
+
+    Some(LifecycleDestroyReconcileRow {
+        secret_ref: descriptor.secret_ref.clone(),
+        metadata_lifecycle,
+        tombstone_state,
+        status,
+        reason_code,
+        action_required,
+        action,
+        value_returned: false,
+        provider_deleted: false,
+    })
+}
+
+fn audit_destroy_reconcile_row<A>(
+    row: &LifecycleDestroyReconcileRow,
+    principal: &PrincipalChain,
+    audit: &mut A,
+) -> Result<()>
+where
+    A: AuditSink,
+{
+    let severity = if row.action_required {
+        Severity::High
+    } else {
+        Severity::Notice
+    };
+    audit.record(AuditEvent::new(
+        AuditAction::SecretLifecycle,
+        AuditOutcome::Allowed,
+        row.reason_code,
+        severity,
+        Some(row.secret_ref.clone()),
+        principal,
+    ))?;
+    Ok(())
 }
 
 async fn finalize_lifecycle_destroy_with<S, R, A>(
@@ -764,6 +929,23 @@ fn emit_lifecycle_destroy_finalize_outcome(outcome: &LifecycleDestroyFinalizeCli
         outcome.value_returned,
         outcome.provider_deleted
     );
+}
+
+fn emit_lifecycle_destroy_reconcile_report(rows: &[LifecycleDestroyReconcileRow]) {
+    for row in rows {
+        println!(
+            "janusd lifecycle destroy-reconcile secret_ref={} status={} reason_code={} action_required={} action={} metadata_lifecycle={} tombstone={} value_returned={} provider_deleted={}",
+            row.secret_ref.as_str(),
+            row.status,
+            row.reason_code,
+            row.action_required,
+            row.action,
+            row.metadata_lifecycle,
+            row.tombstone_state,
+            row.value_returned,
+            row.provider_deleted
+        );
+    }
 }
 
 fn record_managed_command_evidence<R>(
@@ -1586,6 +1768,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
             parse_lifecycle_destroy_finalize(rest.iter().cloned())
                 .map(Command::LifecycleDestroyFinalize)
         }
+        [lifecycle, destroy_reconcile, rest @ ..]
+            if lifecycle == "lifecycle" && destroy_reconcile == "destroy-reconcile" =>
+        {
+            parse_lifecycle_destroy_reconcile(rest.iter().cloned())
+                .map(Command::LifecycleDestroyReconcile)
+        }
         _ => anyhow::bail!("unsupported janusd command; run `janusd --help`"),
     }
 }
@@ -1810,6 +1998,34 @@ fn parse_lifecycle_destroy_finalize(
         secret_ref: secret_ref.context("--secret-ref is required")?,
         metadata_file,
     })
+}
+
+fn parse_lifecycle_destroy_reconcile(
+    args: impl IntoIterator<Item = String>,
+) -> Result<LifecycleDestroyReconcileConfig> {
+    let mut metadata_file = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--metadata-file" => {
+                if metadata_file
+                    .replace(PathBuf::from(required_arg("--metadata-file", args.next())?))
+                    .is_some()
+                {
+                    anyhow::bail!("--metadata-file may only be provided once");
+                }
+            }
+            "--secret" | "--secret-ref" | "--name" | "--value" | "--raw-value" | "--reason"
+            | "--to" | "--delete" | "--provider-delete" => {
+                anyhow::bail!("lifecycle destroy-reconcile accepts only value-free report controls")
+            }
+            other if other.starts_with('-') => anyhow::bail!("unsupported janusd lifecycle flag"),
+            _ => anyhow::bail!("unsupported janusd lifecycle argument"),
+        }
+    }
+
+    Ok(LifecycleDestroyReconcileConfig { metadata_file })
 }
 
 fn parse_approve_issue(args: impl IntoIterator<Item = String>) -> Result<ApproveIssueConfig> {
@@ -2508,7 +2724,7 @@ fn env_first(keys: &[&str]) -> Option<String> {
 
 fn print_usage() {
     eprintln!(
-        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  lifecycle destroy-finalize --secret-ref REF [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\njanusd lifecycle destroy-finalize requires a tombstone and writes destroyed metadata only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
+        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  lifecycle destroy-finalize --secret-ref REF [--metadata-file PATH]\n  lifecycle destroy-reconcile [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\njanusd lifecycle destroy-finalize requires a tombstone and writes destroyed metadata only; it never deletes provider values.\njanusd lifecycle destroy-reconcile reads metadata and tombstones only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
 }
 
@@ -2538,6 +2754,7 @@ mod tests {
             Command::LifecycleStaleReport(_) => panic!("expected forge config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected forge config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected forge config"),
+            Command::LifecycleDestroyReconcile(_) => panic!("expected forge config"),
         }
     }
 
@@ -2551,6 +2768,7 @@ mod tests {
             Command::LifecycleStaleReport(_) => panic!("expected run config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected run config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected run config"),
+            Command::LifecycleDestroyReconcile(_) => panic!("expected run config"),
         }
     }
 
@@ -2565,6 +2783,7 @@ mod tests {
             Command::LifecycleStaleReport(_) => panic!("expected approve issue config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected approve issue config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected approve issue config"),
+            Command::LifecycleDestroyReconcile(_) => panic!("expected approve issue config"),
         }
     }
 
@@ -2579,6 +2798,7 @@ mod tests {
             Command::LifecycleStaleReport(_) => panic!("expected approve permit config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected approve permit config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected approve permit config"),
+            Command::LifecycleDestroyReconcile(_) => panic!("expected approve permit config"),
         }
     }
 
@@ -2593,6 +2813,7 @@ mod tests {
             Command::LifecycleStaleReport(_) => panic!("expected approve revoke config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected approve revoke config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected approve revoke config"),
+            Command::LifecycleDestroyReconcile(_) => panic!("expected approve revoke config"),
         }
     }
 
@@ -2606,6 +2827,7 @@ mod tests {
             Command::LifecycleStaleReport(_) => panic!("expected lifecycle config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected lifecycle config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected lifecycle config"),
+            Command::LifecycleDestroyReconcile(_) => panic!("expected lifecycle config"),
         }
     }
 
@@ -2619,6 +2841,9 @@ mod tests {
             Command::Help => panic!("expected lifecycle stale-report config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected lifecycle stale-report config"),
             Command::LifecycleDestroyFinalize(_) => {
+                panic!("expected lifecycle stale-report config")
+            }
+            Command::LifecycleDestroyReconcile(_) => {
                 panic!("expected lifecycle stale-report config")
             }
         }
@@ -2636,6 +2861,9 @@ mod tests {
             Command::Approve(_) => panic!("expected lifecycle destroy-record config"),
             Command::Help => panic!("expected lifecycle destroy-record config"),
             Command::LifecycleDestroyFinalize(_) => {
+                panic!("expected lifecycle destroy-record config")
+            }
+            Command::LifecycleDestroyReconcile(_) => {
                 panic!("expected lifecycle destroy-record config")
             }
         }
@@ -2657,6 +2885,33 @@ mod tests {
             Command::RunManaged(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::Help => panic!("expected lifecycle destroy-finalize config"),
+            Command::LifecycleDestroyReconcile(_) => {
+                panic!("expected lifecycle destroy-finalize config")
+            }
+        }
+    }
+
+    fn parse_lifecycle_destroy_reconcile_ok(args: &[&str]) -> LifecycleDestroyReconcileConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::LifecycleDestroyReconcile(config) => config,
+            Command::LifecycleTransition(_) => {
+                panic!("expected lifecycle destroy-reconcile config")
+            }
+            Command::LifecycleStaleReport(_) => {
+                panic!("expected lifecycle destroy-reconcile config")
+            }
+            Command::LifecycleDestroyRecord(_) => {
+                panic!("expected lifecycle destroy-reconcile config")
+            }
+            Command::LifecycleDestroyFinalize(_) => {
+                panic!("expected lifecycle destroy-reconcile config")
+            }
+            Command::ForgeRotateGenerated(_) => {
+                panic!("expected lifecycle destroy-reconcile config")
+            }
+            Command::RunManaged(_) => panic!("expected lifecycle destroy-reconcile config"),
+            Command::Approve(_) => panic!("expected lifecycle destroy-reconcile config"),
+            Command::Help => panic!("expected lifecycle destroy-reconcile config"),
         }
     }
 
@@ -3017,6 +3272,51 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("value-free"));
         assert!(!err.to_string().contains("do-not-echo-me"));
+    }
+
+    #[test]
+    fn parses_lifecycle_destroy_reconcile_without_literal_inputs() {
+        let config = parse_lifecycle_destroy_reconcile_ok(&[
+            "lifecycle",
+            "destroy-reconcile",
+            "--metadata-file",
+            "/tmp/janus-metadata.toml",
+        ]);
+
+        assert_eq!(
+            config.metadata_file,
+            Some(PathBuf::from("/tmp/janus-metadata.toml"))
+        );
+
+        let err = parse_args(
+            [
+                "lifecycle",
+                "destroy-reconcile",
+                "--metadata-file",
+                "/tmp/janus-metadata.toml",
+                "--value",
+                "do-not-echo-me",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("value-free"));
+        assert!(!err.to_string().contains("do-not-echo-me"));
+
+        let err = parse_args(
+            [
+                "lifecycle",
+                "destroy-reconcile",
+                "--secret-ref",
+                "sec_do_not_echo",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("value-free"));
+        assert!(!err.to_string().contains("sec_do_not_echo"));
     }
 
     #[test]
@@ -4046,6 +4346,152 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn lifecycle_destroy_reconcile_reports_tombstone_metadata_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FileTombstoneRegistry::new(dir.path().join("tombstones"));
+        let project = ProjectId::new("janus").unwrap();
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let pending_name = SecretName::new("PENDING").unwrap();
+        let pending_ref = SecretRef::for_manifest_entry(&project, &pending_name);
+        let destroyed_missing_name = SecretName::new("DESTROYED_MISSING").unwrap();
+        let destroyed_missing_ref =
+            SecretRef::for_manifest_entry(&project, &destroyed_missing_name);
+        let active_name = SecretName::new("ACTIVE_WITH_TOMBSTONE").unwrap();
+        let active_ref = SecretRef::for_manifest_entry(&project, &active_name);
+        let ok_name = SecretName::new("DESTROYED_OK").unwrap();
+        let ok_ref = SecretRef::for_manifest_entry(&project, &ok_name);
+        let healthy_name = SecretName::new("ACTIVE_OK").unwrap();
+        let healthy_ref = SecretRef::for_manifest_entry(&project, &healthy_name);
+        let orphan_name = SecretName::new("ORPHAN").unwrap();
+        let orphan_ref = SecretRef::for_manifest_entry(&project, &orphan_name);
+
+        for (name, secret_ref) in [
+            (&pending_name, &pending_ref),
+            (&active_name, &active_ref),
+            (&ok_name, &ok_ref),
+            (&orphan_name, &orphan_ref),
+        ] {
+            let config = LifecycleDestroyRecordConfig {
+                secret_ref: secret_ref.clone(),
+                reason: SafeLabel::new("reviewed destroy record").unwrap(),
+                retain_for: Duration::from_secs(24 * 60 * 60),
+                metadata_file: None,
+            };
+            let mut audit = AuditWrite::accepting();
+            record_lifecycle_destroy_with(
+                &config,
+                fixture_store_with_class_and_lifecycle(
+                    secret_ref,
+                    name,
+                    &profile_id,
+                    SecretClass::Normal,
+                    SecretLifecycle::PendingDelete,
+                ),
+                &registry,
+                &fixture_principal(),
+                &mut audit,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        }
+
+        let store = fixture_store_with_lifecycle_entries(&[
+            (
+                pending_ref.clone(),
+                pending_name.clone(),
+                SecretLifecycle::PendingDelete,
+            ),
+            (
+                destroyed_missing_ref.clone(),
+                destroyed_missing_name.clone(),
+                SecretLifecycle::Destroyed,
+            ),
+            (
+                active_ref.clone(),
+                active_name.clone(),
+                SecretLifecycle::Active,
+            ),
+            (ok_ref.clone(), ok_name.clone(), SecretLifecycle::Destroyed),
+            (
+                healthy_ref.clone(),
+                healthy_name.clone(),
+                SecretLifecycle::Active,
+            ),
+        ]);
+        let mut audit = AuditWrite::accepting();
+
+        let rows = build_lifecycle_destroy_reconcile_with(
+            store,
+            &registry,
+            &fixture_principal(),
+            &mut audit,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rows.len(), 5);
+        let by_ref = rows
+            .iter()
+            .map(|row| (row.secret_ref.as_str().to_string(), row))
+            .collect::<BTreeMap<_, _>>();
+        assert!(!by_ref.contains_key(healthy_ref.as_str()));
+
+        let pending = by_ref.get(pending_ref.as_str()).unwrap();
+        assert_eq!(pending.status, "needs_finalize");
+        assert_eq!(pending.reason_code, "destroy_tombstone_pending_finalize");
+        assert_eq!(pending.action, "run_destroy_finalize");
+        assert_eq!(pending.metadata_lifecycle, "pending_delete");
+        assert_eq!(pending.tombstone_state, "present");
+        assert!(pending.action_required);
+
+        let destroyed_missing = by_ref.get(destroyed_missing_ref.as_str()).unwrap();
+        assert_eq!(destroyed_missing.status, "drift");
+        assert_eq!(destroyed_missing.reason_code, "destroyed_missing_tombstone");
+        assert_eq!(destroyed_missing.action, "restore_tombstone_or_investigate");
+        assert_eq!(destroyed_missing.metadata_lifecycle, "destroyed");
+        assert_eq!(destroyed_missing.tombstone_state, "missing");
+        assert!(destroyed_missing.action_required);
+
+        let active = by_ref.get(active_ref.as_str()).unwrap();
+        assert_eq!(active.status, "drift");
+        assert_eq!(active.reason_code, "destroy_tombstone_lifecycle_mismatch");
+        assert_eq!(active.action, "investigate_destroy_lifecycle");
+        assert_eq!(active.metadata_lifecycle, "active");
+        assert_eq!(active.tombstone_state, "present");
+        assert!(active.action_required);
+
+        let ok = by_ref.get(ok_ref.as_str()).unwrap();
+        assert_eq!(ok.status, "ok");
+        assert_eq!(ok.reason_code, "destroy_tombstone_reconcile_ok");
+        assert_eq!(ok.action, "none");
+        assert_eq!(ok.metadata_lifecycle, "destroyed");
+        assert_eq!(ok.tombstone_state, "present");
+        assert!(!ok.action_required);
+
+        let orphan = by_ref.get(orphan_ref.as_str()).unwrap();
+        assert_eq!(orphan.status, "drift");
+        assert_eq!(orphan.reason_code, "destroy_tombstone_metadata_missing");
+        assert_eq!(orphan.action, "investigate_orphan_tombstone");
+        assert_eq!(orphan.metadata_lifecycle, "missing");
+        assert_eq!(orphan.tombstone_state, "present");
+        assert!(orphan.action_required);
+
+        for row in &rows {
+            assert!(!row.value_returned);
+            assert!(!row.provider_deleted);
+            assert!(!format!("{row:?}").contains("expected-canary"));
+        }
+        assert_eq!(audit.events().len(), rows.len());
+        for event in audit.events() {
+            assert_eq!(event.action, AuditAction::SecretLifecycle);
+            assert_eq!(event.outcome, AuditOutcome::Allowed);
+            assert!(!event.value_returned);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn lifecycle_stale_report_reports_value_free_rows_and_audit() {
         let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
@@ -4592,6 +5038,32 @@ mod tests {
         MockStore::new(catalog)
             .with_value(name.clone(), b"expected-canary".to_vec())
             .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn fixture_store_with_lifecycle_entries(
+        entries: &[(SecretRef, SecretName, SecretLifecycle)],
+    ) -> MockStore {
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let catalog = ManifestCatalog::new(
+            entries
+                .iter()
+                .map(|(secret_ref, name, lifecycle)| SecretMeta {
+                    secret_ref: secret_ref.clone(),
+                    name: name.clone(),
+                    label: SafeLabel::new("Canary token").unwrap(),
+                    scope: ScopeRef::new("janus/dev").unwrap(),
+                    owner: Some(OwnerRef::new("infra").unwrap()),
+                    classification: Some(SecretClass::Normal),
+                    lifecycle: *lifecycle,
+                    required: true,
+                    trust_level: TrustLevel::L1,
+                    allowed_uses: vec![profile_id.clone()],
+                })
+                .collect(),
+        )
+        .unwrap();
+        MockStore::new(catalog)
     }
 
     #[cfg(unix)]
