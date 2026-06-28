@@ -91,7 +91,7 @@ It asserts the transcript never contains the fixture secret value.
 
 **Engine container smoke:**
 ```bash
-devenv shell -- scripts/smoke-engine-container.sh
+devenv shell -- ./scripts/smoke-engine-container.sh
 ```
 
 The container smoke builds `Dockerfile.engine`, runs `janus-warden` from that
@@ -100,7 +100,7 @@ mounted disposable fixture. Containers are run with `--rm` and no network.
 
 **Published engine image smoke:**
 ```bash
-devenv shell -- scripts/smoke-published-engine.sh
+devenv shell -- ./scripts/smoke-published-engine.sh
 ```
 
 This resolves the published `rust-engine-v0.1.1` GHCR image to `image@sha256`,
