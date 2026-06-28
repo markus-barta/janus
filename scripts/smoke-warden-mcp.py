@@ -104,7 +104,7 @@ def parse_args() -> argparse.Namespace:
 
 def smoke_env(fixture: Path, *, container: bool = False) -> dict[str, str]:
     root = Path(CONTAINER_FIXTURE_DIR) if container else fixture
-    return {
+    env = {
         "JANUS_WARDEN_BACKEND": "secretspec",
         "JANUS_WARDEN_SECRETSPEC_FILE": str(root / "secretspec.toml"),
         "JANUS_WARDEN_SECRETSPEC_PROVIDER_URI": f"dotenv:{root / '.env'}",
@@ -112,8 +112,10 @@ def smoke_env(fixture: Path, *, container: bool = False) -> dict[str, str]:
         "JANUS_WARDEN_DESTINATION": "dev-smoke",
         "JANUS_WARDEN_EXECUTOR": "warden-stdio",
         "JANUS_WARDEN_SCOPE": "janus/dev",
-        "JANUS_WARDEN_PERMIT_DIR": str(root / "permits"),
     }
+    if not container:
+        env["JANUS_WARDEN_PERMIT_DIR"] = str(root / "permits")
+    return env
 
 
 def prepare_container_mount(fixture: Path, permit_dir: Path) -> None:
