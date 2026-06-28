@@ -116,6 +116,8 @@ This resolves the published `rust-engine-v0.1.1` GHCR image to `image@sha256`,
 verifies GitHub build provenance and the keyless cosign signature for the
 release tag, then runs the same Warden MCP smoke against the digest-pinned
 image. Override `JANUS_PUBLISHED_ENGINE_TAG` to check another release.
+Release CI runs the same smoke after publishing, signing, and attesting a
+`rust-engine-v*` image, using the exact digest returned by the build step.
 
 **Engine image:**
 Publish a signed Rust engine image by creating a GitHub Release whose tag
@@ -128,7 +130,8 @@ gh release create rust-engine-v0.1.0 --target main \
 ```
 
 The release workflow pushes `ghcr.io/markus-barta/janus/janus-engine`, signs it
-keyless with cosign, uploads an SPDX SBOM, and publishes build provenance.
+keyless with cosign, uploads an SPDX SBOM, publishes build provenance, then
+verifies and smokes the exact published digest before the job can pass.
 
 **Envelope (Go):**
 ```bash

@@ -5,13 +5,19 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${JANUS_PUBLISHED_ENGINE_IMAGE:-ghcr.io/markus-barta/janus/janus-engine}"
 tag="${JANUS_PUBLISHED_ENGINE_TAG:-rust-engine-v0.1.1}"
 platform="${JANUS_PUBLISHED_ENGINE_PLATFORM:-}"
-signer_workflow="${JANUS_PUBLISHED_ENGINE_SIGNER_WORKFLOW:-markus-barta/janus/.github/workflows/rust.yml}"
 repo_slug="${JANUS_PUBLISHED_ENGINE_REPO:-markus-barta/janus}"
+signer_workflow="${JANUS_PUBLISHED_ENGINE_SIGNER_WORKFLOW:-${repo_slug}/.github/workflows/rust.yml}"
+require_cosign="${JANUS_PUBLISHED_ENGINE_REQUIRE_COSIGN:-1}"
+digest="${JANUS_PUBLISHED_ENGINE_DIGEST:-}"
+digest_source="provided"
 
-digest="$(
-  docker buildx imagetools inspect "${image}:${tag}" |
-    awk '/^Digest:/ { print $2; exit }'
-)"
+if [[ -z "${digest}" ]]; then
+  digest_source="resolved"
+  digest="$(
+    docker buildx imagetools inspect "${image}:${tag}" |
+      awk '/^Digest:/ { print $2; exit }'
+  )"
+fi
 
 if [[ -z "${digest}" || "${digest}" != sha256:* ]]; then
   echo "failed to resolve digest for ${image}:${tag}" >&2
@@ -19,7 +25,7 @@ if [[ -z "${digest}" || "${digest}" != sha256:* ]]; then
 fi
 
 ref="${image}@${digest}"
-echo "resolved ${image}:${tag} -> ${ref}"
+echo "${digest_source} ${image}:${tag} -> ${ref}"
 
 gh attestation verify "oci://${ref}" \
   --repo "${repo_slug}" \
@@ -32,6 +38,9 @@ if command -v cosign >/dev/null 2>&1; then
     --certificate-identity-regexp "https://github.com/${repo_slug}/.github/workflows/rust.yml@refs/tags/${tag}" \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
   echo "cosign signature verified for ${ref}"
+elif [[ "${require_cosign}" == "1" || "${require_cosign}" == "true" ]]; then
+  echo "cosign not found; keyless signature verification is required" >&2
+  exit 1
 else
   echo "cosign not found; skipped keyless signature verification" >&2
 fi

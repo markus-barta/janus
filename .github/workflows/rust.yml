@@ -107,3 +107,13 @@ jobs:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+      - name: verify published engine digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JANUS_PUBLISHED_ENGINE_IMAGE: ${{ env.IMAGE }}
+          JANUS_PUBLISHED_ENGINE_TAG: ${{ github.event.release.tag_name }}
+          JANUS_PUBLISHED_ENGINE_DIGEST: ${{ steps.build.outputs.digest }}
+          JANUS_PUBLISHED_ENGINE_REPO: ${{ github.repository }}
+          JANUS_PUBLISHED_ENGINE_SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/rust.yml
+          JANUS_PUBLISHED_ENGINE_REQUIRE_COSIGN: "1"
+        run: scripts/smoke-published-engine.sh
