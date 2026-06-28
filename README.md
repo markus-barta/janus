@@ -222,6 +222,34 @@ blast_radius = "deploy-api"
 janusd run --profile profile.deploy --permit use_... -- release apply
 ```
 
+For service/host handoff, an env-file profile owns the env var name and output
+path. The caller still supplies only the opaque permit id and reviewed profile:
+
+```toml
+[[env_files]]
+id = "profile.deploy-env"
+secret_ref = "sec_deploy_token"
+executor = "janus-run@csb1"
+destination = "deploy-api"
+env = "DEPLOY_TOKEN"
+output = "/run/janus/env/deploy-api.env"
+
+[env_files.consumer]
+consumer_ref = "consumer.deploy-api"
+kind = "service"
+owner = "janusd"
+environment = "prod"
+blast_radius = "deploy-api"
+```
+
+```bash
+janusd env-file --profile profile.deploy-env --permit use_...
+```
+
+`janusd env-file` writes a private env file atomically (`0600` on Unix) and
+prints only value-free outcome fields; it rejects caller-supplied env names,
+output paths, raw values, executors, and destinations.
+
 The permit id is power-bearing and should not be logged casually. A copied or
 stale permit still has to pass principal, executor, destination, profile, secret
 ref, manifest membership, expiry, and audit checks before a value is read.

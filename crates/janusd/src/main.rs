@@ -30,8 +30,8 @@ use janus_core::{
     ValidationProbe,
 };
 use janus_executor::{
-    ApprovedUseExecutor, ManagedCommandProfile, ManagedCommandProfileSpec, ManagedCommandRequest,
-    ManagedCommandRuntimeLimits,
+    ApprovedUseExecutor, EnvFileProfile, EnvFileProfileSpec, EnvFileRequest, ManagedCommandProfile,
+    ManagedCommandProfileSpec, ManagedCommandRequest, ManagedCommandRuntimeLimits,
 };
 use janus_forge::{
     ConsumerRotationHooks, GeneratedAlphabet, GeneratedRotationBroker, GeneratedValuePolicy,
@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
         }
         Command::ForgeRotateGenerated(config) => run_forge_rotate_generated(config).await,
         Command::RunManaged(config) => run_managed_command(config).await,
+        Command::EnvFile(config) => run_env_file(config).await,
         Command::Approve(command) => run_approve(command).await,
         Command::LifecycleTransition(config) => run_lifecycle_transition(config).await,
         Command::LifecycleStaleReport(config) => run_lifecycle_stale_report(config).await,
@@ -82,6 +83,7 @@ enum Command {
     Help,
     ForgeRotateGenerated(ForgeRotateGeneratedConfig),
     RunManaged(RunManagedCommandConfig),
+    EnvFile(EnvFileConfig),
     Approve(ApproveCommand),
     LifecycleTransition(LifecycleTransitionConfig),
     LifecycleStaleReport(LifecycleStaleReportConfig),
@@ -115,6 +117,12 @@ struct RunManagedCommandConfig {
     profile_id: ProfileId,
     permit: PermitToken,
     requested_args: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EnvFileConfig {
+    profile_id: ProfileId,
+    permit: PermitToken,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -371,6 +379,31 @@ async fn run_managed_command(config: RunManagedCommandConfig) -> Result<()> {
     let lifecycle_evidence = FileLifecycleEvidenceRegistry::new(lifecycle_evidence_registry_dir());
     record_managed_command_evidence(&outcome, &lifecycle_evidence, SystemTime::now())?;
     emit_run_managed_outcome(&outcome);
+    Ok(())
+}
+
+async fn run_env_file(config: EnvFileConfig) -> Result<()> {
+    let manifest_path = run_profile_manifest_path()?;
+    let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
+    let permits = FilePermitRegistry::new(run_permit_registry_dir()?);
+    let store = load_age_store_from_env()?;
+    let executor = ApprovedUseExecutor::new(SecretBroker::new(
+        store,
+        ProfilePolicy::default(),
+        AuditWrite::accepting(),
+    ));
+    let principal = run_principal_from_env()?;
+    let mut runner = ProfileManifestEnvFileRunner {
+        profiles,
+        permits,
+        executor,
+        principal,
+        clock: SystemManagedCommandClock,
+    };
+    let outcome = run_env_file_with(&config, &mut runner).await?;
+    let lifecycle_evidence = FileLifecycleEvidenceRegistry::new(lifecycle_evidence_registry_dir());
+    record_secret_use_evidence(&outcome.secret_ref, &lifecycle_evidence, SystemTime::now())?;
+    emit_env_file_outcome(&outcome);
     Ok(())
 }
 
@@ -956,7 +989,14 @@ fn record_managed_command_evidence<R>(
 where
     R: SharedLifecycleEvidenceRegistry,
 {
-    registry.record_used(&outcome.secret_ref, at)?;
+    record_secret_use_evidence(&outcome.secret_ref, registry, at)
+}
+
+fn record_secret_use_evidence<R>(secret_ref: &SecretRef, registry: &R, at: SystemTime) -> Result<()>
+where
+    R: SharedLifecycleEvidenceRegistry,
+{
+    registry.record_used(secret_ref, at)?;
     Ok(())
 }
 
@@ -1102,9 +1142,9 @@ fn build_approval_grant(
     now: SystemTime,
 ) -> Result<ApprovalGrant> {
     let profile = profiles
-        .profile(&config.profile_id)
-        .context("managed command profile not found")?;
-    if profile.secret_ref() != &config.secret_ref {
+        .profile_binding(&config.profile_id)
+        .context("approved-use profile not found")?;
+    if profile.secret_ref != config.secret_ref {
         anyhow::bail!("approval profile does not match the requested secret ref");
     }
     let descriptor = descriptors
@@ -1127,10 +1167,10 @@ fn build_approval_grant(
         .classification
         .expect("normal_use_denial guarantees classification is present");
     let use_profile = UseProfile {
-        id: profile.profile_id().clone(),
-        secret_ref: profile.secret_ref().clone(),
-        executor: profile.executor().clone(),
-        destination: profile.destination().clone(),
+        id: config.profile_id.clone(),
+        secret_ref: profile.secret_ref.clone(),
+        executor: profile.executor.clone(),
+        destination: profile.destination.clone(),
         egress: config.egress,
         trust_level: TrustLevel::L2,
         ttl: config.expires_in,
@@ -1140,7 +1180,7 @@ fn build_approval_grant(
     let request = UseRequest {
         secret_ref: config.secret_ref.clone(),
         profile_id: config.profile_id.clone(),
-        destination: profile.destination().clone(),
+        destination: profile.destination.clone(),
         purpose: config.purpose.clone(),
     };
     Ok(ApprovalGrant::for_request(
@@ -1318,6 +1358,81 @@ where
     }
 }
 
+async fn run_env_file_with<R>(config: &EnvFileConfig, runner: &mut R) -> Result<EnvFileCliOutcome>
+where
+    R: EnvFileRunner + Send,
+{
+    runner.run(config).await
+}
+
+#[async_trait]
+trait EnvFileRunner {
+    async fn run(&mut self, config: &EnvFileConfig) -> Result<EnvFileCliOutcome>;
+}
+
+#[async_trait]
+trait EnvFileExecutor {
+    async fn render(
+        &mut self,
+        profile: &EnvFileProfile,
+        permit: &UsePermit,
+        principal: &PrincipalChain,
+        now: SystemTime,
+    ) -> Result<EnvFileCliOutcome>;
+}
+
+#[async_trait]
+impl<S, A> EnvFileExecutor for ApprovedUseExecutor<S, A>
+where
+    S: SecretStore + Send,
+    A: AuditSink + Send,
+{
+    async fn render(
+        &mut self,
+        profile: &EnvFileProfile,
+        permit: &UsePermit,
+        principal: &PrincipalChain,
+        now: SystemTime,
+    ) -> Result<EnvFileCliOutcome> {
+        let outcome = self
+            .render_env_file(EnvFileRequest {
+                profile,
+                permit,
+                principal,
+                now,
+            })
+            .await?;
+        Ok(outcome.into())
+    }
+}
+
+struct ProfileManifestEnvFileRunner<R, E, C = SystemManagedCommandClock> {
+    profiles: ManagedCommandProfileCatalog,
+    permits: R,
+    executor: E,
+    principal: PrincipalChain,
+    clock: C,
+}
+
+#[async_trait]
+impl<R, E, C> EnvFileRunner for ProfileManifestEnvFileRunner<R, E, C>
+where
+    R: ManagedCommandPermitRegistry + Send,
+    E: EnvFileExecutor + Send,
+    C: ManagedCommandClock + Send,
+{
+    async fn run(&mut self, config: &EnvFileConfig) -> Result<EnvFileCliOutcome> {
+        let profile = self
+            .profiles
+            .env_file_profile(&config.profile_id)
+            .context("env-file profile not found")?;
+        let permit = self.permits.resolve(&config.permit)?;
+        self.executor
+            .render(profile, &permit, &self.principal, self.clock.now())
+            .await
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ManagedCommandCliOutcome {
     secret_ref: SecretRef,
@@ -1343,6 +1458,29 @@ impl From<janus_executor::ManagedCommandOutcome> for ManagedCommandCliOutcome {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EnvFileCliOutcome {
+    secret_ref: SecretRef,
+    profile_id: ProfileId,
+    output_path: PathBuf,
+    consumer_ref: ConsumerRef,
+    reason_code: &'static str,
+    value_returned: bool,
+}
+
+impl From<janus_executor::EnvFileOutcome> for EnvFileCliOutcome {
+    fn from(outcome: janus_executor::EnvFileOutcome) -> Self {
+        Self {
+            secret_ref: outcome.plan.secret_ref,
+            profile_id: outcome.plan.profile_id,
+            output_path: outcome.plan.output_path,
+            consumer_ref: outcome.plan.consumer_ref,
+            reason_code: outcome.reason_code,
+            value_returned: outcome.value_returned || outcome.plan.value_returned,
+        }
+    }
+}
+
 fn emit_run_managed_outcome(outcome: &ManagedCommandCliOutcome) {
     print!("{}", outcome.stdout);
     eprint!("{}", outcome.stderr);
@@ -1352,9 +1490,22 @@ fn emit_run_managed_outcome(outcome: &ManagedCommandCliOutcome) {
     );
 }
 
+fn emit_env_file_outcome(outcome: &EnvFileCliOutcome) {
+    println!(
+        "janusd env-file ok secret_ref={} profile_id={} output_path={} consumer_ref={} reason_code={} value_returned={}",
+        outcome.secret_ref.as_str(),
+        outcome.profile_id.as_str(),
+        outcome.output_path.display(),
+        outcome.consumer_ref.as_str(),
+        outcome.reason_code,
+        outcome.value_returned
+    );
+}
+
 #[derive(Clone, Debug)]
 struct ManagedCommandProfileCatalog {
     profiles: Vec<ManagedCommandProfile>,
+    env_file_profiles: Vec<EnvFileProfile>,
 }
 
 impl ManagedCommandProfileCatalog {
@@ -1376,14 +1527,25 @@ impl ManagedCommandProfileCatalog {
         for profile in parsed.profiles {
             let profile = profile.into_profile()?;
             if !ids.insert(profile.profile_id().as_str().to_string()) {
-                anyhow::bail!("duplicate managed command profile id");
+                anyhow::bail!("duplicate approved-use profile id");
             }
             profiles.push(profile);
         }
-        if profiles.is_empty() {
-            anyhow::bail!("managed command profile manifest has no profiles");
+        let mut env_file_profiles = Vec::new();
+        for profile in parsed.env_files {
+            let profile = profile.into_profile()?;
+            if !ids.insert(profile.profile_id().as_str().to_string()) {
+                anyhow::bail!("duplicate approved-use profile id");
+            }
+            env_file_profiles.push(profile);
         }
-        Ok(Self { profiles })
+        if profiles.is_empty() && env_file_profiles.is_empty() {
+            anyhow::bail!("approved-use profile manifest has no profiles");
+        }
+        Ok(Self {
+            profiles,
+            env_file_profiles,
+        })
     }
 
     fn profile(&self, profile_id: &ProfileId) -> Option<&ManagedCommandProfile> {
@@ -1391,12 +1553,44 @@ impl ManagedCommandProfileCatalog {
             .iter()
             .find(|profile| profile.profile_id() == profile_id)
     }
+
+    fn env_file_profile(&self, profile_id: &ProfileId) -> Option<&EnvFileProfile> {
+        self.env_file_profiles
+            .iter()
+            .find(|profile| profile.profile_id() == profile_id)
+    }
+
+    fn profile_binding(&self, profile_id: &ProfileId) -> Option<ApprovedUseProfileBinding> {
+        if let Some(profile) = self.profile(profile_id) {
+            return Some(ApprovedUseProfileBinding {
+                secret_ref: profile.secret_ref().clone(),
+                executor: profile.executor().clone(),
+                destination: profile.destination().clone(),
+            });
+        }
+        self.env_file_profile(profile_id)
+            .map(|profile| ApprovedUseProfileBinding {
+                secret_ref: profile.secret_ref().clone(),
+                executor: profile.executor().clone(),
+                destination: profile.destination().clone(),
+            })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct ManagedCommandProfileCatalogToml {
+    #[serde(default)]
     profiles: Vec<ManagedCommandProfileToml>,
+    #[serde(default)]
+    env_files: Vec<EnvFileProfileToml>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ApprovedUseProfileBinding {
+    secret_ref: SecretRef,
+    executor: ExecutorRef,
+    destination: Destination,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -1423,6 +1617,35 @@ struct ManagedCommandProfileToml {
 struct ManagedCommandConsumerToml {
     consumer_ref: String,
     #[serde(default = "default_managed_command_kind")]
+    kind: String,
+    owner: String,
+    environment: String,
+    #[serde(default = "default_reload_method")]
+    reload: String,
+    #[serde(default)]
+    validation: Vec<String>,
+    #[serde(default)]
+    supports_dual_value: bool,
+    blast_radius: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct EnvFileProfileToml {
+    id: String,
+    secret_ref: String,
+    executor: String,
+    destination: String,
+    env: String,
+    output: PathBuf,
+    consumer: EnvFileConsumerToml,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct EnvFileConsumerToml {
+    consumer_ref: String,
+    #[serde(default = "default_env_file_kind")]
     kind: String,
     owner: String,
     environment: String,
@@ -1476,6 +1699,38 @@ impl ManagedCommandProfileToml {
     }
 }
 
+impl EnvFileProfileToml {
+    fn into_profile(self) -> Result<EnvFileProfile> {
+        let secret_ref = SecretRef::new(self.secret_ref)?;
+        let consumer = ConsumerDescriptor {
+            consumer_ref: ConsumerRef::new(self.consumer.consumer_ref)?,
+            secret_ref: secret_ref.clone(),
+            kind: parse_env_file_consumer_kind(&self.consumer.kind)?,
+            owner: OwnerRef::new(self.consumer.owner)?,
+            environment: Environment::new(self.consumer.environment)?,
+            reload: parse_reload_method(&self.consumer.reload)?,
+            validation: self
+                .consumer
+                .validation
+                .into_iter()
+                .map(ValidationProbe::new)
+                .collect::<janus_core::JanusResult<_>>()?,
+            supports_dual_value: self.consumer.supports_dual_value,
+            blast_radius: BlastRadius::new(self.consumer.blast_radius)?,
+            declared: true,
+        };
+        Ok(EnvFileProfile::new(EnvFileProfileSpec {
+            profile_id: ProfileId::new(self.id)?,
+            secret_ref,
+            executor: ExecutorRef::new(self.executor)?,
+            destination: Destination::new(self.destination)?,
+            env_name: SafeLabel::new(self.env)?,
+            output_path: self.output,
+            consumer,
+        })?)
+    }
+}
+
 fn default_run_timeout_seconds() -> u64 {
     30
 }
@@ -1488,8 +1743,24 @@ fn default_managed_command_kind() -> String {
     "managed_command".to_string()
 }
 
+fn default_env_file_kind() -> String {
+    "service".to_string()
+}
+
 fn default_reload_method() -> String {
     "none".to_string()
+}
+
+fn parse_env_file_consumer_kind(value: &str) -> Result<ConsumerKind> {
+    match value {
+        "service" => Ok(ConsumerKind::Service),
+        "ci_job" => Ok(ConsumerKind::CiJob),
+        "dev_shell" => Ok(ConsumerKind::DevShell),
+        "connector" => Ok(ConsumerKind::Connector),
+        "human_workflow" => Ok(ConsumerKind::HumanWorkflow),
+        "managed_command" => anyhow::bail!("env-file consumer kind must not be managed_command"),
+        _ => anyhow::bail!("unsupported env-file consumer kind"),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -1727,6 +1998,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         }
         [run, rest @ ..] if run == "run" => {
             parse_run_managed(rest.iter().cloned()).map(Command::RunManaged)
+        }
+        [env_file, rest @ ..] if env_file == "env-file" => {
+            parse_env_file(rest.iter().cloned()).map(Command::EnvFile)
         }
         [approve, issue, rest @ ..] if approve == "approve" && issue == "issue" => {
             parse_approve_issue(rest.iter().cloned())
@@ -2274,6 +2548,45 @@ fn parse_run_managed(args: impl IntoIterator<Item = String>) -> Result<RunManage
     })
 }
 
+fn parse_env_file(args: impl IntoIterator<Item = String>) -> Result<EnvFileConfig> {
+    let mut profile_id = None;
+    let mut permit = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--profile" => {
+                if profile_id
+                    .replace(ProfileId::new(required_arg("--profile", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--profile may only be provided once");
+                }
+            }
+            "--permit" => {
+                if permit
+                    .replace(PermitToken::new(required_arg("--permit", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--permit may only be provided once");
+                }
+            }
+            "--secret" | "--secret-ref" | "--value" | "--raw-value" | "--env" | "--output"
+            | "--destination" | "--executor" | "--binary" => {
+                anyhow::bail!("env-file policy fields come from the reviewed profile")
+            }
+            "--" => anyhow::bail!("janusd env-file does not accept command arguments"),
+            other if other.starts_with('-') => anyhow::bail!("unsupported janusd env-file flag"),
+            _ => anyhow::bail!("unsupported janusd env-file argument"),
+        }
+    }
+
+    Ok(EnvFileConfig {
+        profile_id: profile_id.context("--profile is required")?,
+        permit: permit.context("--permit is required")?,
+    })
+}
+
 fn parse_forge_rotate_generated(
     args: impl IntoIterator<Item = String>,
 ) -> Result<ForgeRotateGeneratedConfig> {
@@ -2724,12 +3037,14 @@ fn env_first(keys: &[&str]) -> Option<String> {
 
 fn print_usage() {
     eprintln!(
-        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  lifecycle destroy-finalize --secret-ref REF [--metadata-file PATH]\n  lifecycle destroy-reconcile [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\njanusd lifecycle destroy-finalize requires a tombstone and writes destroyed metadata only; it never deletes provider values.\njanusd lifecycle destroy-reconcile reads metadata and tombstones only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
+        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  env-file --profile PROFILE --permit use_...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  lifecycle destroy-finalize --secret-ref REF [--metadata-file PATH]\n  lifecycle destroy-reconcile [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd env-file writes a reviewed private env file from JANUS_RUN_PROFILE_MANIFEST; callers cannot choose env name, output path, executor, destination, or value.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\njanusd lifecycle destroy-finalize requires a tombstone and writes destroyed metadata only; it never deletes provider values.\njanusd lifecycle destroy-reconcile reads metadata and tombstones only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     #[cfg(unix)]
     use std::time::SystemTime;
 
@@ -2749,6 +3064,7 @@ mod tests {
             Command::ForgeRotateGenerated(config) => config,
             Command::Help => panic!("expected forge config"),
             Command::RunManaged(_) => panic!("expected forge config"),
+            Command::EnvFile(_) => panic!("expected forge config"),
             Command::Approve(_) => panic!("expected forge config"),
             Command::LifecycleTransition(_) => panic!("expected forge config"),
             Command::LifecycleStaleReport(_) => panic!("expected forge config"),
@@ -2762,6 +3078,7 @@ mod tests {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::RunManaged(config) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected run config"),
+            Command::EnvFile(_) => panic!("expected run config"),
             Command::Help => panic!("expected run config"),
             Command::Approve(_) => panic!("expected run config"),
             Command::LifecycleTransition(_) => panic!("expected run config"),
@@ -2772,11 +3089,27 @@ mod tests {
         }
     }
 
+    fn parse_env_file_ok(args: &[&str]) -> EnvFileConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::EnvFile(config) => config,
+            Command::ForgeRotateGenerated(_) => panic!("expected env-file config"),
+            Command::RunManaged(_) => panic!("expected env-file config"),
+            Command::Approve(_) => panic!("expected env-file config"),
+            Command::Help => panic!("expected env-file config"),
+            Command::LifecycleTransition(_) => panic!("expected env-file config"),
+            Command::LifecycleStaleReport(_) => panic!("expected env-file config"),
+            Command::LifecycleDestroyRecord(_) => panic!("expected env-file config"),
+            Command::LifecycleDestroyFinalize(_) => panic!("expected env-file config"),
+            Command::LifecycleDestroyReconcile(_) => panic!("expected env-file config"),
+        }
+    }
+
     fn parse_approve_issue_ok(args: &[&str]) -> ApproveIssueConfig {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::Approve(ApproveCommand::Issue(config)) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected approve issue config"),
             Command::RunManaged(_) => panic!("expected approve issue config"),
+            Command::EnvFile(_) => panic!("expected approve issue config"),
             Command::Approve(_) => panic!("expected approve issue config"),
             Command::Help => panic!("expected approve issue config"),
             Command::LifecycleTransition(_) => panic!("expected approve issue config"),
@@ -2792,6 +3125,7 @@ mod tests {
             Command::Approve(ApproveCommand::Permit(config)) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected approve permit config"),
             Command::RunManaged(_) => panic!("expected approve permit config"),
+            Command::EnvFile(_) => panic!("expected approve permit config"),
             Command::Approve(_) => panic!("expected approve permit config"),
             Command::Help => panic!("expected approve permit config"),
             Command::LifecycleTransition(_) => panic!("expected approve permit config"),
@@ -2807,6 +3141,7 @@ mod tests {
             Command::Approve(ApproveCommand::Revoke(config)) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected approve revoke config"),
             Command::RunManaged(_) => panic!("expected approve revoke config"),
+            Command::EnvFile(_) => panic!("expected approve revoke config"),
             Command::Approve(_) => panic!("expected approve revoke config"),
             Command::Help => panic!("expected approve revoke config"),
             Command::LifecycleTransition(_) => panic!("expected approve revoke config"),
@@ -2822,6 +3157,7 @@ mod tests {
             Command::LifecycleTransition(config) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected lifecycle config"),
             Command::RunManaged(_) => panic!("expected lifecycle config"),
+            Command::EnvFile(_) => panic!("expected lifecycle config"),
             Command::Approve(_) => panic!("expected lifecycle config"),
             Command::Help => panic!("expected lifecycle config"),
             Command::LifecycleStaleReport(_) => panic!("expected lifecycle config"),
@@ -2837,6 +3173,7 @@ mod tests {
             Command::LifecycleTransition(_) => panic!("expected lifecycle stale-report config"),
             Command::ForgeRotateGenerated(_) => panic!("expected lifecycle stale-report config"),
             Command::RunManaged(_) => panic!("expected lifecycle stale-report config"),
+            Command::EnvFile(_) => panic!("expected lifecycle stale-report config"),
             Command::Approve(_) => panic!("expected lifecycle stale-report config"),
             Command::Help => panic!("expected lifecycle stale-report config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected lifecycle stale-report config"),
@@ -2858,6 +3195,7 @@ mod tests {
             }
             Command::ForgeRotateGenerated(_) => panic!("expected lifecycle destroy-record config"),
             Command::RunManaged(_) => panic!("expected lifecycle destroy-record config"),
+            Command::EnvFile(_) => panic!("expected lifecycle destroy-record config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-record config"),
             Command::Help => panic!("expected lifecycle destroy-record config"),
             Command::LifecycleDestroyFinalize(_) => {
@@ -2883,6 +3221,7 @@ mod tests {
                 panic!("expected lifecycle destroy-finalize config")
             }
             Command::RunManaged(_) => panic!("expected lifecycle destroy-finalize config"),
+            Command::EnvFile(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::Help => panic!("expected lifecycle destroy-finalize config"),
             Command::LifecycleDestroyReconcile(_) => {
@@ -2910,6 +3249,7 @@ mod tests {
                 panic!("expected lifecycle destroy-reconcile config")
             }
             Command::RunManaged(_) => panic!("expected lifecycle destroy-reconcile config"),
+            Command::EnvFile(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::Help => panic!("expected lifecycle destroy-reconcile config"),
         }
@@ -2932,6 +3272,66 @@ mod tests {
         assert_eq!(config.permit.as_str(), "use_abc123");
         assert_eq!(config.requested_args, vec!["release", "upload"]);
         assert!(!format!("{config:?}").contains("use_abc123"));
+    }
+
+    #[test]
+    fn parses_env_file_profile_and_rejects_unreviewed_fields() {
+        let config = parse_env_file_ok(&[
+            "env-file",
+            "--profile",
+            "profile.service_env",
+            "--permit",
+            "use_abc123",
+        ]);
+
+        assert_eq!(config.profile_id.as_str(), "profile.service_env");
+        assert_eq!(config.permit.as_str(), "use_abc123");
+        assert!(!format!("{config:?}").contains("use_abc123"));
+
+        for flag in [
+            "--secret-ref",
+            "--value",
+            "--raw-value",
+            "--env",
+            "--output",
+            "--destination",
+            "--executor",
+            "--binary",
+        ] {
+            let err = parse_args(
+                [
+                    "env-file",
+                    "--profile",
+                    "profile.service_env",
+                    "--permit",
+                    "use_abc123",
+                    flag,
+                    "unreviewed",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("reviewed profile"));
+            assert!(!err.to_string().contains("use_abc123"));
+        }
+
+        let err = parse_args(
+            [
+                "env-file",
+                "--profile",
+                "profile.service_env",
+                "--permit",
+                "use_abc123",
+                "--",
+                "echo",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not accept"));
+        assert!(!err.to_string().contains("use_abc123"));
     }
 
     #[test]
@@ -3499,6 +3899,32 @@ mod tests {
         )
     }
 
+    fn env_file_profile_toml(secret_ref: &SecretRef, output_path: &Path) -> String {
+        format!(
+            r#"
+                [[env_files]]
+                id = "profile.service_env"
+                secret_ref = {}
+                executor = "janus-run@fixture"
+                destination = "fixture-service"
+                env = "SERVICE_TOKEN"
+                output = {}
+
+                [env_files.consumer]
+                consumer_ref = "consumer.fixture_service"
+                kind = "service"
+                owner = "janusd-test"
+                environment = "test"
+                reload = "restart-service:fixture-service"
+                validation = ["fixture-service-health"]
+                supports_dual_value = false
+                blast_radius = "fixture-service"
+            "#,
+            toml_string(secret_ref.as_str()),
+            toml_string(output_path.to_string_lossy().as_ref()),
+        )
+    }
+
     #[test]
     fn managed_profile_manifest_parses_reviewed_command_contract() {
         let secret_ref = SecretRef::new("sec_fixture").unwrap();
@@ -3520,6 +3946,31 @@ mod tests {
         assert_eq!(profile.runtime_limits().timeout, Duration::from_secs(30));
         assert_eq!(profile.runtime_limits().max_stdout_bytes, 65536);
         assert_eq!(profile.runtime_limits().max_stderr_bytes, 65536);
+    }
+
+    #[test]
+    fn env_file_profile_manifest_parses_reviewed_service_contract() {
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let output_path = PathBuf::from("/run/janus/env/fixture.env");
+        let catalog =
+            ManagedCommandProfileCatalog::parse(&env_file_profile_toml(&secret_ref, &output_path))
+                .unwrap();
+        let profile = catalog
+            .env_file_profile(&ProfileId::new("profile.service_env").unwrap())
+            .unwrap();
+
+        assert_eq!(profile.secret_ref(), &secret_ref);
+        assert_eq!(profile.executor().as_str(), "janus-run@fixture");
+        assert_eq!(profile.destination().as_str(), "fixture-service");
+        assert_eq!(profile.env_name().as_str(), "SERVICE_TOKEN");
+        assert_eq!(profile.output_path(), output_path.as_path());
+        assert_eq!(profile.consumer_ref().as_str(), "consumer.fixture_service");
+        assert_eq!(profile.consumer().kind, ConsumerKind::Service);
+        assert_eq!(profile.consumer().owner.as_str(), "janusd-test");
+        assert_eq!(
+            profile.consumer().blast_radius,
+            BlastRadius::new("fixture-service").unwrap()
+        );
     }
 
     #[test]
@@ -3567,6 +4018,51 @@ mod tests {
         assert_eq!(snapshot.purpose, "emergency deploy");
         assert_eq!(snapshot.expires_at_unix_secs, 120);
         assert_eq!(snapshot.reason, "approved fixture");
+        assert!(!format!("{approval:?}").contains(&snapshot.approval_id));
+    }
+
+    #[test]
+    fn approve_issue_builds_exact_grant_from_env_file_profile_and_metadata() {
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let profile_id = ProfileId::new("profile.service_env").unwrap();
+        let profiles = ManagedCommandProfileCatalog::parse(&env_file_profile_toml(
+            &secret_ref,
+            &PathBuf::from("/run/janus/env/fixture.env"),
+        ))
+        .unwrap();
+        let descriptors = vec![SecretDescriptor {
+            name: SecretName::new("CANARY").unwrap(),
+            secret_ref: secret_ref.clone(),
+            label: SafeLabel::new("Canary token").unwrap(),
+            scope: ScopeRef::new("janus/dev").unwrap(),
+            owner: Some(OwnerRef::new("infra").unwrap()),
+            classification: Some(SecretClass::Normal),
+            lifecycle: SecretLifecycle::Active,
+            required: true,
+            trust_level: TrustLevel::L1,
+            allowed_uses: vec![profile_id.clone()],
+            present: true,
+        }];
+        let config = ApproveIssueConfig {
+            secret_ref: secret_ref.clone(),
+            profile_id: profile_id.clone(),
+            purpose: Purpose::new("fixture service env").unwrap(),
+            reason: SafeLabel::new("approved fixture").unwrap(),
+            egress: EgressMode::Connector,
+            expires_in: Duration::from_secs(120),
+        };
+
+        let approval =
+            build_approval_grant(&config, &profiles, &descriptors, SystemTime::UNIX_EPOCH).unwrap();
+        let snapshot = approval.snapshot();
+
+        assert_eq!(snapshot.secret_ref, secret_ref.as_str());
+        assert_eq!(snapshot.profile_id, profile_id.as_str());
+        assert_eq!(snapshot.executor, "janus-run@fixture");
+        assert_eq!(snapshot.destination, "fixture-service");
+        assert_eq!(snapshot.class, "normal");
+        assert_eq!(snapshot.egress, "connector");
+        assert_eq!(snapshot.purpose, "fixture service env");
         assert!(!format!("{approval:?}").contains(&snapshot.approval_id));
     }
 
@@ -4827,6 +5323,15 @@ mod tests {
         );
         let err = ManagedCommandProfileCatalog::parse(&duplicate).unwrap_err();
         assert!(err.to_string().contains("duplicate"));
+
+        let cross_kind_duplicate = format!(
+            "{}\n{}",
+            managed_profile_toml(&secret_ref, &allowed_args),
+            env_file_profile_toml(&secret_ref, &PathBuf::from("/run/janus/env/fixture.env"))
+                .replace("profile.service_env", "profile.canary")
+        );
+        let err = ManagedCommandProfileCatalog::parse(&cross_kind_duplicate).unwrap_err();
+        assert!(err.to_string().contains("duplicate"));
     }
 
     #[tokio::test]
@@ -5073,6 +5578,98 @@ mod tests {
     }
 
     #[cfg(unix)]
+    type FixtureEnvFileRunner = ProfileManifestEnvFileRunner<
+        InMemoryPermitRegistry,
+        ApprovedUseExecutor<MockStore, AuditWrite>,
+        FixedManagedCommandClock,
+    >;
+
+    #[cfg(unix)]
+    struct FixtureEnvFileHarness {
+        runner: FixtureEnvFileRunner,
+        permit_token: PermitToken,
+        profile_id: ProfileId,
+        output_path: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl FixtureEnvFileHarness {
+        async fn new(output_dir: &Path) -> Self {
+            let project = ProjectId::new("janus").unwrap();
+            let name = SecretName::new("CANARY").unwrap();
+            let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+            let profile_id = ProfileId::new("profile.service_env").unwrap();
+            let executor_ref = ExecutorRef::new("janus-run@fixture").unwrap();
+            let destination = Destination::new("fixture-service").unwrap();
+            let store = fixture_store(&secret_ref, &name, &profile_id);
+            let use_profile = UseProfile {
+                id: profile_id.clone(),
+                secret_ref: secret_ref.clone(),
+                executor: executor_ref,
+                destination: destination.clone(),
+                egress: EgressMode::Connector,
+                trust_level: TrustLevel::L2,
+                ttl: Duration::from_secs(60),
+                single_use: true,
+                enabled: true,
+            };
+            let principal = fixture_principal();
+            let mut broker = janus_core::SecretBroker::new(
+                store,
+                janus_core::ProfilePolicy::new(vec![use_profile]),
+                AuditWrite::accepting(),
+            );
+            let permit = broker
+                .request_use(
+                    &UseRequest {
+                        secret_ref: secret_ref.clone(),
+                        profile_id: profile_id.clone(),
+                        destination,
+                        purpose: Purpose::new("fixture service env").unwrap(),
+                    },
+                    &principal,
+                    SystemTime::UNIX_EPOCH,
+                )
+                .await
+                .unwrap();
+            let output_path = output_dir.join("service.env");
+            let profile_catalog = ManagedCommandProfileCatalog::parse(&env_file_profile_toml(
+                &secret_ref,
+                &output_path,
+            ))
+            .unwrap();
+            let mut permits = InMemoryPermitRegistry::default();
+            let permit_token = permits.insert(permit);
+
+            Self {
+                runner: ProfileManifestEnvFileRunner {
+                    profiles: profile_catalog,
+                    permits,
+                    executor: ApprovedUseExecutor::new(broker),
+                    principal,
+                    clock: FixedManagedCommandClock(
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                    ),
+                },
+                permit_token,
+                profile_id,
+                output_path,
+            }
+        }
+
+        fn config(&self) -> EnvFileConfig {
+            EnvFileConfig {
+                profile_id: self.profile_id.clone(),
+                permit: self.permit_token.clone(),
+            }
+        }
+
+        fn runner_mut(&mut self) -> &mut FixtureEnvFileRunner {
+            &mut self.runner
+        }
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_command_fixture_path_calls_executor_and_redacts_output() {
         let mut harness = FixtureManagedCommandHarness::new(vec![
@@ -5206,6 +5803,62 @@ mod tests {
         assert!(err.to_string().contains("permit"));
         assert!(!marker.exists());
         let _ = std::fs::remove_file(marker);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn env_file_fixture_path_writes_private_file_and_records_lifecycle_evidence() {
+        let output_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(output_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let evidence_dir = tempfile::tempdir().unwrap();
+        let registry = FileLifecycleEvidenceRegistry::new(evidence_dir.path());
+        let mut harness = FixtureEnvFileHarness::new(output_dir.path()).await;
+        let config = harness.config();
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(3);
+
+        let outcome = run_env_file_with(&config, harness.runner_mut())
+            .await
+            .unwrap();
+        record_secret_use_evidence(&outcome.secret_ref, &registry, at).unwrap();
+
+        assert_eq!(outcome.output_path, harness.output_path);
+        assert_eq!(outcome.reason_code, "ok");
+        assert!(!outcome.value_returned);
+        assert_eq!(
+            std::fs::read_to_string(&outcome.output_path).unwrap(),
+            "SERVICE_TOKEN=expected-canary\n"
+        );
+        let metadata = std::fs::symlink_metadata(&outcome.output_path).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
+
+        let evidence = registry.list().unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].secret_ref, outcome.secret_ref);
+        assert_eq!(evidence[0].last_used_at, Some(at));
+        assert_eq!(evidence[0].last_rotated_at, None);
+        assert!(!format!("{evidence:?}").contains("expected-canary"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn env_file_fixture_path_rejects_wrong_permit_before_write() {
+        let output_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(output_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let mut harness = FixtureEnvFileHarness::new(output_dir.path()).await;
+        let mut config = harness.config();
+        config.permit = PermitToken::new("use_wrongfixture").unwrap();
+
+        let err = run_env_file_with(&config, harness.runner_mut())
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("permit"));
+        assert!(!err.to_string().contains("use_wrongfixture"));
+        assert!(!harness.output_path.exists());
     }
 
     #[cfg(unix)]
