@@ -85,8 +85,9 @@ devenv shell -- ./scripts/assure-engine-release.sh
 ```
 
 The Rust release workflow uses this same gate before publishing/signing
-`rust-engine-v*` images. It runs the workspace tests plus the value-free Warden
-MCP smoke against both `cargo run` and the engine container image.
+`rust-engine-v*` images. It runs the workspace tests, the value-free Warden MCP
+smoke against both `cargo run` and the engine container image, and the local
+`janusd env-file` operator smoke.
 
 **Local Warden MCP smoke:**
 ```bash
@@ -97,6 +98,16 @@ The smoke launches `janus-warden` as a real MCP stdio process against a
 disposable `secretspec`/dotenv fixture, then verifies `initialize`,
 `tools/list`, `health`, `list_secrets`, `describe_secret`, and `request_use`.
 It asserts the transcript never contains the fixture secret value.
+
+**Local janusd env-file smoke:**
+```bash
+devenv shell -- ./scripts/smoke-janusd-env-file.sh
+```
+
+The smoke builds the repo-local `janusd`, seeds a disposable age-backed store,
+then runs the real `approve issue` -> `approve permit` -> `env-file` flow. It
+verifies the rendered service env file is private, consumed by a tiny fixture
+service, and that command output never contains the fixture secret value.
 
 **Engine container smoke:**
 ```bash
