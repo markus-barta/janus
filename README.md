@@ -79,6 +79,15 @@ cargo test --workspace --locked
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+**Engine release assurance gate:**
+```bash
+devenv shell -- ./scripts/assure-engine-release.sh
+```
+
+The Rust release workflow uses this same gate before publishing/signing
+`rust-engine-v*` images. It runs the workspace tests plus the value-free Warden
+MCP smoke against both `cargo run` and the engine container image.
+
 **Local Warden MCP smoke:**
 ```bash
 devenv shell -- python3 scripts/smoke-warden-mcp.py

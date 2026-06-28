@@ -47,15 +47,12 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: build
         run: cargo build --all-targets --locked
-      - name: warden MCP smoke
-        run: python3 scripts/smoke-warden-mcp.py
-      - name: engine container Warden MCP smoke
-        run: scripts/smoke-engine-container.sh
-      - name: test
-        run: cargo test --all --locked
+      - name: engine release assurance gate
+        run: scripts/assure-engine-release.sh
 
   image:
     # Only on a published GitHub Release whose tag starts with rust-engine-v.
+    # The check job above is the release-blocking engine assurance gate.
     if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'rust-engine-v')
     needs: check
     runs-on: ubuntu-latest
