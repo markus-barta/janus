@@ -90,6 +90,11 @@ def parse_args() -> argparse.Namespace:
         help="Run janus-warden from this engine container image instead of cargo.",
     )
     parser.add_argument(
+        "--platform",
+        default=os.environ.get("JANUS_WARDEN_IMAGE_PLATFORM"),
+        help="Docker platform to use with --image, for example linux/amd64.",
+    )
+    parser.add_argument(
         "--bin",
         default=os.environ.get("JANUS_WARDEN_BIN"),
         help="Run this janus-warden binary instead of cargo.",
@@ -135,6 +140,8 @@ def warden_command(repo: Path, fixture: Path, args: argparse.Namespace) -> list[
             "--mount",
             f"type=bind,source={fixture.resolve()},target={CONTAINER_FIXTURE_DIR}",
         ]
+        if args.platform:
+            command.extend(["--platform", args.platform])
         for key, value in smoke_env(fixture, container=True).items():
             command.extend(["-e", f"{key}={value}"])
         command.append(args.image)

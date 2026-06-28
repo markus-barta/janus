@@ -98,6 +98,16 @@ The container smoke builds `Dockerfile.engine`, runs `janus-warden` from that
 image over MCP stdio, and reuses the same value-free assertions against a
 mounted disposable fixture. Containers are run with `--rm` and no network.
 
+**Published engine image smoke:**
+```bash
+devenv shell -- scripts/smoke-published-engine.sh
+```
+
+This resolves the published `rust-engine-v0.1.1` GHCR image to `image@sha256`,
+verifies GitHub build provenance and the keyless cosign signature for the
+release tag, then runs the same Warden MCP smoke against the digest-pinned
+image. Override `JANUS_PUBLISHED_ENGINE_TAG` to check another release.
+
 **Engine image:**
 Publish a signed Rust engine image by creating a GitHub Release whose tag
 matches `rust-engine-v*`:

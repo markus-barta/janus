@@ -4,6 +4,8 @@
   packages = with pkgs; [
     cargo
     clippy
+    cosign
+    gh
     go
     gotools
     rustc
