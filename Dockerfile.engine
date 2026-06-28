@@ -1,9 +1,35 @@
-FROM rust:1-bookworm AS build
+FROM --platform=$BUILDPLATFORM rust:1-bookworm AS build
 
 WORKDIR /src
+ARG BUILDARCH
+ARG TARGETARCH
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
-RUN cargo build --locked --release -p janusd -p janus-warden
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) rust_target="x86_64-unknown-linux-gnu" ;; \
+      arm64) rust_target="aarch64-unknown-linux-gnu" ;; \
+      *) echo "unsupported target arch: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    case "${BUILDARCH}:${TARGETARCH}" in \
+      amd64:arm64) \
+        apt-get update; \
+        apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu; \
+        rm -rf /var/lib/apt/lists/*; \
+        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc; \
+        ;; \
+      arm64:amd64) \
+        apt-get update; \
+        apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu; \
+        rm -rf /var/lib/apt/lists/*; \
+        export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc; \
+        ;; \
+    esac; \
+    rustup target add "${rust_target}"; \
+    cargo build --locked --release --target "${rust_target}" -p janusd -p janus-warden; \
+    mkdir -p /out; \
+    cp "target/${rust_target}/release/janusd" /out/janusd; \
+    cp "target/${rust_target}/release/janus-warden" /out/janus-warden
 
 FROM debian:bookworm-slim
 
@@ -20,8 +46,8 @@ RUN apt-get update \
     && mkdir -p /etc/janus /run/janus/age /run/janus/permits /var/lib/janus/secrets \
     && chown -R janus:janus /run/janus /var/lib/janus
 
-COPY --from=build /src/target/release/janusd /usr/local/bin/janusd
-COPY --from=build /src/target/release/janus-warden /usr/local/bin/janus-warden
+COPY --from=build /out/janusd /usr/local/bin/janusd
+COPY --from=build /out/janus-warden /usr/local/bin/janus-warden
 
 USER janus
 ENTRYPOINT ["janusd"]
