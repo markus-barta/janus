@@ -56,7 +56,10 @@ janus/
 ├── go-envelope/             # the shipped Go REST envelope (frozen, transitional)
 ├── docs/
 │   ├── destroy-lifecycle-runbook.md  # metadata-only destroy operator flow
+│   ├── env-file-handoff-runbook.md   # repo-local env-file service handoff flow
 │   └── extraction-cutover.md         # how to repoint the live nixcfg deploy at a published image
+├── examples/
+│   └── env-file-handoff/             # checked nonprod env-file handoff bundle
 ├── scripts/                 # repo-local smoke and operator helpers
 ├── Cargo.toml               # Rust workspace
 └── .github/workflows/       # rust CI + go-envelope build+sign+SBOM+provenance
@@ -107,7 +110,9 @@ devenv shell -- ./scripts/smoke-janusd-env-file.sh
 The smoke builds the repo-local `janusd`, seeds a disposable age-backed store,
 then runs the real `approve issue` -> `approve permit` -> `env-file` flow. It
 verifies the rendered service env file is private, consumed by a tiny fixture
-service, and that command output never contains the fixture secret value.
+service, and that command output never contains the fixture secret value. The
+checked fixture bundle lives in `examples/env-file-handoff/`; the operator
+handoff runbook is `docs/env-file-handoff-runbook.md`.
 
 **Engine container smoke:**
 ```bash

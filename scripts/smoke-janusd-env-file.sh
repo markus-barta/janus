@@ -8,6 +8,13 @@ canary_value="janus-env-file-smoke-canary"
 profile_id="profile.CANARY"
 executor="janus-run@fixture"
 destination="fixture-service"
+env_name="SERVICE_TOKEN"
+consumer_ref="consumer.fixture_service"
+consumer_owner="janusd-smoke"
+consumer_environment="test"
+validation_probe="fixture-service-env"
+blast_radius="fixture-service"
+bundle="${JANUS_ENV_FILE_HANDOFF_BUNDLE:-${repo}/examples/env-file-handoff}"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/janus-env-file-smoke.XXXXXX")"
 cleanup() {
@@ -79,21 +86,16 @@ env_file="${env_dir}/fixture-service.env"
 expected_file="${runtime}/expected.env"
 fixture_marker="${runtime}/fixture-service.ok"
 
-cat >"${manifest}" <<'EOF'
-[project]
-name = "janus"
-revision = "1.0"
-
-[profiles.default]
-CANARY = { description = "Fixture service token", required = true }
-EOF
-
-cat >"${metadata}" <<'EOF'
-[defaults]
-owner = "infra"
-classification = "break_glass"
-lifecycle = "active"
-EOF
+for path in \
+  "${bundle}/secretspec.toml" \
+  "${bundle}/metadata.toml" \
+  "${bundle}/approved-use.env-file.toml.in" \
+  "${bundle}/consumer-contract.md"
+do
+  [ -f "${path}" ] || fail "handoff bundle file missing: ${path}"
+done
+cp "${bundle}/secretspec.toml" "${manifest}"
+cp "${bundle}/metadata.toml" "${metadata}"
 
 secret_ref="$(
   python3 - <<'PY'
@@ -109,25 +111,42 @@ awk '/^AGE-SECRET-KEY-/ { print; found=1 } END { exit found ? 0 : 1 }' \
   "${identity_file}" >"${janus_identity_file}" || fail "age identity file missing secret key"
 chmod 600 "${identity_file}" "${janus_identity_file}" "${recipient_log}" "${recipient_log}.stdout"
 
-cat >"${profiles}" <<EOF
-[[env_files]]
-id = "${profile_id}"
-secret_ref = "${secret_ref}"
-executor = "${executor}"
-destination = "${destination}"
-env = "SERVICE_TOKEN"
-output = "${env_file}"
+PROFILE_ID="${profile_id}" \
+SECRET_REF="${secret_ref}" \
+EXECUTOR="${executor}" \
+DESTINATION="${destination}" \
+ENV_NAME="${env_name}" \
+OUTPUT_PATH="${env_file}" \
+CONSUMER_REF="${consumer_ref}" \
+CONSUMER_OWNER="${consumer_owner}" \
+CONSUMER_ENVIRONMENT="${consumer_environment}" \
+VALIDATION_PROBE="${validation_probe}" \
+BLAST_RADIUS="${blast_radius}" \
+python3 - "${bundle}/approved-use.env-file.toml.in" "${profiles}" <<'PY'
+import os
+import pathlib
+import re
+import sys
 
-[env_files.consumer]
-consumer_ref = "consumer.fixture_service"
-kind = "service"
-owner = "janusd-smoke"
-environment = "test"
-reload = "none"
-validation = ["fixture-service-env"]
-supports_dual_value = false
-blast_radius = "fixture-service"
-EOF
+template = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+for key in [
+    "PROFILE_ID",
+    "SECRET_REF",
+    "EXECUTOR",
+    "DESTINATION",
+    "ENV_NAME",
+    "OUTPUT_PATH",
+    "CONSUMER_REF",
+    "CONSUMER_OWNER",
+    "CONSUMER_ENVIRONMENT",
+    "VALIDATION_PROBE",
+    "BLAST_RADIUS",
+]:
+    template = template.replace(f"@{key}@", os.environ[key])
+if re.search(r"@[A-Z_]+@", template):
+    raise SystemExit("unrendered placeholder remains in env-file profile template")
+pathlib.Path(sys.argv[2]).write_text(template, encoding="utf-8")
+PY
 
 printf '%s' "${canary_value}" | age -r "${recipient}" -o "${store_dir}/janus/default/CANARY.age" \
   >>"${log_file}" 2>&1
@@ -155,7 +174,7 @@ approval_output="$(
     --secret-ref "${secret_ref}" \
     --profile "${profile_id}" \
     --purpose "fixture env file handoff" \
-    --reason "JANUS-258 smoke" \
+    --reason "JANUS-259 smoke" \
     --egress connector \
     --expires-in-seconds 120
 )"
@@ -179,7 +198,7 @@ env_output="$(
 printf '%s\n' "${env_output}" | grep -F "value_returned=false" >/dev/null \
   || fail "env-file outcome did not declare value_returned=false"
 
-printf 'SERVICE_TOKEN=%s\n' "${canary_value}" >"${expected_file}"
+printf '%s=%s\n' "${env_name}" "${canary_value}" >"${expected_file}"
 cmp -s "${expected_file}" "${env_file}" || fail "rendered env file did not match reviewed binding"
 [ "$(file_mode "${env_file}")" = "600" ] || fail "rendered env file is not mode 0600"
 [ ! -e "${permit_dir}/${permit_id}.json" ] || fail "permit file still exists after env-file consume"
@@ -191,7 +210,8 @@ import os
 print(hashlib.sha256(os.environ["CANARY_VALUE"].encode()).hexdigest())
 PY
 )"
-SERVICE_TOKEN_EXPECTED_SHA256="${expected_sha}" python3 - "${env_file}" "${fixture_marker}" <<'PY'
+SERVICE_TOKEN_ENV_NAME="${env_name}" SERVICE_TOKEN_EXPECTED_SHA256="${expected_sha}" \
+  python3 - "${env_file}" "${fixture_marker}" <<'PY'
 import hashlib
 import os
 import pathlib
@@ -205,7 +225,7 @@ for line in env_path.read_text(encoding="utf-8").splitlines():
         continue
     key, value = line.split("=", 1)
     values[key] = value
-actual = hashlib.sha256(values.get("SERVICE_TOKEN", "").encode()).hexdigest()
+actual = hashlib.sha256(values.get(os.environ["SERVICE_TOKEN_ENV_NAME"], "").encode()).hexdigest()
 if actual != os.environ["SERVICE_TOKEN_EXPECTED_SHA256"]:
     raise SystemExit("fixture service could not consume rendered env file")
 marker_path.write_text("ok\n", encoding="utf-8")
