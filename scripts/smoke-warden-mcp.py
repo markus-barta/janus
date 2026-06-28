@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import selectors
@@ -17,11 +18,17 @@ from typing import Any
 PROTOCOL_VERSION = "2024-11-05"
 REQUEST_TIMEOUT_SECONDS = 15
 CANARY_VALUE = "expected-canary"
+CONTAINER_FIXTURE_DIR = "/tmp/janus-warden-smoke"
 
 
 def main() -> int:
+    args = parse_args()
     repo = Path(__file__).resolve().parents[1]
-    with tempfile.TemporaryDirectory(prefix="janus-warden-smoke-") as tmp:
+    temp_parent = None
+    if args.image:
+        temp_parent = repo / ".tmp"
+        temp_parent.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="janus-warden-smoke-", dir=temp_parent) as tmp:
         fixture = Path(tmp)
         manifest = fixture / "secretspec.toml"
         env_file = fixture / ".env"
@@ -47,22 +54,13 @@ classification = "normal"
 """,
             encoding="utf-8",
         )
+        if args.image:
+            prepare_container_mount(fixture, permit_dir)
 
         child_env = os.environ.copy()
-        child_env.update(
-            {
-                "JANUS_WARDEN_BACKEND": "secretspec",
-                "JANUS_WARDEN_SECRETSPEC_FILE": str(manifest),
-                "JANUS_WARDEN_SECRETSPEC_PROVIDER_URI": f"dotenv:{env_file}",
-                "JANUS_WARDEN_SECRETSPEC_METADATA_FILE": str(metadata),
-                "JANUS_WARDEN_DESTINATION": "dev-smoke",
-                "JANUS_WARDEN_EXECUTOR": "warden-stdio",
-                "JANUS_WARDEN_SCOPE": "janus/dev",
-                "JANUS_WARDEN_PERMIT_DIR": str(permit_dir),
-            }
-        )
+        child_env.update(smoke_env(fixture))
 
-        command = warden_command(repo)
+        command = warden_command(repo, fixture, args)
         proc = subprocess.Popen(
             command,
             cwd=repo,
@@ -82,10 +80,68 @@ classification = "normal"
     return 0
 
 
-def warden_command(repo: Path) -> list[str]:
-    configured = os.environ.get("JANUS_WARDEN_BIN")
-    if configured:
-        return [configured]
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Smoke-test janus-warden over MCP stdio without exposing values."
+    )
+    parser.add_argument(
+        "--image",
+        default=os.environ.get("JANUS_WARDEN_IMAGE"),
+        help="Run janus-warden from this engine container image instead of cargo.",
+    )
+    parser.add_argument(
+        "--bin",
+        default=os.environ.get("JANUS_WARDEN_BIN"),
+        help="Run this janus-warden binary instead of cargo.",
+    )
+    return parser.parse_args()
+
+
+def smoke_env(fixture: Path, *, container: bool = False) -> dict[str, str]:
+    root = Path(CONTAINER_FIXTURE_DIR) if container else fixture
+    return {
+        "JANUS_WARDEN_BACKEND": "secretspec",
+        "JANUS_WARDEN_SECRETSPEC_FILE": str(root / "secretspec.toml"),
+        "JANUS_WARDEN_SECRETSPEC_PROVIDER_URI": f"dotenv:{root / '.env'}",
+        "JANUS_WARDEN_SECRETSPEC_METADATA_FILE": str(root / "metadata.toml"),
+        "JANUS_WARDEN_DESTINATION": "dev-smoke",
+        "JANUS_WARDEN_EXECUTOR": "warden-stdio",
+        "JANUS_WARDEN_SCOPE": "janus/dev",
+        "JANUS_WARDEN_PERMIT_DIR": str(root / "permits"),
+    }
+
+
+def prepare_container_mount(fixture: Path, permit_dir: Path) -> None:
+    # The engine image runs as the unprivileged `janus` user. The smoke fixture
+    # is temporary test data, so make it readable and the permit directory
+    # writable across host/container uid boundaries.
+    fixture.chmod(0o755)
+    permit_dir.chmod(0o777)
+    for path in [fixture / "secretspec.toml", fixture / ".env", fixture / "metadata.toml"]:
+        path.chmod(0o644)
+
+
+def warden_command(repo: Path, fixture: Path, args: argparse.Namespace) -> list[str]:
+    if args.image:
+        command = [
+            "docker",
+            "run",
+            "--rm",
+            "-i",
+            "--network",
+            "none",
+            "--entrypoint",
+            "janus-warden",
+            "--mount",
+            f"type=bind,source={fixture.resolve()},target={CONTAINER_FIXTURE_DIR}",
+        ]
+        for key, value in smoke_env(fixture, container=True).items():
+            command.extend(["-e", f"{key}={value}"])
+        command.append(args.image)
+        return command
+
+    if args.bin:
+        return [args.bin]
     return ["cargo", "run", "--quiet", "-p", "janus-warden"]
 
 

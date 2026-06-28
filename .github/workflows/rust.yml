@@ -49,6 +49,8 @@ jobs:
         run: cargo build --all-targets --locked
       - name: warden MCP smoke
         run: python3 scripts/smoke-warden-mcp.py
+      - name: engine container Warden MCP smoke
+        run: scripts/smoke-engine-container.sh
       - name: test
         run: cargo test --all --locked
 

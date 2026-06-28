@@ -89,6 +89,15 @@ disposable `secretspec`/dotenv fixture, then verifies `initialize`,
 `tools/list`, `health`, `list_secrets`, `describe_secret`, and `request_use`.
 It asserts the transcript never contains the fixture secret value.
 
+**Engine container smoke:**
+```bash
+devenv shell -- scripts/smoke-engine-container.sh
+```
+
+The container smoke builds `Dockerfile.engine`, runs `janus-warden` from that
+image over MCP stdio, and reuses the same value-free assertions against a
+mounted disposable fixture. Containers are run with `--rm` and no network.
+
 **Engine image:**
 Publish a signed Rust engine image by creating a GitHub Release whose tag
 matches `rust-engine-v*`:
