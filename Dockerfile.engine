@@ -14,13 +14,13 @@ RUN set -eux; \
     case "${BUILDARCH}:${TARGETARCH}" in \
       amd64:arm64) \
         apt-get update; \
-        apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu; \
+        apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross; \
         rm -rf /var/lib/apt/lists/*; \
         export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc; \
         ;; \
       arm64:amd64) \
         apt-get update; \
-        apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu; \
+        apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu libc6-dev-amd64-cross; \
         rm -rf /var/lib/apt/lists/*; \
         export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc; \
         ;; \
