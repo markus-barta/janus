@@ -42,12 +42,14 @@ The smoke creates an isolated temp runtime, seeds an age-backed store, renders
 the profile template, and exercises:
 
 ```bash
+janusd env-file preflight ...
 janusd approve issue ...
 janusd approve permit ...
 janusd env-file ...
 ```
 
 It verifies:
+- preflight checks the reviewed target without writing the env file
 - output file mode is `0600`
 - output path comes from the rendered profile
 - env binding matches the reviewed profile
@@ -94,6 +96,18 @@ export JANUS_AGE_RECIPIENT=age1...
 export JANUS_AGE_METADATA_FILE=/etc/janus/metadata.toml
 export JANUS_RUN_EXECUTOR=janus-run@HOST
 export JANUS_RUN_SCOPE=janus/nonprod
+```
+
+Preflight the reviewed profile before issuing approval or permit material:
+
+```bash
+janusd env-file preflight --profile profile.SERVICE
+```
+
+Expected output is value-free and shaped like:
+
+```text
+janusd env-file preflight ok secret_ref=sec_... profile_id=profile.SERVICE output_path=/run/... consumer_ref=consumer... reason_code=ok value_returned=false
 ```
 
 Issue an approval when policy requires it:
@@ -149,6 +163,7 @@ as spent.
 
 Keep value-free evidence only:
 - commit that introduced/changed the reviewed profile
+- `janusd env-file preflight` value-free outcome
 - `janusd approve issue` output
 - `janusd approve permit` output
 - `janusd env-file` value-free outcome

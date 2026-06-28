@@ -225,6 +225,13 @@ impl EnvFileProfile {
         &self.consumer
     }
 
+    /// Validate the reviewed env-file target without reading a secret.
+    pub fn preflight_target(&self) -> JanusResult<EnvFilePlan> {
+        let plan = self.plan();
+        preflight_env_file_target(&plan.output_path, &plan.env_name)?;
+        Ok(plan)
+    }
+
     fn plan(&self) -> EnvFilePlan {
         EnvFilePlan {
             profile_id: self.profile_id.clone(),
@@ -1810,6 +1817,37 @@ mod tests {
         assert!(!format!("{:?}", audit.events()).contains("expected-canary"));
 
         let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn env_file_preflight_checks_private_target_without_secret_use() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_executor, _permit, _principal, executor_ref, destination, managed_profile) =
+            executor_fixture().await;
+        let dir = marker_path("env-file-preflight-ok");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let output_path = dir.join("service.env");
+        let profile = env_file_profile(
+            managed_profile.profile_id().clone(),
+            managed_profile.secret_ref().clone(),
+            executor_ref,
+            destination,
+            output_path.clone(),
+        );
+
+        let plan = profile.preflight_target().unwrap();
+
+        assert_eq!(plan.output_path, output_path);
+        assert_eq!(plan.secret_ref, managed_profile.secret_ref().clone());
+        assert_eq!(plan.consumer_ref, profile.consumer_ref().clone());
+        assert!(!plan.value_returned);
+        assert!(!plan.output_path.exists());
+        assert!(!format!("{plan:?}").contains("expected-canary"));
+
         let _ = fs::remove_dir(dir);
     }
 

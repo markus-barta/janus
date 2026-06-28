@@ -108,7 +108,8 @@ devenv shell -- ./scripts/smoke-janusd-env-file.sh
 ```
 
 The smoke builds the repo-local `janusd`, seeds a disposable age-backed store,
-then runs the real `approve issue` -> `approve permit` -> `env-file` flow. It
+preflights the reviewed env-file target without a permit or secret read, then
+runs the real `approve issue` -> `approve permit` -> `env-file` flow. It
 verifies the rendered service env file is private, consumed by a tiny fixture
 service, and that command output never contains the fixture secret value. The
 checked fixture bundle lives in `examples/env-file-handoff/`; the operator
@@ -256,6 +257,13 @@ kind = "service"
 owner = "janusd"
 environment = "prod"
 blast_radius = "deploy-api"
+```
+
+Before issuing a permit, preflight the reviewed profile and target path without
+reading secret material:
+
+```bash
+janusd env-file preflight --profile profile.deploy-env
 ```
 
 ```bash

@@ -30,8 +30,9 @@ use janus_core::{
     ValidationProbe,
 };
 use janus_executor::{
-    ApprovedUseExecutor, EnvFileProfile, EnvFileProfileSpec, EnvFileRequest, ManagedCommandProfile,
-    ManagedCommandProfileSpec, ManagedCommandRequest, ManagedCommandRuntimeLimits,
+    ApprovedUseExecutor, EnvFilePlan, EnvFileProfile, EnvFileProfileSpec, EnvFileRequest,
+    ManagedCommandProfile, ManagedCommandProfileSpec, ManagedCommandRequest,
+    ManagedCommandRuntimeLimits,
 };
 use janus_forge::{
     ConsumerRotationHooks, GeneratedAlphabet, GeneratedRotationBroker, GeneratedValuePolicy,
@@ -68,6 +69,7 @@ async fn main() -> Result<()> {
         }
         Command::ForgeRotateGenerated(config) => run_forge_rotate_generated(config).await,
         Command::RunManaged(config) => run_managed_command(config).await,
+        Command::EnvFilePreflight(config) => run_env_file_preflight(config).await,
         Command::EnvFile(config) => run_env_file(config).await,
         Command::Approve(command) => run_approve(command).await,
         Command::LifecycleTransition(config) => run_lifecycle_transition(config).await,
@@ -83,6 +85,7 @@ enum Command {
     Help,
     ForgeRotateGenerated(ForgeRotateGeneratedConfig),
     RunManaged(RunManagedCommandConfig),
+    EnvFilePreflight(EnvFilePreflightConfig),
     EnvFile(EnvFileConfig),
     Approve(ApproveCommand),
     LifecycleTransition(LifecycleTransitionConfig),
@@ -123,6 +126,11 @@ struct RunManagedCommandConfig {
 struct EnvFileConfig {
     profile_id: ProfileId,
     permit: PermitToken,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EnvFilePreflightConfig {
+    profile_id: ProfileId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -404,6 +412,14 @@ async fn run_env_file(config: EnvFileConfig) -> Result<()> {
     let lifecycle_evidence = FileLifecycleEvidenceRegistry::new(lifecycle_evidence_registry_dir());
     record_secret_use_evidence(&outcome.secret_ref, &lifecycle_evidence, SystemTime::now())?;
     emit_env_file_outcome(&outcome);
+    Ok(())
+}
+
+async fn run_env_file_preflight(config: EnvFilePreflightConfig) -> Result<()> {
+    let manifest_path = run_profile_manifest_path()?;
+    let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
+    let outcome = run_env_file_preflight_with(&config, &profiles)?;
+    emit_env_file_preflight_outcome(&outcome);
     Ok(())
 }
 
@@ -1365,6 +1381,19 @@ where
     runner.run(config).await
 }
 
+fn run_env_file_preflight_with(
+    config: &EnvFilePreflightConfig,
+    profiles: &ManagedCommandProfileCatalog,
+) -> Result<EnvFileCliOutcome> {
+    let profile = profiles
+        .env_file_profile(&config.profile_id)
+        .context("env-file profile not found")?;
+    Ok(EnvFileCliOutcome::from_plan(
+        profile.preflight_target()?,
+        "ok",
+    ))
+}
+
 #[async_trait]
 trait EnvFileRunner {
     async fn run(&mut self, config: &EnvFileConfig) -> Result<EnvFileCliOutcome>;
@@ -1470,14 +1499,26 @@ struct EnvFileCliOutcome {
 
 impl From<janus_executor::EnvFileOutcome> for EnvFileCliOutcome {
     fn from(outcome: janus_executor::EnvFileOutcome) -> Self {
+        let value_returned = outcome.value_returned || outcome.plan.value_returned;
+        Self::from_plan(outcome.plan, outcome.reason_code).with_value_returned(value_returned)
+    }
+}
+
+impl EnvFileCliOutcome {
+    fn from_plan(plan: EnvFilePlan, reason_code: &'static str) -> Self {
         Self {
-            secret_ref: outcome.plan.secret_ref,
-            profile_id: outcome.plan.profile_id,
-            output_path: outcome.plan.output_path,
-            consumer_ref: outcome.plan.consumer_ref,
-            reason_code: outcome.reason_code,
-            value_returned: outcome.value_returned || outcome.plan.value_returned,
+            secret_ref: plan.secret_ref,
+            profile_id: plan.profile_id,
+            output_path: plan.output_path,
+            consumer_ref: plan.consumer_ref,
+            reason_code,
+            value_returned: plan.value_returned,
         }
+    }
+
+    fn with_value_returned(mut self, value_returned: bool) -> Self {
+        self.value_returned = value_returned;
+        self
     }
 }
 
@@ -1493,6 +1534,18 @@ fn emit_run_managed_outcome(outcome: &ManagedCommandCliOutcome) {
 fn emit_env_file_outcome(outcome: &EnvFileCliOutcome) {
     println!(
         "janusd env-file ok secret_ref={} profile_id={} output_path={} consumer_ref={} reason_code={} value_returned={}",
+        outcome.secret_ref.as_str(),
+        outcome.profile_id.as_str(),
+        outcome.output_path.display(),
+        outcome.consumer_ref.as_str(),
+        outcome.reason_code,
+        outcome.value_returned
+    );
+}
+
+fn emit_env_file_preflight_outcome(outcome: &EnvFileCliOutcome) {
+    println!(
+        "janusd env-file preflight ok secret_ref={} profile_id={} output_path={} consumer_ref={} reason_code={} value_returned={}",
         outcome.secret_ref.as_str(),
         outcome.profile_id.as_str(),
         outcome.output_path.display(),
@@ -1998,6 +2051,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         }
         [run, rest @ ..] if run == "run" => {
             parse_run_managed(rest.iter().cloned()).map(Command::RunManaged)
+        }
+        [env_file, preflight, rest @ ..] if env_file == "env-file" && preflight == "preflight" => {
+            parse_env_file_preflight(rest.iter().cloned()).map(Command::EnvFilePreflight)
         }
         [env_file, rest @ ..] if env_file == "env-file" => {
             parse_env_file(rest.iter().cloned()).map(Command::EnvFile)
@@ -2587,6 +2643,40 @@ fn parse_env_file(args: impl IntoIterator<Item = String>) -> Result<EnvFileConfi
     })
 }
 
+fn parse_env_file_preflight(
+    args: impl IntoIterator<Item = String>,
+) -> Result<EnvFilePreflightConfig> {
+    let mut profile_id = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--profile" => {
+                if profile_id
+                    .replace(ProfileId::new(required_arg("--profile", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--profile may only be provided once");
+                }
+            }
+            "--permit" => anyhow::bail!("janusd env-file preflight does not accept permits"),
+            "--secret" | "--secret-ref" | "--value" | "--raw-value" | "--env" | "--output"
+            | "--destination" | "--executor" | "--binary" => {
+                anyhow::bail!("env-file preflight policy fields come from the reviewed profile")
+            }
+            "--" => anyhow::bail!("janusd env-file preflight does not accept command arguments"),
+            other if other.starts_with('-') => {
+                anyhow::bail!("unsupported janusd env-file preflight flag")
+            }
+            _ => anyhow::bail!("unsupported janusd env-file preflight argument"),
+        }
+    }
+
+    Ok(EnvFilePreflightConfig {
+        profile_id: profile_id.context("--profile is required")?,
+    })
+}
+
 fn parse_forge_rotate_generated(
     args: impl IntoIterator<Item = String>,
 ) -> Result<ForgeRotateGeneratedConfig> {
@@ -3037,7 +3127,7 @@ fn env_first(keys: &[&str]) -> Option<String> {
 
 fn print_usage() {
     eprintln!(
-        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  env-file --profile PROFILE --permit use_...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  lifecycle destroy-finalize --secret-ref REF [--metadata-file PATH]\n  lifecycle destroy-reconcile [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd env-file writes a reviewed private env file from JANUS_RUN_PROFILE_MANIFEST; callers cannot choose env name, output path, executor, destination, or value.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\njanusd lifecycle destroy-finalize requires a tombstone and writes destroyed metadata only; it never deletes provider values.\njanusd lifecycle destroy-reconcile reads metadata and tombstones only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
+        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE --permit use_...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  lifecycle destroy-finalize --secret-ref REF [--metadata-file PATH]\n  lifecycle destroy-reconcile [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd env-file preflight checks the reviewed env-file profile and target path without a permit, backend, or secret read.\njanusd env-file writes a reviewed private env file from JANUS_RUN_PROFILE_MANIFEST; callers cannot choose env name, output path, executor, destination, or value.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\njanusd lifecycle destroy-finalize requires a tombstone and writes destroyed metadata only; it never deletes provider values.\njanusd lifecycle destroy-reconcile reads metadata and tombstones only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
 }
 
@@ -3064,6 +3154,7 @@ mod tests {
             Command::ForgeRotateGenerated(config) => config,
             Command::Help => panic!("expected forge config"),
             Command::RunManaged(_) => panic!("expected forge config"),
+            Command::EnvFilePreflight(_) => panic!("expected forge config"),
             Command::EnvFile(_) => panic!("expected forge config"),
             Command::Approve(_) => panic!("expected forge config"),
             Command::LifecycleTransition(_) => panic!("expected forge config"),
@@ -3078,6 +3169,7 @@ mod tests {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::RunManaged(config) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected run config"),
+            Command::EnvFilePreflight(_) => panic!("expected run config"),
             Command::EnvFile(_) => panic!("expected run config"),
             Command::Help => panic!("expected run config"),
             Command::Approve(_) => panic!("expected run config"),
@@ -3092,6 +3184,7 @@ mod tests {
     fn parse_env_file_ok(args: &[&str]) -> EnvFileConfig {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::EnvFile(config) => config,
+            Command::EnvFilePreflight(_) => panic!("expected env-file config"),
             Command::ForgeRotateGenerated(_) => panic!("expected env-file config"),
             Command::RunManaged(_) => panic!("expected env-file config"),
             Command::Approve(_) => panic!("expected env-file config"),
@@ -3104,11 +3197,28 @@ mod tests {
         }
     }
 
+    fn parse_env_file_preflight_ok(args: &[&str]) -> EnvFilePreflightConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::EnvFilePreflight(config) => config,
+            Command::EnvFile(_) => panic!("expected env-file preflight config"),
+            Command::ForgeRotateGenerated(_) => panic!("expected env-file preflight config"),
+            Command::RunManaged(_) => panic!("expected env-file preflight config"),
+            Command::Approve(_) => panic!("expected env-file preflight config"),
+            Command::Help => panic!("expected env-file preflight config"),
+            Command::LifecycleTransition(_) => panic!("expected env-file preflight config"),
+            Command::LifecycleStaleReport(_) => panic!("expected env-file preflight config"),
+            Command::LifecycleDestroyRecord(_) => panic!("expected env-file preflight config"),
+            Command::LifecycleDestroyFinalize(_) => panic!("expected env-file preflight config"),
+            Command::LifecycleDestroyReconcile(_) => panic!("expected env-file preflight config"),
+        }
+    }
+
     fn parse_approve_issue_ok(args: &[&str]) -> ApproveIssueConfig {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::Approve(ApproveCommand::Issue(config)) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected approve issue config"),
             Command::RunManaged(_) => panic!("expected approve issue config"),
+            Command::EnvFilePreflight(_) => panic!("expected approve issue config"),
             Command::EnvFile(_) => panic!("expected approve issue config"),
             Command::Approve(_) => panic!("expected approve issue config"),
             Command::Help => panic!("expected approve issue config"),
@@ -3125,6 +3235,7 @@ mod tests {
             Command::Approve(ApproveCommand::Permit(config)) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected approve permit config"),
             Command::RunManaged(_) => panic!("expected approve permit config"),
+            Command::EnvFilePreflight(_) => panic!("expected approve permit config"),
             Command::EnvFile(_) => panic!("expected approve permit config"),
             Command::Approve(_) => panic!("expected approve permit config"),
             Command::Help => panic!("expected approve permit config"),
@@ -3141,6 +3252,7 @@ mod tests {
             Command::Approve(ApproveCommand::Revoke(config)) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected approve revoke config"),
             Command::RunManaged(_) => panic!("expected approve revoke config"),
+            Command::EnvFilePreflight(_) => panic!("expected approve revoke config"),
             Command::EnvFile(_) => panic!("expected approve revoke config"),
             Command::Approve(_) => panic!("expected approve revoke config"),
             Command::Help => panic!("expected approve revoke config"),
@@ -3157,6 +3269,7 @@ mod tests {
             Command::LifecycleTransition(config) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected lifecycle config"),
             Command::RunManaged(_) => panic!("expected lifecycle config"),
+            Command::EnvFilePreflight(_) => panic!("expected lifecycle config"),
             Command::EnvFile(_) => panic!("expected lifecycle config"),
             Command::Approve(_) => panic!("expected lifecycle config"),
             Command::Help => panic!("expected lifecycle config"),
@@ -3173,6 +3286,7 @@ mod tests {
             Command::LifecycleTransition(_) => panic!("expected lifecycle stale-report config"),
             Command::ForgeRotateGenerated(_) => panic!("expected lifecycle stale-report config"),
             Command::RunManaged(_) => panic!("expected lifecycle stale-report config"),
+            Command::EnvFilePreflight(_) => panic!("expected lifecycle stale-report config"),
             Command::EnvFile(_) => panic!("expected lifecycle stale-report config"),
             Command::Approve(_) => panic!("expected lifecycle stale-report config"),
             Command::Help => panic!("expected lifecycle stale-report config"),
@@ -3195,6 +3309,7 @@ mod tests {
             }
             Command::ForgeRotateGenerated(_) => panic!("expected lifecycle destroy-record config"),
             Command::RunManaged(_) => panic!("expected lifecycle destroy-record config"),
+            Command::EnvFilePreflight(_) => panic!("expected lifecycle destroy-record config"),
             Command::EnvFile(_) => panic!("expected lifecycle destroy-record config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-record config"),
             Command::Help => panic!("expected lifecycle destroy-record config"),
@@ -3221,6 +3336,7 @@ mod tests {
                 panic!("expected lifecycle destroy-finalize config")
             }
             Command::RunManaged(_) => panic!("expected lifecycle destroy-finalize config"),
+            Command::EnvFilePreflight(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::EnvFile(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::Help => panic!("expected lifecycle destroy-finalize config"),
@@ -3249,6 +3365,9 @@ mod tests {
                 panic!("expected lifecycle destroy-reconcile config")
             }
             Command::RunManaged(_) => panic!("expected lifecycle destroy-reconcile config"),
+            Command::EnvFilePreflight(_) => {
+                panic!("expected lifecycle destroy-reconcile config")
+            }
             Command::EnvFile(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::Help => panic!("expected lifecycle destroy-reconcile config"),
@@ -3332,6 +3451,61 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("does not accept"));
         assert!(!err.to_string().contains("use_abc123"));
+    }
+
+    #[test]
+    fn parses_env_file_preflight_without_permit_or_policy_fields() {
+        let config = parse_env_file_preflight_ok(&[
+            "env-file",
+            "preflight",
+            "--profile",
+            "profile.service_env",
+        ]);
+
+        assert_eq!(config.profile_id.as_str(), "profile.service_env");
+
+        let err = parse_args(
+            [
+                "env-file",
+                "preflight",
+                "--profile",
+                "profile.service_env",
+                "--permit",
+                "use_abc123",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not accept permits"));
+        assert!(!err.to_string().contains("use_abc123"));
+
+        for flag in [
+            "--secret-ref",
+            "--value",
+            "--raw-value",
+            "--env",
+            "--output",
+            "--destination",
+            "--executor",
+            "--binary",
+        ] {
+            let err = parse_args(
+                [
+                    "env-file",
+                    "preflight",
+                    "--profile",
+                    "profile.service_env",
+                    flag,
+                    "unreviewed",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("reviewed profile"));
+            assert!(!err.to_string().contains("unreviewed"));
+        }
     }
 
     #[test]
@@ -5840,6 +6014,28 @@ mod tests {
         assert_eq!(evidence[0].last_used_at, Some(at));
         assert_eq!(evidence[0].last_rotated_at, None);
         assert!(!format!("{evidence:?}").contains("expected-canary"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn env_file_preflight_fixture_path_checks_target_without_writing() {
+        let output_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(output_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let harness = FixtureEnvFileHarness::new(output_dir.path()).await;
+        let config = EnvFilePreflightConfig {
+            profile_id: harness.profile_id.clone(),
+        };
+
+        let outcome = run_env_file_preflight_with(&config, &harness.runner.profiles).unwrap();
+
+        assert_eq!(outcome.output_path, harness.output_path);
+        assert_eq!(outcome.profile_id, harness.profile_id);
+        assert_eq!(outcome.consumer_ref.as_str(), "consumer.fixture_service");
+        assert_eq!(outcome.reason_code, "ok");
+        assert!(!outcome.value_returned);
+        assert!(!outcome.output_path.exists());
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
     }
 
     #[cfg(unix)]

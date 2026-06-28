@@ -19,5 +19,6 @@ devenv shell -- ./scripts/smoke-janusd-env-file.sh
 ```
 
 The smoke renders the template into a disposable runtime, issues an approval,
-issues a single-use permit, writes a private env file, and verifies a tiny
-fixture service can consume it without printing the secret literal.
+preflights the target without a permit or secret read, issues a single-use
+permit, writes a private env file, and verifies a tiny fixture service can
+consume it without printing the secret literal.

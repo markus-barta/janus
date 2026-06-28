@@ -169,6 +169,16 @@ export JANUS_AGE_METADATA_FILE="${metadata}"
 export JANUS_RUN_EXECUTOR="${executor}"
 export JANUS_RUN_SCOPE="janus/default"
 
+preflight_output="$(
+  run_janusd "env-file preflight" env-file preflight \
+    --profile "${profile_id}"
+)"
+printf '%s\n' "${preflight_output}" | grep -F "value_returned=false" >/dev/null \
+  || fail "env-file preflight outcome did not declare value_returned=false"
+printf '%s\n' "${preflight_output}" | grep -F "consumer_ref=${consumer_ref}" >/dev/null \
+  || fail "env-file preflight outcome did not include reviewed consumer"
+[ ! -e "${env_file}" ] || fail "env-file preflight created the env file"
+
 approval_output="$(
   run_janusd "approve issue" approve issue \
     --secret-ref "${secret_ref}" \
