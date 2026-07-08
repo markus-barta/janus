@@ -588,6 +588,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /ui/permits/{permitID}/run", app.withAuth(app.handleRunPermitUI))
 	mux.HandleFunc("GET /legacy", app.withAuth(app.handleLegacyDashboard))
 	mux.HandleFunc("GET /access", app.withAuth(app.handleAccessPage))
+	mux.HandleFunc("GET /vault/new", app.withAuth(app.handleNewSecretPage))
 	mux.HandleFunc("GET /static/", app.handleStatic)
 	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
 	return app.securityHeaders(app.requestIDs(app.rateLimit(app.limitRequestBody(app.safeHTTPBoundary(mux)))))
@@ -611,7 +612,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/legacy", "/access", "/auth/smoke", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/legacy", "/access", "/vault/new", "/auth/smoke", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
@@ -943,7 +944,9 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	app.audit(r, "dashboard.view", "allowed", actorFromContext(r.Context()), "")
 	session := currentSession(r.Context())
-	renderTemplate(w, app.templates, "dashboard", app.dashboardData(r, session, nil, r.URL.Query().Get("ref")))
+	data := app.dashboardData(r, session, nil, r.URL.Query().Get("ref"))
+	applyVaultFilters(data, r)
+	renderTemplate(w, app.templates, "dashboard", data)
 }
 
 func (app *App) dashboardData(r *http.Request, session Session, actionResult *UIActionResult, selectedRef string) map[string]any {
@@ -1027,6 +1030,12 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"CSPNonce":             cspNonceFromContext(r.Context()),
 		"Now":                  time.Now().UTC(),
 		"VaultTiles":           vaultTilesFor(descriptors, lifecyclePosture, permitPosture),
+		"View":                 "grid",
+		"Query":                "",
+		"FilterProvider":       "",
+		"FilterState":          "",
+		"Providers":            descriptorProviders(descriptors),
+		"TotalCount":           len(descriptors),
 		"Session":              session,
 		"CSRF":                 app.csrfToken(session),
 		"Descriptors":          descriptors,

@@ -150,6 +150,83 @@ func TestVaultSidebarLinksAccessPage(t *testing.T) {
 	}
 }
 
+func TestVaultFiltersNarrowCardsButKeepTiles(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/?q=zitadel", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	body := out.Body.String()
+	if !strings.Contains(body, "zitadel-janus-oidc") {
+		t.Fatalf("filtered vault should keep matching secret: %s", body)
+	}
+	if strings.Contains(body, `href="/?ref=csb1-age-identity#focus"`) {
+		t.Fatalf("filtered vault should hide non-matching secret: %s", body)
+	}
+	if !strings.Contains(body, "1 of 2 secrets shown") {
+		t.Fatalf("filtered vault should show the filter note: %s", body)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/?q=no-such-thing", nil)
+	out = httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if !strings.Contains(out.Body.String(), "Nothing matches these filters") {
+		t.Fatalf("empty filter result should render the friendly state: %s", out.Body.String())
+	}
+}
+
+func TestVaultListViewRendersTable(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/?view=list", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	body := out.Body.String()
+	for _, want := range []string{"<table class=\"ledger\">", "last checked", "csb1-age-identity", "zitadel-janus-oidc"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("list view should render %q: %s", want, body)
+		}
+	}
+}
+
+func TestNewSecretPlanGeneratesDeclarativeSteps(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/vault/new?service=xyz&host=csb1&rotation=90&tags=app-env", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"csb1-xyz-env", "agenix -e secrets/csb1-xyz-env.age", "publicKeys = markus &#43;&#43; csb1", "age.secrets.csb1-xyz-env", "/run/agenix/csb1-xyz-env", "agenix-catalog.json", "1Password", "value never enters Janus", "rotation_days&#34;: 90"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("new-secret plan should include %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, `name="value"`) || strings.Contains(body, "type=\"password\"") {
+		t.Fatalf("new-secret flow must never ask for the secret value: %s", body)
+	}
+}
+
+func TestNewSecretPlanRejectsUnusableNames(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/vault/new?service=Bad_Name!", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if !strings.Contains(out.Body.String(), "Plan not ready") {
+		t.Fatalf("invalid service name should block the plan: %s", out.Body.String())
+	}
+	if strings.Contains(out.Body.String(), "agenix -e secrets/") {
+		t.Fatalf("invalid plan should not emit commands: %s", out.Body.String())
+	}
+}
+
 func TestVaultStaticAssetsServed(t *testing.T) {
 	app := newTestApp(t)
 	cases := []struct {

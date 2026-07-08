@@ -148,7 +148,46 @@
     </div>
 
     <h2 id="vault">Secrets</h2>
+    <form class="filterbar" method="get" action="/#vault">
+      <input type="search" name="q" value="{{ .Query }}" placeholder="Search name, host, tag…" aria-label="Search secrets">
+      <select name="provider" aria-label="Backend">
+        <option value="">backend: all</option>
+        {{ range .Providers }}<option value="{{ . }}" {{ if eq . $.FilterProvider }}selected{{ end }}>{{ . }}</option>{{ end }}
+      </select>
+      <select name="state" aria-label="State">
+        <option value="">state: all</option>
+        <option value="active" {{ if eq .FilterState "active" }}selected{{ end }}>active</option>
+        <option value="attention" {{ if eq .FilterState "attention" }}selected{{ end }}>needs attention</option>
+      </select>
+      <input type="hidden" name="view" value="{{ .View }}">
+      <button class="btn quiet" type="submit">Filter</button>
+      <span class="viewtoggle">
+        <a {{ if eq .View "grid" }}class="on" {{ end }}href="/?q={{ .Query | urlquery }}&amp;provider={{ .FilterProvider | urlquery }}&amp;state={{ .FilterState | urlquery }}&amp;view=grid#vault">grid</a>
+        ·
+        <a {{ if eq .View "list" }}class="on" {{ end }}href="/?q={{ .Query | urlquery }}&amp;provider={{ .FilterProvider | urlquery }}&amp;state={{ .FilterState | urlquery }}&amp;view=list#vault">list</a>
+      </span>
+      <a class="btn newbtn" href="/vault/new">+ New secret</a>
+    </form>
     {{ if .Descriptors }}
+    {{ if eq .View "list" }}
+    <div class="panel">
+      <table class="ledger">
+        <tr><th>secret</th><th>host</th><th>backend</th><th>class</th><th>state</th><th>rotates</th><th>last checked</th><th></th></tr>
+        {{ range .Descriptors }}
+        <tr>
+          <td class="mono">{{ .ID }}</td>
+          <td>{{ .Scope }}</td>
+          <td>{{ .Provider }}</td>
+          <td>{{ .Classification }}</td>
+          <td>{{ if eq .Lifecycle "active" }}<span class="state ok">active</span>{{ else if eq .Lifecycle "rotating" }}<span class="state warn">rotating</span>{{ else }}<span class="state bad">{{ .Lifecycle }}</span>{{ end }}</td>
+          <td>{{ .RotationDays }}d</td>
+          <td>{{ since .LastCheckedAt }}</td>
+          <td><a href="/?ref={{ .ID }}#focus">focus →</a></td>
+        </tr>
+        {{ end }}
+      </table>
+    </div>
+    {{ else }}
     <div class="cards">
       {{ range .Descriptors }}
       <div class="card {{ if ne .Lifecycle "active" }}attention{{ end }}">
@@ -172,8 +211,12 @@
       </div>
       {{ end }}
     </div>
+    {{ end }}
+    {{ if ne (len .Descriptors) .TotalCount }}<p class="filternote">{{ len .Descriptors }} of {{ .TotalCount }} secrets shown — <a href="/#vault">clear filters</a></p>{{ end }}
+    {{ else if .TotalCount }}
+    <div class="empty">Nothing matches these filters. <a href="/#vault">Clear them</a> to see all {{ .TotalCount }} secrets.</div>
     {{ else }}
-    <div class="empty">No secrets in the catalog yet. The door is closed until something worth guarding arrives.</div>
+    <div class="empty">No secrets in the catalog yet. <a href="/vault/new">Add the first one</a> — Janus will walk you through it.</div>
     {{ end }}
 
     {{ if .Focus.Descriptor.ID }}

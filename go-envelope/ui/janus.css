@@ -291,6 +291,54 @@ form.action button:hover, .btn:hover { opacity: 0.88; }
   padding: 5px 12px;
 }
 
+/* ---- filter bar + new-secret flow ---- */
+.filterbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 13px;
+  background: var(--panel);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.filterbar input[type="search"] {
+  flex: 1;
+  min-width: 160px;
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  background: var(--paper);
+  color: var(--ink);
+  padding: 7px 10px;
+  font: inherit;
+}
+.filterbar select {
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  background: var(--paper);
+  color: var(--ink);
+  padding: 7px 8px;
+  font: inherit;
+}
+.viewtoggle { color: var(--muted); font-size: 13px; }
+.viewtoggle a { color: var(--muted); text-decoration: none; padding: 2px 4px; }
+.viewtoggle a.on { color: var(--teal); font-weight: 600; }
+.newbtn { margin-left: auto; text-decoration: none; }
+.filternote { color: var(--muted); font-size: 13px; }
+form.filterrow { flex-direction: row; flex-wrap: wrap; align-items: end; gap: 12px; }
+form.filterrow label { min-width: 150px; }
+form.filterrow button { align-self: end; }
+pre.snippet {
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  background: var(--panel-soft);
+  padding: 12px 14px;
+  font: 12.5px/1.5 var(--mono);
+  overflow-x: auto;
+  margin: 4px 0 10px;
+}
+
 table.ledger { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.ledger th {
   text-align: left;
