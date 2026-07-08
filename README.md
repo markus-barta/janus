@@ -259,8 +259,21 @@ environment = "prod"
 blast_radius = "deploy-api"
 ```
 
+Profiles may also declare a reviewed SHA-256 sidecar when a consumer needs a
+value-free verification artifact. The sidecar is derived inside the approved-use
+executor, written atomically as a private file, and never returns the secret
+literal:
+
+```toml
+[env_files.hash_sidecar]
+format = "pharos-beacon-token-hashes-v1"
+subject = "deploy-api"
+output = "/run/janus/env/deploy-api-token-hash.json"
+```
+
 Before issuing a permit, preflight the reviewed profile and target path without
-reading secret material:
+reading secret material. Preflight also checks the sidecar target when one is
+declared:
 
 ```bash
 janusd env-file preflight --profile profile.deploy-env
@@ -270,9 +283,10 @@ janusd env-file preflight --profile profile.deploy-env
 janusd env-file --profile profile.deploy-env --permit use_...
 ```
 
-`janusd env-file` writes a private env file atomically (`0600` on Unix) and
-prints only value-free outcome fields; it rejects caller-supplied env names,
-output paths, raw values, executors, and destinations.
+`janusd env-file` writes a private env file and optional hash sidecar atomically
+(`0600` on Unix) and prints only value-free outcome fields; it rejects
+caller-supplied env names, output paths, raw values, executors, and
+destinations.
 
 The permit id is power-bearing and should not be logged casually. A copied or
 stale permit still has to pass principal, executor, destination, profile, secret

@@ -70,14 +70,15 @@ Before wiring a real service/host, create a reviewed consumer contract with:
 - destination
 - env var name
 - absolute output path
+- optional reviewed hash sidecar format, subject, and absolute output path
 - reload method
 - validation probe
 - dual-value support
 - blast radius
 
-The parent directory for the env file must already exist, must not be a symlink,
-and must be private on Unix (`0700`). Existing env files must be regular files
-and private (`0600`).
+The parent directory for the env file and any hash sidecar must already exist,
+must not be a symlink, and must be private on Unix (`0700`). Existing env files
+and sidecars must be regular files and private (`0600`).
 
 ## Operator Flow
 
@@ -107,7 +108,7 @@ janusd env-file preflight --profile profile.SERVICE
 Expected output is value-free and shaped like:
 
 ```text
-janusd env-file preflight ok secret_ref=sec_... profile_id=profile.SERVICE output_path=/run/... consumer_ref=consumer... reason_code=ok value_returned=false
+janusd env-file preflight ok secret_ref=sec_... profile_id=profile.SERVICE output_path=/run/... hash_output_path=none hash_format=none consumer_ref=consumer... reason_code=ok value_returned=false
 ```
 
 Issue an approval when policy requires it:
@@ -140,7 +141,7 @@ janusd env-file --profile profile.SERVICE --permit use_...
 Expected output is value-free and shaped like:
 
 ```text
-janusd env-file ok secret_ref=sec_... profile_id=profile.SERVICE output_path=/run/... consumer_ref=consumer... reason_code=ok value_returned=false
+janusd env-file ok secret_ref=sec_... profile_id=profile.SERVICE output_path=/run/... hash_output_path=none hash_format=none consumer_ref=consumer... reason_code=ok value_returned=false
 ```
 
 ## Rollback And Cleanup

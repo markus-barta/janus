@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 janus-core = { path = "../janus-core" }
+sha2 = "0.10"
 
 [dev-dependencies]
 janus-mock = { path = "../janus-mock" }

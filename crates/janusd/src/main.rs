@@ -30,9 +30,9 @@ use janus_core::{
     ValidationProbe,
 };
 use janus_executor::{
-    ApprovedUseExecutor, EnvFilePlan, EnvFileProfile, EnvFileProfileSpec, EnvFileRequest,
-    ManagedCommandProfile, ManagedCommandProfileSpec, ManagedCommandRequest,
-    ManagedCommandRuntimeLimits,
+    ApprovedUseExecutor, EnvFileHashSidecarFormat, EnvFileHashSidecarSpec, EnvFilePlan,
+    EnvFileProfile, EnvFileProfileSpec, EnvFileRequest, ManagedCommandProfile,
+    ManagedCommandProfileSpec, ManagedCommandRequest, ManagedCommandRuntimeLimits,
 };
 use janus_forge::{
     ConsumerRotationHooks, GeneratedAlphabet, GeneratedRotationBroker, GeneratedValuePolicy,
@@ -1492,6 +1492,8 @@ struct EnvFileCliOutcome {
     secret_ref: SecretRef,
     profile_id: ProfileId,
     output_path: PathBuf,
+    hash_output_path: Option<PathBuf>,
+    hash_format: Option<&'static str>,
     consumer_ref: ConsumerRef,
     reason_code: &'static str,
     value_returned: bool,
@@ -1510,6 +1512,14 @@ impl EnvFileCliOutcome {
             secret_ref: plan.secret_ref,
             profile_id: plan.profile_id,
             output_path: plan.output_path,
+            hash_output_path: plan
+                .hash_sidecar
+                .as_ref()
+                .map(|sidecar| sidecar.output_path.clone()),
+            hash_format: plan
+                .hash_sidecar
+                .as_ref()
+                .map(|sidecar| sidecar.format.as_str()),
             consumer_ref: plan.consumer_ref,
             reason_code,
             value_returned: plan.value_returned,
@@ -1533,10 +1543,12 @@ fn emit_run_managed_outcome(outcome: &ManagedCommandCliOutcome) {
 
 fn emit_env_file_outcome(outcome: &EnvFileCliOutcome) {
     println!(
-        "janusd env-file ok secret_ref={} profile_id={} output_path={} consumer_ref={} reason_code={} value_returned={}",
+        "janusd env-file ok secret_ref={} profile_id={} output_path={} hash_output_path={} hash_format={} consumer_ref={} reason_code={} value_returned={}",
         outcome.secret_ref.as_str(),
         outcome.profile_id.as_str(),
         outcome.output_path.display(),
+        optional_path(outcome.hash_output_path.as_deref()),
+        outcome.hash_format.unwrap_or("none"),
         outcome.consumer_ref.as_str(),
         outcome.reason_code,
         outcome.value_returned
@@ -1545,14 +1557,21 @@ fn emit_env_file_outcome(outcome: &EnvFileCliOutcome) {
 
 fn emit_env_file_preflight_outcome(outcome: &EnvFileCliOutcome) {
     println!(
-        "janusd env-file preflight ok secret_ref={} profile_id={} output_path={} consumer_ref={} reason_code={} value_returned={}",
+        "janusd env-file preflight ok secret_ref={} profile_id={} output_path={} hash_output_path={} hash_format={} consumer_ref={} reason_code={} value_returned={}",
         outcome.secret_ref.as_str(),
         outcome.profile_id.as_str(),
         outcome.output_path.display(),
+        optional_path(outcome.hash_output_path.as_deref()),
+        outcome.hash_format.unwrap_or("none"),
         outcome.consumer_ref.as_str(),
         outcome.reason_code,
         outcome.value_returned
     );
+}
+
+fn optional_path(path: Option<&Path>) -> String {
+    path.map(|path| path.display().to_string())
+        .unwrap_or_else(|| "none".to_string())
 }
 
 #[derive(Clone, Debug)]
@@ -1691,7 +1710,16 @@ struct EnvFileProfileToml {
     destination: String,
     env: String,
     output: PathBuf,
+    hash_sidecar: Option<EnvFileHashSidecarToml>,
     consumer: EnvFileConsumerToml,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct EnvFileHashSidecarToml {
+    format: String,
+    subject: String,
+    output: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -1779,6 +1807,16 @@ impl EnvFileProfileToml {
             destination: Destination::new(self.destination)?,
             env_name: SafeLabel::new(self.env)?,
             output_path: self.output,
+            hash_sidecar: self
+                .hash_sidecar
+                .map(|sidecar| -> Result<EnvFileHashSidecarSpec> {
+                    Ok(EnvFileHashSidecarSpec {
+                        format: parse_env_file_hash_sidecar_format(&sidecar.format)?,
+                        subject: SafeLabel::new(sidecar.subject)?,
+                        output_path: sidecar.output,
+                    })
+                })
+                .transpose()?,
             consumer,
         })?)
     }
@@ -1813,6 +1851,13 @@ fn parse_env_file_consumer_kind(value: &str) -> Result<ConsumerKind> {
         "human_workflow" => Ok(ConsumerKind::HumanWorkflow),
         "managed_command" => anyhow::bail!("env-file consumer kind must not be managed_command"),
         _ => anyhow::bail!("unsupported env-file consumer kind"),
+    }
+}
+
+fn parse_env_file_hash_sidecar_format(value: &str) -> Result<EnvFileHashSidecarFormat> {
+    match value {
+        "pharos-beacon-token-hashes-v1" => Ok(EnvFileHashSidecarFormat::PharosBeaconTokenHashesV1),
+        _ => anyhow::bail!("unsupported env-file hash sidecar format"),
     }
 }
 
@@ -4099,6 +4144,42 @@ mod tests {
         )
     }
 
+    fn env_file_profile_with_hash_sidecar_toml(
+        secret_ref: &SecretRef,
+        output_path: &Path,
+        hash_output_path: &Path,
+    ) -> String {
+        format!(
+            r#"
+                [[env_files]]
+                id = "profile.service_env"
+                secret_ref = {}
+                executor = "janus-run@fixture"
+                destination = "fixture-service"
+                env = "SERVICE_TOKEN"
+                output = {}
+
+                [env_files.hash_sidecar]
+                format = "pharos-beacon-token-hashes-v1"
+                subject = "ares"
+                output = {}
+
+                [env_files.consumer]
+                consumer_ref = "consumer.fixture_service"
+                kind = "service"
+                owner = "janusd-test"
+                environment = "test"
+                reload = "restart-service:fixture-service"
+                validation = ["fixture-service-health"]
+                supports_dual_value = false
+                blast_radius = "fixture-service"
+            "#,
+            toml_string(secret_ref.as_str()),
+            toml_string(output_path.to_string_lossy().as_ref()),
+            toml_string(hash_output_path.to_string_lossy().as_ref()),
+        )
+    }
+
     #[test]
     fn managed_profile_manifest_parses_reviewed_command_contract() {
         let secret_ref = SecretRef::new("sec_fixture").unwrap();
@@ -4145,6 +4226,28 @@ mod tests {
             profile.consumer().blast_radius,
             BlastRadius::new("fixture-service").unwrap()
         );
+    }
+
+    #[test]
+    fn env_file_profile_manifest_parses_reviewed_hash_sidecar_contract() {
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let output_path = PathBuf::from("/run/janus/env/fixture.env");
+        let hash_output_path = PathBuf::from("/run/janus/env/fixture-token-hash.json");
+        let catalog = ManagedCommandProfileCatalog::parse(
+            &env_file_profile_with_hash_sidecar_toml(&secret_ref, &output_path, &hash_output_path),
+        )
+        .unwrap();
+        let profile = catalog
+            .env_file_profile(&ProfileId::new("profile.service_env").unwrap())
+            .unwrap();
+        let sidecar = profile.hash_sidecar().expect("hash sidecar");
+
+        assert_eq!(
+            sidecar.format(),
+            EnvFileHashSidecarFormat::PharosBeaconTokenHashesV1
+        );
+        assert_eq!(sidecar.subject().as_str(), "ares");
+        assert_eq!(sidecar.output_path(), hash_output_path.as_path());
     }
 
     #[test]
@@ -5764,11 +5867,23 @@ mod tests {
         permit_token: PermitToken,
         profile_id: ProfileId,
         output_path: PathBuf,
+        hash_output_path: Option<PathBuf>,
     }
 
     #[cfg(unix)]
     impl FixtureEnvFileHarness {
         async fn new(output_dir: &Path) -> Self {
+            Self::new_with_optional_hash_sidecar(output_dir, false).await
+        }
+
+        async fn new_with_hash_sidecar(output_dir: &Path) -> Self {
+            Self::new_with_optional_hash_sidecar(output_dir, true).await
+        }
+
+        async fn new_with_optional_hash_sidecar(
+            output_dir: &Path,
+            include_hash_sidecar: bool,
+        ) -> Self {
             let project = ProjectId::new("janus").unwrap();
             let name = SecretName::new("CANARY").unwrap();
             let secret_ref = SecretRef::for_manifest_entry(&project, &name);
@@ -5807,11 +5922,14 @@ mod tests {
                 .await
                 .unwrap();
             let output_path = output_dir.join("service.env");
-            let profile_catalog = ManagedCommandProfileCatalog::parse(&env_file_profile_toml(
-                &secret_ref,
-                &output_path,
-            ))
-            .unwrap();
+            let hash_output_path =
+                include_hash_sidecar.then(|| output_dir.join("service-token-hash.json"));
+            let profile_toml = if let Some(hash_output_path) = &hash_output_path {
+                env_file_profile_with_hash_sidecar_toml(&secret_ref, &output_path, hash_output_path)
+            } else {
+                env_file_profile_toml(&secret_ref, &output_path)
+            };
+            let profile_catalog = ManagedCommandProfileCatalog::parse(&profile_toml).unwrap();
             let mut permits = InMemoryPermitRegistry::default();
             let permit_token = permits.insert(permit);
 
@@ -5828,6 +5946,7 @@ mod tests {
                 permit_token,
                 profile_id,
                 output_path,
+                hash_output_path,
             }
         }
 
@@ -6018,6 +6137,40 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn env_file_fixture_path_writes_private_hash_sidecar() {
+        let output_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(output_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let mut harness = FixtureEnvFileHarness::new_with_hash_sidecar(output_dir.path()).await;
+        let config = harness.config();
+
+        let outcome = run_env_file_with(&config, harness.runner_mut())
+            .await
+            .unwrap();
+        let hash_output_path = harness.hash_output_path.as_ref().expect("hash sidecar");
+
+        assert_eq!(
+            outcome.hash_output_path.as_deref(),
+            Some(hash_output_path.as_path())
+        );
+        assert_eq!(outcome.hash_format, Some("pharos-beacon-token-hashes-v1"));
+        assert!(!outcome.value_returned);
+        assert_eq!(
+            std::fs::read_to_string(&outcome.output_path).unwrap(),
+            "SERVICE_TOKEN=expected-canary\n"
+        );
+        let sidecar = std::fs::read_to_string(hash_output_path).unwrap();
+        assert!(sidecar.contains("\"schema\": \"inspr.pharos.beacon-token-hashes.v1\""));
+        assert!(sidecar.contains("\"name\": \"ares\""));
+        assert!(!sidecar.contains("expected-canary"));
+        let metadata = std::fs::symlink_metadata(hash_output_path).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn env_file_preflight_fixture_path_checks_target_without_writing() {
         let output_dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(output_dir.path(), std::fs::Permissions::from_mode(0o700))
@@ -6035,6 +6188,31 @@ mod tests {
         assert_eq!(outcome.reason_code, "ok");
         assert!(!outcome.value_returned);
         assert!(!outcome.output_path.exists());
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn env_file_preflight_fixture_path_checks_hash_sidecar_without_writing() {
+        let output_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(output_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let harness = FixtureEnvFileHarness::new_with_hash_sidecar(output_dir.path()).await;
+        let config = EnvFilePreflightConfig {
+            profile_id: harness.profile_id.clone(),
+        };
+
+        let outcome = run_env_file_preflight_with(&config, &harness.runner.profiles).unwrap();
+        let hash_output_path = harness.hash_output_path.as_ref().expect("hash sidecar");
+
+        assert_eq!(
+            outcome.hash_output_path.as_deref(),
+            Some(hash_output_path.as_path())
+        );
+        assert_eq!(outcome.hash_format, Some("pharos-beacon-token-hashes-v1"));
+        assert!(!outcome.value_returned);
+        assert!(!outcome.output_path.exists());
+        assert!(!hash_output_path.exists());
         assert!(!format!("{outcome:?}").contains("expected-canary"));
     }
 

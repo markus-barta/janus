@@ -22,6 +22,7 @@ use janus_core::{
     JanusResult, PrincipalChain, ProfileId, SafeLabel, SecretBroker, SecretRef, SecretStore,
     SecretValue, UsePermit,
 };
+use sha2::{Digest, Sha256};
 
 /// Request to consume one approved-use permit.
 pub struct ApprovedUseInvocation<'a> {
@@ -139,8 +140,45 @@ pub struct EnvFileProfileSpec {
     pub env_name: SafeLabel,
     /// Reviewed absolute output path for the env file.
     pub output_path: PathBuf,
+    /// Optional reviewed SHA-256 sidecar artifact derived from the same secret.
+    pub hash_sidecar: Option<EnvFileHashSidecarSpec>,
     /// Declared service/host consumer metadata used by rotation evidence.
     pub consumer: ConsumerDescriptor,
+}
+
+/// Supported value-free hash sidecar formats for service handoff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnvFileHashSidecarFormat {
+    /// Pharos `inspr.pharos.beacon-token-hashes.v1` JSON contract.
+    PharosBeaconTokenHashesV1,
+}
+
+impl EnvFileHashSidecarFormat {
+    /// Stable value-free format label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PharosBeaconTokenHashesV1 => "pharos-beacon-token-hashes-v1",
+        }
+    }
+}
+
+/// Optional reviewed hash sidecar for env-file handoff.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvFileHashSidecarSpec {
+    /// Sidecar format.
+    pub format: EnvFileHashSidecarFormat,
+    /// Subject key inside the sidecar, for example a Pharos host name.
+    pub subject: SafeLabel,
+    /// Reviewed absolute output path for the sidecar.
+    pub output_path: PathBuf,
+}
+
+/// Reviewed hash sidecar for env-file handoff.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvFileHashSidecar {
+    format: EnvFileHashSidecarFormat,
+    subject: SafeLabel,
+    output_path: PathBuf,
 }
 
 /// A reviewed service env-file profile.
@@ -152,6 +190,7 @@ pub struct EnvFileProfile {
     destination: Destination,
     env_name: SafeLabel,
     output_path: PathBuf,
+    hash_sidecar: Option<EnvFileHashSidecar>,
     consumer: ConsumerDescriptor,
 }
 
@@ -164,6 +203,27 @@ impl EnvFileProfile {
                 detail: "env-file output path must be absolute".to_string(),
             });
         }
+        let hash_sidecar = spec
+            .hash_sidecar
+            .map(|sidecar| {
+                if !sidecar.output_path.is_absolute() {
+                    return Err(JanusError::InvalidManifest {
+                        detail: "env-file hash sidecar output path must be absolute".to_string(),
+                    });
+                }
+                if sidecar.output_path == spec.output_path {
+                    return Err(JanusError::InvalidManifest {
+                        detail: "env-file hash sidecar output path must differ from env file"
+                            .to_string(),
+                    });
+                }
+                Ok(EnvFileHashSidecar {
+                    format: sidecar.format,
+                    subject: sidecar.subject,
+                    output_path: sidecar.output_path,
+                })
+            })
+            .transpose()?;
         if spec.consumer.kind == ConsumerKind::ManagedCommand {
             return Err(JanusError::InvalidManifest {
                 detail: "env-file profile consumer must not be managed_command".to_string(),
@@ -181,6 +241,7 @@ impl EnvFileProfile {
             destination: spec.destination,
             env_name: spec.env_name,
             output_path: spec.output_path,
+            hash_sidecar,
             consumer: spec.consumer,
         })
     }
@@ -215,6 +276,11 @@ impl EnvFileProfile {
         &self.output_path
     }
 
+    /// Optional reviewed hash sidecar.
+    pub fn hash_sidecar(&self) -> Option<&EnvFileHashSidecar> {
+        self.hash_sidecar.as_ref()
+    }
+
     /// Declared consumer ref for observation/rotation evidence.
     pub fn consumer_ref(&self) -> &ConsumerRef {
         &self.consumer.consumer_ref
@@ -229,6 +295,9 @@ impl EnvFileProfile {
     pub fn preflight_target(&self) -> JanusResult<EnvFilePlan> {
         let plan = self.plan();
         preflight_env_file_target(&plan.output_path, &plan.env_name)?;
+        if let Some(sidecar) = &plan.hash_sidecar {
+            preflight_hash_sidecar_target(&sidecar.output_path)?;
+        }
         Ok(plan)
     }
 
@@ -240,9 +309,27 @@ impl EnvFileProfile {
             destination: self.destination.clone(),
             env_name: self.env_name.clone(),
             output_path: self.output_path.clone(),
+            hash_sidecar: self.hash_sidecar.clone().map(EnvFileHashSidecarPlan::from),
             consumer_ref: self.consumer.consumer_ref.clone(),
             value_returned: false,
         }
+    }
+}
+
+impl EnvFileHashSidecar {
+    /// Sidecar format.
+    pub fn format(&self) -> EnvFileHashSidecarFormat {
+        self.format
+    }
+
+    /// Reviewed subject key.
+    pub fn subject(&self) -> &SafeLabel {
+        &self.subject
+    }
+
+    /// Reviewed output path.
+    pub fn output_path(&self) -> &Path {
+        &self.output_path
     }
 }
 
@@ -446,10 +533,36 @@ pub struct EnvFilePlan {
     pub env_name: SafeLabel,
     /// Reviewed output path.
     pub output_path: PathBuf,
+    /// Optional reviewed hash sidecar plan.
+    pub hash_sidecar: Option<EnvFileHashSidecarPlan>,
     /// Declared consumer.
     pub consumer_ref: ConsumerRef,
     /// Invariant marker.
     pub value_returned: bool,
+}
+
+/// Value-free hash sidecar execution plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvFileHashSidecarPlan {
+    /// Reviewed sidecar format.
+    pub format: EnvFileHashSidecarFormat,
+    /// Reviewed subject key.
+    pub subject: SafeLabel,
+    /// Reviewed output path.
+    pub output_path: PathBuf,
+    /// Invariant marker.
+    pub value_returned: bool,
+}
+
+impl From<EnvFileHashSidecar> for EnvFileHashSidecarPlan {
+    fn from(sidecar: EnvFileHashSidecar) -> Self {
+        Self {
+            format: sidecar.format,
+            subject: sidecar.subject,
+            output_path: sidecar.output_path,
+            value_returned: false,
+        }
+    }
 }
 
 /// Secret-bearing execution context available only inside the executor callback.
@@ -837,6 +950,9 @@ where
         }
         let plan = request.profile.plan();
         preflight_env_file_target(&plan.output_path, &plan.env_name)?;
+        if let Some(sidecar) = request.profile.hash_sidecar() {
+            preflight_hash_sidecar_target(sidecar.output_path())?;
+        }
         let value = self
             .broker
             .use_permit(
@@ -848,6 +964,9 @@ where
             )
             .await?;
         write_env_file_atomic(&plan.output_path, &plan.env_name, &value)?;
+        if let Some(sidecar) = request.profile.hash_sidecar() {
+            write_hash_sidecar_atomic(sidecar, &value)?;
+        }
         self.broker
             .record_consumer_observe(request.profile.consumer(), request.principal)?;
         Ok(EnvFileOutcome {
@@ -931,11 +1050,69 @@ fn write_env_file_atomic(
     result
 }
 
+fn write_hash_sidecar_atomic(sidecar: &EnvFileHashSidecar, value: &SecretValue) -> JanusResult<()> {
+    let path = sidecar.output_path();
+    preflight_hash_sidecar_target(path)?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .expect("preflight validates parent");
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("preflight validates file name");
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp_path = parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), nonce));
+    let mut created_temp = false;
+    let result = (|| -> JanusResult<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp_path)
+            .map_err(|_| JanusError::StoreUnavailable {
+                detail: "failed to create temporary hash sidecar".to_string(),
+            })?;
+        created_temp = true;
+        write_hash_sidecar(&mut file, sidecar, value)?;
+        file.flush().map_err(|_| JanusError::StoreUnavailable {
+            detail: "failed to flush temporary hash sidecar".to_string(),
+        })?;
+        file.sync_all().map_err(|_| JanusError::StoreUnavailable {
+            detail: "failed to sync temporary hash sidecar".to_string(),
+        })?;
+        fs::rename(&temp_path, path).map_err(|_| JanusError::StoreUnavailable {
+            detail: "failed to replace hash sidecar atomically".to_string(),
+        })?;
+        created_temp = false;
+        Ok(())
+    })();
+    if created_temp {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
 fn preflight_env_file_target(path: &Path, env_name: &SafeLabel) -> JanusResult<()> {
     validate_env_file_name(env_name)?;
+    preflight_private_output_path(path, "env-file output")
+}
+
+fn preflight_hash_sidecar_target(path: &Path) -> JanusResult<()> {
+    preflight_private_output_path(path, "env-file hash sidecar output")
+}
+
+fn preflight_private_output_path(path: &Path, label: &'static str) -> JanusResult<()> {
     if !path.is_absolute() {
         return Err(JanusError::InvalidManifest {
-            detail: "env-file output path must be absolute".to_string(),
+            detail: format!("{label} path must be absolute"),
         });
     }
     let parent = path
@@ -943,14 +1120,14 @@ fn preflight_env_file_target(path: &Path, env_name: &SafeLabel) -> JanusResult<(
         .filter(|parent| !parent.as_os_str().is_empty());
     let Some(parent) = parent else {
         return Err(JanusError::InvalidManifest {
-            detail: "env-file output path must have a parent directory".to_string(),
+            detail: format!("{label} path must have a parent directory"),
         });
     };
     ensure_private_directory(parent)?;
     if let Ok(metadata) = fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(JanusError::StoreUnavailable {
-                detail: "env-file output path is not a regular file".to_string(),
+                detail: format!("{label} path is not a regular file"),
             });
         }
         #[cfg(unix)]
@@ -958,7 +1135,7 @@ fn preflight_env_file_target(path: &Path, env_name: &SafeLabel) -> JanusResult<(
             use std::os::unix::fs::PermissionsExt;
             if metadata.permissions().mode() & 0o077 != 0 {
                 return Err(JanusError::StoreUnavailable {
-                    detail: "env-file output path must be private".to_string(),
+                    detail: format!("{label} path must be private"),
                 });
             }
         }
@@ -968,11 +1145,11 @@ fn preflight_env_file_target(path: &Path, env_name: &SafeLabel) -> JanusResult<(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| JanusError::InvalidManifest {
-            detail: "env-file output path must include a file name".to_string(),
+            detail: format!("{label} path must include a file name"),
         })?;
     if file_name.contains('/') || file_name.is_empty() {
         return Err(JanusError::InvalidManifest {
-            detail: "env-file output path must include a safe file name".to_string(),
+            detail: format!("{label} path must include a safe file name"),
         });
     }
     Ok(())
@@ -1020,6 +1197,65 @@ fn write_env_assignment(
         .map_err(|_| JanusError::StoreUnavailable {
             detail: "failed to write env file".to_string(),
         })
+}
+
+fn write_hash_sidecar(
+    mut writer: impl Write,
+    sidecar: &EnvFileHashSidecar,
+    value: &SecretValue,
+) -> JanusResult<()> {
+    match sidecar.format() {
+        EnvFileHashSidecarFormat::PharosBeaconTokenHashesV1 => {
+            let hash = sha256_hex(value.expose_bytes());
+            writer
+                .write_all(b"{\n  \"schema\": \"inspr.pharos.beacon-token-hashes.v1\",\n  \"hosts\": [\n    { \"name\": ")
+                .and_then(|_| write_json_string(&mut writer, sidecar.subject().as_str()))
+                .and_then(|_| writer.write_all(b", \"token_sha256\": \""))
+                .and_then(|_| writer.write_all(hash.as_bytes()))
+                .and_then(|_| writer.write_all(b"\" }\n  ]\n}\n"))
+                .map_err(|_| JanusError::StoreUnavailable {
+                    detail: "failed to write hash sidecar".to_string(),
+                })
+        }
+    }
+}
+
+fn sha256_hex(value: &[u8]) -> String {
+    let digest = Sha256::digest(value);
+    hex(&digest)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const CHARS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(CHARS[(b >> 4) as usize] as char);
+        out.push(CHARS[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn write_json_string(mut writer: impl Write, value: &str) -> std::io::Result<()> {
+    writer.write_all(b"\"")?;
+    for ch in value.chars() {
+        match ch {
+            '"' => writer.write_all(br#"\""#)?,
+            '\\' => writer.write_all(br#"\\"#)?,
+            '\u{08}' => writer.write_all(br#"\b"#)?,
+            '\u{0c}' => writer.write_all(br#"\f"#)?,
+            '\n' => writer.write_all(br#"\n"#)?,
+            '\r' => writer.write_all(br#"\r"#)?,
+            '\t' => writer.write_all(br#"\t"#)?,
+            ch if ch.is_control() => {
+                write!(writer, "\\u{:04x}", ch as u32)?;
+            }
+            ch => {
+                let mut buf = [0_u8; 4];
+                writer.write_all(ch.encode_utf8(&mut buf).as_bytes())?;
+            }
+        }
+    }
+    writer.write_all(b"\"")
 }
 
 #[cfg(test)]
@@ -1212,6 +1448,7 @@ mod tests {
             destination,
             env_name: SafeLabel::new("SERVICE_TOKEN").unwrap(),
             output_path,
+            hash_sidecar: None,
             consumer: ConsumerDescriptor {
                 consumer_ref: ConsumerRef::new("consumer.fixture_service").unwrap(),
                 secret_ref,
@@ -1222,6 +1459,42 @@ mod tests {
                 validation: vec![ValidationProbe::new("service-health").unwrap()],
                 supports_dual_value: false,
                 blast_radius: BlastRadius::new("fixture-service").unwrap(),
+                declared: true,
+            },
+        })
+        .unwrap()
+    }
+
+    fn env_file_profile_with_hash_sidecar(
+        profile_id: ProfileId,
+        secret_ref: SecretRef,
+        executor: ExecutorRef,
+        destination: Destination,
+        output_path: PathBuf,
+        hash_output_path: PathBuf,
+    ) -> EnvFileProfile {
+        EnvFileProfile::new(EnvFileProfileSpec {
+            profile_id,
+            secret_ref: secret_ref.clone(),
+            executor,
+            destination,
+            env_name: SafeLabel::new("SERVICE_TOKEN").unwrap(),
+            output_path,
+            hash_sidecar: Some(EnvFileHashSidecarSpec {
+                format: EnvFileHashSidecarFormat::PharosBeaconTokenHashesV1,
+                subject: SafeLabel::new("ares").unwrap(),
+                output_path: hash_output_path,
+            }),
+            consumer: ConsumerDescriptor {
+                consumer_ref: ConsumerRef::new("consumer.fixture_service").unwrap(),
+                secret_ref,
+                kind: ConsumerKind::Service,
+                owner: janus_core::OwnerRef::new("janusd-test").unwrap(),
+                environment: janus_core::Environment::new("test").unwrap(),
+                reload: janus_core::ReloadMethod::None,
+                validation: vec![],
+                supports_dual_value: false,
+                blast_radius: janus_core::BlastRadius::new("fixture-service").unwrap(),
                 declared: true,
             },
         })
@@ -1817,6 +2090,66 @@ mod tests {
         assert!(!format!("{:?}", audit.events()).contains("expected-canary"));
 
         let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn env_file_handoff_writes_private_hash_sidecar_without_returning_literal() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (mut executor, permit, principal, executor_ref, destination, managed_profile) =
+            executor_fixture().await;
+        let dir = marker_path("env-file-hash-sidecar-ok");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let output_path = dir.join("service.env");
+        let hash_output_path = dir.join("service-token-hash.json");
+        let profile = env_file_profile_with_hash_sidecar(
+            managed_profile.profile_id().clone(),
+            managed_profile.secret_ref().clone(),
+            executor_ref,
+            destination,
+            output_path.clone(),
+            hash_output_path.clone(),
+        );
+
+        let outcome = executor
+            .render_env_file(EnvFileRequest {
+                profile: &profile,
+                permit: &permit,
+                principal: &principal,
+                now: run_at(),
+            })
+            .await
+            .unwrap();
+
+        let sidecar = fs::read_to_string(&hash_output_path).unwrap();
+        assert!(sidecar.contains("\"schema\": \"inspr.pharos.beacon-token-hashes.v1\""));
+        assert!(sidecar.contains("\"name\": \"ares\""));
+        assert!(sidecar.contains(&sha256_hex(b"expected-canary")));
+        assert!(!sidecar.contains("expected-canary"));
+        assert_eq!(
+            fs::metadata(&hash_output_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            outcome
+                .plan
+                .hash_sidecar
+                .as_ref()
+                .map(|sidecar| sidecar.output_path.as_path()),
+            Some(hash_output_path.as_path())
+        );
+        assert!(!outcome.value_returned);
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
+
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(hash_output_path);
         let _ = fs::remove_dir(dir);
     }
 
