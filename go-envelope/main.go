@@ -586,6 +586,8 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /ui/evidence/attachments", app.withAuth(app.handleAttachEvidenceUI))
 	mux.HandleFunc("POST /ui/permits", app.withAuth(app.handleCreatePermitUI))
 	mux.HandleFunc("POST /ui/permits/{permitID}/run", app.withAuth(app.handleRunPermitUI))
+	mux.HandleFunc("GET /legacy", app.withAuth(app.handleLegacyDashboard))
+	mux.HandleFunc("GET /static/", app.handleStatic)
 	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
 	return app.securityHeaders(app.requestIDs(app.rateLimit(app.limitRequestBody(app.safeHTTPBoundary(mux)))))
 }
@@ -608,7 +610,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/auth/smoke", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/legacy", "/auth/smoke", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
@@ -620,6 +622,8 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 		return []string{http.MethodPost}, true
 	}
 	switch {
+	case strings.HasPrefix(path, "/static/"):
+		return []string{http.MethodGet}, true
 	case singleSegmentRunPath(path, "/api/permits/"):
 		return []string{http.MethodPost}, true
 	case singleSegmentRunPath(path, "/ui/permits/"):
@@ -1019,6 +1023,8 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	data := map[string]any{
 		"Title":                "Janus",
 		"CSPNonce":             cspNonceFromContext(r.Context()),
+		"Now":                  time.Now().UTC(),
+		"VaultTiles":           vaultTilesFor(descriptors, lifecyclePosture, permitPosture),
 		"Session":              session,
 		"CSRF":                 app.csrfToken(session),
 		"Descriptors":          descriptors,
@@ -3892,8 +3898,9 @@ func (app *App) browserSmokeReceiptCSRFRefreshAllowed(r *http.Request) bool {
 }
 
 func mustTemplates() *template.Template {
-	return template.Must(template.New("janus").Funcs(template.FuncMap{
+	t := template.Must(template.New("janus").Funcs(template.FuncMap{
 		"buildCommitShort": func() string { return shortCommit(buildCommit) },
+		"since":            humanSince,
 	}).Parse(`
 {{ define "base_top" -}}
 <!doctype html>
@@ -4842,7 +4849,7 @@ func mustTemplates() *template.Template {
 </html>
 {{- end }}
 
-{{ define "dashboard" -}}
+{{ define "legacy_dashboard" -}}
 {{ template "base_top" . }}
 <section class="overview" id="overview">
   <div class="intro">
@@ -8289,4 +8296,5 @@ func mustTemplates() *template.Template {
 {{ template "base_bottom" . }}
 {{- end }}
 `))
+	return template.Must(t.ParseFS(vaultTemplateFS, "ui/vault.html"))
 }

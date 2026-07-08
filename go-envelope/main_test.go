@@ -3555,7 +3555,7 @@ func TestRestoreDrillWorkflowTracksPresenceOnlyAttachment(t *testing.T) {
 		name string
 		path string
 	}{
-		{name: "dashboard", path: "/"},
+		{name: "dashboard", path: "/legacy"},
 		{name: "posture", path: "/api/posture"},
 		{name: "evidence", path: "/api/evidence"},
 	}
@@ -3616,7 +3616,7 @@ func TestReleaseProvenanceWorkflowTracksPresenceOnlyAttachment(t *testing.T) {
 		name string
 		path string
 	}{
-		{name: "dashboard", path: "/"},
+		{name: "dashboard", path: "/legacy"},
 		{name: "posture", path: "/api/posture"},
 		{name: "evidence", path: "/api/evidence"},
 	}
@@ -3681,7 +3681,7 @@ func TestPrivacyRetentionWorkflowTracksPresenceOnlyAttachment(t *testing.T) {
 		name string
 		path string
 	}{
-		{name: "dashboard", path: "/"},
+		{name: "dashboard", path: "/legacy"},
 		{name: "posture", path: "/api/posture"},
 		{name: "evidence", path: "/api/evidence"},
 	}
@@ -3746,7 +3746,7 @@ func TestIntegrationConformanceWorkflowTracksPresenceOnlyAttachment(t *testing.T
 		name string
 		path string
 	}{
-		{name: "dashboard", path: "/"},
+		{name: "dashboard", path: "/legacy"},
 		{name: "posture", path: "/api/posture"},
 		{name: "evidence", path: "/api/evidence"},
 	}
@@ -3811,7 +3811,7 @@ func TestRemoteAuditWorkflowTracksPresenceOnlyAttachment(t *testing.T) {
 		name string
 		path string
 	}{
-		{name: "dashboard", path: "/"},
+		{name: "dashboard", path: "/legacy"},
 		{name: "posture", path: "/api/posture"},
 		{name: "evidence", path: "/api/evidence"},
 	}
@@ -3876,7 +3876,7 @@ func TestBreakGlassReviewWorkflowTracksPresenceOnlyAttachment(t *testing.T) {
 		name string
 		path string
 	}{
-		{name: "dashboard", path: "/"},
+		{name: "dashboard", path: "/legacy"},
 		{name: "posture", path: "/api/posture"},
 		{name: "evidence", path: "/api/evidence"},
 	}
@@ -5042,7 +5042,7 @@ func TestDashboardRendersAccessPolicy(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	out := httptest.NewRecorder()
-	app.withAuth(app.handleDashboard)(out, req)
+	app.withAuth(app.handleLegacyDashboard)(out, req)
 	if out.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
@@ -5159,7 +5159,7 @@ func TestDashboardRendersRequestHandleWitnessForOperator(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(rr.Result().Cookies()[0])
 	out := httptest.NewRecorder()
-	app.withAuth(app.handleDashboard)(out, req)
+	app.withAuth(app.handleLegacyDashboard)(out, req)
 	if out.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
@@ -5222,7 +5222,7 @@ func TestDashboardRendersRequestPermitWitnessForOperator(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(rr.Result().Cookies()[0])
 	out := httptest.NewRecorder()
-	app.withAuth(app.handleDashboard)(out, req)
+	app.withAuth(app.handleLegacyDashboard)(out, req)
 	if out.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
@@ -5275,7 +5275,7 @@ func TestDashboardShowsRestrictedStateWhenReadinessDegraded(t *testing.T) {
 	app.cfg.RequireAuth = false
 	app.permits = nil
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/legacy", nil)
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
 	if out.Code != http.StatusOK {
@@ -5299,7 +5299,7 @@ func TestDashboardShowsAuditSinkRecoveryGuidance(t *testing.T) {
 	app.cfg.RequireAuth = false
 	app.store.auditFile = filepath.Join(t.TempDir(), "missing-parent", "audit.jsonl")
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/legacy", nil)
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
 	if out.Code != http.StatusOK {
@@ -5328,7 +5328,7 @@ func TestDashboardShowsEnterpriseMissingControlGuidance(t *testing.T) {
 		t.Setenv(spec.EnvKey, "")
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/legacy", nil)
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
 	if out.Code != http.StatusOK {
@@ -5361,7 +5361,7 @@ func TestEnterpriseEvidenceAttachmentsArePresenceOnlyAcrossRoutes(t *testing.T) 
 		name string
 		path string
 	}{
-		{name: "dashboard", path: "/"},
+		{name: "dashboard", path: "/legacy"},
 		{name: "posture", path: "/api/posture"},
 		{name: "evidence", path: "/api/evidence"},
 	}
@@ -5424,7 +5424,7 @@ func TestEvidenceAttachmentWorkflowIsPresenceOnly(t *testing.T) {
 		name string
 		path string
 	}{
-		{name: "dashboard", path: "/"},
+		{name: "dashboard", path: "/legacy"},
 		{name: "posture", path: "/api/posture"},
 		{name: "evidence", path: "/api/evidence"},
 	}
@@ -5483,7 +5483,7 @@ func TestDashboardShowsDevModeGuardrails(t *testing.T) {
 	app.cfg.RequireAuth = false
 	app.cfg.ProductMode = "dev"
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/legacy", nil)
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
 	if out.Code != http.StatusOK {
@@ -6007,7 +6007,7 @@ func TestDashboardHidesOperatorActionsForViewer(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(rr.Result().Cookies()[0])
 	out := httptest.NewRecorder()
-	app.withAuth(app.handleDashboard)(out, req)
+	app.withAuth(app.handleLegacyDashboard)(out, req)
 	if out.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
@@ -6127,7 +6127,7 @@ func TestDashboardRoleAvailabilityStripByRole(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req.AddCookie(rr.Result().Cookies()[0])
 			out := httptest.NewRecorder()
-			app.withAuth(app.handleDashboard)(out, req)
+			app.withAuth(app.handleLegacyDashboard)(out, req)
 			if out.Code != http.StatusOK {
 				t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 			}
@@ -6256,7 +6256,7 @@ func TestDashboardAuditRowsRequireAuditorRole(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(viewerCookie.Result().Cookies()[0])
 	out := httptest.NewRecorder()
-	app.withAuth(app.handleDashboard)(out, req)
+	app.withAuth(app.handleLegacyDashboard)(out, req)
 	if out.Code != http.StatusOK {
 		t.Fatalf("expected viewer dashboard 200, got %d body=%s", out.Code, out.Body.String())
 	}
@@ -6274,7 +6274,7 @@ func TestDashboardAuditRowsRequireAuditorRole(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(auditorCookie.Result().Cookies()[0])
 	out = httptest.NewRecorder()
-	app.withAuth(app.handleDashboard)(out, req)
+	app.withAuth(app.handleLegacyDashboard)(out, req)
 	if out.Code != http.StatusOK {
 		t.Fatalf("expected auditor dashboard 200, got %d body=%s", out.Code, out.Body.String())
 	}
@@ -6300,7 +6300,7 @@ func TestDashboardRendersDescriptorFocus(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/?ref=csb1-age-identity", nil)
 	out := httptest.NewRecorder()
-	app.withAuth(app.handleDashboard)(out, req)
+	app.withAuth(app.handleLegacyDashboard)(out, req)
 	if out.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
@@ -6485,7 +6485,7 @@ func TestDashboardRendersRecentPermits(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	out := httptest.NewRecorder()
-	app.withAuth(app.handleDashboard)(out, req)
+	app.withAuth(app.handleLegacyDashboard)(out, req)
 	if out.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}

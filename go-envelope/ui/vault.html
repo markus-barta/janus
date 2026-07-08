@@ -1,0 +1,289 @@
+{{ define "dashboard" -}}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{ if .CSRF }}<meta name="csrf-token" content="{{ .CSRF }}">{{ end }}
+  <title>Janus — Vault</title>
+  <link rel="icon" type="image/svg+xml" href="/static/janus-logo.svg">
+  <link rel="stylesheet" href="/static/janus.css">
+  <style nonce="{{ .CSPNonce }}">
+    /* dual-tone light of the hero: cool looks back, warm looks forward */
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(90rem 60rem at -20% -10%, rgba(61, 154, 139, 0.07), transparent 55%),
+        radial-gradient(90rem 60rem at 120% -10%, rgba(201, 145, 63, 0.07), transparent 55%);
+    }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="side">
+    <div class="brand">
+      <img src="/static/janus-logo.svg" alt="">
+      <span>JANUS</span>
+    </div>
+    <nav class="nav" aria-label="Main">
+      <a class="active" href="/">Vault</a>
+      <a href="#focus">Access</a>
+      <a href="#requests">Requests</a>
+      <a href="#ledger">Ledger</a>
+      <a href="#assurance">Assurance</a>
+    </nav>
+    <div class="spacer"></div>
+    <div class="foot">
+      <a href="/legacy">legacy console →</a>
+      <div class="userchip">
+        <span>{{ if .Session.Name }}{{ .Session.Name }}{{ else }}{{ .Session.Subject }}{{ end }}</span>
+        <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button type="submit" title="Sign out">sign out</button></form>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="pagehead">
+      <div>
+        <h1>Vault</h1>
+        <div class="sub">every secret, accounted for</div>
+      </div>
+      <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC</span>
+    </div>
+
+    {{ with .ActionResult }}
+    <div class="banner {{ .Outcome }}">
+      <span class="t">{{ .Title }}</span>
+      <span class="m">{{ .Message }}</span>
+      <div class="facts">
+        {{ if .HandleID }}<span>handle <b>{{ .HandleID }}</b></span>{{ end }}
+        {{ if .PermitID }}<span>permit <b>{{ .PermitID }}</b></span>{{ end }}
+        {{ if .SecretRef }}<span>ref <b>{{ .SecretRef }}</b></span>{{ end }}
+        {{ if .Status }}<span>status <b>{{ .Status }}</b></span>{{ end }}
+        {{ if .ExpiresAt }}<span>expires <b>{{ .ExpiresAt }}</b></span>{{ end }}
+        {{ if .RunReason }}<span>reason <b>{{ .RunReason }}</b></span>{{ end }}
+        {{ if .RequestID }}<span class="mono">request_id={{ .RequestID }}</span>{{ end }}
+        {{ if .OutputScrubbed }}<span class="state ok">output_scrubbed=true</span>{{ end }}
+        <span class="state ok">value_returned=false</span>
+      </div>
+      {{ with .Receipt }}
+      <div class="rh">Action receipt <span class="state ok">hash locked</span></div>
+      <div class="facts">
+        <span>schema <b>{{ .Schema }}</b></span>
+        <span>algorithm <b>{{ .Algorithm }}</b></span>
+        <span>boundary <b>{{ .Boundary }}</b></span>
+        <span>Role <span class="state ok">role_checked=true</span></span>
+        <span>CSRF <span class="state ok">csrf_checked=true</span></span>
+        <span>Readiness <span class="state ok">readiness_checked=true</span></span>
+        <span>Audit <span class="state ok">audit_recorded=true</span></span>
+        <span>Proof <span class="state ok">tamper_evident=true</span></span>
+      </div>
+      <div class="rh">Copy-safe action receipt fields</div>
+      <div class="facts">
+        <span>Receipt id <b>{{ .ReceiptID }}</b></span>
+        <span>Receipt hash <b>{{ .ReceiptHash }}</b></span>
+        <span>Request id <b>{{ .RequestID }}</b></span>
+        <span class="mono">request_id={{ .RequestID }}</span>
+      </div>
+      <div class="rh">Covered checks</div>
+      <div class="facts">
+        <span>covers <b>{{ .Coverage }}</b></span>
+        <span class="state ok">secret_value_returned=false</span>
+        <span class="state ok">request_body_returned=false</span>
+      </div>
+      <span class="m">Verify receipt: Recompute the SHA-256 hash over the copy-safe receipt fields — it matches the receipt hash. {{ if .Next }}{{ .Next }}{{ end }}</span>
+      {{ end }}
+      {{ if .PermitID }}
+      <div class="rh">Permit safety verdict</div>
+      <div class="facts">
+        <span class="state ok">Metadata only</span>
+        <span class="state ok">No connector</span>
+        <span class="state ok">Audited</span>
+        {{ if .OutputScrubbed }}<span class="state ok">Scrubbed output</span>{{ end }}
+      </div>
+      {{ if and $.CanOperate (not .OutputScrubbed) }}
+      <form method="post" action="/ui/permits/{{ .PermitID }}/run">
+        <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+        <button class="btn quiet" type="submit">Run safety check</button>
+      </form>
+      {{ end }}
+      {{ end }}
+      {{ if .OutputScrubbed }}
+      <div class="rh">Permit safety check result witness</div>
+      <div class="facts">
+        <span>Execution verdict <b>{{ .Status }}</b></span>
+        <span>Run denial reason <b>{{ .RunReason }}</b></span>
+      </div>
+      <div class="rh">Permit safety check evidence flags</div>
+      <div class="facts">
+        <span class="state ok">run_status={{ .Status }}</span>
+        <span class="state ok">run_reason_returned=true</span>
+        <span class="state ok">connector_execution=false</span>
+        <span class="state ok">connector_output_returned=false</span>
+        <span class="state ok">permit_payload_returned=false</span>
+        <span class="state ok">backend_path_returned=false</span>
+        <span class="state ok">source_path_returned=false</span>
+        <span class="state ok">env_returned=false</span>
+      </div>
+      {{ end }}
+    </div>
+    {{ end }}
+
+    <div class="tiles">
+      <div class="tile"><strong>{{ .VaultTiles.Secrets }}</strong><span>Secrets</span></div>
+      <div class="tile"><strong>{{ .VaultTiles.Active }}</strong><span>Active</span></div>
+      <div class="tile {{ if .VaultTiles.Attention }}warm{{ end }}"><strong>{{ .VaultTiles.Attention }}</strong><span>Need attention</span></div>
+      <div class="tile {{ if .VaultTiles.Permits }}warm{{ end }}"><strong>{{ .VaultTiles.Permits }}</strong><span>Permits</span></div>
+    </div>
+
+    <h2 id="vault">Secrets</h2>
+    {{ if .Descriptors }}
+    <div class="cards">
+      {{ range .Descriptors }}
+      <div class="card {{ if ne .Lifecycle "active" }}attention{{ end }}">
+        <div class="name"><span>{{ .DisplayName }}</span>{{ if .RevealAllowed }}<span class="key" title="reveal permitted">⚿</span>{{ end }}</div>
+        <div class="owner">{{ .Owner }}{{ if .Scope }} · {{ .Scope }}{{ end }}</div>
+        <div class="chips">
+          <span class="chip">{{ .Provider }}</span>
+          <span class="chip">{{ .Classification }}</span>
+          {{ if eq .Lifecycle "active" }}<span class="chip teal">active</span>
+          {{ else if eq .Lifecycle "rotating" }}<span class="chip amber">rotating</span>
+          {{ else }}<span class="chip danger">{{ .Lifecycle }}</span>{{ end }}
+        </div>
+        <div class="meta">
+          <span>rotates every <b>{{ .RotationDays }}d</b> · <b>{{ .ConsumerCount }}</b> consumer{{ if ne .ConsumerCount 1 }}s{{ end }}</span>
+          <span>last checked <b>{{ since .LastCheckedAt }}</b></span>
+        </div>
+        <div class="foot">
+          <span class="mono">{{ .ID }}</span>
+          <a href="/?ref={{ .ID }}#focus">focus →</a>
+        </div>
+      </div>
+      {{ end }}
+    </div>
+    {{ else }}
+    <div class="empty">No secrets in the catalog yet. The door is closed until something worth guarding arrives.</div>
+    {{ end }}
+
+    {{ if .Focus.Descriptor.ID }}
+    <h2 id="focus">Focus — <span class="mono">{{ .Focus.Descriptor.ID }}</span></h2>
+    <div class="grid2">
+      <div class="panel">
+        <strong>{{ .Focus.Descriptor.DisplayName }}</strong>
+        <p class="lead">{{ .Focus.Descriptor.Classification }} · lifecycle {{ .Focus.Lifecycle }} · owner {{ .Focus.Descriptor.Owner }}</p>
+        {{ if .Focus.NormalUseBlocked }}<p class="lead"><span class="state warn">blocked</span> {{ .Focus.NormalUseReason }}</p>{{ end }}
+        {{ range .Focus.Gates }}<p class="lead"><span class="state {{ if eq .Severity "error" }}bad{{ else }}warn{{ end }}">{{ .Code }}</span> {{ .Message }}</p>{{ end }}
+        {{ if not .Focus.Gates }}<p class="lead"><span class="state ok">clear</span> no catalog gates on this descriptor.</p>{{ end }}
+      </div>
+      <div class="panel">
+        {{ if .CanOperate }}
+        <strong>Request a metadata handle</strong>
+        <p class="lead">Issues a handle for metadata-only follow-up. The secret value is never returned here.</p>
+        <form class="action" method="post" action="/ui/warden/resolve">
+          <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+          <input type="hidden" name="ref" value="{{ .Focus.Descriptor.ID }}">
+          <label>Reason
+            <input name="reason" maxlength="160" required placeholder="maintenance, audit, rotation">
+          </label>
+          <button type="submit">Issue handle</button>
+        </form>
+        <strong>Request a permit</strong>
+        <form class="action" method="post" action="/ui/permits">
+          <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+          <input type="hidden" name="ref" value="{{ .Focus.Descriptor.ID }}">
+          <label>Action
+            <select name="action" required>
+              <option value="metadata_use">metadata_use</option>
+              <option value="resolve_handle">resolve_handle</option>
+            </select>
+          </label>
+          <label>Destination
+            <input name="destination" maxlength="120" placeholder="janus dashboard">
+          </label>
+          <label>Reason
+            <input name="reason" maxlength="160" required placeholder="audit, rotation, incident review">
+          </label>
+          <button type="submit">Create permit</button>
+        </form>
+        {{ else }}
+        <strong>No access yet</strong>
+        <p class="lead">You are signed in, but handle and permit actions need the operator role. Ask the operator to grant it — nothing is broken.</p>
+        {{ end }}
+      </div>
+    </div>
+    {{ end }}
+
+    <h2 id="requests">Requests</h2>
+    {{ if and .CanOperate .Permits }}
+    <div class="panel">
+      <table class="ledger">
+        <tr><th>permit</th><th>ref</th><th>action</th><th>status</th><th>expires</th><th></th></tr>
+        {{ range .Permits }}
+        <tr>
+          <td class="mono">{{ .ID }}</td>
+          <td class="mono">{{ .SecretRef }}</td>
+          <td>{{ .Action }}</td>
+          <td>{{ if eq .Status "approved" }}<span class="state ok">{{ .Status }}</span>{{ else if eq .Status "denied" }}<span class="state bad">{{ .Status }}</span>{{ else }}<span class="state warn">{{ .Status }}</span>{{ end }}</td>
+          <td>{{ since .ExpiresAt }}</td>
+          <td>
+            <form method="post" action="/ui/permits/{{ .ID }}/run">
+              <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+              <button class="btn quiet" type="submit">safety check</button>
+            </form>
+          </td>
+        </tr>
+        {{ end }}
+      </table>
+    </div>
+    {{ else if .CanOperate }}
+    <div class="empty">No permits right now. Quiet doors are good doors.</div>
+    {{ else }}
+    <div class="empty">Permit requests are operator-gated. Viewing the vault posture is all this role allows.</div>
+    {{ end }}
+
+    <h2 id="ledger">Ledger</h2>
+    {{ if and .CanViewAudit .Audit }}
+    <div class="panel">
+      <table class="ledger">
+        <tr><th>when</th><th>action</th><th>outcome</th><th>ref</th></tr>
+        {{ range .Audit }}
+        <tr>
+          <td>{{ since .Time }}</td>
+          <td class="mono">{{ .Action }}</td>
+          <td>{{ if eq .Outcome "allowed" }}<span class="state ok">{{ .Outcome }}</span>{{ else }}<span class="state bad">{{ .Outcome }}</span>{{ end }}</td>
+          <td class="mono">{{ .SecretRef }}</td>
+        </tr>
+        {{ end }}
+      </table>
+    </div>
+    {{ else if .CanViewAudit }}
+    <div class="empty">The ledger is empty — nothing witnessed yet.</div>
+    {{ else }}
+    <div class="empty">The ledger needs the auditor role. Every touch is still being witnessed.</div>
+    {{ end }}
+
+    <h2 id="assurance">Assurance</h2>
+    <div class="panel">
+      <div class="chips">
+        {{ if .Ready }}<span class="chip teal">readiness ok</span>{{ else }}<span class="chip danger">degraded — sensitive actions fail closed</span>{{ end }}
+        <span class="chip">{{ .Lifecycle.ActiveCount }} active</span>
+        {{ if .Lifecycle.BlockedCount }}<span class="chip amber">{{ .Lifecycle.BlockedCount }} blocked</span>{{ end }}
+        {{ if .Lifecycle.StaleCount }}<span class="chip amber">{{ .Lifecycle.StaleCount }} stale</span>{{ end }}
+        {{ if .Lifecycle.GateCount }}<span class="chip amber">{{ .Lifecycle.GateCount }} lifecycle gates</span>{{ end }}
+        <span class="chip">mode {{ .Mode }}</span>
+      </div>
+      <p class="lead">Janus looks both ways: what may happen is permitted above; what did happen is witnessed in the ledger. No secret value crosses this page — <span class="mono">value_returned=false</span>, always. Full posture detail remains on the <a href="/legacy">legacy console</a>.</p>
+    </div>
+
+    <div class="footer">
+      <span>janus · build {{ buildCommitShort }}</span>
+      <span>witnessed · metadata only</span>
+    </div>
+  </main>
+</div>
+</body>
+</html>
+{{- end }}
