@@ -320,7 +320,6 @@ type App struct {
 	store     *Store
 	broker    *Broker
 	permits   *PermitStore
-	evidence  *EvidenceAttachmentStore
 	limiter   *RateLimiter
 	oauth     *oauth2.Config
 	verifier  *oidc.IDTokenVerifier
@@ -511,16 +510,11 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("permit store: %w", err)
 	}
-	evidenceStore, err := NewEvidenceAttachmentStore(cfg.DataDir)
-	if err != nil {
-		return nil, fmt.Errorf("evidence attachment store: %w", err)
-	}
 	app := &App{
 		cfg:       cfg,
 		store:     store,
 		broker:    NewBroker(store).WithScopePolicy(cfg.ScopePolicy),
 		permits:   permitStore,
-		evidence:  evidenceStore,
 		limiter:   NewRateLimiter(180, time.Minute),
 		templates: mustTemplates(),
 	}
@@ -556,37 +550,21 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /auth/smoke", app.withAuth(app.handleAuthSmokePage))
 	mux.HandleFunc("GET /session-witness", app.withAuth(app.handleSessionWitnessPage))
 	mux.HandleFunc("GET /session-witness.txt", app.withAuth(app.handleSessionWitnessText))
-	mux.HandleFunc("GET /session-witness/proof.txt", app.withAuth(app.handleSessionWitnessProofText))
-	mux.HandleFunc("GET /session-witness/evidence.txt", app.withAuth(app.handleSessionWitnessEvidenceText))
-	mux.HandleFunc("POST /session-witness/evidence/record", app.withAuth(app.handleSessionWitnessEvidenceRecord))
-	mux.HandleFunc("POST /session-witness/evidence/browser-smoke-receipt", app.withAuth(app.handleSessionWitnessBrowserSmokeReceiptText))
-	mux.HandleFunc("POST /session-witness/evidence/verify-record", app.withAuth(app.handleSessionWitnessEvidenceRecordVerifyPost))
-	mux.HandleFunc("POST /session-witness/evidence/verify-current-record", app.withAuth(app.handleSessionWitnessEvidenceVerifyCurrentRecordPost))
 	mux.HandleFunc("GET /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPage))
 	mux.HandleFunc("POST /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPost))
-	mux.HandleFunc("POST /session-witness/verify-pack", app.withAuth(app.handleSessionWitnessVerifyPackPost))
 	mux.HandleFunc("POST /session-witness/verify-current", app.withAuth(app.handleSessionWitnessVerifyCurrent))
-	mux.HandleFunc("POST /session-witness/verify-current-pack", app.withAuth(app.handleSessionWitnessVerifyCurrentPack))
 	mux.HandleFunc("GET /api/warden/descriptors", app.withAuth(app.handleDescriptors))
 	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle)))
 	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit)))
 	mux.HandleFunc("GET /api/auth/session-witness", app.withAuth(app.handleAuthSessionWitness))
 	mux.HandleFunc("POST /api/auth/session-witness/verify", app.withAuth(app.handleAuthSessionWitnessVerify))
-	mux.HandleFunc("POST /api/auth/session-witness/verify-pack", app.withAuth(app.handleAuthSessionWitnessVerifyPack))
-	mux.HandleFunc("POST /api/auth/session-witness/verify-current-pack", app.withAuth(app.handleAuthSessionWitnessVerifyCurrentPack))
-	mux.HandleFunc("POST /api/auth/session-witness/evidence/record", app.withAuth(app.handleAuthSessionWitnessEvidenceRecord))
-	mux.HandleFunc("POST /api/auth/session-witness/evidence/verify-record", app.withAuth(app.handleAuthSessionWitnessEvidenceRecordVerify))
-	mux.HandleFunc("POST /api/auth/session-witness/evidence/verify-current-record", app.withAuth(app.handleAuthSessionWitnessEvidenceVerifyCurrentRecord))
 	mux.HandleFunc("GET /api/posture", app.withAuth(app.handlePosture))
 	mux.HandleFunc("GET /api/evidence", app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence)))
-	mux.HandleFunc("POST /api/evidence/attachments", app.withAuth(app.handleAttachEvidence))
 	mux.HandleFunc("POST /api/permits", app.withAuth(app.requireRole(RoleOperator, "permit.create", app.handleCreatePermit)))
 	mux.HandleFunc("POST /api/permits/{permitID}/run", app.withAuth(app.requireRole(RoleOperator, "permit.run", app.handleRunPermit)))
 	mux.HandleFunc("POST /ui/warden/resolve", app.withAuth(app.handleResolveHandleUI))
-	mux.HandleFunc("POST /ui/evidence/attachments", app.withAuth(app.handleAttachEvidenceUI))
 	mux.HandleFunc("POST /ui/permits", app.withAuth(app.handleCreatePermitUI))
 	mux.HandleFunc("POST /ui/permits/{permitID}/run", app.withAuth(app.handleRunPermitUI))
-	mux.HandleFunc("GET /legacy", app.withAuth(app.handleLegacyDashboard))
 	mux.HandleFunc("GET /access", app.withAuth(app.handleAccessPage))
 	mux.HandleFunc("GET /requests", app.withAuth(app.handleRequestsPage))
 	mux.HandleFunc("GET /ledger", app.withAuth(app.handleLedgerPage))
@@ -616,15 +594,15 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/legacy", "/access", "/requests", "/ledger", "/assurance", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/access", "/requests", "/ledger", "/assurance", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
-	case "/session-witness/verify-current", "/session-witness/verify-current-pack", "/session-witness/verify-pack", "/session-witness/evidence/record", "/session-witness/evidence/browser-smoke-receipt", "/session-witness/evidence/verify-record", "/session-witness/evidence/verify-current-record":
+	case "/session-witness/verify-current":
 		return []string{http.MethodPost}, true
-	case "/logout", "/api/warden/resolve", "/api/evidence/attachments", "/api/permits", "/ui/warden/resolve", "/ui/evidence/attachments", "/ui/permits":
+	case "/logout", "/api/warden/resolve", "/api/permits", "/ui/warden/resolve", "/ui/permits":
 		return []string{http.MethodPost}, true
-	case "/api/auth/session-witness/verify", "/api/auth/session-witness/verify-pack", "/api/auth/session-witness/verify-current-pack", "/api/auth/session-witness/evidence/record", "/api/auth/session-witness/evidence/verify-record", "/api/auth/session-witness/evidence/verify-current-record":
+	case "/api/auth/session-witness/verify":
 		return []string{http.MethodPost}, true
 	}
 	switch {
@@ -903,7 +881,6 @@ func (app *App) readinessBody() (map[string]any, bool) {
 	auditSinkReady := false
 	auditChainReady := false
 	permitStoreReady := false
-	evidenceStoreReady := false
 
 	if app.store != nil {
 		descriptorCount = len(app.store.Descriptors())
@@ -914,20 +891,16 @@ func (app *App) readinessBody() (map[string]any, bool) {
 	if app.permits != nil {
 		permitStoreReady = app.permits.Posture().Persisted
 	}
-	if app.evidence != nil {
-		evidenceStoreReady = app.evidence.file != ""
-	}
 
 	checks := map[string]bool{
-		"auth":                      authReady,
-		"descriptor_store":          descriptorReady,
-		"audit_sink":                auditSinkReady,
-		"audit_chain":               auditChainReady,
-		"permit_store":              permitStoreReady,
-		"evidence_attachment_store": evidenceStoreReady,
-		"value_returned":            false,
+		"auth":             authReady,
+		"descriptor_store": descriptorReady,
+		"audit_sink":       auditSinkReady,
+		"audit_chain":      auditChainReady,
+		"permit_store":     permitStoreReady,
+		"value_returned":   false,
 	}
-	ready := authReady && descriptorReady && auditSinkReady && auditChainReady && permitStoreReady && evidenceStoreReady
+	ready := authReady && descriptorReady && auditSinkReady && auditChainReady && permitStoreReady
 	return map[string]any{
 		"ready":            ready,
 		"service":          "janus",
@@ -960,22 +933,18 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		selectedRef = actionResult.SecretRef
 	}
 	focus := focusDescriptor(descriptors, selectedRef)
-	evidenceAttachments := app.evidenceAttachmentMap()
-	issues := enterpriseChecksWithAttachments(app.cfg, evidenceAttachments)
 	canViewAudit := HasRole(session, RoleAuditor)
 	auditPosture := app.store.AuditPosture()
 	var recentAudit []AuditEntry
 	if canViewAudit {
 		recentAudit = app.store.RecentAudit(8)
 	}
-	auditTrail := AuditTrailFor(recentAudit, auditPosture, canViewAudit)
 	catalogGates := ValidateCatalog(descriptors)
 	accessPosture := app.accessPosture()
 	rolePolicyReadiness := RolePolicyReadinessFor(app.cfg.RolePolicy, accessPosture)
-	readinessBody, ready := app.readinessBody()
+	_, ready := app.readinessBody()
 	scopePosture := app.scopePosture(app.store.Descriptors())
 	lifecyclePosture := LifecyclePostureFor(descriptors, time.Now().UTC())
-	approvedUsePosture := ApprovedUsePostureFor(descriptors)
 	permitPosture := PermitPosture{ValueReturned: false}
 	var recentPermits []Permit
 	canOperate := HasRole(session, RoleOperator)
@@ -986,120 +955,49 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		}
 	}
 	evidenceHash := ""
-	evidenceHashFull := ""
 	if canViewAudit && app.permits != nil {
 		evidencePack := app.evidencePack(session)
 		if evidencePack.Integrity != nil {
-			evidenceHashFull = evidencePack.Integrity.PackHash
-			evidenceHash = evidenceHashFull
+			evidenceHash = evidencePack.Integrity.PackHash
 			if len(evidenceHash) > 12 {
 				evidenceHash = evidenceHash[:12]
 			}
 		}
 	}
-	evidenceBoundary := EvidenceBoundaryFor(canViewAudit, evidenceHash != "")
-	evidenceReceipt := EvidenceReceiptFor(evidenceBoundary, nil)
-	supplyChain := SupplyChainPostureFor(evidenceBoundary)
-	authFailure := AuthFailurePostureFor(app.cfg)
-	authenticatedRole := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
-	authenticatedBrowser := app.authenticatedBrowserWitness(session, authenticatedRole, ready)
-	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
-	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
-	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
-	enterpriseDryRun := EnterpriseDryRunFor(app.cfg.ProductMode, EnterpriseValidationWithAttachmentsFor(Config{ProductMode: "enterprise", RolePolicy: app.cfg.RolePolicy}, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments))
-	enterpriseClaim := EnterpriseClaimReviewFor(app.cfg.ProductMode, enterpriseValidation, enterpriseDryRun, evidenceBoundary)
-	attachmentReview := AttachmentReviewFor(enterpriseValidation)
-	externalEvidence := app.externalEvidencePosture(enterpriseValidation, session)
-	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
-	restoreProof := RestoreDrillProofFor(enterpriseValidation)
-	restoreWorkflow := RestoreDrillWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	releaseWorkflow := ReleaseProvenanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	remoteAuditWorkflow := RemoteAuditWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	breakGlassWorkflow := BreakGlassReviewWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	enterpriseReleaseGate := EnterpriseReleaseGateFor(app.cfg.ProductMode, enterpriseClaim, supplyChain, remoteAuditWorkflow, restoreWorkflow, releaseWorkflow, privacyWorkflow, integrationWorkflow, breakGlassWorkflow, auditPosture, accessPosture, app.cfg.RolePolicy, evidenceBoundary)
-	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
-	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
-	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
-	auditDrill := AuditFailureDrillFor(ready, auditPosture)
-	roleAvailability := RoleAvailabilityFor(session)
-	roleWorkbench := RoleWorkbenchFor(session, ready)
-	actionReadiness := ActionReadinessFor(session, ready)
-	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
-	commandCenter := CommandCenterFor(ready, operationalStatus, actionReadiness, modeGuardrails, attachmentReview, evidenceBoundary)
 	data := map[string]any{
-		"Title":                "Janus",
-		"ActivePage":           "vault",
-		"CSPNonce":             cspNonceFromContext(r.Context()),
-		"Now":                  time.Now().UTC(),
-		"VaultTiles":           vaultTilesFor(descriptors, lifecyclePosture, permitPosture),
-		"View":                 "grid",
-		"Query":                "",
-		"FilterProvider":       "",
-		"FilterState":          "",
-		"Providers":            descriptorProviders(descriptors),
-		"TotalCount":           len(descriptors),
-		"Session":              session,
-		"CSRF":                 app.csrfToken(session),
-		"Descriptors":          descriptors,
-		"Issues":               issues,
-		"Mode":                 app.cfg.ProductMode,
-		"Audit":                recentAudit,
-		"AuditTrail":           auditTrail,
-		"Posture":              auditPosture,
-		"CatalogGates":         catalogGates,
-		"Access":               accessPosture,
-		"RolePolicyReadiness":  rolePolicyReadiness,
-		"RoleBoundaries":       RoleBoundariesFor(session),
-		"RoleAvailability":     roleAvailability,
-		"RoleWorkbench":        roleWorkbench,
-		"ActionReadiness":      actionReadiness,
-		"OperationalStatus":    operationalStatus,
-		"SupplyChain":          supplyChain,
-		"AuthFailure":          authFailure,
-		"AuthenticatedRole":    authenticatedRole,
-		"AuthenticatedBrowser": authenticatedBrowser,
-		"CommandCenter":        commandCenter,
-		"Ready":                ready,
-		"Readiness":            readinessBody,
-		"SessionPosture":       app.sessionPosture(session),
-		"Scope":                scopePosture,
-		"Lifecycle":            lifecyclePosture,
-		"ApprovedUse":          approvedUsePosture,
-		"ModePosture":          ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
-		"ModeGuardrails":       modeGuardrails,
-		"Enterprise":           enterpriseValidation,
-		"EnterpriseDryRun":     enterpriseDryRun,
-		"EnterpriseClaim":      enterpriseClaim,
-		"EnterpriseRelease":    enterpriseReleaseGate,
-		"AttachmentReview":     attachmentReview,
-		"ExternalEvidence":     externalEvidence,
-		"RestoreProof":         restoreProof,
-		"RestoreWorkflow":      restoreWorkflow,
-		"ReleaseWorkflow":      releaseWorkflow,
-		"PrivacyWorkflow":      privacyWorkflow,
-		"IntegrationWorkflow":  integrationWorkflow,
-		"RemoteAuditWorkflow":  remoteAuditWorkflow,
-		"BreakGlassWorkflow":   breakGlassWorkflow,
-		"Privacy":              privacyPosture,
-		"AssuranceSummary":     assuranceSummary,
-		"AssuranceGates":       assuranceGates,
-		"NegativePath":         negativePath,
-		"Guidance":             degradedGuidance,
-		"AuditDrill":           auditDrill,
-		"EvidenceHash":         evidenceHash,
-		"EvidenceHashFull":     evidenceHashFull,
-		"EvidenceBoundary":     evidenceBoundary,
-		"EvidenceReceipt":      evidenceReceipt,
-		"CanExportEvidence":    canViewAudit,
-		"CanViewAudit":         canViewAudit,
-		"CanOperate":           canOperate,
-		"ActionResult":         actionResult,
-		"Permits":              recentPermits,
-		"PermitPosture":        permitPosture,
-		"SelectedRef":          focus.Descriptor.ID,
-		"Focus":                focus,
+		"Title":               "Janus",
+		"ActivePage":          "vault",
+		"CSPNonce":            cspNonceFromContext(r.Context()),
+		"Now":                 time.Now().UTC(),
+		"VaultTiles":          vaultTilesFor(descriptors, lifecyclePosture, permitPosture),
+		"View":                "grid",
+		"Query":               "",
+		"FilterProvider":      "",
+		"FilterState":         "",
+		"Providers":           descriptorProviders(descriptors),
+		"TotalCount":          len(descriptors),
+		"Session":             session,
+		"CSRF":                app.csrfToken(session),
+		"Descriptors":         descriptors,
+		"Mode":                app.cfg.ProductMode,
+		"Audit":               recentAudit,
+		"Posture":             auditPosture,
+		"CatalogGates":        catalogGates,
+		"Access":              accessPosture,
+		"RolePolicyReadiness": rolePolicyReadiness,
+		"RoleBoundaries":      RoleBoundariesFor(session),
+		"Ready":               ready,
+		"Scope":               scopePosture,
+		"Lifecycle":           lifecyclePosture,
+		"EvidenceHash":        evidenceHash,
+		"CanExportEvidence":   canViewAudit,
+		"CanViewAudit":        canViewAudit,
+		"CanOperate":          canOperate,
+		"ActionResult":        actionResult,
+		"Permits":             recentPermits,
+		"PermitPosture":       permitPosture,
+		"SelectedRef":         focus.Descriptor.ID,
+		"Focus":               focus,
 	}
 	return data
 }
@@ -1137,17 +1035,6 @@ func applyWitnessVerificationHeaders(w http.ResponseWriter, receipt WitnessVerif
 	w.Header().Set("X-Janus-Value-Returned", "false")
 }
 
-func applyEvidenceRecordVerificationHeaders(w http.ResponseWriter, receipt WitnessEvidenceRecordReceipt) {
-	if w == nil {
-		return
-	}
-	w.Header().Set("X-Janus-Evidence-Record-Verification-Schema", receipt.Schema)
-	w.Header().Set("X-Janus-Evidence-Record-Verification-Algorithm", receipt.Algorithm)
-	w.Header().Set("X-Janus-Evidence-Record-Verification-Hash", receipt.Hash)
-	w.Header().Set("X-Janus-Evidence-Record-Verification-Hash-Body-Field", receipt.BodyField)
-	w.Header().Set("X-Janus-Value-Returned", "false")
-}
-
 func attachWitnessEvidence(w http.ResponseWriter, verification WitnessReceiptVerification, requestID string) WitnessReceiptVerification {
 	receipt := WitnessReceiptVerificationReceiptFor(verification, requestID)
 	verification.Receipt = &receipt
@@ -1156,13 +1043,6 @@ func attachWitnessEvidence(w http.ResponseWriter, verification WitnessReceiptVer
 	if w != nil {
 		applyWitnessVerificationHeaders(w, receipt)
 	}
-	return verification
-}
-
-func attachEvidenceRecordVerificationReceipt(w http.ResponseWriter, verification WitnessEvidenceRecordVerification, requestID string) WitnessEvidenceRecordVerification {
-	receipt := EvidenceRecordVerificationReceiptFor(verification, requestID)
-	verification.Receipt = &receipt
-	applyEvidenceRecordVerificationHeaders(w, receipt)
 	return verification
 }
 
@@ -1285,140 +1165,6 @@ func (app *App) handleSessionWitnessText(w http.ResponseWriter, r *http.Request)
 	_, _ = w.Write([]byte(AuthenticatedBrowserCaptureTextFor(witness, capture, reqID, receipt)))
 }
 
-func (app *App) handleSessionWitnessProofText(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	witness, capture := app.authenticatedBrowserWitnessCapture(session)
-	reqID := requestID(r)
-	capturedAt := time.Now().UTC()
-	witnessReceipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID, capturedAt)
-	verification := VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{
-		ProofLine: witnessReceipt.Input,
-		ProofHash: witnessReceipt.Hash,
-	}, capturedAt)
-	verificationReceipt := WitnessReceiptVerificationReceiptFor(verification, reqID)
-	verification.Receipt = &verificationReceipt
-	applyAuthenticatedBrowserWitnessHeaders(w, witness, capture, witnessReceipt)
-	applyWitnessVerificationHeaders(w, verificationReceipt)
-	w.Header().Set("Content-Disposition", `inline; filename="janus-current-session-witness-proof.txt"`)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	app.audit(r, "auth.session.witness.proof_text", "allowed", session.Subject, "")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(CurrentSessionWitnessProofTextFor(witness, capture, reqID, witnessReceipt, verification)))
-}
-
-func (app *App) handleSessionWitnessEvidenceText(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	witness, _ := app.authenticatedBrowserWitnessCapture(session)
-	verification := app.currentSessionWitnessProofPackVerification(r, session)
-	verification = attachWitnessEvidence(w, verification, requestID(r))
-	checklist := ReviewerLaunchChecklistFor(witness, &verification)
-	w.Header().Set("Content-Disposition", `inline; filename="janus-current-session-evidence.txt"`)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	app.audit(r, "auth.session.witness.evidence_text", "allowed", session.Subject, "")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(CurrentSessionEvidenceTextFor(verification, checklist)))
-}
-
-type sessionEvidenceRecordResult struct {
-	Record        string
-	AuditEntry    AuditEntry
-	AuditRecorded bool
-	Status        int
-}
-
-func (app *App) currentSessionEvidenceRecord(w http.ResponseWriter, r *http.Request, session Session) sessionEvidenceRecordResult {
-	witness, _ := app.authenticatedBrowserWitnessCapture(session)
-	verification := app.currentSessionWitnessProofPackVerification(r, session)
-	verification = attachWitnessEvidence(w, verification, requestID(r))
-	checklist := ReviewerLaunchChecklistFor(witness, &verification)
-	auditEntry := AuditEntry{}
-	auditRecorded := false
-	status := http.StatusUnprocessableEntity
-	if verification.Verified && verification.Evidence != nil && verification.Evidence.ProofPackVerified {
-		auditEntry, auditRecorded = app.audit(r, "auth.session.witness.evidence.record", "allowed", session.Subject, "copy_safe_evidence_recorded")
-		if auditRecorded {
-			status = http.StatusOK
-		} else {
-			status = http.StatusServiceUnavailable
-		}
-	} else {
-		app.audit(r, "auth.session.witness.evidence.record", verification.Status, session.Subject, "copy_safe_evidence_not_recorded")
-	}
-	return sessionEvidenceRecordResult{
-		Record:        CurrentSessionEvidenceRecordTextFor(verification, checklist, requestID(r), auditEntry, auditRecorded),
-		AuditEntry:    auditEntry,
-		AuditRecorded: auditRecorded,
-		Status:        status,
-	}
-}
-
-func (app *App) handleSessionWitnessEvidenceRecord(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	if !app.csrfAllowed(r, session) {
-		app.audit(r, "auth.session.witness.evidence.record", "denied", session.Subject, "csrf failed")
-		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
-		return
-	}
-	result := app.currentSessionEvidenceRecord(w, r, session)
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Disposition", `inline; filename="janus-current-session-evidence-record.txt"`)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(result.Status)
-	_, _ = w.Write([]byte(result.Record))
-}
-
-func (app *App) handleSessionWitnessBrowserSmokeReceiptText(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	csrfSource := "form_token"
-	if !app.csrfAllowed(r, session) {
-		if app.validCSRFToken(r, session) {
-			csrfSource = "form_token_origin_fallback"
-		} else if app.browserSmokeReceiptCSRFRefreshAllowed(r) {
-			app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", "denied", session.Subject, "csrf refresh redirect")
-			http.Redirect(w, r, "/auth/smoke?retry=csrf", http.StatusSeeOther)
-			return
-		} else {
-			app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", "denied", session.Subject, "csrf failed")
-			writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
-			return
-		}
-	}
-	_ = r.ParseForm()
-	result, recordVerification := app.verifyCurrentSessionEvidenceRecord(r, session)
-	recordVerification = attachEvidenceRecordVerificationReceipt(w, recordVerification, requestID(r))
-	status := result.Status
-	if !recordVerification.Verified && status == http.StatusOK {
-		status = http.StatusUnprocessableEntity
-	}
-	if recordVerification.Verified {
-		app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", "allowed", session.Subject, "copy_safe_browser_smoke_receipt")
-	} else {
-		app.audit(r, "auth.session.witness.evidence.browser_smoke_receipt", recordVerification.Status, session.Subject, "copy_safe_browser_smoke_receipt_blocked")
-	}
-	if wantsHTMLResponse(r) && r.Form.Get("format") != "text" {
-		witness, _ := app.authenticatedBrowserWitnessCapture(session)
-		renderTemplateStatus(w, app.templates, "browser_smoke_receipt", status, map[string]any{
-			"Title":                "Janus Browser Smoke Receipt",
-			"CSPNonce":             cspNonceFromContext(r.Context()),
-			"WitnessPage":          true,
-			"Session":              session,
-			"CSRF":                 app.csrfToken(session),
-			"Mode":                 app.cfg.ProductMode,
-			"AuthenticatedRole":    SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), witness.Ready),
-			"AuthenticatedBrowser": witness,
-			"Verification":         recordVerification,
-			"RequestID":            requestID(r),
-			"CSRFSource":           csrfSource,
-		})
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Disposition", `inline; filename="janus-authenticated-browser-smoke.txt"`)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(status)
-	_, _ = w.Write([]byte(AuthenticatedBrowserSmokeReceiptTextFor(recordVerification, requestID(r))))
-}
-
 func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	witness, capture := app.authenticatedBrowserWitnessCapture(session)
@@ -1436,80 +1182,23 @@ func (app *App) handleAuthSessionWitness(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-func (app *App) handleAuthSessionWitnessEvidenceRecord(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	if !app.csrfAllowed(r, session) {
-		app.audit(r, "auth.session.witness.evidence.record.api", "denied", session.Subject, "csrf failed")
-		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
-		return
-	}
-	result := app.currentSessionEvidenceRecord(nil, r, session)
-	prevHash := "genesis"
-	if result.AuditEntry.PrevHash != "" {
-		prevHash = result.AuditEntry.PrevHash
-	}
-	eventHash := result.AuditEntry.EventHash
-	chainLink := "missing"
-	if result.AuditRecorded && eventHash != "" {
-		chainLink = prevHash + "-" + eventHash
-	}
-	severity := result.AuditEntry.Severity
-	if severity == "" {
-		severity = "missing"
-	}
-	writeJSON(w, result.Status, map[string]any{
-		"record":                result.Record,
-		"record_body_field":     "record",
-		"request_id":            requestID(r),
-		"audit_action":          "auth.session.witness.evidence.record",
-		"audit_recorded":        result.AuditRecorded,
-		"audit_hash_algorithm":  "sha256-audit-entry-v1",
-		"audit_event_hash":      eventHash,
-		"audit_prev_hash":       prevHash,
-		"audit_chain_link":      chainLink,
-		"audit_severity":        severity,
-		"input_returned":        false,
-		"request_body_returned": false,
-		"value_returned":        false,
-	})
-}
-
-func (app *App) sessionWitnessVerifyData(r *http.Request, session Session, verification *WitnessReceiptVerification, recordVerification *WitnessEvidenceRecordVerification) map[string]any {
+func (app *App) sessionWitnessVerifyData(r *http.Request, session Session, verification *WitnessReceiptVerification) map[string]any {
 	witness, capture := app.authenticatedBrowserWitnessCapture(session)
 	return map[string]any{
-		"Title":                      "Janus Witness Verifier",
-		"CSPNonce":                   cspNonceFromContext(r.Context()),
-		"WitnessPage":                true,
-		"WitnessVerifyPage":          true,
-		"Session":                    session,
-		"CSRF":                       app.csrfToken(session),
-		"Mode":                       app.cfg.ProductMode,
-		"AuthenticatedRole":          SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), witness.Ready),
-		"AuthenticatedBrowser":       witness,
-		"LaunchChecklist":            ReviewerLaunchChecklistFor(witness, verification),
-		"Capture":                    capture,
-		"Verification":               verification,
-		"EvidenceRecordVerification": recordVerification,
-		"RequestID":                  requestID(r),
+		"Title":                "Janus Witness Verifier",
+		"CSPNonce":             cspNonceFromContext(r.Context()),
+		"WitnessPage":          true,
+		"WitnessVerifyPage":    true,
+		"Session":              session,
+		"CSRF":                 app.csrfToken(session),
+		"Mode":                 app.cfg.ProductMode,
+		"AuthenticatedRole":    SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), witness.Ready),
+		"AuthenticatedBrowser": witness,
+		"LaunchChecklist":      ReviewerLaunchChecklistFor(witness, verification),
+		"Capture":              capture,
+		"Verification":         verification,
+		"RequestID":            requestID(r),
 	}
-}
-
-func (app *App) verifySessionWitnessEvidenceRecordText(recordText string) WitnessEvidenceRecordVerification {
-	fields, _, _ := CurrentSessionEvidenceRecordFields(recordText)
-	var auditEntry AuditEntry
-	auditFound := false
-	auditPosture := AuditPosture{}
-	if app.store != nil {
-		auditPosture = app.store.AuditPosture()
-		auditEntry, auditFound = app.store.AuditEntryByHash(fields["audit_event_hash"])
-	}
-	return VerifyCurrentSessionEvidenceRecordText(recordText, auditPosture, auditEntry, auditFound)
-}
-
-func (app *App) verifyCurrentSessionEvidenceRecord(r *http.Request, session Session) (sessionEvidenceRecordResult, WitnessEvidenceRecordVerification) {
-	result := app.currentSessionEvidenceRecord(nil, r, session)
-	verification := app.verifySessionWitnessEvidenceRecordText(result.Record)
-	return result, verification
 }
 
 func (app *App) currentSessionWitnessVerification(r *http.Request, session Session) WitnessReceiptVerification {
@@ -1523,25 +1212,10 @@ func (app *App) currentSessionWitnessVerification(r *http.Request, session Sessi
 	}, capturedAt)
 }
 
-func (app *App) currentSessionWitnessProofPackVerification(r *http.Request, session Session) WitnessReceiptVerification {
-	witness, capture := app.authenticatedBrowserWitnessCapture(session)
-	reqID := requestID(r)
-	capturedAt := time.Now().UTC()
-	witnessReceipt := AuthenticatedBrowserCaptureReceiptFor(witness, capture, reqID, capturedAt)
-	currentVerification := VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{
-		ProofLine: witnessReceipt.Input,
-		ProofHash: witnessReceipt.Hash,
-	}, capturedAt)
-	currentReceipt := WitnessReceiptVerificationReceiptFor(currentVerification, reqID)
-	currentVerification.Receipt = &currentReceipt
-	proofPack := CurrentSessionWitnessProofTextFor(witness, capture, reqID, witnessReceipt, currentVerification)
-	return VerifyAuthenticatedBrowserProofPack(proofPack, capturedAt)
-}
-
 func (app *App) handleSessionWitnessVerifyPage(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	app.audit(r, "auth.session.witness.verify.page", "allowed", session.Subject, "")
-	renderTemplate(w, app.templates, "session_witness_verify", app.sessionWitnessVerifyData(r, session, nil, nil))
+	renderTemplate(w, app.templates, "session_witness_verify", app.sessionWitnessVerifyData(r, session, nil))
 }
 
 func (app *App) handleSessionWitnessVerifyPost(w http.ResponseWriter, r *http.Request) {
@@ -1551,7 +1225,7 @@ func (app *App) handleSessionWitnessVerifyPost(w http.ResponseWriter, r *http.Re
 		verification := VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{}, time.Now().UTC())
 		verification.Status = "blocked"
 		verification.Summary = "CSRF token required."
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification, nil))
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification))
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -1559,7 +1233,7 @@ func (app *App) handleSessionWitnessVerifyPost(w http.ResponseWriter, r *http.Re
 		verification := VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{}, time.Now().UTC())
 		verification.Status = "blocked"
 		verification.Summary = "Verification form could not be read."
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusBadRequest, app.sessionWitnessVerifyData(r, session, &verification, nil))
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusBadRequest, app.sessionWitnessVerifyData(r, session, &verification))
 		return
 	}
 	req := WitnessReceiptVerificationRequest{
@@ -1573,98 +1247,7 @@ func (app *App) handleSessionWitnessVerifyPost(w http.ResponseWriter, r *http.Re
 		status = http.StatusUnprocessableEntity
 	}
 	app.audit(r, "auth.session.witness.verify.ui", verification.Status, session.Subject, "")
-	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification, nil))
-}
-
-func (app *App) handleSessionWitnessVerifyPackPost(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	if !app.csrfAllowed(r, session) {
-		app.audit(r, "auth.session.witness.verify_pack.ui", "denied", session.Subject, "csrf failed")
-		verification := VerifyAuthenticatedBrowserProofPack("", time.Now().UTC())
-		verification.Status = "blocked"
-		verification.Summary = "CSRF token required."
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification, nil))
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		app.audit(r, "auth.session.witness.verify_pack.ui", "denied", session.Subject, "bad form")
-		verification := VerifyAuthenticatedBrowserProofPack("", time.Now().UTC())
-		verification.Status = "blocked"
-		verification.Summary = "Verification form could not be read."
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusBadRequest, app.sessionWitnessVerifyData(r, session, &verification, nil))
-		return
-	}
-	verification := VerifyAuthenticatedBrowserProofPack(r.Form.Get("proof_pack"), time.Now().UTC())
-	verification = attachWitnessEvidence(w, verification, requestID(r))
-	status := http.StatusOK
-	if !verification.Verified {
-		status = http.StatusUnprocessableEntity
-	}
-	app.audit(r, "auth.session.witness.verify_pack.ui", verification.Status, session.Subject, "")
-	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification, nil))
-}
-
-func (app *App) handleSessionWitnessEvidenceRecordVerifyPost(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	if !app.csrfAllowed(r, session) {
-		app.audit(r, "auth.session.witness.evidence.verify_record", "denied", session.Subject, "csrf failed")
-		recordVerification := WitnessEvidenceRecordVerification{
-			Label:               "Evidence record verification",
-			Status:              "blocked",
-			Summary:             "CSRF token required.",
-			InputReturned:       false,
-			RequestBodyReturned: false,
-			ValueReturned:       false,
-		}
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, nil, &recordVerification))
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		app.audit(r, "auth.session.witness.evidence.verify_record", "denied", session.Subject, "bad form")
-		recordVerification := WitnessEvidenceRecordVerification{
-			Label:               "Evidence record verification",
-			Status:              "blocked",
-			Summary:             "Evidence record form could not be read.",
-			InputReturned:       false,
-			RequestBodyReturned: false,
-			ValueReturned:       false,
-		}
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusBadRequest, app.sessionWitnessVerifyData(r, session, nil, &recordVerification))
-		return
-	}
-	recordVerification := app.verifySessionWitnessEvidenceRecordText(r.Form.Get("evidence_record"))
-	recordVerification = attachEvidenceRecordVerificationReceipt(w, recordVerification, requestID(r))
-	status := http.StatusOK
-	if !recordVerification.Verified {
-		status = http.StatusUnprocessableEntity
-	}
-	app.audit(r, "auth.session.witness.evidence.verify_record", recordVerification.Status, session.Subject, "input_not_returned")
-	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, nil, &recordVerification))
-}
-
-func (app *App) handleSessionWitnessEvidenceVerifyCurrentRecordPost(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	if !app.csrfAllowed(r, session) {
-		app.audit(r, "auth.session.witness.evidence.verify_current_record", "denied", session.Subject, "csrf failed")
-		recordVerification := WitnessEvidenceRecordVerification{
-			Label:               "Evidence record verification",
-			Status:              "blocked",
-			Summary:             "CSRF token required.",
-			InputReturned:       false,
-			RequestBodyReturned: false,
-			ValueReturned:       false,
-		}
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, nil, &recordVerification))
-		return
-	}
-	result, recordVerification := app.verifyCurrentSessionEvidenceRecord(r, session)
-	recordVerification = attachEvidenceRecordVerificationReceipt(w, recordVerification, requestID(r))
-	status := result.Status
-	if status == http.StatusOK && !recordVerification.Verified {
-		status = http.StatusUnprocessableEntity
-	}
-	app.audit(r, "auth.session.witness.evidence.verify_current_record", recordVerification.Status, session.Subject, "record_input_not_returned")
-	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, nil, &recordVerification))
+	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification))
 }
 
 func (app *App) handleSessionWitnessVerifyCurrent(w http.ResponseWriter, r *http.Request) {
@@ -1674,7 +1257,7 @@ func (app *App) handleSessionWitnessVerifyCurrent(w http.ResponseWriter, r *http
 		verification := VerifyAuthenticatedBrowserCaptureReceipt(WitnessReceiptVerificationRequest{}, time.Now().UTC())
 		verification.Status = "blocked"
 		verification.Summary = "CSRF token required."
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification, nil))
+		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification))
 		return
 	}
 	verification := app.currentSessionWitnessVerification(r, session)
@@ -1684,27 +1267,7 @@ func (app *App) handleSessionWitnessVerifyCurrent(w http.ResponseWriter, r *http
 		status = http.StatusUnprocessableEntity
 	}
 	app.audit(r, "auth.session.witness.verify.current", verification.Status, session.Subject, "")
-	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification, nil))
-}
-
-func (app *App) handleSessionWitnessVerifyCurrentPack(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	if !app.csrfAllowed(r, session) {
-		app.audit(r, "auth.session.witness.verify.current_pack", "denied", session.Subject, "csrf failed")
-		verification := VerifyAuthenticatedBrowserProofPack("", time.Now().UTC())
-		verification.Status = "blocked"
-		verification.Summary = "CSRF token required."
-		renderTemplateStatus(w, app.templates, "session_witness_verify", http.StatusForbidden, app.sessionWitnessVerifyData(r, session, &verification, nil))
-		return
-	}
-	verification := app.currentSessionWitnessProofPackVerification(r, session)
-	verification = attachWitnessEvidence(w, verification, requestID(r))
-	status := http.StatusOK
-	if !verification.Verified {
-		status = http.StatusUnprocessableEntity
-	}
-	app.audit(r, "auth.session.witness.verify.current_pack", verification.Status, session.Subject, "")
-	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification, nil))
+	renderTemplateStatus(w, app.templates, "session_witness_verify", status, app.sessionWitnessVerifyData(r, session, &verification))
 }
 
 func (app *App) handleAuthSessionWitnessVerify(w http.ResponseWriter, r *http.Request) {
@@ -1731,111 +1294,6 @@ func (app *App) handleAuthSessionWitnessVerify(w http.ResponseWriter, r *http.Re
 		"verification":   verification,
 		"request_id":     requestID(r),
 		"value_returned": false,
-	})
-}
-
-func (app *App) handleAuthSessionWitnessVerifyPack(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	if !app.csrfAllowed(r, session) {
-		app.audit(r, "auth.session.witness.verify_pack", "denied", session.Subject, "csrf failed")
-		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
-		return
-	}
-	var req WitnessProofPackVerificationRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&req); err != nil {
-		app.audit(r, "auth.session.witness.verify_pack", "denied", session.Subject, "bad json")
-		writeJSONError(w, r, http.StatusBadRequest, "bad_json", "Request body must be JSON")
-		return
-	}
-	verification := VerifyAuthenticatedBrowserProofPack(req.ProofPack, time.Now().UTC())
-	verification = attachWitnessEvidence(w, verification, requestID(r))
-	status := http.StatusOK
-	if !verification.Verified {
-		status = http.StatusUnprocessableEntity
-	}
-	app.audit(r, "auth.session.witness.verify_pack", verification.Status, session.Subject, "")
-	writeJSON(w, status, map[string]any{
-		"verification":   verification,
-		"request_id":     requestID(r),
-		"value_returned": false,
-	})
-}
-
-func (app *App) handleAuthSessionWitnessVerifyCurrentPack(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	if !app.csrfAllowed(r, session) {
-		app.audit(r, "auth.session.witness.verify_current_pack", "denied", session.Subject, "csrf failed")
-		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
-		return
-	}
-	verification := app.currentSessionWitnessProofPackVerification(r, session)
-	verification = attachWitnessEvidence(w, verification, requestID(r))
-	status := http.StatusOK
-	if !verification.Verified {
-		status = http.StatusUnprocessableEntity
-	}
-	app.audit(r, "auth.session.witness.verify_current_pack", verification.Status, session.Subject, "")
-	writeJSON(w, status, map[string]any{
-		"verification":   verification,
-		"request_id":     requestID(r),
-		"value_returned": false,
-	})
-}
-
-func (app *App) handleAuthSessionWitnessEvidenceRecordVerify(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	if !app.csrfAllowed(r, session) {
-		app.audit(r, "auth.session.witness.evidence.verify_record.api", "denied", session.Subject, "csrf failed")
-		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
-		return
-	}
-	var req WitnessEvidenceRecordVerificationRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384)).Decode(&req); err != nil {
-		app.audit(r, "auth.session.witness.evidence.verify_record.api", "denied", session.Subject, "bad json")
-		writeJSONError(w, r, http.StatusBadRequest, "bad_json", "Request body must be JSON")
-		return
-	}
-	verification := app.verifySessionWitnessEvidenceRecordText(req.EvidenceRecord)
-	verification = attachEvidenceRecordVerificationReceipt(w, verification, requestID(r))
-	status := http.StatusOK
-	if !verification.Verified {
-		status = http.StatusUnprocessableEntity
-	}
-	app.audit(r, "auth.session.witness.evidence.verify_record.api", verification.Status, session.Subject, "input_not_returned")
-	writeJSON(w, status, map[string]any{
-		"verification":   verification,
-		"request_id":     requestID(r),
-		"value_returned": false,
-	})
-}
-
-func (app *App) handleAuthSessionWitnessEvidenceVerifyCurrentRecord(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	if !app.csrfAllowed(r, session) {
-		app.audit(r, "auth.session.witness.evidence.verify_current_record.api", "denied", session.Subject, "csrf failed")
-		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
-		return
-	}
-	result, verification := app.verifyCurrentSessionEvidenceRecord(r, session)
-	verification = attachEvidenceRecordVerificationReceipt(w, verification, requestID(r))
-	status := result.Status
-	if status == http.StatusOK && !verification.Verified {
-		status = http.StatusUnprocessableEntity
-	}
-	recordStatus := "blocked"
-	if result.Status == http.StatusOK {
-		recordStatus = "recorded"
-	}
-	app.audit(r, "auth.session.witness.evidence.verify_current_record.api", verification.Status, session.Subject, "record_input_not_returned")
-	writeJSON(w, status, map[string]any{
-		"verification":          verification,
-		"record_returned":       false,
-		"record_status":         recordStatus,
-		"audit_recorded":        result.AuditRecorded,
-		"request_id":            requestID(r),
-		"input_returned":        false,
-		"request_body_returned": false,
-		"value_returned":        false,
 	})
 }
 
@@ -1870,83 +1328,6 @@ func actionReceipt(r *http.Request, action, outcome, next string) ActionReceipt 
 		SecretValueReturned: false,
 		RequestBodyReturned: false,
 		ValueReturned:       false,
-	})
-}
-
-func (app *App) attachEvidencePresence(r *http.Request, session Session, req EvidenceAttachmentRequest, action string) (EvidenceAttachmentRecord, int, error) {
-	spec, ok := enterpriseValidationSpecByKey(req.ControlKey)
-	if !ok {
-		app.audit(r, action, "denied", session.Subject, "unknown evidence control")
-		return EvidenceAttachmentRecord{}, http.StatusBadRequest, errors.New("Unknown enterprise evidence control.")
-	}
-	if req.Attestation != externalEvidenceAttestation {
-		app.audit(r, action, "denied", session.Subject, "attestation required")
-		return EvidenceAttachmentRecord{}, http.StatusBadRequest, errors.New("External evidence attestation required.")
-	}
-	if !HasRole(session, spec.OwnerRole) {
-		app.audit(r, action, "denied", session.Subject, "role "+spec.OwnerRole+" required")
-		return EvidenceAttachmentRecord{}, http.StatusForbidden, errors.New(spec.OwnerRole + " role required.")
-	}
-	if !app.requireReadyAPIForAttach(r, session, action) {
-		return EvidenceAttachmentRecord{}, http.StatusServiceUnavailable, errors.New("Janus readiness is degraded; evidence presence was not recorded.")
-	}
-	if app.evidence == nil {
-		app.audit(r, action, "denied", session.Subject, "evidence store unavailable")
-		return EvidenceAttachmentRecord{}, http.StatusServiceUnavailable, errors.New("Evidence attachment store is unavailable.")
-	}
-	record := NewEvidenceAttachmentRecord(spec, session.Subject)
-	if err := app.evidence.Put(record); err != nil {
-		app.audit(r, action, "denied", session.Subject, "evidence persistence failed")
-		return EvidenceAttachmentRecord{}, http.StatusInternalServerError, errors.New("Evidence presence could not be recorded.")
-	}
-	app.audit(r, action, "allowed", session.Subject, spec.Key)
-	return record, http.StatusCreated, nil
-}
-
-func (app *App) requireReadyAPIForAttach(r *http.Request, session Session, action string) bool {
-	if _, ready := app.readinessBody(); ready {
-		return true
-	}
-	app.audit(r, action, "denied", session.Subject, "system degraded")
-	return false
-}
-
-func evidenceAttachErrorCode(status int) string {
-	switch status {
-	case http.StatusForbidden:
-		return "role_denied"
-	case http.StatusServiceUnavailable:
-		return "system_degraded"
-	case http.StatusInternalServerError:
-		return "evidence_store_failed"
-	default:
-		return "evidence_attestation_invalid"
-	}
-}
-
-func (app *App) handleAttachEvidence(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	if !app.csrfAllowed(r, session) {
-		app.audit(r, "evidence.attach", "denied", session.Subject, "csrf failed")
-		writeJSONError(w, r, http.StatusForbidden, "csrf_failed", "CSRF token required")
-		return
-	}
-
-	var req EvidenceAttachmentRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
-		writeJSONError(w, r, http.StatusBadRequest, "bad_json", "Request body must be JSON")
-		return
-	}
-	record, status, err := app.attachEvidencePresence(r, session, req, "evidence.attach")
-	if err != nil {
-		writeJSONError(w, r, status, evidenceAttachErrorCode(status), err.Error())
-		return
-	}
-	receipt := actionReceipt(r, "evidence.attach", "allowed", "Keep the reviewed evidence outside Janus; only presence metadata was recorded.")
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"attachment":     record,
-		"receipt":        receipt,
-		"value_returned": false,
 	})
 }
 
@@ -2106,44 +1487,6 @@ func (app *App) handleRunPermit(w http.ResponseWriter, r *http.Request) {
 		"receipt":        receipt,
 		"value_returned": false,
 	})
-}
-
-func (app *App) handleAttachEvidenceUI(w http.ResponseWriter, r *http.Request) {
-	session := currentSession(r.Context())
-	if !app.csrfAllowed(r, session) {
-		app.audit(r, "evidence.attach.ui", "denied", session.Subject, "csrf failed")
-		result := UIActionResult{Title: "Evidence blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(r, session, &result, ""))
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		app.audit(r, "evidence.attach.ui", "denied", session.Subject, "bad form")
-		result := UIActionResult{Title: "Evidence blocked", Outcome: "denied", Message: "Request form could not be read.", ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(r, session, &result, ""))
-		return
-	}
-	req := EvidenceAttachmentRequest{
-		ControlKey:  strings.TrimSpace(r.Form.Get("control_key")),
-		Attestation: strings.TrimSpace(r.Form.Get("attestation")),
-	}
-	record, status, err := app.attachEvidencePresence(r, session, req, "evidence.attach.ui")
-	if err != nil {
-		result := UIActionResult{Title: "Evidence blocked", Outcome: "denied", Message: err.Error(), ValueReturned: false}
-		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(r, session, &result, ""))
-		return
-	}
-	receipt := actionReceipt(r, "evidence.attach.ui", "allowed", "Keep the reviewed evidence outside Janus; only presence metadata was recorded.")
-	result := UIActionResult{
-		Title:         "Evidence presence attached",
-		Outcome:       "allowed",
-		Message:       "Presence recorded. Evidence files, URLs, refs, notes, and values stayed outside Janus.",
-		Receipt:       &receipt,
-		ControlKey:    record.ControlKey,
-		Status:        record.Attachment,
-		EvidenceState: record.State,
-		ValueReturned: false,
-	}
-	renderTemplateStatus(w, app.templates, "dashboard", http.StatusCreated, app.dashboardData(r, session, &result, ""))
 }
 
 func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
@@ -3038,21 +2381,13 @@ func envBoolDefault(key string, fallback bool) bool {
 	}
 }
 
-func enterpriseChecks(cfg Config) []string {
-	return enterpriseChecksWithAttachments(cfg, nil)
-}
-
-func enterpriseChecksWithAttachments(cfg Config, attachments map[string]EvidenceAttachmentRecord) []string {
+// configGates lists the configuration-level readiness gates that stay
+// visible on posture surfaces (the self-hosted remainder of the former
+// enterprise checks).
+func configGates(cfg Config) []string {
 	var issues []string
 	if cfg.RequireAuth && !cfg.OIDCConfigured() {
 		issues = append(issues, "Zitadel OIDC is not configured.")
-	}
-	if cfg.ProductMode == "enterprise" {
-		for _, spec := range enterpriseValidationSpecs() {
-			if os.Getenv(spec.EnvKey) == "" && !evidenceAttachmentPresent(attachments, spec.Key) {
-				issues = append(issues, spec.Missing)
-			}
-		}
 	}
 	if !cfg.RolePolicy.Configured() {
 		message := "Explicit Janus role bindings are not configured."
@@ -3062,190 +2397,6 @@ func enterpriseChecksWithAttachments(cfg Config, attachments map[string]Evidence
 		issues = append(issues, message)
 	}
 	return issues
-}
-
-type enterpriseValidationSpec struct {
-	Key       string
-	Label     string
-	EnvKey    string
-	Missing   string
-	Detail    string
-	OwnerRole string
-	Next      string
-}
-
-func enterpriseValidationSpecs() []enterpriseValidationSpec {
-	return []enterpriseValidationSpec{
-		{
-			Key:       "remote_audit",
-			Label:     "Remote audit",
-			EnvKey:    "JANUS_REMOTE_AUDIT",
-			Missing:   "Enterprise mode needs remote audit shipping before production use.",
-			Detail:    "Audit evidence must leave the host and be reviewed outside Janus.",
-			OwnerRole: "auditor",
-			Next:      "Attach remote audit shipping evidence outside Janus.",
-		},
-		{
-			Key:       "break_glass_review",
-			Label:     "Break-glass review",
-			EnvKey:    "JANUS_BREAK_GLASS_REVIEW",
-			Missing:   "Enterprise mode needs a documented break-glass review owner.",
-			Detail:    "Emergency access needs a named review path and owner.",
-			OwnerRole: "admin",
-			Next:      "Attach break-glass owner and review evidence outside Janus.",
-		},
-		{
-			Key:       "restore_drill",
-			Label:     "Restore drill",
-			EnvKey:    "JANUS_RESTORE_DRILL",
-			Missing:   "Enterprise mode needs a recent restore drill record.",
-			Detail:    "Recovery evidence must prove metadata, audit, scope, and policy survive restore.",
-			OwnerRole: "operator",
-			Next:      "Attach the latest restore drill record outside Janus.",
-		},
-		{
-			Key:       "integration_conformance",
-			Label:     "Integration conformance",
-			EnvKey:    "JANUS_INTEGRATION_CONFORMANCE",
-			Missing:   "Enterprise mode needs integration conformance evidence.",
-			Detail:    "Identity, audit, ticketing, SIEM, and custody integrations need reviewed conformance.",
-			OwnerRole: "admin",
-			Next:      "Attach integration conformance evidence outside Janus.",
-		},
-		{
-			Key:       "release_provenance",
-			Label:     "Release provenance",
-			EnvKey:    "JANUS_RELEASE_PROVENANCE",
-			Missing:   "Enterprise mode needs trusted release provenance.",
-			Detail:    "Operators need provenance, channel, and build evidence before stronger claims.",
-			OwnerRole: "operator",
-			Next:      "Attach release provenance evidence outside Janus.",
-		},
-		{
-			Key:       "privacy_policy",
-			Label:     "Privacy policy",
-			EnvKey:    "JANUS_PRIVACY_POLICY",
-			Missing:   "Enterprise mode needs privacy and retention policy evidence.",
-			Detail:    "Evidence exports, audit, retention, and raw metadata access need a reviewed policy.",
-			OwnerRole: "admin",
-			Next:      "Attach reviewed privacy and retention policy evidence outside Janus.",
-		},
-	}
-}
-
-func enterpriseValidationSpecByKey(key string) (enterpriseValidationSpec, bool) {
-	key = strings.TrimSpace(key)
-	for _, spec := range enterpriseValidationSpecs() {
-		if spec.Key == key {
-			return spec, true
-		}
-	}
-	return enterpriseValidationSpec{}, false
-}
-
-func EnterpriseValidationFor(cfg Config, ready bool, access AccessPosture, audit AuditPosture, catalogGateCount int) EnterpriseValidation {
-	return EnterpriseValidationWithAttachmentsFor(cfg, ready, access, audit, catalogGateCount, nil)
-}
-
-func EnterpriseValidationWithAttachmentsFor(cfg Config, ready bool, access AccessPosture, audit AuditPosture, catalogGateCount int, attachments map[string]EvidenceAttachmentRecord) EnterpriseValidation {
-	mode := strings.TrimSpace(cfg.ProductMode)
-	if mode == "" {
-		mode = "self_hosted"
-	}
-	validation := EnterpriseValidation{
-		Mode:          mode,
-		Status:        "not_claimed",
-		Summary:       "Self-hosted mode can be ready without claiming enterprise evidence.",
-		ValueReturned: false,
-	}
-
-	enterpriseMode := mode == "enterprise"
-	if enterpriseMode {
-		validation.Status = "blocked"
-		validation.Summary = "Enterprise mode is blocked until every required external control has evidence."
-	}
-
-	validation.Controls = append(validation.Controls, EnterpriseValidationControl{
-		Key:                 "self_hosted_baseline",
-		Label:               "Self-hosted baseline",
-		State:               "ready",
-		Required:            true,
-		Detail:              "Redacted readiness, explicit roles, catalog gates, and local audit must be clear.",
-		OwnerRole:           "admin",
-		Attachment:          "local_posture",
-		EvidenceSignal:      "local_controls",
-		Next:                "Keep local readiness, role, audit, and catalog gates clear.",
-		EvidenceRefReturned: false,
-		ValueReturned:       false,
-		Tone:                "ok",
-	})
-	if !ready || !access.ExplicitBindings || !audit.ChainVerified || catalogGateCount > 0 {
-		validation.Controls[0].State = "review"
-		validation.Controls[0].Tone = "warn"
-		validation.Controls[0].Next = "Clear local readiness, role, audit, and catalog gates first."
-		if enterpriseMode {
-			validation.MissingCount++
-		}
-	}
-
-	for _, spec := range enterpriseValidationSpecs() {
-		attachedByWorkflow := evidenceAttachmentPresent(attachments, spec.Key)
-		control := EnterpriseValidationControl{
-			Key:                 spec.Key,
-			Label:               spec.Label,
-			State:               "not_claimed",
-			Required:            enterpriseMode,
-			Detail:              spec.Detail,
-			OwnerRole:           spec.OwnerRole,
-			Attachment:          "not_claimed",
-			EvidenceSignal:      "presence_only_env_flag",
-			Next:                "Switch to enterprise only after this external evidence exists.",
-			EvidenceRefReturned: false,
-			ValueReturned:       false,
-			Tone:                "info",
-		}
-		if attachedByWorkflow {
-			control.State = "attached"
-			control.Attachment = "attached_presence_only"
-			control.EvidenceSignal = "presence_only_workflow"
-			control.Next = "Keep the external evidence reviewed outside Janus; only presence is recorded here."
-			control.Tone = "ok"
-		}
-		if enterpriseMode {
-			if os.Getenv(spec.EnvKey) != "" || attachedByWorkflow {
-				control.State = "attached"
-				control.Attachment = "attached_presence_only"
-				if attachedByWorkflow {
-					control.EvidenceSignal = "presence_only_workflow"
-					control.Next = "Keep the external evidence reviewed outside Janus; only presence is recorded here."
-				} else {
-					control.Next = "Keep external evidence current and reviewed outside Janus."
-				}
-				control.Tone = "ok"
-			} else {
-				control.State = "missing"
-				control.Attachment = "missing"
-				control.Next = spec.Next
-				control.Tone = "warn"
-				validation.MissingCount++
-			}
-		}
-		validation.Controls = append(validation.Controls, control)
-	}
-
-	if enterpriseMode && validation.MissingCount == 0 {
-		validation.Status = "candidate"
-		validation.Summary = "Enterprise controls are attached; keep external review evidence before relying on this claim."
-	}
-	return validation
-}
-
-func evidenceAttachmentPresent(attachments map[string]EvidenceAttachmentRecord, key string) bool {
-	if len(attachments) == 0 {
-		return false
-	}
-	record, ok := attachments[key]
-	return ok && record.Attachment == "attached_presence_only" && !record.ValueReturned && !record.EvidenceRefReturned
 }
 
 func ProductModePostureFor(cfg Config, ready bool, issues []string, access AccessPosture, audit AuditPosture, catalogGateCount int) ProductModePosture {
@@ -3400,8 +2551,7 @@ func (app *App) renderSafeFailure(w http.ResponseWriter, r *http.Request, status
 func (app *App) postureBody(session Session) map[string]any {
 	allDescriptors := app.store.Descriptors()
 	descriptors := app.cfg.ScopePolicy.Filter(allDescriptors)
-	evidenceAttachments := app.evidenceAttachmentMap()
-	issues := enterpriseChecksWithAttachments(app.cfg, evidenceAttachments)
+	issues := configGates(app.cfg)
 	catalogGates := ValidateCatalog(descriptors)
 	accessPosture := app.accessPosture()
 	rolePolicyReadiness := RolePolicyReadinessFor(app.cfg.RolePolicy, accessPosture)
@@ -3417,34 +2567,18 @@ func (app *App) postureBody(session Session) map[string]any {
 	canExportEvidence := HasRole(session, RoleAuditor)
 	evidenceBoundary := EvidenceBoundaryFor(canExportEvidence, canExportEvidence)
 	evidenceReceipt := EvidenceReceiptFor(evidenceBoundary, nil)
-	supplyChain := SupplyChainPostureFor(evidenceBoundary)
 	authFailure := AuthFailurePostureFor(app.cfg)
 	authenticatedRole := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
 	authenticatedBrowser := app.authenticatedBrowserWitness(session, authenticatedRole, ready)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
-	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
-	enterpriseDryRun := EnterpriseDryRunFor(app.cfg.ProductMode, EnterpriseValidationWithAttachmentsFor(Config{ProductMode: "enterprise", RolePolicy: app.cfg.RolePolicy}, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments))
-	enterpriseClaim := EnterpriseClaimReviewFor(app.cfg.ProductMode, enterpriseValidation, enterpriseDryRun, evidenceBoundary)
-	attachmentReview := AttachmentReviewFor(enterpriseValidation)
-	externalEvidence := app.externalEvidencePosture(enterpriseValidation, session)
-	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
-	restoreProof := RestoreDrillProofFor(enterpriseValidation)
-	restoreWorkflow := RestoreDrillWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	releaseWorkflow := ReleaseProvenanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	remoteAuditWorkflow := RemoteAuditWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	breakGlassWorkflow := BreakGlassReviewWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	enterpriseReleaseGate := EnterpriseReleaseGateFor(app.cfg.ProductMode, enterpriseClaim, supplyChain, remoteAuditWorkflow, restoreWorkflow, releaseWorkflow, privacyWorkflow, integrationWorkflow, breakGlassWorkflow, auditPosture, accessPosture, app.cfg.RolePolicy, evidenceBoundary)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
-	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
+	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary)
 	auditDrill := AuditFailureDrillFor(ready, auditPosture)
 	roleAvailability := RoleAvailabilityFor(session)
 	actionReadiness := ActionReadinessFor(session, ready)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, roleAvailability)
-	commandCenter := CommandCenterFor(ready, operationalStatus, actionReadiness, modeGuardrails, attachmentReview, evidenceBoundary)
 	return map[string]any{
 		"service":               "janus",
 		"mode":                  app.cfg.ProductMode,
@@ -3462,39 +2596,23 @@ func (app *App) postureBody(session Session) map[string]any {
 			"duties":          []string{"posture", "use_actions", "audit_export", "admin_policy"},
 			"value_returned":  false,
 		},
-		"scope":                            scopePosture,
-		"lifecycle":                        lifecyclePosture,
-		"approved_use":                     approvedUsePosture,
-		"permits":                          permitPosture,
-		"mode_posture":                     ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
-		"mode_guardrails":                  modeGuardrails,
-		"enterprise_validation":            enterpriseValidation,
-		"enterprise_dry_run":               enterpriseDryRun,
-		"enterprise_claim_review":          enterpriseClaim,
-		"enterprise_release_gate":          enterpriseReleaseGate,
-		"attachment_review":                attachmentReview,
-		"external_evidence":                externalEvidence,
-		"restore_drill_proof":              restoreProof,
-		"restore_drill_workflow":           restoreWorkflow,
-		"release_provenance_workflow":      releaseWorkflow,
-		"privacy_retention_workflow":       privacyWorkflow,
-		"integration_conformance_workflow": integrationWorkflow,
-		"remote_audit_workflow":            remoteAuditWorkflow,
-		"break_glass_review_workflow":      breakGlassWorkflow,
-		"privacy_posture":                  privacyPosture,
-		"evidence_receipt":                 evidenceReceipt,
-		"action_readiness":                 actionReadiness,
-		"command_center":                   commandCenter,
-		"assurance_summary":                assuranceSummary,
-		"assurance_gates":                  assuranceGates,
-		"negative_path_assurance":          negativePath,
-		"degraded_guidance":                degradedGuidance,
-		"audit_failure_drill":              auditDrill,
-		"operational_status":               operationalStatus,
-		"supply_chain_posture":             supplyChain,
-		"auth_failure_posture":             authFailure,
-		"authenticated_role_evidence":      authenticatedRole,
-		"authenticated_browser_witness":    authenticatedBrowser,
+		"scope":                         scopePosture,
+		"lifecycle":                     lifecyclePosture,
+		"approved_use":                  approvedUsePosture,
+		"permits":                       permitPosture,
+		"mode_posture":                  ProductModePostureFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates)),
+		"privacy_posture":               privacyPosture,
+		"evidence_receipt":              evidenceReceipt,
+		"action_readiness":              actionReadiness,
+		"assurance_summary":             assuranceSummary,
+		"assurance_gates":               assuranceGates,
+		"negative_path_assurance":       negativePath,
+		"degraded_guidance":             degradedGuidance,
+		"audit_failure_drill":           auditDrill,
+		"operational_status":            operationalStatus,
+		"auth_failure_posture":          authFailure,
+		"authenticated_role_evidence":   authenticatedRole,
+		"authenticated_browser_witness": authenticatedBrowser,
 		"auth": map[string]any{
 			"oidc_nonce":                  app.cfg.OIDCConfigured(),
 			"pkce_s256":                   app.cfg.OIDCConfigured(),
@@ -3530,47 +2648,30 @@ func (app *App) postureBody(session Session) map[string]any {
 			"value_returned":              false,
 		},
 		"assurance": map[string]any{
-			"route_value_leak_sentinel":        true,
-			"json_errors_request_id":           true,
-			"backend_source_paths":             "not_returned",
-			"role_policy_proof":                "explicit_counts_no_values",
-			"role_policy_readiness":            "bootstrap_to_explicit_zitadel_lanes",
-			"role_claim_policy":                "explicit_only_no_ambient_grants",
-			"evidence_export_boundary":         "dashboard_and_json",
-			"evidence_download":                "auditor_json_with_pack_hash",
-			"evidence_receipt":                 "download_header_body_match",
-			"enterprise_validation":            "self_hosted_safe_enterprise_required",
-			"enterprise_attachments":           "presence_only_no_refs",
-			"enterprise_dry_run":               "self_hosted_to_enterprise_checklist",
-			"enterprise_claim_review":          "presence_only_claim_review",
-			"enterprise_release_gate":          "single_value_free_release_decision",
-			"auth_failure_posture":             "safe_reason_codes_no_provider_values",
-			"authenticated_role_evidence":      "signed_in_role_receipt_no_identity_values",
-			"authenticated_browser_witness":    "signed_session_browser_proof_no_identity_values",
-			"external_evidence_workflow":       "presence_only_no_refs",
-			"attachment_review":                "presence_only_owner_review",
-			"restore_drill_proof":              "dashboard_posture_evidence",
-			"restore_drill_workflow":           "presence_only_recovery_evidence",
-			"release_provenance_workflow":      "presence_only_release_evidence",
-			"privacy_retention_workflow":       "presence_only_policy_evidence",
-			"integration_conformance_workflow": "presence_only_integration_evidence",
-			"remote_audit_workflow":            "presence_only_audit_shipping_evidence",
-			"break_glass_review_workflow":      "presence_only_emergency_access_evidence",
-			"action_readiness":                 "role_and_readiness_matrix",
-			"command_center":                   "dashboard_posture_api",
-			"action_receipts":                  "mutation_result_receipts",
-			"action_receipt_integrity":         "tamper_evident_hash_proof",
-			"action_receipt_verification":      "copy_safe_ui_fields",
-			"mode_guardrails":                  "dashboard_posture_evidence",
-			"privacy_retention":                "dashboard_posture_evidence",
-			"negative_path_assurance":          "dashboard_posture_evidence",
-			"degraded_guidance":                "dashboard_posture_evidence",
-			"audit_failure_drill":              "fail_closed_dashboard_posture_evidence",
-			"human_readable_summary":           "dashboard_posture_evidence",
-			"assurance_gate_proofs":            "role_catalog_degraded_value_leak",
-			"operational_status":               "dashboard_posture_strip",
-			"supply_chain_posture":             "summary_only_dependency_security_evidence",
-			"value_returned":                   false,
+			"route_value_leak_sentinel":     true,
+			"json_errors_request_id":        true,
+			"backend_source_paths":          "not_returned",
+			"role_policy_proof":             "explicit_counts_no_values",
+			"role_policy_readiness":         "bootstrap_to_explicit_zitadel_lanes",
+			"role_claim_policy":             "explicit_only_no_ambient_grants",
+			"evidence_export_boundary":      "dashboard_and_json",
+			"evidence_download":             "auditor_json_with_pack_hash",
+			"evidence_receipt":              "download_header_body_match",
+			"auth_failure_posture":          "safe_reason_codes_no_provider_values",
+			"authenticated_role_evidence":   "signed_in_role_receipt_no_identity_values",
+			"authenticated_browser_witness": "signed_session_browser_proof_no_identity_values",
+			"action_readiness":              "role_and_readiness_matrix",
+			"action_receipts":               "mutation_result_receipts",
+			"action_receipt_integrity":      "tamper_evident_hash_proof",
+			"action_receipt_verification":   "copy_safe_ui_fields",
+			"privacy_retention":             "dashboard_posture_evidence",
+			"negative_path_assurance":       "dashboard_posture_evidence",
+			"degraded_guidance":             "dashboard_posture_evidence",
+			"audit_failure_drill":           "fail_closed_dashboard_posture_evidence",
+			"human_readable_summary":        "dashboard_posture_evidence",
+			"assurance_gate_proofs":         "role_catalog_degraded_value_leak",
+			"operational_status":            "dashboard_posture_strip",
+			"value_returned":                false,
 		},
 		"response_hardening": map[string]any{
 			"cache_control":                  "no-store",
@@ -3660,36 +2761,19 @@ func (app *App) postureBody(session Session) map[string]any {
 			"request_correlated_json_errors",
 			"route_value_leak_sentinel",
 			"mode_posture_evidence",
-			"mode_guardrails",
 			"evidence_export_boundary_ux",
 			"role_availability_ux",
 			"authenticated_role_receipt",
 			"authenticated_browser_witness_api",
 			"human_readable_assurance_summary",
 			"operational_status_strip",
-			"supply_chain_posture_summary",
 			"evidence_download_receipt",
 			"exact_evidence_download_receipt",
-			"enterprise_evidence_attachment_matrix",
-			"enterprise_attachment_review_workflow",
-			"enterprise_dry_run_checklist",
-			"enterprise_claim_review_workflow",
-			"enterprise_release_gate_decision",
-			"external_evidence_presence_workflow",
-			"restore_drill_proof",
-			"restore_drill_presence_workflow",
-			"release_provenance_presence_workflow",
-			"privacy_retention_presence_workflow",
-			"integration_conformance_presence_workflow",
-			"remote_audit_presence_workflow",
-			"break_glass_review_presence_workflow",
 			"role_aware_action_readiness",
-			"command_center_ux",
 			"value_free_action_receipts",
 			"tamper_evident_action_receipts",
 			"action_receipt_verification_ux",
 			"assurance_gate_proof_strip",
-			"enterprise_validation_clarity",
 			"privacy_retention_posture",
 			"negative_path_assurance_matrix",
 			"degraded_guidance_panel",
@@ -3703,20 +2787,6 @@ func (app *App) accessPosture() AccessPosture {
 	return AccessPostureFor(app.cfg.RolePolicy)
 }
 
-func (app *App) evidenceAttachmentMap() map[string]EvidenceAttachmentRecord {
-	if app.evidence == nil {
-		return nil
-	}
-	return app.evidence.Map()
-}
-
-func (app *App) externalEvidencePosture(enterprise EnterpriseValidation, session Session) ExternalEvidencePosture {
-	if app.evidence == nil {
-		return ExternalEvidencePostureFor(enterprise, nil, false, session)
-	}
-	return app.evidence.Posture(enterprise, session)
-}
-
 func (app *App) scopePosture(descriptors []SecretDescriptor) ScopePosture {
 	return ScopePostureFor(app.cfg.ScopePolicy, descriptors)
 }
@@ -3724,8 +2794,7 @@ func (app *App) scopePosture(descriptors []SecretDescriptor) ScopePosture {
 func (app *App) evidencePack(session Session) EvidencePack {
 	allDescriptors := app.store.Descriptors()
 	descriptors := app.cfg.ScopePolicy.Filter(allDescriptors)
-	evidenceAttachments := app.evidenceAttachmentMap()
-	issues := enterpriseChecksWithAttachments(app.cfg, evidenceAttachments)
+	issues := configGates(app.cfg)
 	catalogGates := ValidateCatalog(descriptors)
 	_, ready := app.readinessBody()
 	accessPosture := app.accessPosture()
@@ -3736,29 +2805,14 @@ func (app *App) evidencePack(session Session) EvidencePack {
 	recentAudit := app.store.RecentAudit(50)
 	auditTrail := AuditTrailFor(recentAudit, auditPosture, canExportEvidence)
 	evidenceBoundary := EvidenceBoundaryFor(canExportEvidence, canExportEvidence)
-	supplyChain := SupplyChainPostureFor(evidenceBoundary)
 	authFailure := AuthFailurePostureFor(app.cfg)
 	authenticatedRole := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
 	authenticatedBrowser := app.authenticatedBrowserWitness(session, authenticatedRole, ready)
 	assuranceSummary := AssuranceSummaryFor(app.cfg.ProductMode, ready, len(issues), len(catalogGates), accessPosture, auditPosture, evidenceBoundary)
 	assuranceGates := AssuranceGatesFor(ready, len(catalogGates), accessPosture)
-	enterpriseValidation := EnterpriseValidationWithAttachmentsFor(app.cfg, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments)
-	enterpriseDryRun := EnterpriseDryRunFor(app.cfg.ProductMode, EnterpriseValidationWithAttachmentsFor(Config{ProductMode: "enterprise", RolePolicy: app.cfg.RolePolicy}, ready, accessPosture, auditPosture, len(catalogGates), evidenceAttachments))
-	enterpriseClaim := EnterpriseClaimReviewFor(app.cfg.ProductMode, enterpriseValidation, enterpriseDryRun, evidenceBoundary)
-	attachmentReview := AttachmentReviewFor(enterpriseValidation)
-	externalEvidence := app.externalEvidencePosture(enterpriseValidation, session)
-	modeGuardrails := ModeGuardrailsFor(app.cfg, ready, issues, accessPosture, auditPosture, len(catalogGates), enterpriseValidation)
-	restoreProof := RestoreDrillProofFor(enterpriseValidation)
-	restoreWorkflow := RestoreDrillWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	releaseWorkflow := ReleaseProvenanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	privacyWorkflow := PrivacyRetentionWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	integrationWorkflow := IntegrationConformanceWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	remoteAuditWorkflow := RemoteAuditWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	breakGlassWorkflow := BreakGlassReviewWorkflowFor(enterpriseValidation, evidenceAttachments, session)
-	enterpriseReleaseGate := EnterpriseReleaseGateFor(app.cfg.ProductMode, enterpriseClaim, supplyChain, remoteAuditWorkflow, restoreWorkflow, releaseWorkflow, privacyWorkflow, integrationWorkflow, breakGlassWorkflow, auditPosture, accessPosture, app.cfg.RolePolicy, evidenceBoundary)
 	privacyPosture := PrivacyPostureFor(evidenceBoundary, auditPosture)
 	negativePath := NegativePathAssuranceFor(ready, len(catalogGates), accessPosture, auditPosture)
-	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary, enterpriseValidation)
+	degradedGuidance := DegradedGuidanceFor(ready, auditPosture, evidenceBoundary)
 	auditDrill := AuditFailureDrillFor(ready, auditPosture)
 	actionReadiness := ActionReadinessFor(session, ready)
 	operationalStatus := OperationalStatusFor(ready, scopePosture, assuranceSummary, evidenceBoundary, RoleAvailabilityFor(session))
@@ -3768,31 +2822,16 @@ func (app *App) evidencePack(session Session) EvidencePack {
 		Mode:                 app.cfg.ProductMode,
 		Posture:              app.postureBody(session),
 		Operational:          operationalStatus,
-		SupplyChain:          supplyChain,
 		AuthFailure:          authFailure,
 		AuthenticatedRole:    authenticatedRole,
 		AuthenticatedBrowser: authenticatedBrowser,
 		RolePolicyReadiness:  rolePolicyReadiness,
-		ModeGuardrails:       modeGuardrails,
 		ActionReadiness:      actionReadiness,
 		AssuranceGates:       assuranceGates,
 		NegativePath:         negativePath,
 		Guidance:             degradedGuidance,
 		AuditDrill:           auditDrill,
 		AssuranceSummary:     assuranceSummary,
-		RestoreWorkflow:      restoreWorkflow,
-		ReleaseWorkflow:      releaseWorkflow,
-		PrivacyWorkflow:      privacyWorkflow,
-		IntegrationWorkflow:  integrationWorkflow,
-		RemoteAuditWorkflow:  remoteAuditWorkflow,
-		BreakGlassWorkflow:   breakGlassWorkflow,
-		Enterprise:           enterpriseValidation,
-		EnterpriseDryRun:     enterpriseDryRun,
-		EnterpriseClaim:      enterpriseClaim,
-		EnterpriseRelease:    enterpriseReleaseGate,
-		AttachmentReview:     attachmentReview,
-		ExternalEvidence:     externalEvidence,
-		RestoreProof:         restoreProof,
 		Privacy:              privacyPosture,
 		Descriptors:          descriptors,
 		CatalogGates:         catalogGates,
@@ -3884,32 +2923,6 @@ func renderTemplateStatus(w http.ResponseWriter, templates *template.Template, n
 	if err := templates.ExecuteTemplate(w, name, data); err != nil {
 		http.Error(w, "render failed", http.StatusInternalServerError)
 	}
-}
-
-func wantsHTMLResponse(r *http.Request) bool {
-	accept := strings.ToLower(r.Header.Get("Accept"))
-	return strings.Contains(accept, "text/html") && !strings.Contains(accept, "text/plain")
-}
-
-func (app *App) browserSmokeReceiptCSRFRefreshAllowed(r *http.Request) bool {
-	if r.Method != http.MethodPost || r.Form.Get("format") == "text" {
-		return false
-	}
-	accept := strings.ToLower(r.Header.Get("Accept"))
-	if strings.Contains(accept, "application/json") || strings.Contains(accept, "text/plain") {
-		return false
-	}
-	site := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")))
-	if site == "cross-site" {
-		return false
-	}
-	mode := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Mode")))
-	dest := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")))
-	if dest != "" && dest != "document" {
-		return false
-	}
-	ua := strings.ToLower(r.Header.Get("User-Agent"))
-	return strings.Contains(accept, "text/html") || mode == "navigate" || strings.Contains(ua, "mozilla/")
 }
 
 func mustTemplates() *template.Template {
@@ -4822,7 +3835,6 @@ func mustTemplates() *template.Template {
 			      <a href="/auth/smoke">Smoke</a>
 			      <a href="/session-witness">Witness</a>
 			      <a href="/session-witness.txt">Text</a>
-		      <a href="/session-witness/proof.txt">Proof pack</a>
 		      <a href="/session-witness/verify">Verify</a>
 		      <a href="/api/auth/session-witness">JSON</a>
 		      {{ else }}
@@ -4864,2757 +3876,6 @@ func mustTemplates() *template.Template {
 </html>
 {{- end }}
 
-{{ define "legacy_dashboard" -}}
-{{ template "base_top" . }}
-<section class="overview" id="overview">
-  <div class="intro">
-    <div class="intro-copy">
-      <div class="eyebrow">{{ .ModeGuardrails.Current }} / {{ .ModeGuardrails.Claim }} / metadata-only</div>
-      <h1>Vault control plane</h1>
-      <p>Ownership, posture, and audit-safe descriptors for secrets. Secret values stay outside Janus.</p>
-    </div>
-    <div class="safety-ribbon" aria-label="Current safety posture">
-      <div class="safety-chip info">
-        <span>Service</span>
-        <strong>Janus</strong>
-      </div>
-      <div class="safety-chip {{ if eq .ModeGuardrails.Current "enterprise" }}ok{{ else }}info{{ end }}">
-        <span>Mode</span>
-        <strong>{{ .ModeGuardrails.Current }}</strong>
-      </div>
-      <div class="safety-chip ok">
-        <span>Boundary</span>
-        <strong>values withheld</strong>
-      </div>
-      <div class="safety-chip {{ if .CommandCenter.BlockedActions }}warn{{ else }}ok{{ end }}">
-        <span>Actions</span>
-        <strong>{{ .CommandCenter.AvailableActions }} safe</strong>
-      </div>
-    </div>
-		    <div class="toolbar">
-		      {{ if .CanExportEvidence }}<a class="button primary" href="/api/evidence">Evidence JSON</a>{{ end }}
-		      <a class="button primary" href="/auth/smoke">Auth smoke</a>
-		      <a class="button quiet" href="/session-witness">Session proof</a>
-		      <a class="button quiet" href="/session-witness.txt">Proof text</a>
-		      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
-	      <a class="button quiet" href="/api/posture">Posture JSON</a>
-	      <a class="button quiet" href="/api/warden/descriptors">Descriptors JSON</a>
-	    </div>
-    <div class="session-proof" aria-label="Browser session witness">
-      <div class="session-proof-item {{ if eq .AuthenticatedBrowser.State "authenticated" }}ok{{ else if eq .AuthenticatedBrowser.State "local_smoke" }}info{{ else }}warn{{ end }}">
-        <span>Session witness</span>
-        <strong>{{ .AuthenticatedBrowser.State }}</strong>
-        <p>{{ .AuthenticatedBrowser.Flow }}</p>
-      </div>
-      <div class="session-proof-item ok">
-        <span>Cookie and CSRF</span>
-        <strong>{{ .AuthenticatedBrowser.SessionCookiePolicy }}</strong>
-        <p>{{ .AuthenticatedBrowser.CSRFBoundary }}; {{ .AuthenticatedBrowser.CSPBoundary }}</p>
-	      </div>
-	      <div class="session-proof-item action">
-	        <a class="button quiet" href="/session-witness/proof.txt">Open proof pack</a>
-	      </div>
-	    </div>
-    <div class="reviewer-flow" aria-label="Signed-browser reviewer handoff">
-      <div class="reviewer-step ok">
-        <span>Reviewer handoff</span>
-        <strong>browser proof ready</strong>
-        <p>signed_browser_capture=true</p>
-      </div>
-      <div class="reviewer-step action">
-        <a class="button primary" href="/session-witness/proof.txt">Proof pack</a>
-      </div>
-      <div class="reviewer-step action">
-        <a class="button quiet" href="/session-witness">Inspect witness</a>
-      </div>
-      <div class="reviewer-step ok">
-        <span>Boundary</span>
-        <strong>values withheld</strong>
-        <p>proof_pack_contains_verification=true</p>
-      </div>
-    </div>
-    <p><span class="pill {{ if eq .OperationalStatus.Verdict "operational" }}ok{{ else }}warn{{ end }}">{{ .OperationalStatus.Verdict }}</span> {{ .OperationalStatus.Summary }}</p>
-    <div class="ops-strip" aria-label="Operational status">
-      {{ range .OperationalStatus.Items }}
-      <div class="ops-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-      </div>
-      {{ end }}
-    </div>
-    <div class="assurance-flow" aria-label="Assurance flow">
-	      <div class="assurance-step">
-	        <b>1</b>
-	        <strong>Signed-in role receipt</strong>
-	        <span>{{ .AuthenticatedRole.State }}; identity values withheld</span>
-	      </div>
-      <div class="assurance-step">
-        <b>2</b>
-        <strong>Metadata only</strong>
-        <span>{{ len .Descriptors }} descriptors, values withheld</span>
-      </div>
-      <div class="assurance-step">
-        <b>3</b>
-        <strong>Use gate</strong>
-        <span>{{ if .ApprovedUse.BlockedCount }}{{ .ApprovedUse.BlockedCount }} blocked{{ else }}profiled and closed{{ end }}</span>
-      </div>
-      <div class="assurance-step">
-        <b>4</b>
-        <strong>Audit trail</strong>
-        <span>{{ if .Posture.ChainVerified }}chain verified{{ else }}review needed{{ end }}</span>
-      </div>
-    </div>
-    <div class="trust-rail" aria-label="Trust posture">
-      <div class="trust-step {{ if .Ready }}ok{{ else }}warn{{ end }}">
-        <span>Readiness</span>
-        <strong>{{ if .Ready }}ready{{ else }}review{{ end }}</strong>
-      </div>
-      <div class="trust-step {{ if .CatalogGates }}warn{{ else }}ok{{ end }}">
-        <span>Catalog gates</span>
-        <strong>{{ len .CatalogGates }}</strong>
-      </div>
-      <div class="trust-step {{ if .Access.ExplicitBindings }}ok{{ else }}warn{{ end }}">
-        <span>Access</span>
-        <strong>{{ if .Access.ExplicitBindings }}explicit{{ else }}bootstrap{{ end }}</strong>
-      </div>
-      <div class="trust-step {{ if .ApprovedUse.BlockedCount }}warn{{ else }}ok{{ end }}">
-        <span>Approved use</span>
-        <strong>{{ if .ApprovedUse.BlockedCount }}{{ .ApprovedUse.BlockedCount }} blocked{{ else }}profiled{{ end }}</strong>
-      </div>
-    </div>
-  </div>
-  <div class="status">
-    <div class="status-head">
-      <h2>Live posture</h2>
-      {{ if not .Ready }}<span class="pill warn">restricted</span>{{ else if .Issues }}<span class="pill warn">{{ len .Issues }} gates</span>{{ else }}<span class="pill ok">ready</span>{{ end }}
-    </div>
-    <div class="status-body">
-      <div class="signal">
-        <span class="muted">Secret values</span>
-        <strong>withheld</strong>
-        <span class="pill ok">never returned</span>
-      </div>
-      <div class="signal">
-        <span class="muted">Scope</span>
-        <strong>{{ range .Scope.AllowedScopes }}{{ . }}{{ end }}</strong>
-        {{ if .Scope.Strict }}<span class="pill ok">strict</span>{{ else }}<span class="pill warn">open</span>{{ end }}
-      </div>
-      <div class="signal">
-        <span class="muted">Lifecycle</span>
-        {{ if .Lifecycle.BlockedCount }}<strong>review</strong><span class="pill warn">{{ .Lifecycle.BlockedCount }} blocked</span>{{ else }}<strong>clear</strong><span class="pill ok">{{ .Lifecycle.ActiveCount }} active</span>{{ end }}
-      </div>
-      <div class="signal">
-        <span class="muted">Audit chain</span>
-        {{ if .Posture.ChainVerified }}<strong>verified</strong><span class="pill ok">hash chained</span>{{ else }}<strong>review</strong><span class="pill warn">needs review</span>{{ end }}
-      </div>
-      <div class="signal">
-        <span class="muted">Evidence hash</span>
-        {{ if .CanViewAudit }}
-        <strong class="mono">{{ if .EvidenceHash }}{{ .EvidenceHash }}{{ else }}pending{{ end }}</strong>
-        <span class="pill info">sha256</span>
-        {{ else }}
-        <strong>restricted</strong>
-        <span class="pill warn">auditor</span>
-        {{ end }}
-      </div>
-    </div>
-	  </div>
-		</section>
-		<section class="panel" style="margin-bottom:16px" id="command-center">
-		  <div class="panel-head">
-		    <h2>Command center</h2>
-		    <span class="pill {{ if eq .CommandCenter.State "ready" }}ok{{ else if eq .CommandCenter.State "review" }}info{{ else }}warn{{ end }}">{{ .CommandCenter.State }}</span>
-		  </div>
-		  <div class="panel-body">
-		    <div class="command-top">
-		      <div class="stack">
-		        <p>{{ .CommandCenter.Summary }}</p>
-		        <p><span class="pill ok">{{ .CommandCenter.Boundary }}</span> <span class="pill ok">value_returned=false</span> <span class="pill info">{{ .CommandCenter.AvailableActions }} safe actions</span> <span class="pill {{ if .CommandCenter.BlockedActions }}warn{{ else }}ok{{ end }}">{{ .CommandCenter.BlockedActions }} blocked</span> <span class="pill {{ if .CommandCenter.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .CommandCenter.ReviewCount }} review</span></p>
-		      </div>
-		      <div class="command-state {{ if eq .CommandCenter.State "ready" }}ok{{ else if eq .CommandCenter.State "review" }}info{{ else }}warn{{ end }}">
-		        <span>Now</span>
-		        <strong>{{ .CommandCenter.State }}</strong>
-		        <span>metadata only</span>
-		      </div>
-		    </div>
-		    <div class="command-grid" aria-label="Command center status">
-		      {{ range .CommandCenter.Cards }}
-		      <div class="command-card {{ .Tone }}">
-		        <span>{{ .Label }}</span>
-		        <strong>{{ .State }}</strong>
-		        <p>{{ .Detail }}</p>
-		        <p><span class="pill info">next</span> {{ .Next }}</p>
-		      </div>
-		      {{ end }}
-		    </div>
-		    {{ if .CommandCenter.QuickActions }}
-		    <div class="command-actions" aria-label="Safe quick actions">
-		      {{ range .CommandCenter.QuickActions }}
-		      <a class="button {{ if eq .Key "evidence_export" }}primary{{ else }}quiet{{ end }}" href="{{ .Href }}">{{ .Label }}</a>
-		      {{ end }}
-		    </div>
-		{{ end }}
-	  </div>
-	</section>
-	<section class="panel" style="margin-bottom:16px" id="auth-failure-posture">
-	  <div class="panel-head">
-	    <h2>Auth failure posture</h2>
-	    <span class="pill {{ if eq .AuthFailure.State "ready" }}ok{{ else if eq .AuthFailure.State "local_auth_disabled" }}info{{ else }}warn{{ end }}">{{ .AuthFailure.State }}</span>
-	  </div>
-	  <div class="panel-body stack">
-	    <p>{{ .AuthFailure.Summary }}</p>
-	    <p><span class="pill info">{{ .AuthFailure.IdentityProvider }}</span> <span class="pill info">{{ .AuthFailure.EvidenceSignal }}</span> <span class="pill info">Redirect loop guard {{ .AuthFailure.LoopGuard.State }}</span> <span class="pill ok">raw_callback_query_returned=false</span> <span class="pill ok">provider_error_returned=false</span> <span class="pill ok">redirect_url_returned=false</span> <span class="pill ok">token_returned=false</span> <span class="pill ok">cookie_value_returned=false</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">env_returned=false</span> <span class="pill ok">backend_path_returned=false</span> <span class="pill ok">value_returned=false</span></p>
-	    <p><span class="pill info">loop window</span> {{ .AuthFailure.LoopGuard.MaxAttempts }} starts / {{ .AuthFailure.LoopGuard.WindowSeconds }} seconds <span class="pill info">{{ .AuthFailure.LoopGuard.ResetAction }}</span></p>
-	    <div class="mode-grid" aria-label="Auth failure reasons">
-	      {{ range .AuthFailure.Reasons }}
-	      <div class="mode-item {{ .Tone }}">
-	        <span>{{ .Label }}</span>
-	        <strong>{{ .State }}</strong>
-	        <p>{{ .Detail }}</p>
-	        <p><span class="pill info">{{ .Key }}</span> <span class="pill info">next</span> {{ .Next }}</p>
-	        <p><span class="pill ok">raw query not returned</span> <span class="pill ok">provider detail not returned</span></p>
-	      </div>
-	      {{ end }}
-	    </div>
-	    <p><strong>Safe actions</strong></p>
-	    <div class="mode-grid" aria-label="Auth failure actions">
-	      {{ range .AuthFailure.Actions }}
-	      <div class="mode-item ok">
-	        <span>{{ .Label }}</span>
-	        <strong>{{ .Key }}</strong>
-	        <p>{{ .Safety }}</p>
-	        <p><span class="pill info">next</span> {{ .Next }}</p>
-	      </div>
-	      {{ end }}
-	    </div>
-	  </div>
-	</section>
-	<section class="panel" style="margin-bottom:16px" id="supply-chain-posture">
-	  <div class="panel-head">
-	    <h2>Supply-chain posture</h2>
-	    <span class="pill {{ if eq .SupplyChain.Status "clean" }}ok{{ else }}warn{{ end }}">{{ .SupplyChain.Status }}</span>
-	  </div>
-	  <div class="panel-body stack">
-	    <p>{{ .SupplyChain.Summary }}</p>
-	    <div class="witness-grid" aria-label="Supply-chain posture witness">
-	      <div class="witness-card {{ if eq .SupplyChain.Status "clean" }}ok{{ else }}warn{{ end }}">
-	        <span>Dependency state</span>
-	        <strong>{{ .SupplyChain.DependencyState }}</strong>
-	        <p>Builder {{ .SupplyChain.Builder }}. Review cadence: {{ .SupplyChain.ReviewCadence }}.</p>
-	      </div>
-		      <div class="witness-card {{ if .SupplyChain.OpenAlerts }}warn{{ else }}ok{{ end }}">
-		        <span>Alert posture</span>
-		        <strong>{{ .SupplyChain.OpenAlerts }} open</strong>
-		        <p>{{ .SupplyChain.FixedAlerts }} fixed alerts retained as safe release evidence.</p>
-		      </div>
-		      <div class="witness-card {{ if eq .SupplyChain.BuildProvenance.Status "bound" }}ok{{ else }}warn{{ end }}">
-		        <span>Build receipt</span>
-		        <strong>{{ .SupplyChain.BuildProvenance.CommitShort }}</strong>
-		        <p>{{ .SupplyChain.BuildProvenance.GoVersion }} / {{ .SupplyChain.BuildProvenance.BuildTime }}</p>
-		      </div>
-		      <div class="witness-card ok">
-		        <span>Evidence boundary</span>
-		        <strong>values withheld</strong>
-		        <p>Scanner output, package files, backend paths, env, evidence refs, and values are not returned.</p>
-		      </div>
-	    </div>
-	    <details class="evidence-flags">
-	      <summary>Supply-chain evidence flags</summary>
-	      <div class="flag-cloud" aria-label="Supply-chain value-free evidence flags">
-	        <span class="pill ok">{{ .SupplyChain.DependencyState }}</span>
-	        <span class="pill info">builder {{ .SupplyChain.Builder }}</span>
-		        <span class="pill ok">{{ .SupplyChain.OpenAlerts }} open alerts</span>
-		        <span class="pill info">{{ .SupplyChain.FixedAlerts }} fixed alerts</span>
-		        <span class="pill {{ if .SupplyChain.BuildProvenance.CommitBound }}ok{{ else }}warn{{ end }}">commit_bound={{ .SupplyChain.BuildProvenance.CommitBound }}</span>
-		        <span class="pill {{ if .SupplyChain.BuildProvenance.BuildTimeBound }}ok{{ else }}warn{{ end }}">build_time_bound={{ .SupplyChain.BuildProvenance.BuildTimeBound }}</span>
-		        <span class="pill info">commit {{ .SupplyChain.BuildProvenance.CommitShort }}</span>
-		        <span class="pill info">{{ .SupplyChain.BuildProvenance.EvidenceSignal }}</span>
-		        <span class="pill ok">artifact_returned=false</span>
-		        <span class="pill ok">sbom_returned=false</span>
-		        <span class="pill info">review cadence</span>
-		        <span class="pill info">{{ .SupplyChain.ReviewCadence }}</span>
-		        <span class="pill ok">scanner_output_returned=false</span>
-	        <span class="pill ok">package_lock_returned=false</span>
-	        <span class="pill ok">backend_path_returned=false</span>
-	        <span class="pill ok">env_returned=false</span>
-	        <span class="pill ok">evidence_ref_returned=false</span>
-	        <span class="pill ok">value_returned=false</span>
-	      </div>
-	    </details>
-	    <div class="mode-grid" aria-label="Supply-chain posture checks">
-	      {{ range .SupplyChain.Checks }}
-	      <div class="mode-item {{ .Tone }}">
-	        <span>{{ .Label }}</span>
-	        <strong>{{ .State }}</strong>
-	        <p>{{ .Detail }}</p>
-	        <p><span class="pill info">next</span> {{ .Next }}</p>
-	      </div>
-	      {{ end }}
-	    </div>
-	  </div>
-	</section>
-	<section class="panel" style="margin-bottom:16px" id="mode-guardrails">
-	  <div class="panel-head">
-	    <h2>Mode guardrails</h2>
-	    <span class="pill {{ if .ModeGuardrails.BlockedCount }}warn{{ else if .ModeGuardrails.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .ModeGuardrails.Claim }}</span>
-	  </div>
-	  <div class="panel-body stack">
-	    <p>{{ .ModeGuardrails.Summary }}</p>
-	    <div class="witness-grid" aria-label="Mode guardrails witness">
-	      <div class="witness-card {{ if eq .ModeGuardrails.Current "enterprise" }}ok{{ else }}info{{ end }}">
-	        <span>Current mode</span>
-	        <strong>{{ .ModeGuardrails.Current }}</strong>
-	        <p>Mode is explicit before any stronger claim is made.</p>
-	      </div>
-	      <div class="witness-card {{ if .ModeGuardrails.BlockedCount }}warn{{ else if .ModeGuardrails.ReviewCount }}warn{{ else }}ok{{ end }}">
-	        <span>Claim boundary</span>
-	        <strong>{{ .ModeGuardrails.Claim }}</strong>
-	        <p>{{ .ModeGuardrails.BlockedCount }} blocked, {{ .ModeGuardrails.ReviewCount }} review.</p>
-	      </div>
-	      <div class="witness-card ok">
-	        <span>Value boundary</span>
-	        <strong>values withheld</strong>
-	        <p>{{ .ModeGuardrails.Boundary }}; no secret values are returned.</p>
-	      </div>
-	    </div>
-	    <details class="evidence-flags">
-	      <summary>Mode guardrail evidence flags</summary>
-	      <div class="flag-cloud" aria-label="Mode guardrail value-free evidence flags">
-	        <span class="pill info">{{ .ModeGuardrails.Current }}</span>
-	        <span class="pill warn">{{ .ModeGuardrails.Boundary }}</span>
-	        <span class="pill {{ if .ModeGuardrails.BlockedCount }}warn{{ else }}ok{{ end }}">{{ .ModeGuardrails.BlockedCount }} blocked</span>
-	        <span class="pill {{ if .ModeGuardrails.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .ModeGuardrails.ReviewCount }} review</span>
-	        <span class="pill ok">value_returned=false</span>
-	      </div>
-	    </details>
-	    <div class="mode-grid" aria-label="Mode guardrails">
-	      {{ range .ModeGuardrails.Items }}
-	      <div class="mode-item {{ .Tone }}">
-	        <span>{{ .Label }}</span>
-	        <strong>{{ .State }}</strong>
-	        <p>{{ .Claim }}</p>
-	        <p>{{ .Limit }}</p>
-	        <p><span class="pill info">next</span> {{ .Next }}</p>
-	      </div>
-	      {{ end }}
-	    </div>
-	  </div>
-	</section>
-	<section class="panel" style="margin-bottom:16px" id="degraded-guidance">
-	  <div class="panel-head">
-	    <h2>Next safe steps</h2>
-	    <span class="pill {{ if .Guidance.BlockedCount }}warn{{ else if .Guidance.ReviewCount }}warn{{ else }}ok{{ end }}">{{ if .Guidance.BlockedCount }}{{ .Guidance.BlockedCount }} blocked{{ else if .Guidance.ReviewCount }}{{ .Guidance.ReviewCount }} review{{ else }}clear{{ end }}</span>
-	  </div>
-	  <div class="panel-body stack">
-	    <p>{{ .Guidance.Summary }}</p>
-	    <div class="witness-grid" aria-label="Next safe steps witness">
-	      <div class="witness-card {{ if .Guidance.BlockedCount }}warn{{ else if .Guidance.ReviewCount }}warn{{ else }}ok{{ end }}">
-	        <span>Action state</span>
-	        <strong>{{ if .Guidance.BlockedCount }}{{ .Guidance.BlockedCount }} blocked{{ else if .Guidance.ReviewCount }}{{ .Guidance.ReviewCount }} review{{ else }}clear{{ end }}</strong>
-	        <p>Only safe recovery and review actions are shown.</p>
-	      </div>
-	      <div class="witness-card info">
-	        <span>Role boundary</span>
-	        <strong>role gated</strong>
-	        <p>Recovery actions stay tied to their required role and next step.</p>
-	      </div>
-	      <div class="witness-card ok">
-	        <span>Value boundary</span>
-	        <strong>values withheld</strong>
-	        <p>Guidance explains what to do next without returning secret material.</p>
-	      </div>
-	    </div>
-	    <details class="evidence-flags">
-	      <summary>Next safe steps evidence flags</summary>
-	      <div class="flag-cloud" aria-label="Next safe steps value-free evidence flags">
-	        <span class="pill ok">value_returned=false</span>
-	        <span class="pill info">safe actions only</span>
-	        <span class="pill {{ if .Guidance.BlockedCount }}warn{{ else }}ok{{ end }}">{{ .Guidance.BlockedCount }} blocked</span>
-	        <span class="pill {{ if .Guidance.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .Guidance.ReviewCount }} review</span>
-	      </div>
-	    </details>
-	    <div class="mode-grid" aria-label="Degraded-state guidance">
-	      {{ range .Guidance.Items }}
-	      <div class="mode-item {{ .Tone }}">
-	        <span>{{ .Label }}</span>
-	        <strong>{{ .State }}</strong>
-	        <p>{{ .Impact }}</p>
-	        <p><span class="pill info">{{ .Role }}</span> {{ .Action }}</p>
-	      </div>
-	      {{ end }}
-	    </div>
-	  </div>
-	</section>
-	<section class="panel" style="margin-bottom:16px" id="audit-failure-drill">
-	  <div class="panel-head">
-	    <h2>Audit failure drill</h2>
-	    <span class="pill {{ if .AuditDrill.BlockedCount }}warn{{ else }}ok{{ end }}">{{ .AuditDrill.Status }}</span>
-	  </div>
-	  <div class="panel-body stack">
-	    <p>{{ .AuditDrill.Summary }}</p>
-	    <div class="witness-grid" aria-label="Audit failure drill witness">
-	      <div class="witness-card {{ if .AuditDrill.BlockedCount }}warn{{ else }}ok{{ end }}">
-	        <span>Drill state</span>
-	        <strong>{{ .AuditDrill.Status }}</strong>
-	        <p>{{ .AuditDrill.Scenario }} is visible as a security state.</p>
-	      </div>
-	      <div class="witness-card info">
-	        <span>Recovery role</span>
-	        <strong>{{ .AuditDrill.RecoveryRole }}</strong>
-	        <p>Recovery stays role-separated before sensitive action resumes.</p>
-	      </div>
-	      <div class="witness-card ok">
-	        <span>Value boundary</span>
-	        <strong>values withheld</strong>
-	        <p>Audit failure guidance returns status and next step only.</p>
-	      </div>
-	    </div>
-	    <details class="evidence-flags">
-	      <summary>Audit failure drill evidence flags</summary>
-	      <div class="flag-cloud" aria-label="Audit failure drill value-free evidence flags">
-	        <span class="pill info">{{ .AuditDrill.Scenario }}</span>
-	        <span class="pill info">role {{ .AuditDrill.RecoveryRole }}</span>
-	        <span class="pill {{ if .AuditDrill.BlockedCount }}warn{{ else }}ok{{ end }}">{{ .AuditDrill.BlockedCount }} blocked</span>
-	        <span class="pill ok">value_returned=false</span>
-	      </div>
-	    </details>
-	    <div class="mode-grid" aria-label="Audit failure drill">
-	      {{ range .AuditDrill.Checks }}
-	      <div class="mode-item {{ .Tone }}">
-	        <span>{{ .Label }}</span>
-	        <strong>{{ .State }}</strong>
-	        <p>{{ .Proof }}</p>
-	        <p><span class="pill info">next</span> {{ .Next }}</p>
-	      </div>
-	      {{ end }}
-	    </div>
-	  </div>
-	</section>
-	<section class="panel" style="margin-bottom:16px" id="assurance-summary">
-	  <div class="panel-head">
-	    <h2>Assurance summary</h2>
-    <span class="pill {{ if .AssuranceSummary.Review }}warn{{ else }}ok{{ end }}">{{ .AssuranceSummary.Verdict }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .AssuranceSummary.Summary }}</p>
-    <div class="witness-grid" aria-label="Assurance summary witness">
-      <div class="witness-card {{ if .AssuranceSummary.Review }}warn{{ else }}ok{{ end }}">
-        <span>Proof decision</span>
-        <strong>{{ .AssuranceSummary.Verdict }}</strong>
-        <p>{{ len .AssuranceSummary.Proven }} proven controls; {{ len .AssuranceSummary.Review }} review items.</p>
-      </div>
-      <div class="witness-card {{ if .AssuranceSummary.Review }}warn{{ else }}ok{{ end }}">
-        <span>Review posture</span>
-        <strong>{{ if .AssuranceSummary.Review }}review needed{{ else }}clear{{ end }}</strong>
-        <p>Review items stay visible before stronger claims are trusted.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>values withheld</strong>
-        <p>Human-readable evidence is shown without returning secret values.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Assurance summary evidence flags</summary>
-      <div class="flag-cloud" aria-label="Assurance summary value-free evidence flags">
-        <span class="pill info">verdict {{ .AssuranceSummary.Verdict }}</span>
-        <span class="pill ok">{{ len .AssuranceSummary.Proven }} proven</span>
-        <span class="pill {{ if .AssuranceSummary.Review }}warn{{ else }}ok{{ end }}">{{ len .AssuranceSummary.Review }} review</span>
-        <span class="pill info">human readable evidence</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    <p><strong>Proven controls</strong></p>
-    <div class="mode-grid" aria-label="Proven assurance controls">
-      {{ range .AssuranceSummary.Proven }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-      </div>
-      {{ end }}
-    </div>
-    {{ if .AssuranceSummary.Review }}
-    <p><strong>Review items</strong></p>
-    <div class="mode-grid" aria-label="Assurance review items">
-      {{ range .AssuranceSummary.Review }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-      </div>
-      {{ end }}
-    </div>
-    {{ end }}
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="assurance-gates">
-  <div class="panel-head">
-    <h2>Assurance gates</h2>
-    <span class="pill {{ if .AssuranceGates.ReviewCount }}warn{{ else }}ok{{ end }}">{{ if .AssuranceGates.ReviewCount }}{{ .AssuranceGates.ReviewCount }} review{{ else }}covered{{ end }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .AssuranceGates.Summary }}</p>
-    <div class="witness-grid" aria-label="Assurance gates witness">
-      <div class="witness-card {{ if .AssuranceGates.ReviewCount }}warn{{ else }}ok{{ end }}">
-        <span>Gate coverage</span>
-        <strong>{{ if .AssuranceGates.ReviewCount }}{{ .AssuranceGates.ReviewCount }} review{{ else }}covered{{ end }}</strong>
-        <p>{{ len .AssuranceGates.Gates }} abuse and invariant gates are visible.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Abuse posture</span>
-        <strong>abuse tested</strong>
-        <p>Role denial, catalog metadata, degraded action, and value-leak sentinels stay explicit.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>values withheld</strong>
-        <p>Gate proof returns control state only, not secret material.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Assurance gate evidence flags</summary>
-      <div class="flag-cloud" aria-label="Assurance gate value-free evidence flags">
-        <span class="pill info">{{ len .AssuranceGates.Gates }} gates</span>
-        <span class="pill {{ if .AssuranceGates.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .AssuranceGates.ReviewCount }} review</span>
-        <span class="pill info">abuse tested</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    <div class="mode-grid" aria-label="Assurance gate proofs">
-      {{ range .AssuranceGates.Gates }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-	</section>
-	<section class="panel" style="margin-bottom:16px" id="negative-path-assurance">
-	  <div class="panel-head">
-	    <h2>Blocked-path checks</h2>
-	    <span class="pill {{ if .NegativePath.ReviewCount }}warn{{ else }}ok{{ end }}">{{ if .NegativePath.ReviewCount }}{{ .NegativePath.ReviewCount }} review{{ else }}covered{{ end }}</span>
-	  </div>
-	  <div class="panel-body stack">
-	    <p>{{ .NegativePath.Summary }}</p>
-	    <div class="witness-grid" aria-label="Blocked-path witness">
-	      <div class="witness-card {{ if .NegativePath.ReviewCount }}warn{{ else }}ok{{ end }}">
-	        <span>Denied path coverage</span>
-	        <strong>{{ .NegativePath.CoveredCount }} covered</strong>
-	        <p>{{ .NegativePath.ReviewCount }} review items across {{ len .NegativePath.Cases }} negative-path cases.</p>
-	      </div>
-	      <div class="witness-card ok">
-	        <span>Failure behavior</span>
-	        <strong>fail closed</strong>
-	        <p>Wrong roles, catalog gaps, audit-down states, and sensitive actions stay explicit.</p>
-	      </div>
-	      <div class="witness-card ok">
-	        <span>Value boundary</span>
-	        <strong>values withheld</strong>
-	        <p>Denied paths return safe status and request correlation, not secret data.</p>
-	      </div>
-	    </div>
-	    <details class="evidence-flags">
-	      <summary>Blocked-path evidence flags</summary>
-	      <div class="flag-cloud" aria-label="Blocked-path value-free evidence flags">
-	        <span class="pill info">{{ .NegativePath.CoveredCount }} covered</span>
-	        <span class="pill {{ if .NegativePath.ReviewCount }}warn{{ else }}ok{{ end }}">{{ .NegativePath.ReviewCount }} review</span>
-	        <span class="pill info">{{ len .NegativePath.Cases }} cases</span>
-	        <span class="pill ok">value_returned=false</span>
-	      </div>
-	    </details>
-	    <div class="mode-grid" aria-label="Negative-path assurance">
-	      {{ range .NegativePath.Cases }}
-	      <div class="mode-item {{ .Tone }}">
-	        <span>{{ .Label }}</span>
-	        <strong>{{ .State }}</strong>
-	        <p>{{ .Detail }}</p>
-	      </div>
-	      {{ end }}
-	    </div>
-	  </div>
-	</section>
-	<section class="panel" style="margin-bottom:16px" id="available-to-you">
-	  <div class="panel-head">
-	    <h2>Available to you</h2>
-    <span class="pill info">role gated</span>
-  </div>
-  <div class="panel-body stack">
-    <div class="witness-grid" aria-label="Session capability witness">
-      <div class="witness-card ok">
-        <span>Capability view</span>
-        <strong>{{ len .RoleAvailability }} duties</strong>
-        <p>Session duties are shown as safe labels, not raw identity data.</p>
-      </div>
-      <div class="witness-card info">
-        <span>Role boundary</span>
-        <strong>role gated</strong>
-        <p>Controls outside this session's roles stay unavailable or hidden.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>values withheld</strong>
-        <p>Role availability never returns subjects, groups, claims, tokens, cookies, env, or secret values.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Role availability evidence flags</summary>
-      <div class="flag-cloud" aria-label="Role availability value-free evidence flags">
-        <span class="pill info">{{ len .RoleAvailability }} duties</span>
-        <span class="pill info">role gated</span>
-        <span class="pill ok">identity_values_returned=false</span>
-        <span class="pill ok">claim_values_returned=false</span>
-        <span class="pill ok">group_values_returned=false</span>
-        <span class="pill ok">token_returned=false</span>
-        <span class="pill ok">cookie_value_returned=false</span>
-        <span class="pill ok">env_values_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    <div class="mode-grid" aria-label="Available to you">
-      {{ range .RoleAvailability }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-      </div>
-      {{ end }}
-    </div>
-	  </div>
-	</section>
-	<section class="panel" style="margin-bottom:16px" id="authenticated-role-evidence">
-	  <div class="panel-head">
-	    <h2>Signed-in role receipt</h2>
-	    <span class="pill {{ if eq .AuthenticatedRole.State "signed_in" }}ok{{ else if eq .AuthenticatedRole.State "local_auth_disabled" }}info{{ else }}warn{{ end }}">{{ .AuthenticatedRole.State }}</span>
-	  </div>
-	  <div class="panel-body stack">
-	    <p>{{ .AuthenticatedRole.Summary }}</p>
-	    <p><span class="pill info">{{ .AuthenticatedBrowser.Label }}</span> {{ .AuthenticatedBrowser.Summary }}</p>
-	    <p><span class="pill info">Human validation witness</span> role gates visible, identity values private</p>
-	    <div class="witness-grid" aria-label="Human validation witness">
-	      <div class="witness-card {{ if eq .AuthenticatedBrowser.State "authenticated" }}ok{{ else if eq .AuthenticatedBrowser.State "local_smoke" }}info{{ else }}warn{{ end }}">
-	        <span>Browser proof</span>
-	        <strong>{{ .AuthenticatedBrowser.State }}</strong>
-	        <p>{{ if eq .AuthenticatedBrowser.AuthMode "zitadel_oidc" }}Zitadel to Janus flow{{ else }}Local smoke flow{{ end }}, strict signed session, copy-safe browser proof.</p>
-	      </div>
-	      <div class="witness-card {{ if eq .AuthenticatedRole.State "signed_in" }}ok{{ else if eq .AuthenticatedRole.State "local_auth_disabled" }}info{{ else }}warn{{ end }}">
-	        <span>Session</span>
-	        <strong>{{ if eq .AuthenticatedRole.State "signed_in" }}Signed in{{ else if eq .AuthenticatedRole.State "local_auth_disabled" }}Local smoke{{ else }}Needs login{{ end }}</strong>
-	        <p>Role receipt is present; identity values stay private.</p>
-	      </div>
-	      <div class="witness-card ok">
-	        <span>Roles Janus sees</span>
-	        <strong>{{ .AuthenticatedRole.ActiveRoleCount }} active</strong>
-	        <p>{{ range .AuthenticatedRole.Roles }}{{ if .Active }}<span class="pill info">{{ .Label }}</span> {{ end }}{{ end }}</p>
-	      </div>
-	      <div class="witness-card ok">
-	        <span>Privacy boundary</span>
-	        <strong>values withheld</strong>
-	        <p>No subject, email, name, group, claim, token, cookie, env, request body, or backend value is shown.</p>
-	      </div>
-	    </div>
-	    <p><span class="pill info">next</span> {{ .AuthenticatedRole.Next }}</p>
-	    <details class="evidence-flags">
-	      <summary>Evidence flags</summary>
-	      <div class="flag-cloud" aria-label="Signed-in role value-free evidence flags">
-	        <span class="pill info">{{ .AuthenticatedRole.AuthMode }}</span>
-	        <span class="pill info">{{ .AuthenticatedRole.IdentityBoundary }}</span>
-	        <span class="pill ok">{{ .AuthenticatedRole.EvidenceSignal }}</span>
-	        <span class="pill ok">{{ .AuthenticatedBrowser.EvidenceSignal }}</span>
-	        <span class="pill info">{{ .AuthenticatedBrowser.SessionCookiePolicy }}</span>
-	        <span class="pill info">{{ .AuthenticatedBrowser.CSRFBoundary }}</span>
-	        <span class="pill info">{{ .AuthenticatedBrowser.CSPBoundary }}</span>
-	        <span class="pill ok">identity_values_returned=false</span>
-	        <span class="pill ok">subject_returned=false</span>
-	        <span class="pill ok">email_returned=false</span>
-	        <span class="pill ok">name_returned=false</span>
-	        <span class="pill ok">claim_values_returned=false</span>
-	        <span class="pill ok">group_values_returned=false</span>
-	        <span class="pill ok">token_returned=false</span>
-	        <span class="pill ok">cookie_value_returned=false</span>
-	        <span class="pill ok">request_body_returned=false</span>
-	        <span class="pill ok">env_values_returned=false</span>
-	        <span class="pill ok">backend_path_returned=false</span>
-	        <span class="pill ok">connector_output_returned=false</span>
-	        <span class="pill ok">permit_payload_returned=false</span>
-	        <span class="pill ok">secret_value_returned=false</span>
-	        <span class="pill ok">value_returned=false</span>
-	      </div>
-	    </details>
-	    <div class="mode-grid" aria-label="Authenticated browser gates">
-	      {{ range .AuthenticatedBrowser.Gates }}
-	      <div class="mode-item {{ .Tone }}">
-	        <span>{{ .Label }}</span>
-	        <strong>{{ .State }}</strong>
-	        <p>{{ .Detail }}</p>
-	        <p><span class="pill ok">value_returned=false</span></p>
-	      </div>
-	      {{ end }}
-	    </div>
-	    <div class="mode-grid" aria-label="Signed-in role states">
-	      {{ range .AuthenticatedRole.Roles }}
-	      <div class="mode-item {{ .Tone }}">
-	        <span>{{ .Label }}</span>
-	        <strong>{{ .State }}</strong>
-	        <p>{{ .Detail }}</p>
-	        <p><span class="pill info">role {{ .Role }}</span> <span class="pill ok">value_returned=false</span></p>
-	      </div>
-	      {{ end }}
-	    </div>
-	    <div class="mode-grid" aria-label="Authenticated role gates">
-	      {{ range .AuthenticatedRole.Gates }}
-	      <div class="mode-item {{ .Tone }}">
-	        <span>{{ .Label }}</span>
-	        <strong>{{ .State }}</strong>
-	        <p>{{ .Detail }}</p>
-	        <p><span class="pill info">required {{ .RequiredRole }}</span> <span class="pill ok">value_returned=false</span></p>
-	        <p><span class="pill info">next</span> {{ .Next }}</p>
-	      </div>
-	      {{ end }}
-	    </div>
-	  </div>
-	</section>
-	<section class="panel" style="margin-bottom:16px" id="action-readiness">
-  <div class="panel-head">
-    <h2>Action readiness</h2>
-    <span class="pill {{ if .ActionReadiness.Blocked }}warn{{ else if .ActionReadiness.Gated }}warn{{ else }}ok{{ end }}">{{ .ActionReadiness.Available }} available</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .ActionReadiness.Summary }}</p>
-    <div class="witness-grid" aria-label="Action readiness witness">
-      <div class="witness-card {{ if .ActionReadiness.Blocked }}warn{{ else }}ok{{ end }}">
-        <span>Available actions</span>
-        <strong>{{ .ActionReadiness.Available }}</strong>
-        <p>Safe actions are visible only when their role and readiness checks pass.</p>
-      </div>
-      <div class="witness-card {{ if or .ActionReadiness.Gated .ActionReadiness.Blocked }}warn{{ else }}ok{{ end }}">
-        <span>Action gates</span>
-        <strong>{{ .ActionReadiness.Gated }} role / {{ .ActionReadiness.Blocked }} readiness</strong>
-        <p>Role-gated or readiness-blocked actions fail closed before connector work.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>values withheld</strong>
-        <p>Action readiness returns safety labels and next steps, not secret values or connector output.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Action readiness evidence flags</summary>
-      <div class="flag-cloud" aria-label="Action readiness value-free evidence flags">
-        <span class="pill ok">{{ .ActionReadiness.Available }} available</span>
-        <span class="pill info">{{ .ActionReadiness.Gated }} role gated</span>
-        <span class="pill {{ if .ActionReadiness.Blocked }}warn{{ else }}ok{{ end }}">{{ .ActionReadiness.Blocked }} readiness blocked</span>
-        <span class="pill ok">connector_output_returned=false</span>
-        <span class="pill ok">request_body_returned=false</span>
-        <span class="pill ok">backend_path_returned=false</span>
-        <span class="pill ok">env_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    <div class="mode-grid" aria-label="Action readiness">
-      {{ range .ActionReadiness.Actions }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Reason }}</p>
-        <p><span class="pill info">role {{ .RequiredRole }}</span> <span class="pill ok">value_returned=false</span></p>
-        <p><span class="pill info">safety</span> {{ .Safety }}</p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="mode-posture">
-  <div class="panel-head">
-    <h2>Deployment mode</h2>
-    <span class="pill info">{{ .ModePosture.Current }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .ModePosture.Summary }}</p>
-    <div class="witness-grid" aria-label="Deployment mode witness">
-      <div class="witness-card info">
-        <span>Current mode</span>
-        <strong>{{ .ModePosture.Current }}</strong>
-        <p>Runtime claim is shown in UI, health, and evidence.</p>
-      </div>
-      <div class="witness-card {{ if eq .ModePosture.Baseline "ready" }}ok{{ else if eq .ModePosture.Baseline "dev_only" }}warn{{ else }}warn{{ end }}">
-        <span>Baseline claim</span>
-        <strong>{{ .ModePosture.Baseline }}</strong>
-        <p>Local readiness stays separate from enterprise evidence.</p>
-      </div>
-      <div class="witness-card {{ if eq .ModePosture.Enterprise "candidate" }}ok{{ else }}warn{{ end }}">
-        <span>Enterprise claim</span>
-        <strong>{{ .ModePosture.Enterprise }}</strong>
-        <p>Enterprise is not trusted unless external evidence is complete.</p>
-      </div>
-    </div>
-    <div class="witness-grid" aria-label="Deployment mode boundary witness">
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>values withheld</strong>
-        <p>Mode posture returns claim state only, not secret values or backend evidence.</p>
-      </div>
-      <div class="witness-card info">
-        <span>Claim separation</span>
-        <strong>explicit</strong>
-        <p>Dev, self-hosted, and enterprise promises stay visibly different.</p>
-      </div>
-      <div class="witness-card {{ if eq .ModePosture.Enterprise "candidate" }}ok{{ else }}warn{{ end }}">
-        <span>Next claim</span>
-        <strong>enterprise {{ .ModePosture.Enterprise }}</strong>
-        <p>Stronger claims wait for release, restore, integration, privacy, and audit evidence.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Deployment mode evidence flags</summary>
-      <div class="flag-cloud" aria-label="Deployment mode value-free evidence flags">
-        <span class="pill info">current mode {{ .ModePosture.Current }}</span>
-        <span class="pill {{ if eq .ModePosture.Baseline "ready" }}ok{{ else }}warn{{ end }}">baseline {{ .ModePosture.Baseline }}</span>
-        <span class="pill {{ if eq .ModePosture.Enterprise "candidate" }}ok{{ else }}warn{{ end }}">enterprise {{ .ModePosture.Enterprise }}</span>
-        <span class="pill info">claim separation explicit</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill ok">backend_path_returned=false</span>
-        <span class="pill ok">env_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    <div class="mode-grid" aria-label="Deployment mode posture">
-      {{ range .ModePosture.Controls }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-      </div>
-      {{ end }}
-    </div>
-	</div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="enterprise-release-gate">
-  <div class="panel-head">
-    <h2>Enterprise release gate</h2>
-    <span class="pill {{ if eq .EnterpriseRelease.Status "candidate" }}ok{{ else if eq .EnterpriseRelease.Status "ready_for_review" }}info{{ else }}warn{{ end }}">{{ .EnterpriseRelease.Status }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .EnterpriseRelease.Summary }}</p>
-    <p><span class="pill info">Release witness</span> decision visible, external evidence values private</p>
-    <div class="witness-grid" aria-label="Enterprise release witness">
-      <div class="witness-card {{ if eq .EnterpriseRelease.Claim "enterprise_candidate" }}ok{{ else }}warn{{ end }}">
-        <span>Claim</span>
-        <strong>{{ .EnterpriseRelease.Claim }}</strong>
-        <p>{{ .EnterpriseRelease.CurrentMode }} now; {{ .EnterpriseRelease.TargetMode }} target.</p>
-      </div>
-      <div class="witness-card {{ if .EnterpriseRelease.Blocked }}warn{{ else }}ok{{ end }}">
-        <span>Release decision</span>
-        <strong>{{ .EnterpriseRelease.Verdict }}</strong>
-        <p>{{ .EnterpriseRelease.Blocked }} blocked, {{ .EnterpriseRelease.Passed }} passed, {{ .EnterpriseRelease.ReviewCount }} review.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Evidence boundary</span>
-        <strong>values withheld</strong>
-        <p>No evidence ref, procedure, ticket URL, backend path, request body, env, scanner output, artifact, or payload is shown.</p>
-      </div>
-    </div>
-    <p><span class="pill info">release cadence</span> {{ .EnterpriseRelease.ReleaseCadence }}</p>
-    <p><span class="pill info">next</span> {{ .EnterpriseRelease.Next }}</p>
-    <details class="evidence-flags">
-      <summary>Enterprise release evidence flags</summary>
-      <div class="flag-cloud" aria-label="Enterprise release value-free evidence flags">
-        <span class="pill info">current mode {{ .EnterpriseRelease.CurrentMode }}</span>
-        <span class="pill warn">target mode {{ .EnterpriseRelease.TargetMode }}</span>
-        <span class="pill {{ if eq .EnterpriseRelease.Claim "enterprise_candidate" }}ok{{ else }}warn{{ end }}">claim {{ .EnterpriseRelease.Claim }}</span>
-        <span class="pill info">verdict {{ .EnterpriseRelease.Verdict }}</span>
-        <span class="pill info">{{ .EnterpriseRelease.Required }} required</span>
-        <span class="pill ok">{{ .EnterpriseRelease.Passed }} passed</span>
-        <span class="pill {{ if .EnterpriseRelease.Blocked }}warn{{ else }}ok{{ end }}">{{ .EnterpriseRelease.Blocked }} blocked</span>
-        <span class="pill info">{{ .EnterpriseRelease.ReviewCount }} review</span>
-        <span class="pill info">{{ .EnterpriseRelease.EvidenceSignal }}</span>
-        <span class="pill info">gate {{ .EnterpriseRelease.EvidenceGate }}</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill ok">procedure_returned=false</span>
-        <span class="pill ok">ticket_url_returned=false</span>
-        <span class="pill ok">backend_path_returned=false</span>
-        <span class="pill ok">request_body_returned=false</span>
-        <span class="pill ok">env_returned=false</span>
-        <span class="pill ok">scanner_output_returned=false</span>
-        <span class="pill ok">artifact_returned=false</span>
-        <span class="pill ok">payload_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    <div class="mode-grid" aria-label="Enterprise release gate checklist">
-      {{ range .EnterpriseRelease.Checks }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-        <p><span class="pill info">owner {{ .OwnerRole }}</span> <span class="pill {{ if .Required }}warn{{ else }}info{{ end }}">required={{ .Required }}</span> <span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="enterprise-dry-run">
-  <div class="panel-head">
-    <h2>Enterprise dry run</h2>
-    <span class="pill {{ if eq .EnterpriseDryRun.Status "candidate" }}ok{{ else }}warn{{ end }}">{{ .EnterpriseDryRun.Status }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .EnterpriseDryRun.Summary }}</p>
-    <p><span class="pill info">Promotion dry-run witness</span> target path visible, evidence values private</p>
-    <div class="witness-grid" aria-label="Enterprise dry-run witness">
-      <div class="witness-card info">
-        <span>Promotion path</span>
-        <strong>{{ .EnterpriseDryRun.CurrentMode }} to {{ .EnterpriseDryRun.TargetMode }}</strong>
-        <p>Current mode stays explicit before any enterprise claim.</p>
-      </div>
-      <div class="witness-card {{ if .EnterpriseDryRun.Missing }}warn{{ else }}ok{{ end }}">
-        <span>Blockers</span>
-        <strong>{{ .EnterpriseDryRun.Missing }}</strong>
-        <p>{{ .EnterpriseDryRun.Required }} controls required before promotion.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Evidence boundary</span>
-        <strong>values withheld</strong>
-        <p>No external evidence ref or secret value is shown in the dry run.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Enterprise dry-run evidence flags</summary>
-      <div class="flag-cloud" aria-label="Enterprise dry-run value-free evidence flags">
-        <span class="pill info">{{ .EnterpriseDryRun.CurrentMode }} now</span>
-        <span class="pill warn">{{ .EnterpriseDryRun.TargetMode }} target</span>
-        <span class="pill {{ if .EnterpriseDryRun.Missing }}warn{{ else }}ok{{ end }}">{{ .EnterpriseDryRun.Missing }} blockers</span>
-        <span class="pill info">{{ .EnterpriseDryRun.Required }} required</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    <div class="mode-grid" aria-label="Enterprise dry-run checklist">
-      {{ range .EnterpriseDryRun.Checks }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-        <p><span class="pill info">owner {{ .OwnerRole }}</span> <span class="pill {{ if .Required }}warn{{ else }}info{{ end }}">required={{ .Required }}</span></p>
-        <p><span class="pill {{ if eq .Attachment "missing" }}warn{{ else if eq .Attachment "attached_presence_only" }}ok{{ else }}info{{ end }}">{{ .Attachment }}</span> <span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="enterprise-claim-review">
-  <div class="panel-head">
-    <h2>Enterprise claim review</h2>
-    <span class="pill {{ if eq .EnterpriseClaim.Status "candidate" }}ok{{ else if eq .EnterpriseClaim.Status "ready_for_review" }}info{{ else }}warn{{ end }}">{{ .EnterpriseClaim.Status }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .EnterpriseClaim.Summary }}</p>
-    <p><span class="pill info">Claim review witness</span> owner readiness visible, evidence values private</p>
-    <div class="witness-grid" aria-label="Enterprise claim witness">
-      <div class="witness-card {{ if eq .EnterpriseClaim.Claim "enterprise_candidate" }}ok{{ else }}warn{{ end }}">
-        <span>Claim</span>
-        <strong>{{ .EnterpriseClaim.Claim }}</strong>
-        <p>{{ .EnterpriseClaim.CurrentMode }} now; {{ .EnterpriseClaim.TargetMode }} target.</p>
-      </div>
-      <div class="witness-card {{ if .EnterpriseClaim.Missing }}warn{{ else }}ok{{ end }}">
-        <span>Owner evidence</span>
-        <strong>{{ .EnterpriseClaim.Ready }} ready</strong>
-        <p>{{ .EnterpriseClaim.Attached }} attached, {{ .EnterpriseClaim.Missing }} missing, {{ .EnterpriseClaim.ReviewCount }} review.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Evidence boundary</span>
-        <strong>values withheld</strong>
-        <p>No evidence ref, procedure, ticket URL, backend path, request body, env, or secret value is shown.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Enterprise claim evidence flags</summary>
-      <div class="flag-cloud" aria-label="Enterprise claim value-free evidence flags">
-        <span class="pill info">current mode {{ .EnterpriseClaim.CurrentMode }}</span>
-        <span class="pill warn">target mode {{ .EnterpriseClaim.TargetMode }}</span>
-        <span class="pill {{ if eq .EnterpriseClaim.Claim "enterprise_candidate" }}ok{{ else }}warn{{ end }}">claim {{ .EnterpriseClaim.Claim }}</span>
-        <span class="pill info">{{ .EnterpriseClaim.Required }} required</span>
-        <span class="pill ok">{{ .EnterpriseClaim.Ready }} ready</span>
-        <span class="pill info">{{ .EnterpriseClaim.Attached }} attached</span>
-        <span class="pill {{ if .EnterpriseClaim.Missing }}warn{{ else }}ok{{ end }}">{{ .EnterpriseClaim.Missing }} missing</span>
-        <span class="pill info">{{ .EnterpriseClaim.ReviewCount }} review</span>
-        <span class="pill info">{{ .EnterpriseClaim.EvidenceSignal }}</span>
-        <span class="pill info">gate {{ .EnterpriseClaim.EvidenceGate }}</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill ok">procedure_returned=false</span>
-        <span class="pill ok">ticket_url_returned=false</span>
-        <span class="pill ok">backend_path_returned=false</span>
-        <span class="pill ok">request_body_returned=false</span>
-        <span class="pill ok">env_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    <p><span class="pill info">review cadence</span> {{ .EnterpriseClaim.ReviewCadence }}</p>
-    <div class="mode-grid" aria-label="Enterprise claim owner review">
-      {{ range .EnterpriseClaim.Owners }}
-      <div class="mode-item {{ if .Missing }}warn{{ else }}ok{{ end }}">
-        <span>owner {{ .Role }}</span>
-        <strong>{{ .Ready }} ready</strong>
-        <p><span class="pill info">{{ .Required }} required</span> <span class="pill info">{{ .Attached }} attached</span> <span class="pill {{ if .Missing }}warn{{ else }}ok{{ end }}">{{ .Missing }} missing</span> <span class="pill info">{{ .ReviewCount }} review</span></p>
-      </div>
-      {{ end }}
-    </div>
-    <div class="mode-grid" aria-label="Enterprise claim checklist">
-      {{ range .EnterpriseClaim.Checks }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-        <p><span class="pill info">owner {{ .OwnerRole }}</span> <span class="pill {{ if .Required }}warn{{ else }}info{{ end }}">required={{ .Required }}</span></p>
-        <p><span class="pill {{ if eq .Attachment "missing" }}warn{{ else if eq .Attachment "attached_presence_only" }}ok{{ else }}info{{ end }}">{{ .Attachment }}</span> <span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="external-evidence">
-  <div class="panel-head">
-    <h2>External evidence workflow</h2>
-    <span class="pill {{ if eq .ExternalEvidence.Status "candidate" }}ok{{ else if eq .ExternalEvidence.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .ExternalEvidence.Status }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .ExternalEvidence.Summary }}</p>
-    <p><span class="pill info">Evidence intake witness</span> presence only, evidence values private</p>
-    <div class="witness-grid" aria-label="External evidence intake witness">
-      <div class="witness-card {{ if eq .ExternalEvidence.Status "candidate" }}ok{{ else if eq .ExternalEvidence.Status "blocked" }}warn{{ else }}info{{ end }}">
-        <span>Intake status</span>
-        <strong>{{ .ExternalEvidence.Status }}</strong>
-        <p>{{ .ExternalEvidence.Required }} controls tracked for enterprise evidence.</p>
-      </div>
-      <div class="witness-card {{ if .ExternalEvidence.Missing }}warn{{ else }}ok{{ end }}">
-        <span>Presence records</span>
-        <strong>{{ .ExternalEvidence.Attached }} attached</strong>
-        <p>{{ .ExternalEvidence.Missing }} missing, {{ .ExternalEvidence.ReviewCount }} review.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Evidence boundary</span>
-        <strong>values withheld</strong>
-        <p>No files, URLs, refs, notes, or evidence values are stored or shown.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>External evidence intake flags</summary>
-      <div class="flag-cloud" aria-label="External evidence value-free intake flags">
-        <span class="pill info">{{ .ExternalEvidence.Attached }} attached</span>
-        <span class="pill {{ if .ExternalEvidence.Missing }}warn{{ else }}ok{{ end }}">{{ .ExternalEvidence.Missing }} missing</span>
-        <span class="pill info">{{ .ExternalEvidence.ReviewCount }} review</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    <div class="mode-grid" aria-label="Presence-only external evidence workflow">
-      {{ range .ExternalEvidence.Items }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .Attachment }}</strong>
-        <p>{{ .Next }}</p>
-        <p><span class="pill info">owner {{ .OwnerRole }}</span> <span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">no refs stored</span></p>
-        {{ if eq .Attachment "attached_presence_only" }}
-        <p><span class="pill ok">presence recorded</span> <span class="pill ok">evidence stays external</span></p>
-        {{ else if .CanAttach }}
-        <form method="post" action="/ui/evidence/attachments">
-          <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
-          <input type="hidden" name="control_key" value="{{ .Key }}">
-          <input type="hidden" name="attestation" value="external_evidence_exists">
-          <button class="button quiet" type="submit">Mark present</button>
-        </form>
-        {{ else }}
-        <p><span class="pill warn">{{ .OwnerRole }} role required</span></p>
-        {{ end }}
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="enterprise-validation">
-  <div class="panel-head">
-    <h2>Enterprise validation</h2>
-    <span class="pill {{ if eq .Enterprise.Status "candidate" }}ok{{ else if eq .Enterprise.Status "not_claimed" }}info{{ else }}warn{{ end }}">{{ .Enterprise.Status }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .Enterprise.Summary }}</p>
-    <p><span class="pill info">Enterprise validation witness</span> control state visible, evidence values private</p>
-    <div class="witness-grid" aria-label="Enterprise validation witness">
-      <div class="witness-card {{ if eq .Enterprise.Status "candidate" }}ok{{ else if eq .Enterprise.Status "not_claimed" }}info{{ else }}warn{{ end }}">
-        <span>Validation status</span>
-        <strong>{{ .Enterprise.Status }}</strong>
-        <p>{{ .Enterprise.Mode }} mode is explicit.</p>
-      </div>
-      <div class="witness-card {{ if .Enterprise.MissingCount }}warn{{ else }}ok{{ end }}">
-        <span>Control gaps</span>
-        <strong>{{ .Enterprise.MissingCount }}</strong>
-        <p>{{ len .Enterprise.Controls }} controls tracked for review.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Evidence boundary</span>
-        <strong>values withheld</strong>
-        <p>Only presence and state are shown; evidence refs and secret values stay outside Janus.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Enterprise validation evidence flags</summary>
-      <div class="flag-cloud" aria-label="Enterprise validation value-free evidence flags">
-        <span class="pill ok">value_returned=false</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill info">presence only</span>
-        <span class="pill info">self-hosted safe</span>
-        <span class="pill warn">enterprise required</span>
-      </div>
-    </details>
-    <div class="mode-grid" aria-label="Enterprise validation controls">
-      {{ range .Enterprise.Controls }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-        <p><span class="pill info">owner {{ .OwnerRole }}</span> <span class="pill {{ if eq .Attachment "missing" }}warn{{ else if eq .Attachment "attached_presence_only" }}ok{{ else }}info{{ end }}">{{ .Attachment }}</span></p>
-        <p><span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-	</div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="attachment-review">
-  <div class="panel-head">
-    <h2>Attachment review</h2>
-    <span class="pill {{ if eq .AttachmentReview.Status "candidate" }}ok{{ else if eq .AttachmentReview.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .AttachmentReview.Status }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .AttachmentReview.Summary }}</p>
-    <p><span class="pill info">Attachment review witness</span> owner readiness visible, evidence values private</p>
-    <div class="witness-grid" aria-label="Enterprise attachment review witness">
-      <div class="witness-card {{ if eq .AttachmentReview.Status "candidate" }}ok{{ else if eq .AttachmentReview.Status "blocked" }}warn{{ else }}info{{ end }}">
-        <span>Review status</span>
-        <strong>{{ .AttachmentReview.Status }}</strong>
-        <p>{{ .AttachmentReview.ReviewCount }} owner review items.</p>
-      </div>
-      <div class="witness-card {{ if .AttachmentReview.Missing }}warn{{ else }}ok{{ end }}">
-        <span>Attachments</span>
-        <strong>{{ .AttachmentReview.Attached }} attached</strong>
-        <p>{{ .AttachmentReview.ReviewCount }} review items, {{ .AttachmentReview.Missing }} missing before enterprise promotion.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Evidence boundary</span>
-        <strong>values withheld</strong>
-        <p>Owner review shows presence only; evidence refs and values stay external.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Attachment review evidence flags</summary>
-      <div class="flag-cloud" aria-label="Attachment review value-free evidence flags">
-        <span class="pill {{ if .AttachmentReview.Required }}warn{{ else }}info{{ end }}">{{ .AttachmentReview.Required }} required</span>
-        <span class="pill {{ if .AttachmentReview.Attached }}ok{{ else }}info{{ end }}">{{ .AttachmentReview.Attached }} attached</span>
-        <span class="pill {{ if .AttachmentReview.Missing }}warn{{ else }}ok{{ end }}">{{ .AttachmentReview.Missing }} missing</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    <div class="mode-grid" aria-label="Enterprise attachment owner review">
-      {{ range .AttachmentReview.Owners }}
-      <div class="mode-item {{ if .Missing }}warn{{ else if .Attached }}ok{{ else }}info{{ end }}">
-        <span>owner {{ .Role }}</span>
-        <strong>{{ .Attached }} / {{ len .Controls }} attached</strong>
-        <p><span class="pill {{ if .Required }}warn{{ else }}info{{ end }}">{{ .Required }} required</span> <span class="pill {{ if .Missing }}warn{{ else }}ok{{ end }}">{{ .Missing }} missing</span> <span class="pill info">{{ .ReviewCount }} review</span></p>
-        {{ range .Controls }}
-        <p><strong>{{ .Label }}</strong> <span class="pill {{ if eq .Attachment "missing" }}warn{{ else if eq .Attachment "attached_presence_only" }}ok{{ else }}info{{ end }}">{{ .Attachment }}</span> <span class="pill info">{{ .State }}</span></p>
-        <p><span class="pill info">{{ .EvidenceSignal }}</span> <span class="pill ok">evidence ref not returned</span></p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-        {{ end }}
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="break-glass-review-workflow">
-  <div class="panel-head">
-    <h2>Break-glass review workflow</h2>
-    <span class="pill {{ if eq .BreakGlassWorkflow.Status "attached" }}ok{{ else if eq .BreakGlassWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .BreakGlassWorkflow.Status }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .BreakGlassWorkflow.Summary }}</p>
-    <div class="witness-grid" aria-label="Break-glass review workflow witness">
-      <div class="witness-card {{ if eq .BreakGlassWorkflow.Status "attached" }}ok{{ else if eq .BreakGlassWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">
-        <span>Workflow state</span>
-        <strong>{{ .BreakGlassWorkflow.Status }}</strong>
-        <p>Owner: {{ .BreakGlassWorkflow.OwnerRole }}. Review cadence: {{ .BreakGlassWorkflow.ReviewCadence }}.</p>
-      </div>
-      <div class="witness-card {{ if .BreakGlassWorkflow.Attached }}ok{{ else if .BreakGlassWorkflow.Missing }}warn{{ else }}info{{ end }}">
-        <span>Evidence handoff</span>
-        <strong>{{ .BreakGlassWorkflow.Attachment }}</strong>
-        <p>{{ if .BreakGlassWorkflow.Attached }}Presence recorded; emergency evidence stays external.{{ else if .BreakGlassWorkflow.CanAttach }}Ready for presence-only attachment after external review.{{ else }}Role-gated until the owner can attest external evidence.{{ end }}</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>values withheld</strong>
-        <p>Procedures, contacts, targets, credentials, and evidence refs are not returned.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Break-glass review evidence flags</summary>
-      <div class="flag-cloud" aria-label="Break-glass review value-free evidence flags">
-        <span class="pill info">owner {{ .BreakGlassWorkflow.OwnerRole }}</span>
-        <span class="pill {{ if .BreakGlassWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .BreakGlassWorkflow.Required }}</span>
-        <span class="pill {{ if .BreakGlassWorkflow.Attached }}ok{{ else if .BreakGlassWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .BreakGlassWorkflow.Attachment }}</span>
-        <span class="pill info">{{ .BreakGlassWorkflow.EvidenceSignal }}</span>
-        <span class="pill info">review cadence</span>
-        <span class="pill info">{{ .BreakGlassWorkflow.ReviewCadence }}</span>
-        <span class="pill ok">procedure_returned=false</span>
-        <span class="pill ok">contact_path_returned=false</span>
-        <span class="pill ok">access_target_returned=false</span>
-        <span class="pill ok">credential_returned=false</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    {{ if .BreakGlassWorkflow.Attached }}
-    <p><span class="pill ok">presence recorded</span> <span class="pill ok">emergency evidence stays external</span> {{ .BreakGlassWorkflow.Next }}</p>
-    {{ else if .BreakGlassWorkflow.CanAttach }}
-    <form method="post" action="/ui/evidence/attachments">
-      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
-      <input type="hidden" name="control_key" value="{{ .BreakGlassWorkflow.ControlKey }}">
-      <input type="hidden" name="attestation" value="external_evidence_exists">
-      <button class="button quiet" type="submit">Mark break-glass review present</button>
-    </form>
-    <p>{{ .BreakGlassWorkflow.Next }}</p>
-    {{ else }}
-    <p><span class="pill warn">{{ .BreakGlassWorkflow.OwnerRole }} role required</span> {{ .BreakGlassWorkflow.Next }}</p>
-    {{ end }}
-    <div class="mode-grid" aria-label="Break-glass review workflow checks">
-      {{ range .BreakGlassWorkflow.Checks }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="remote-audit-workflow">
-  <div class="panel-head">
-    <h2>Remote audit workflow</h2>
-    <span class="pill {{ if eq .RemoteAuditWorkflow.Status "attached" }}ok{{ else if eq .RemoteAuditWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .RemoteAuditWorkflow.Status }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .RemoteAuditWorkflow.Summary }}</p>
-    <div class="witness-grid" aria-label="Remote audit workflow witness">
-      <div class="witness-card {{ if eq .RemoteAuditWorkflow.Status "attached" }}ok{{ else if eq .RemoteAuditWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">
-        <span>Workflow state</span>
-        <strong>{{ .RemoteAuditWorkflow.Status }}</strong>
-        <p>Owner: {{ .RemoteAuditWorkflow.OwnerRole }}. Review cadence: {{ .RemoteAuditWorkflow.ReviewCadence }}.</p>
-      </div>
-      <div class="witness-card {{ if .RemoteAuditWorkflow.Attached }}ok{{ else if .RemoteAuditWorkflow.Missing }}warn{{ else }}info{{ end }}">
-        <span>Evidence handoff</span>
-        <strong>{{ .RemoteAuditWorkflow.Attachment }}</strong>
-        <p>{{ if .RemoteAuditWorkflow.Attached }}Presence recorded; audit shipping evidence stays external.{{ else if .RemoteAuditWorkflow.CanAttach }}Ready for presence-only attachment after external review.{{ else }}Role-gated until the owner can attest external evidence.{{ end }}</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>values withheld</strong>
-        <p>Endpoints, payloads, audit tokens, and evidence refs are not returned.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Remote audit evidence flags</summary>
-      <div class="flag-cloud" aria-label="Remote audit value-free evidence flags">
-        <span class="pill info">owner {{ .RemoteAuditWorkflow.OwnerRole }}</span>
-        <span class="pill {{ if .RemoteAuditWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .RemoteAuditWorkflow.Required }}</span>
-        <span class="pill {{ if .RemoteAuditWorkflow.Attached }}ok{{ else if .RemoteAuditWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .RemoteAuditWorkflow.Attachment }}</span>
-        <span class="pill info">{{ .RemoteAuditWorkflow.EvidenceSignal }}</span>
-        <span class="pill info">review cadence</span>
-        <span class="pill info">{{ .RemoteAuditWorkflow.ReviewCadence }}</span>
-        <span class="pill ok">endpoint_returned=false</span>
-        <span class="pill ok">payload_returned=false</span>
-        <span class="pill ok">audit_token_returned=false</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    {{ if .RemoteAuditWorkflow.Attached }}
-    <p><span class="pill ok">presence recorded</span> <span class="pill ok">audit shipping evidence stays external</span> {{ .RemoteAuditWorkflow.Next }}</p>
-    {{ else if .RemoteAuditWorkflow.CanAttach }}
-    <form method="post" action="/ui/evidence/attachments">
-      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
-      <input type="hidden" name="control_key" value="{{ .RemoteAuditWorkflow.ControlKey }}">
-      <input type="hidden" name="attestation" value="external_evidence_exists">
-      <button class="button quiet" type="submit">Mark remote audit present</button>
-    </form>
-    <p>{{ .RemoteAuditWorkflow.Next }}</p>
-    {{ else }}
-    <p><span class="pill warn">{{ .RemoteAuditWorkflow.OwnerRole }} role required</span> {{ .RemoteAuditWorkflow.Next }}</p>
-    {{ end }}
-    <div class="mode-grid" aria-label="Remote audit workflow checks">
-      {{ range .RemoteAuditWorkflow.Checks }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="integration-conformance-workflow">
-  <div class="panel-head">
-    <h2>Integration conformance workflow</h2>
-    <span class="pill {{ if eq .IntegrationWorkflow.Status "attached" }}ok{{ else if eq .IntegrationWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .IntegrationWorkflow.Status }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .IntegrationWorkflow.Summary }}</p>
-    <div class="witness-grid" aria-label="Integration conformance workflow witness">
-      <div class="witness-card {{ if eq .IntegrationWorkflow.Status "attached" }}ok{{ else if eq .IntegrationWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">
-        <span>Workflow state</span>
-        <strong>{{ .IntegrationWorkflow.Status }}</strong>
-        <p>Owner: {{ .IntegrationWorkflow.OwnerRole }}. Review cadence: {{ .IntegrationWorkflow.ReviewCadence }}.</p>
-      </div>
-      <div class="witness-card {{ if .IntegrationWorkflow.Attached }}ok{{ else if .IntegrationWorkflow.Missing }}warn{{ else }}info{{ end }}">
-        <span>Evidence handoff</span>
-        <strong>{{ .IntegrationWorkflow.Attachment }}</strong>
-        <p>{{ if .IntegrationWorkflow.Attached }}Presence recorded; connector evidence stays external.{{ else if .IntegrationWorkflow.CanAttach }}Ready for presence-only attachment after external review.{{ else }}Role-gated until the owner can attest external evidence.{{ end }}</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>values withheld</strong>
-        <p>Connector config, endpoints, payloads, and evidence refs are not returned.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Integration conformance evidence flags</summary>
-      <div class="flag-cloud" aria-label="Integration conformance value-free evidence flags">
-        <span class="pill info">owner {{ .IntegrationWorkflow.OwnerRole }}</span>
-        <span class="pill {{ if .IntegrationWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .IntegrationWorkflow.Required }}</span>
-        <span class="pill {{ if .IntegrationWorkflow.Attached }}ok{{ else if .IntegrationWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .IntegrationWorkflow.Attachment }}</span>
-        <span class="pill info">{{ .IntegrationWorkflow.EvidenceSignal }}</span>
-        <span class="pill info">review cadence</span>
-        <span class="pill info">{{ .IntegrationWorkflow.ReviewCadence }}</span>
-        <span class="pill ok">connector_config_returned=false</span>
-        <span class="pill ok">endpoint_returned=false</span>
-        <span class="pill ok">payload_returned=false</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    {{ if .IntegrationWorkflow.Attached }}
-    <p><span class="pill ok">presence recorded</span> <span class="pill ok">connector evidence stays external</span> {{ .IntegrationWorkflow.Next }}</p>
-    {{ else if .IntegrationWorkflow.CanAttach }}
-    <form method="post" action="/ui/evidence/attachments">
-      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
-      <input type="hidden" name="control_key" value="{{ .IntegrationWorkflow.ControlKey }}">
-      <input type="hidden" name="attestation" value="external_evidence_exists">
-      <button class="button quiet" type="submit">Mark integration conformance present</button>
-    </form>
-    <p>{{ .IntegrationWorkflow.Next }}</p>
-    {{ else }}
-    <p><span class="pill warn">{{ .IntegrationWorkflow.OwnerRole }} role required</span> {{ .IntegrationWorkflow.Next }}</p>
-    {{ end }}
-    <div class="mode-grid" aria-label="Integration conformance workflow checks">
-      {{ range .IntegrationWorkflow.Checks }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="restore-drill-workflow">
-  <div class="panel-head">
-    <h2>Restore drill workflow</h2>
-    <span class="pill {{ if eq .RestoreWorkflow.Status "attached" }}ok{{ else if eq .RestoreWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .RestoreWorkflow.Status }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .RestoreWorkflow.Summary }}</p>
-    <div class="witness-grid" aria-label="Restore drill workflow witness">
-      <div class="witness-card {{ if eq .RestoreWorkflow.Status "attached" }}ok{{ else if eq .RestoreWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">
-        <span>Workflow state</span>
-        <strong>{{ .RestoreWorkflow.Status }}</strong>
-        <p>Owner: {{ .RestoreWorkflow.OwnerRole }}. Review cadence: {{ .RestoreWorkflow.ReviewCadence }}.</p>
-      </div>
-      <div class="witness-card {{ if .RestoreWorkflow.Attached }}ok{{ else if .RestoreWorkflow.Missing }}warn{{ else }}info{{ end }}">
-        <span>Evidence handoff</span>
-        <strong>{{ .RestoreWorkflow.Attachment }}</strong>
-        <p>{{ if .RestoreWorkflow.Attached }}Presence recorded; recovery evidence stays external.{{ else if .RestoreWorkflow.CanAttach }}Ready for presence-only attachment after external review.{{ else }}Role-gated until the owner can attest external evidence.{{ end }}</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>values withheld</strong>
-        <p>Restore evidence refs and recovery material are not returned.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Restore drill evidence flags</summary>
-      <div class="flag-cloud" aria-label="Restore drill value-free evidence flags">
-        <span class="pill info">owner {{ .RestoreWorkflow.OwnerRole }}</span>
-        <span class="pill {{ if .RestoreWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .RestoreWorkflow.Required }}</span>
-        <span class="pill {{ if .RestoreWorkflow.Attached }}ok{{ else if .RestoreWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .RestoreWorkflow.Attachment }}</span>
-        <span class="pill info">{{ .RestoreWorkflow.EvidenceSignal }}</span>
-        <span class="pill info">review cadence</span>
-        <span class="pill info">{{ .RestoreWorkflow.ReviewCadence }}</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    {{ if .RestoreWorkflow.Attached }}
-    <p><span class="pill ok">presence recorded</span> <span class="pill ok">recovery evidence stays external</span> {{ .RestoreWorkflow.Next }}</p>
-    {{ else if .RestoreWorkflow.CanAttach }}
-    <form method="post" action="/ui/evidence/attachments">
-      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
-      <input type="hidden" name="control_key" value="{{ .RestoreWorkflow.ControlKey }}">
-      <input type="hidden" name="attestation" value="external_evidence_exists">
-      <button class="button quiet" type="submit">Mark restore drill present</button>
-    </form>
-    <p>{{ .RestoreWorkflow.Next }}</p>
-    {{ else }}
-    <p><span class="pill warn">{{ .RestoreWorkflow.OwnerRole }} role required</span> {{ .RestoreWorkflow.Next }}</p>
-    {{ end }}
-    <div class="mode-grid" aria-label="Restore drill workflow recovery checks">
-      {{ range .RestoreWorkflow.Checks }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="release-provenance-workflow">
-  <div class="panel-head">
-    <h2>Release provenance workflow</h2>
-    <span class="pill {{ if eq .ReleaseWorkflow.Status "attached" }}ok{{ else if eq .ReleaseWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .ReleaseWorkflow.Status }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .ReleaseWorkflow.Summary }}</p>
-    <div class="witness-grid" aria-label="Release provenance workflow witness">
-      <div class="witness-card {{ if eq .ReleaseWorkflow.Status "attached" }}ok{{ else if eq .ReleaseWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">
-        <span>Workflow state</span>
-        <strong>{{ .ReleaseWorkflow.Status }}</strong>
-        <p>Owner: {{ .ReleaseWorkflow.OwnerRole }}. Review cadence: {{ .ReleaseWorkflow.ReviewCadence }}.</p>
-      </div>
-      <div class="witness-card {{ if .ReleaseWorkflow.Attached }}ok{{ else if .ReleaseWorkflow.Missing }}warn{{ else }}info{{ end }}">
-        <span>Evidence handoff</span>
-        <strong>{{ .ReleaseWorkflow.Attachment }}</strong>
-        <p>{{ if .ReleaseWorkflow.Attached }}Presence recorded; release evidence stays external.{{ else if .ReleaseWorkflow.CanAttach }}Ready for presence-only attachment after external review.{{ else }}Role-gated until the owner can attest external evidence.{{ end }}</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>values withheld</strong>
-        <p>Build artifacts, release material, and evidence refs are not returned.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Release provenance evidence flags</summary>
-      <div class="flag-cloud" aria-label="Release provenance value-free evidence flags">
-        <span class="pill info">owner {{ .ReleaseWorkflow.OwnerRole }}</span>
-        <span class="pill {{ if .ReleaseWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .ReleaseWorkflow.Required }}</span>
-        <span class="pill {{ if .ReleaseWorkflow.Attached }}ok{{ else if .ReleaseWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .ReleaseWorkflow.Attachment }}</span>
-        <span class="pill info">{{ .ReleaseWorkflow.EvidenceSignal }}</span>
-        <span class="pill info">review cadence</span>
-        <span class="pill info">{{ .ReleaseWorkflow.ReviewCadence }}</span>
-        <span class="pill ok">artifact_returned=false</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    {{ if .ReleaseWorkflow.Attached }}
-    <p><span class="pill ok">presence recorded</span> <span class="pill ok">release evidence stays external</span> {{ .ReleaseWorkflow.Next }}</p>
-    {{ else if .ReleaseWorkflow.CanAttach }}
-    <form method="post" action="/ui/evidence/attachments">
-      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
-      <input type="hidden" name="control_key" value="{{ .ReleaseWorkflow.ControlKey }}">
-      <input type="hidden" name="attestation" value="external_evidence_exists">
-      <button class="button quiet" type="submit">Mark release provenance present</button>
-    </form>
-    <p>{{ .ReleaseWorkflow.Next }}</p>
-    {{ else }}
-    <p><span class="pill warn">{{ .ReleaseWorkflow.OwnerRole }} role required</span> {{ .ReleaseWorkflow.Next }}</p>
-    {{ end }}
-    <div class="mode-grid" aria-label="Release provenance workflow checks">
-      {{ range .ReleaseWorkflow.Checks }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="privacy-retention-workflow">
-  <div class="panel-head">
-    <h2>Privacy and retention workflow</h2>
-    <span class="pill {{ if eq .PrivacyWorkflow.Status "attached" }}ok{{ else if eq .PrivacyWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .PrivacyWorkflow.Status }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .PrivacyWorkflow.Summary }}</p>
-    <div class="witness-grid" aria-label="Privacy and retention workflow witness">
-      <div class="witness-card {{ if eq .PrivacyWorkflow.Status "attached" }}ok{{ else if eq .PrivacyWorkflow.Status "blocked" }}warn{{ else }}info{{ end }}">
-        <span>Workflow state</span>
-        <strong>{{ .PrivacyWorkflow.Status }}</strong>
-        <p>Owner: {{ .PrivacyWorkflow.OwnerRole }}. Review cadence: {{ .PrivacyWorkflow.ReviewCadence }}.</p>
-      </div>
-      <div class="witness-card {{ if .PrivacyWorkflow.Attached }}ok{{ else if .PrivacyWorkflow.Missing }}warn{{ else }}info{{ end }}">
-        <span>Evidence handoff</span>
-        <strong>{{ .PrivacyWorkflow.Attachment }}</strong>
-        <p>{{ if .PrivacyWorkflow.Attached }}Presence recorded; policy evidence stays external.{{ else if .PrivacyWorkflow.CanAttach }}Ready for presence-only attachment after external review.{{ else }}Role-gated until the owner can attest external evidence.{{ end }}</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>values withheld</strong>
-        <p>Policy docs, raw metadata, evidence refs, and secret values are not returned.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Privacy and retention evidence flags</summary>
-      <div class="flag-cloud" aria-label="Privacy and retention value-free evidence flags">
-	        <span class="pill info">owner {{ .PrivacyWorkflow.OwnerRole }}</span>
-	        <span class="pill info">control_key={{ .PrivacyWorkflow.ControlKey }}</span>
-	        <span class="pill {{ if .PrivacyWorkflow.Required }}warn{{ else }}info{{ end }}">required={{ .PrivacyWorkflow.Required }}</span>
-        <span class="pill {{ if .PrivacyWorkflow.Attached }}ok{{ else if .PrivacyWorkflow.Missing }}warn{{ else }}info{{ end }}">{{ .PrivacyWorkflow.Attachment }}</span>
-        <span class="pill info">{{ .PrivacyWorkflow.EvidenceSignal }}</span>
-        <span class="pill info">review cadence</span>
-        <span class="pill info">{{ .PrivacyWorkflow.ReviewCadence }}</span>
-        <span class="pill ok">policy_doc_returned=false</span>
-        <span class="pill ok">raw_metadata_returned=false</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    {{ if .PrivacyWorkflow.Attached }}
-    <p><span class="pill ok">presence recorded</span> <span class="pill ok">policy evidence stays external</span> {{ .PrivacyWorkflow.Next }}</p>
-    {{ else if .PrivacyWorkflow.CanAttach }}
-    <form method="post" action="/ui/evidence/attachments">
-      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
-      <input type="hidden" name="control_key" value="{{ .PrivacyWorkflow.ControlKey }}">
-      <input type="hidden" name="attestation" value="external_evidence_exists">
-      <button class="button quiet" type="submit">Mark privacy policy present</button>
-    </form>
-    <p>{{ .PrivacyWorkflow.Next }}</p>
-    {{ else }}
-    <p><span class="pill warn">{{ .PrivacyWorkflow.OwnerRole }} role required</span> {{ .PrivacyWorkflow.Next }}</p>
-    {{ end }}
-    <div class="mode-grid" aria-label="Privacy and retention workflow checks">
-      {{ range .PrivacyWorkflow.Checks }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="restore-drill-proof">
-  <div class="panel-head">
-    <h2>Restore drill proof</h2>
-    <span class="pill {{ if eq .RestoreProof.Status "candidate" }}ok{{ else if eq .RestoreProof.Status "blocked" }}warn{{ else }}info{{ end }}">{{ .RestoreProof.Status }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .RestoreProof.Summary }}</p>
-    <div class="witness-grid" aria-label="Restore drill proof witness">
-      <div class="witness-card {{ if eq .RestoreProof.Status "candidate" }}ok{{ else if eq .RestoreProof.Status "blocked" }}warn{{ else }}info{{ end }}">
-        <span>Recovery claim</span>
-        <strong>{{ .RestoreProof.Status }}</strong>
-        <p>{{ .RestoreProof.Mode }} recovery proof is evaluated from safe metadata only.</p>
-      </div>
-      <div class="witness-card {{ if eq .RestoreProof.Attachment "attached_presence_only" }}ok{{ else if eq .RestoreProof.Attachment "missing" }}warn{{ else }}info{{ end }}">
-        <span>Drill record</span>
-        <strong>{{ .RestoreProof.Attachment }}</strong>
-        <p>Janus records whether the external drill exists, not the drill contents.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>values withheld</strong>
-        <p>Restore evidence refs, raw recovery notes, and secret values are not returned.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Restore drill proof evidence flags</summary>
-      <div class="flag-cloud" aria-label="Restore drill proof value-free evidence flags">
-        <span class="pill info">{{ .RestoreProof.Mode }}</span>
-        <span class="pill {{ if eq .RestoreProof.Attachment "attached_presence_only" }}ok{{ else if eq .RestoreProof.Attachment "missing" }}warn{{ else }}info{{ end }}">{{ .RestoreProof.Attachment }}</span>
-        <span class="pill ok">evidence_ref_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    <div class="mode-grid" aria-label="Restore drill proof">
-      {{ range .RestoreProof.Checks }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Proof }}</p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="privacy-retention">
-  <div class="panel-head">
-    <h2>Privacy and retention</h2>
-    <span class="pill {{ if .Privacy.ReviewCount }}warn{{ else }}ok{{ end }}">{{ if .Privacy.ReviewCount }}{{ .Privacy.ReviewCount }} review{{ else }}clear{{ end }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .Privacy.Summary }}</p>
-    <p><span class="pill ok">{{ .Privacy.Redaction }}</span> <span class="pill info">{{ .Privacy.Retention }}</span> <span class="pill ok">value_returned=false</span></p>
-    <div class="mode-grid" aria-label="Privacy and retention posture">
-      {{ range .Privacy.Surfaces }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-        <p><span class="pill info">{{ .Retention }}</span></p>
-      </div>
-      {{ end }}
-    </div>
-    <p><strong>Excluded from evidence</strong><br>{{ range .Privacy.Excluded }}<span class="pill warn">{{ . }}</span> {{ end }}</p>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="evidence-boundary">
-  <div class="panel-head">
-    <h2>Evidence export</h2>
-    <span class="pill {{ if .CanExportEvidence }}ok{{ else }}warn{{ end }}">{{ .EvidenceBoundary.Gate }}</span>
-  </div>
-  <div class="panel-body stack">
-    <p><span class="pill ok">{{ .EvidenceBoundary.RedactionModel }}</span> <span class="pill ok">value_returned=false</span> <span class="pill info">audience {{ .EvidenceBoundary.Audience }}</span></p>
-    <div class="witness-grid" aria-label="Evidence export witness">
-      <div class="witness-card {{ if .CanExportEvidence }}ok{{ else }}warn{{ end }}">
-        <span>Audit proof</span>
-        <strong>{{ if .CanExportEvidence }}ready{{ else }}role gated{{ end }}</strong>
-        <p>Export proves posture, controls, recent audit refs, and integrity without carrying secret-bearing payloads.</p>
-      </div>
-      <div class="witness-card {{ if .EvidenceBoundary.HashAvailable }}ok{{ else }}warn{{ end }}">
-        <span>Download gate</span>
-        <strong>{{ if .CanExportEvidence }}exact receipt{{ else }}auditor only{{ end }}</strong>
-        <p>{{ .EvidenceReceipt.Verification }}</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>metadata only</strong>
-        <p>Secret values, tokens, cookies, request bodies, env, command output, and backend paths stay out.</p>
-      </div>
-      <div class="witness-card info">
-        <span>Retention posture</span>
-        <strong>{{ .Privacy.Retention }}</strong>
-        <p>Evidence is useful for review while excluded data remains outside Janus retention and export.</p>
-      </div>
-    </div>
-    {{ if .CanExportEvidence }}
-    <div class="receipt" aria-label="Evidence download receipt">
-      <div>
-        <strong>Exact download receipt</strong>
-        <p>The downloaded JSON includes <span class="mono">{{ .EvidenceReceipt.BodyField }}</span>, and the response header <span class="mono">{{ .EvidenceReceipt.HashHeader }}</span> matches it.</p>
-      </div>
-      <a class="button primary" href="/api/evidence" download="janus-evidence.json">Download JSON</a>
-    </div>
-    {{ if .EvidenceHashFull }}
-    <label class="hash-copy">Current preview
-      <input readonly value="{{ .EvidenceHashFull }}" aria-label="Evidence hash preview">
-    </label>
-    <p><span class="pill info">{{ .EvidenceReceipt.Algorithm }}</span> <span class="pill ok">copy-safe metadata</span> <span class="pill info">exact hash returned on download</span></p>
-    {{ end }}
-    {{ else }}
-    <div class="receipt" aria-label="Evidence download receipt">
-      <div>
-        <strong>Download restricted</strong>
-        <p>Auditor role is required before Janus returns an evidence pack or exact receipt.</p>
-      </div>
-      <span class="pill warn">auditor required</span>
-    </div>
-    {{ end }}
-    <div class="mode-grid" aria-label="Evidence export boundary">
-      <div class="mode-item {{ if .CanExportEvidence }}ok{{ else }}warn{{ end }}">
-        <span>Export role</span>
-        <strong>{{ .EvidenceBoundary.Audience }}</strong>
-        <p>{{ if .CanExportEvidence }}Evidence JSON is available to this session.{{ else }}Evidence JSON is gated from this session.{{ end }}</p>
-      </div>
-      <div class="mode-item {{ if .EvidenceBoundary.HashAvailable }}ok{{ else }}warn{{ end }}">
-        <span>Integrity</span>
-        <strong>{{ if .EvidenceBoundary.HashAvailable }}hash ready{{ else }}restricted{{ end }}</strong>
-        <p>{{ .EvidenceBoundary.Integrity }}</p>
-      </div>
-      <div class="mode-item {{ if .CanExportEvidence }}ok{{ else }}warn{{ end }}">
-        <span>Receipt</span>
-        <strong>{{ .EvidenceReceipt.State }}</strong>
-        <p>{{ .EvidenceReceipt.Verification }}</p>
-      </div>
-      <div class="mode-item ok">
-        <span>Boundary</span>
-        <strong>metadata only</strong>
-        <p>No secret-bearing payloads are exported. Coverage: {{ .EvidenceReceipt.Coverage }}.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Evidence export evidence flags</summary>
-      <div class="flag-cloud" aria-label="Included evidence">
-        <span class="pill ok">Included evidence</span>
-        {{ range .EvidenceBoundary.Includes }}<span class="pill info">{{ . }}</span>{{ end }}
-      </div>
-      <div class="flag-cloud" aria-label="Never exported evidence">
-        <span class="pill ok">Never exported</span>
-        {{ range .EvidenceBoundary.Excludes }}<span class="pill warn">{{ . }}</span>{{ end }}
-      </div>
-    </details>
-  </div>
-</section>
-<section class="panel" style="margin-bottom:16px" id="role-workbench">
-  <div class="panel-head">
-    <h2>Role workbench</h2>
-    <span class="pill info">least privilege</span>
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .RoleWorkbench.Summary }}</p>
-    <p><span class="pill ok">value_returned=false</span> <span class="pill ok">hidden controls not rendered</span></p>
-    <div class="witness-grid" aria-label="Role workbench witness">
-      <div class="witness-card ok">
-        <span>Available controls</span>
-        <strong>{{ len .RoleWorkbench.Available }} rendered</strong>
-        <p>This session only sees controls allowed by its active roles and current readiness.</p>
-      </div>
-      <div class="witness-card {{ if .RoleWorkbench.Hidden }}warn{{ else }}ok{{ end }}">
-        <span>Hidden controls</span>
-        <strong>{{ len .RoleWorkbench.Hidden }} hidden</strong>
-        <p>Controls outside this role boundary are withheld instead of shown as tempting dead ends.</p>
-      </div>
-      <div class="witness-card info">
-        <span>Least privilege</span>
-        <strong>role boundary</strong>
-        <p>Viewer, operator, auditor, and admin duties stay separated before any action is offered.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Value boundary</span>
-        <strong>values withheld</strong>
-        <p>Role checks use labels and counts; identity, claim, token, cookie, and secret values stay private.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Role workbench evidence flags</summary>
-      <div class="flag-cloud" aria-label="Role workbench value-free evidence flags">
-        <span class="pill ok">available_controls={{ len .RoleWorkbench.Available }}</span>
-        <span class="pill ok">hidden_controls={{ len .RoleWorkbench.Hidden }}</span>
-        <span class="pill ok">hidden_controls_not_rendered=true</span>
-        <span class="pill ok">role_boundary_enforced=true</span>
-        <span class="pill ok">identity_values_returned=false</span>
-        <span class="pill ok">claim_values_returned=false</span>
-        <span class="pill ok">token_returned=false</span>
-        <span class="pill ok">cookie_value_returned=false</span>
-        <span class="pill ok">secret_value_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    <p><strong>Rendered now</strong></p>
-    <div class="mode-grid" aria-label="Rendered role controls">
-      {{ range .RoleWorkbench.Available }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-    {{ if .RoleWorkbench.Hidden }}
-    <p><strong>Hidden by role</strong></p>
-    <div class="mode-grid" aria-label="Hidden role controls">
-      {{ range .RoleWorkbench.Hidden }}
-      <div class="mode-item {{ .Tone }}">
-        <span>{{ .Label }}</span>
-        <strong>{{ .State }}</strong>
-        <p>{{ .Detail }}</p>
-        <p><span class="pill info">next</span> {{ .Next }}</p>
-      </div>
-      {{ end }}
-    </div>
-    {{ end }}
-  </div>
-</section>
-{{ if not .Ready }}
-<section class="panel security-state" style="margin-bottom:16px" id="security-state">
-  <div class="panel-head"><h2>Security state</h2><span class="pill warn">restricted</span></div>
-  <div class="panel-body stack">
-    <p>Sensitive actions are blocked until readiness checks recover.</p>
-    <p><span class="pill warn">ready=false</span> <span class="pill ok">value_returned=false</span></p>
-  </div>
-</section>
-{{ end }}
-{{ if .Issues }}
-<section class="panel" style="margin-bottom:16px" id="gates">
-  <div class="panel-head"><h2>Readiness gates</h2><span class="pill warn">action needed</span></div>
-  <div class="panel-body stack">
-    {{ range .Issues }}<p class="warn">{{ . }}</p>{{ end }}
-  </div>
-</section>
-{{ end }}
-{{ if .ActionResult }}
-<section class="panel" style="margin-bottom:16px" id="result">
-  <div class="panel-head">
-    <h2>{{ .ActionResult.Title }}</h2>
-    {{ if eq .ActionResult.Outcome "allowed" }}<span class="pill ok">allowed</span>{{ else }}<span class="pill warn">denied</span>{{ end }}
-  </div>
-  <div class="panel-body stack">
-    <p>{{ .ActionResult.Message }}</p>
-    {{ if .ActionResult.RunReason }}<p class="warn">{{ .ActionResult.RunReason }}</p>{{ end }}
-    {{ if .ActionResult.RequestID }}<p class="mono">request_id={{ .ActionResult.RequestID }}</p>{{ end }}
-    {{ if .ActionResult.Receipt }}
-    <div class="receipt" aria-label="Action receipt">
-      <div>
-        <strong>Action receipt</strong>
-        <p><span class="mono">request_id={{ .ActionResult.Receipt.RequestID }}</span></p>
-      </div>
-      <span class="pill {{ if eq .ActionResult.Receipt.Outcome "allowed" }}ok{{ else }}info{{ end }}">{{ .ActionResult.Receipt.Outcome }}</span>
-    </div>
-    <div class="verdict" aria-label="Action receipt checks">
-      <span><strong>Role</strong>{{ if .ActionResult.Receipt.RoleChecked }} checked{{ else }} pending{{ end }}</span>
-      <span><strong>CSRF</strong>{{ if .ActionResult.Receipt.CSRFChecked }} checked{{ else }} pending{{ end }}</span>
-      <span><strong>Readiness</strong>{{ if .ActionResult.Receipt.ReadinessChecked }} checked{{ else }} pending{{ end }}</span>
-      <span><strong>Audit</strong>{{ if .ActionResult.Receipt.AuditRecorded }} recorded{{ else }} pending{{ end }}</span>
-    </div>
-    <div class="receipt-proof" aria-label="Action receipt proof">
-      <span><strong>Proof</strong>{{ if .ActionResult.Receipt.TamperEvident }}hash locked{{ else }}pending{{ end }}</span>
-      <span><strong>ID</strong><span class="mono">{{ .ActionResult.Receipt.ReceiptID }}</span></span>
-      <span><strong>Hash</strong><span class="mono">{{ .ActionResult.Receipt.ReceiptHash }}</span></span>
-    </div>
-    <div class="receipt-copy" aria-label="Copy-safe action receipt fields">
-      <label>Receipt id
-        <input readonly value="{{ .ActionResult.Receipt.ReceiptID }}" aria-label="Receipt id">
-      </label>
-      <label>Receipt hash
-        <input readonly value="{{ .ActionResult.Receipt.ReceiptHash }}" aria-label="Receipt hash">
-      </label>
-      <label>Request id
-        <input readonly value="{{ .ActionResult.Receipt.RequestID }}" aria-label="Receipt request id">
-      </label>
-    </div>
-    <div class="receipt" aria-label="Action receipt verification">
-      <div>
-        <strong>Verify receipt</strong>
-        <p>{{ .ActionResult.Receipt.Verification }}</p>
-      </div>
-      <span class="pill ok">copy-safe</span>
-    </div>
-    <p><strong>Covered checks</strong><br><span class="pill ok">role_checked={{ .ActionResult.Receipt.RoleChecked }}</span> <span class="pill ok">csrf_checked={{ .ActionResult.Receipt.CSRFChecked }}</span> <span class="pill ok">readiness_checked={{ .ActionResult.Receipt.ReadinessChecked }}</span> <span class="pill ok">audit_recorded={{ .ActionResult.Receipt.AuditRecorded }}</span></p>
-    <p><span class="pill ok">{{ .ActionResult.Receipt.Boundary }}</span> <span class="pill ok">secret_value_returned=false</span> <span class="pill ok">request_body_returned=false</span></p>
-    <p><span class="pill ok">tamper_evident=true</span> <span class="pill info">{{ .ActionResult.Receipt.Algorithm }}</span> <span class="pill info">{{ .ActionResult.Receipt.Schema }}</span></p>
-    <p><span class="pill info">covers</span> {{ .ActionResult.Receipt.Coverage }}</p>
-    <p><span class="pill info">next</span> {{ .ActionResult.Receipt.Next }}</p>
-    {{ end }}
-    {{ if .ActionResult.PermitID }}
-    {{ if .ActionResult.OutputScrubbed }}
-    <div class="witness-grid" aria-label="Permit safety check result witness">
-      <div class="witness-card ok">
-        <span>Execution verdict</span>
-        <strong>{{ .ActionResult.Status }}</strong>
-        <p>The safety check returns a closed result instead of executing a connector.</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Scrubbed output</span>
-        <strong>confirmed</strong>
-        <p>No command output, connector response, payload, or secret value is returned.</p>
-      </div>
-      <div class="witness-card info">
-        <span>Run denial reason</span>
-        <strong>closed</strong>
-        <p>{{ .ActionResult.RunReason }}</p>
-      </div>
-      <div class="witness-card ok">
-        <span>Permit context</span>
-        <strong>short lived</strong>
-        <p>Permit <span class="mono">{{ .ActionResult.PermitID }}</span> stays metadata-only until it expires at {{ .ActionResult.ExpiresAt }}.</p>
-      </div>
-    </div>
-    <details class="evidence-flags">
-      <summary>Permit safety check evidence flags</summary>
-      <div class="flag-cloud" aria-label="Permit safety check value-free evidence flags">
-        <span class="pill ok">run_status={{ .ActionResult.Status }}</span>
-        <span class="pill ok">run_reason_returned=true</span>
-        <span class="pill ok">output_scrubbed={{ .ActionResult.OutputScrubbed }}</span>
-        <span class="pill ok">connector_execution=false</span>
-        <span class="pill ok">connector_output_returned=false</span>
-        <span class="pill ok">permit_payload_returned=false</span>
-        <span class="pill ok">secret_value_returned=false</span>
-        <span class="pill ok">backend_path_returned=false</span>
-        <span class="pill ok">source_path_returned=false</span>
-        <span class="pill ok">request_body_returned=false</span>
-        <span class="pill ok">env_returned=false</span>
-        <span class="pill ok">value_returned=false</span>
-      </div>
-    </details>
-    {{ end }}
-    <div class="verdict" aria-label="Permit safety verdict">
-      <span><strong>Metadata only</strong> secret value withheld</span>
-      <span><strong>No connector</strong> execution unavailable</span>
-      <span><strong>Scrubbed output</strong>{{ if .ActionResult.OutputScrubbed }} confirmed{{ else }} pending check{{ end }}</span>
-      <span><strong>Audited</strong> value_returned=false</span>
-    </div>
-    {{ end }}
-    {{ if .ActionResult.ControlKey }}
-    <div class="facts">
-      <div class="fact"><strong>{{ .ActionResult.ControlKey }}</strong><span class="muted">control key</span></div>
-      <div class="fact"><strong>{{ .ActionResult.EvidenceState }}</strong><span class="muted">evidence state</span></div>
-      <div class="fact"><strong>{{ .ActionResult.Status }}</strong><span class="muted">attachment</span></div>
-    </div>
-    <p><span class="pill ok">presence only</span> <span class="pill ok">evidence_ref_returned=false</span> <span class="pill ok">request_body_returned=false</span></p>
-    {{ end }}
-    {{ if .ActionResult.HandleID }}
-    <div class="facts">
-      <div class="fact"><strong class="mono">{{ .ActionResult.HandleID }}</strong><span class="muted">handle id</span></div>
-      <div class="fact"><strong>{{ .ActionResult.SecretRef }}</strong><span class="muted">secret ref</span></div>
-      <div class="fact"><strong>{{ .ActionResult.ExpiresAt }}</strong><span class="muted">expires</span></div>
-    </div>
-    {{ end }}
-    {{ if .ActionResult.PermitID }}
-    <div class="facts">
-      <div class="fact"><strong class="mono">{{ .ActionResult.PermitID }}</strong><span class="muted">permit id</span></div>
-      <div class="fact"><strong>{{ .ActionResult.Status }}</strong><span class="muted">status</span></div>
-      <div class="fact"><strong>{{ .ActionResult.Action }}</strong><span class="muted">action</span></div>
-    </div>
-    {{ if .ActionResult.OutputScrubbed }}<p><span class="pill ok">output_scrubbed=true</span></p>{{ end }}
-    {{ if .CanOperate }}
-    <form method="post" action="/ui/permits/{{ .ActionResult.PermitID }}/run">
-      <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-      <button class="button quiet" type="submit">Run safety check</button>
-    </form>
-    {{ else }}
-    <p><span class="pill warn">operator role required</span></p>
-    {{ end }}
-    {{ end }}
-    <p><span class="pill ok">value_returned=false</span></p>
-  </div>
-</section>
-{{ end }}
-{{ if .Focus.Descriptor.ID }}
-<section class="grid" id="focus">
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Descriptor focus</h2>
-      {{ if .Focus.Gates }}<span class="pill warn">{{ .Focus.GateCount }} gates</span>{{ else }}<span class="pill ok">clear</span>{{ end }}
-    </div>
-    <div class="panel-body stack">
-      <div class="intro-copy">
-        <h2>{{ .Focus.Descriptor.DisplayName }}</h2>
-        <p><span class="mono">{{ .Focus.Descriptor.ID }}</span></p>
-      </div>
-      <div class="facts">
-        <div class="fact"><strong>{{ .Focus.Descriptor.Classification }}</strong><span class="muted">classification</span></div>
-        <div class="fact"><strong>{{ .Focus.Lifecycle }}</strong><span class="muted">lifecycle</span></div>
-        <div class="fact"><strong>{{ .Focus.Descriptor.Owner }}</strong><span class="muted">owner</span></div>
-      </div>
-      <div class="facts">
-        <div class="fact"><strong>{{ .Focus.Descriptor.Scope }}</strong><span class="muted">scope</span></div>
-        <div class="fact"><strong>{{ .Focus.Descriptor.Provider }}</strong><span class="muted">provider</span></div>
-        <div class="fact"><strong>{{ .Focus.Descriptor.Status }}</strong><span class="muted">provider status</span></div>
-      </div>
-      <div class="facts">
-        <div class="fact"><strong>{{ .Focus.Descriptor.ConsumerCount }}</strong><span class="muted">consumers</span></div>
-        <div class="fact"><strong>{{ .Focus.Descriptor.RotationDays }} days</strong><span class="muted">rotation</span></div>
-        <div class="fact"><strong>{{ if .Focus.NormalUseBlocked }}blocked{{ else }}allowed{{ end }}</strong><span class="muted">normal use</span></div>
-      </div>
-      <p>
-        <span class="pill ok">value-free metadata</span>
-        {{ if .Focus.Descriptor.UseEnabled }}<span class="pill ok">use profiled</span>{{ else }}<span class="pill warn">approved use missing</span>{{ end }}
-        {{ if .Focus.LifecycleBlocked }}<span class="pill warn">lifecycle blocked</span>{{ else }}<span class="pill ok">lifecycle allowed</span>{{ end }}
-        <span class="pill ok">reveal disabled</span>
-        {{ range .Focus.Descriptor.Tags }}<span class="pill info">{{ . }}</span> {{ end }}
-      </p>
-      {{ if .Focus.NormalUseReason }}<p class="warn">{{ .Focus.NormalUseReason }}</p>{{ end }}
-      {{ range .Focus.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
-    </div>
-  </div>
-</section>
-{{ end }}
-{{ if .CanOperate }}
-<section class="grid" id="warden">
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Request metadata handle</h2>
-      <span class="pill ok">value-free</span>
-    </div>
-    <div class="panel-body stack">
-      {{ if .CanOperate }}
-      <div class="witness-grid" aria-label="Request handle witness">
-        <div class="witness-card ok">
-          <span>Intent boundary</span>
-          <strong>metadata handle</strong>
-          <p>This action creates a short-lived handle for the selected descriptor and never asks for a secret value.</p>
-        </div>
-        <div class="witness-card ok">
-          <span>Role and readiness</span>
-          <strong>checked first</strong>
-          <p>Operator role, CSRF, and readiness must pass before Janus issues anything.</p>
-        </div>
-        <div class="witness-card ok">
-          <span>No connector</span>
-          <strong>no execution</strong>
-          <p>The request does not run a connector, call a backend secret path, or return command output.</p>
-        </div>
-        <div class="witness-card info">
-          <span>Metadata receipt</span>
-          <strong>audit linked</strong>
-          <p>A successful request returns a copy-safe action receipt with request id, receipt id, and receipt hash.</p>
-        </div>
-      </div>
-      <div class="receipt" aria-label="Request metadata handle boundary">
-        <div>
-          <strong>Before you issue</strong>
-          <p>Form sends descriptor id and reason only. Result returns a handle id, descriptor ref, expiry, and receipt proof.</p>
-        </div>
-        <span class="pill ok">values withheld</span>
-      </div>
-      <details class="evidence-flags">
-        <summary>Request handle evidence flags</summary>
-        <div class="flag-cloud" aria-label="Request handle value-free evidence flags">
-          <span class="pill ok">will_create=metadata_handle</span>
-          <span class="pill ok">operator_role_required=true</span>
-          <span class="pill ok">csrf_required=true</span>
-          <span class="pill ok">readiness_required=true</span>
-          <span class="pill ok">audit_receipt_returned=true</span>
-          <span class="pill ok">connector_execution=false</span>
-          <span class="pill ok">secret_value_returned=false</span>
-          <span class="pill ok">backend_path_returned=false</span>
-          <span class="pill ok">source_path_returned=false</span>
-          <span class="pill ok">request_body_returned=false</span>
-          <span class="pill ok">env_returned=false</span>
-          <span class="pill ok">value_returned=false</span>
-        </div>
-      </details>
-      <form class="flow" method="post" action="/ui/warden/resolve">
-        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-        <label>Descriptor
-          <select name="ref" required>
-            {{ range .Descriptors }}<option value="{{ .ID }}" {{ if eq .ID $.SelectedRef }}selected{{ end }}>{{ .DisplayName }}</option>{{ end }}
-          </select>
-        </label>
-        <label>Reason
-          <input name="reason" maxlength="160" required placeholder="maintenance, audit, rotation">
-        </label>
-        <button class="primary" type="submit">Issue metadata handle</button>
-      </form>
-      {{ else }}
-      <div class="stack">
-        <p class="warn">Operator role required.</p>
-        <p>Viewing posture is allowed, but requesting handles is role-gated.</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-<section class="grid" id="permit">
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Request permit</h2>
-      <span class="pill warn">no execution connector</span>
-    </div>
-    <div class="panel-body stack">
-      {{ if .CanOperate }}
-      <div class="witness-grid" aria-label="Request permit witness">
-        <div class="witness-card ok">
-          <span>Permit intent</span>
-          <strong>metadata only</strong>
-          <p>The permit records approved use for the selected descriptor without opening secret value access.</p>
-        </div>
-        <div class="witness-card ok">
-          <span>No connector</span>
-          <strong>run stays closed</strong>
-          <p>Permit creation does not execute a connector, call a backend secret path, or return command output.</p>
-        </div>
-        <div class="witness-card info">
-          <span>Reason and destination</span>
-          <strong>audit context</strong>
-          <p>Reason and destination are short labels for review; they are not used as payloads or instructions.</p>
-        </div>
-        <div class="witness-card ok">
-          <span>Short-lived status</span>
-          <strong>10 minutes</strong>
-          <p>Permit records expire automatically and return a copy-safe action receipt when created.</p>
-        </div>
-      </div>
-      <div class="receipt" aria-label="Request permit boundary">
-        <div>
-          <strong>Before you create</strong>
-          <p>Form sends descriptor id, approved action, destination label, and reason only. Result returns permit id, descriptor ref, status, expiry, and receipt proof.</p>
-        </div>
-        <span class="pill ok">values withheld</span>
-      </div>
-      <details class="evidence-flags">
-        <summary>Request permit evidence flags</summary>
-        <div class="flag-cloud" aria-label="Request permit value-free evidence flags">
-          <span class="pill ok">will_create=metadata_permit</span>
-          <span class="pill ok">permit_intent=metadata_only</span>
-          <span class="pill ok">operator_role_required=true</span>
-          <span class="pill ok">csrf_required=true</span>
-          <span class="pill ok">readiness_required=true</span>
-          <span class="pill ok">audit_receipt_returned=true</span>
-          <span class="pill ok">connector_execution=false</span>
-          <span class="pill ok">connector_output_returned=false</span>
-          <span class="pill ok">permit_payload_returned=false</span>
-          <span class="pill ok">secret_value_returned=false</span>
-          <span class="pill ok">backend_path_returned=false</span>
-          <span class="pill ok">source_path_returned=false</span>
-          <span class="pill ok">request_body_returned=false</span>
-          <span class="pill ok">env_returned=false</span>
-          <span class="pill ok">value_returned=false</span>
-        </div>
-      </details>
-      <form class="flow" method="post" action="/ui/permits">
-        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-        <label>Descriptor
-          <select name="ref" required>
-            {{ range .Descriptors }}<option value="{{ .ID }}" {{ if eq .ID $.SelectedRef }}selected{{ end }}>{{ .DisplayName }}</option>{{ end }}
-          </select>
-        </label>
-        <label>Action
-          <select name="action" required>
-            <option value="metadata_use">metadata_use</option>
-            <option value="resolve_handle">resolve_handle</option>
-          </select>
-        </label>
-        <label>Destination
-          <input name="destination" maxlength="120" placeholder="janus dashboard">
-        </label>
-        <label>Reason
-          <input name="reason" maxlength="160" required placeholder="audit, rotation, incident review">
-        </label>
-        <button class="primary" type="submit">Create metadata permit</button>
-      </form>
-      {{ else }}
-      <div class="stack">
-        <p class="warn">Operator role required.</p>
-        <p>Viewing posture is allowed, but permit requests are role-gated.</p>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-</section>
-{{ end }}
-{{ if and .CanOperate .Permits }}
-<section class="grid" id="permits">
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Recent permits</h2>
-      {{ if .PermitPosture.Persisted }}<span class="pill ok">{{ len .Permits }} durable</span>{{ else }}<span class="pill warn">{{ len .Permits }} in memory</span>{{ end }}
-    </div>
-    <div class="panel-body stack">
-      <div class="witness-grid" aria-label="Recent permit safety witness">
-        <div class="witness-card ok">
-          <span>Check boundary</span>
-          <strong>metadata only</strong>
-          <p>Running a safety check evaluates the permit record and never asks for a secret value.</p>
-        </div>
-        <div class="witness-card ok">
-          <span>No connector execution</span>
-          <strong>closed</strong>
-          <p>V1 has no execution connector, so permit checks return a no-execution verdict.</p>
-        </div>
-        <div class="witness-card ok">
-          <span>Scrubbed result</span>
-          <strong>required</strong>
-          <p>Check output is scrubbed and no connector output, payload, request body, or env data is returned.</p>
-        </div>
-        <div class="witness-card info">
-          <span>Receipt after check</span>
-          <strong>copy-safe</strong>
-          <p>Each check writes audit evidence and returns request id, receipt id, and receipt hash.</p>
-        </div>
-      </div>
-      <details class="evidence-flags">
-        <summary>Recent permit evidence flags</summary>
-        <div class="flag-cloud" aria-label="Recent permit value-free evidence flags">
-          <span class="pill ok">permit_count={{ len .Permits }}</span>
-          <span class="pill ok">run_check_available=true</span>
-          <span class="pill ok">connector_execution=false</span>
-          <span class="pill ok">connector_output_returned=false</span>
-          <span class="pill ok">permit_payload_returned=false</span>
-          <span class="pill ok">request_body_returned=false</span>
-          <span class="pill ok">env_returned=false</span>
-          <span class="pill ok">secret_value_returned=false</span>
-          <span class="pill ok">value_returned=false</span>
-        </div>
-      </details>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Permit</th><th>Secret ref</th><th>Action</th><th>Status</th><th>Expires</th><th>Check</th></tr></thead>
-        <tbody>
-        {{ range .Permits }}
-          <tr>
-            <td class="mono">{{ .ID }}</td>
-            <td>{{ .SecretRef }}</td>
-            <td>{{ .Action }}</td>
-            <td>{{ .Status }}</td>
-            <td>{{ .ExpiresAt.Format "15:04:05" }}</td>
-            <td>
-              {{ if $.CanOperate }}
-              <form method="post" action="/ui/permits/{{ .ID }}/run">
-                <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
-                <button class="button quiet" type="submit">Run safety check</button>
-              </form>
-              {{ else }}
-              <span class="pill warn">operator role required</span>
-              {{ end }}
-            </td>
-          </tr>
-        {{ end }}
-        </tbody>
-      </table>
-    </div>
-  </div>
-</section>
-{{ end }}
-<section class="grid" id="posture">
-  <div class="panel half">
-    <div class="panel-head">
-      <h2>Access policy</h2>
-      {{ if .Access.ExplicitBindings }}<span class="pill ok">explicit bindings</span>{{ else }}<span class="pill warn">bootstrap</span>{{ end }}
-    </div>
-    <div class="panel-body stack">
-      <p>
-        {{ range .Session.Roles }}<span class="pill info">{{ . }}</span> {{ end }}
-      </p>
-      <div class="facts">
-        <div class="fact"><strong>{{ .Access.GateCount }}</strong><span class="muted">role gates</span></div>
-        <div class="fact"><strong>{{ if .Access.BootstrapOwner }}on{{ else }}off{{ end }}</strong><span class="muted">bootstrap owner</span></div>
-        <div class="fact"><strong>{{ .Access.ClaimPolicy }}</strong><span class="muted">claim policy</span></div>
-        <div class="fact"><strong>{{ .Access.SubjectBindingCount }}</strong><span class="muted">subject bindings</span></div>
-        <div class="fact"><strong>{{ .Access.GroupBindingCount }}</strong><span class="muted">group bindings</span></div>
-        <div class="fact"><strong>auditor</strong><span class="muted">evidence role</span></div>
-        <div class="fact"><strong>{{ .SessionPosture.TTLLabel }}</strong><span class="muted">session ttl</span></div>
-        <div class="fact"><strong>{{ .SessionPosture.ExpiresLabel }}</strong><span class="muted">expires</span></div>
-        <div class="fact"><strong>{{ .SessionPosture.CookieSameSite }}</strong><span class="muted">session cookie</span></div>
-      </div>
-      <div class="mode-grid" aria-label="Role policy proof">
-        {{ range .Access.BindingSources }}
-        <div class="mode-item {{ .Tone }}">
-          <span>{{ .Label }}</span>
-          <strong>{{ .State }}</strong>
-          <p><span class="pill info">{{ .Count }} bindings</span> <span class="pill ok">value_returned=false</span></p>
-          <p>{{ .Detail }}</p>
-        </div>
-        {{ end }}
-      </div>
-      {{ range .Access.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
-    </div>
-  </div>
-  <div class="panel half">
-    <div class="panel-head">
-      <h2>Scope boundary</h2>
-      {{ if .Scope.Gates }}<span class="pill warn">review</span>{{ else }}<span class="pill ok">enforced</span>{{ end }}
-    </div>
-    <div class="panel-body stack">
-      <p>{{ range .Scope.AllowedScopes }}<span class="pill info">{{ . }}</span> {{ end }}</p>
-      <div class="facts">
-        <div class="fact"><strong>{{ .Scope.DescriptorCount }}</strong><span class="muted">catalog descriptors</span></div>
-        <div class="fact"><strong>{{ .Scope.OutOfScopeCount }}</strong><span class="muted">out of scope</span></div>
-        <div class="fact"><strong>{{ if .Scope.Strict }}on{{ else }}off{{ end }}</strong><span class="muted">strict mode</span></div>
-      </div>
-      {{ range .Scope.Gates }}<p class="warn">{{ .Message }}</p>{{ end }}
-    </div>
-  </div>
-  <div class="panel" id="role-policy-readiness">
-    <div class="panel-head">
-      <h2>Role policy readiness</h2>
-      <span class="pill {{ if eq .RolePolicyReadiness.Status "ready" }}ok{{ else }}warn{{ end }}">{{ .RolePolicyReadiness.Status }}</span>
-    </div>
-    <div class="panel-body stack">
-      <p>{{ .RolePolicyReadiness.Summary }}</p>
-      <p><span class="pill {{ if .RolePolicyReadiness.Ready }}ok{{ else }}warn{{ end }}">{{ .RolePolicyReadiness.ReadyLanes }} ready lanes</span> <span class="pill {{ if .RolePolicyReadiness.MissingLanes }}warn{{ else }}ok{{ end }}">{{ .RolePolicyReadiness.MissingLanes }} missing lanes</span> <span class="pill info">bootstrap {{ .RolePolicyReadiness.BootstrapOwnerState }}</span> <span class="pill info">{{ .RolePolicyReadiness.EvidenceSignal }}</span> <span class="pill ok">subject_values_returned=false</span> <span class="pill ok">group_values_returned=false</span> <span class="pill ok">claim_values_returned=false</span> <span class="pill ok">env_values_returned=false</span> <span class="pill ok">backend_path_returned=false</span> <span class="pill ok">token_returned=false</span> <span class="pill ok">value_returned=false</span></p>
-      <p><span class="pill info">next</span> {{ .RolePolicyReadiness.Next }}</p>
-      <div class="mode-grid" aria-label="Role policy readiness lanes">
-        {{ range .RolePolicyReadiness.Lanes }}
-        <div class="mode-item {{ .Tone }}">
-          <span>{{ .Label }}</span>
-          <strong>{{ .State }}</strong>
-          <p>{{ .Detail }}</p>
-          <p><span class="pill info">role {{ .Role }}</span> <span class="pill {{ if .Ready }}ok{{ else }}warn{{ end }}">{{ .BindingCount }} bindings</span> <span class="pill info">subject_binding_configured={{ .SubjectBindingConfigured }}</span> <span class="pill info">group_binding_configured={{ .GroupBindingConfigured }}</span></p>
-          <p><span class="pill info">next</span> {{ .Next }}</p>
-        </div>
-        {{ end }}
-      </div>
-      <div class="mode-grid" aria-label="Bootstrap to explicit role setup path">
-        {{ range .RolePolicyReadiness.Steps }}
-        <div class="mode-item {{ .Tone }}">
-          <span>{{ .Label }}</span>
-          <strong>{{ .State }}</strong>
-          <p>{{ .Detail }}</p>
-          <p><span class="pill info">owner {{ .OwnerRole }}</span> <span class="pill ok">value_returned=false</span></p>
-          <p><span class="pill info">next</span> {{ .Next }}</p>
-        </div>
-        {{ end }}
-      </div>
-    </div>
-  </div>
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Duty boundary</h2>
-      <span class="pill info">role matrix</span>
-    </div>
-    <div class="panel-body">
-      <div class="role-matrix" aria-label="Role duty matrix">
-        {{ range .RoleBoundaries }}
-        <div class="role-card {{ if .Active }}active{{ end }}">
-          <div class="role-head">
-            <strong>{{ .Role }}</strong>
-            {{ if .Active }}<span class="pill ok">active</span>{{ else }}<span class="pill">inactive</span>{{ end }}
-          </div>
-          <div class="role-label">{{ .Duty }}</div>
-          <p>{{ .Allowed }}</p>
-          <p class="warn">{{ .Blocked }}</p>
-        </div>
-        {{ end }}
-      </div>
-    </div>
-  </div>
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Lifecycle posture</h2>
-      {{ if .Lifecycle.Gates }}<span class="pill warn">{{ .Lifecycle.GateCount }} gates</span>{{ else }}<span class="pill ok">normal use clear</span>{{ end }}
-    </div>
-    <div class="panel-body stack">
-      <div class="witness-grid" aria-label="Lifecycle posture witness">
-        <div class="witness-card {{ if .Lifecycle.Gates }}warn{{ else }}ok{{ end }}">
-          <span>Normal-use gate</span>
-          <strong>{{ if .Lifecycle.Gates }}review{{ else }}clear{{ end }}</strong>
-          <p>Only active or rotating descriptors with an approved profile can move into normal metadata use.</p>
-        </div>
-        <div class="witness-card {{ if .Lifecycle.BlockedCount }}warn{{ else }}ok{{ end }}">
-          <span>Blocked lifecycle</span>
-          <strong>{{ .Lifecycle.BlockedCount }} blocked</strong>
-          <p>Draft, deprecated, disabled, pending-delete, destroyed, or unknown states fail closed.</p>
-        </div>
-        <div class="witness-card {{ if .Lifecycle.StaleCount }}warn{{ else }}ok{{ end }}">
-          <span>Freshness review</span>
-          <strong>{{ .Lifecycle.StaleCount }} stale</strong>
-          <p>Missing or old freshness timestamps stay visible before stronger lifecycle claims.</p>
-        </div>
-        <div class="witness-card ok">
-          <span>Value boundary</span>
-          <strong>metadata only</strong>
-          <p>Lifecycle evidence uses state, counts, safe refs, and reasons; secret values stay outside Janus.</p>
-        </div>
-      </div>
-      <p>{{ range .Lifecycle.StateCounts }}<span class="pill info">{{ .State }} {{ .Count }}</span> {{ end }}</p>
-      <div class="facts">
-        <div class="fact"><strong>{{ .Lifecycle.ActiveCount }}</strong><span class="muted">active</span></div>
-        <div class="fact"><strong>{{ .Lifecycle.BlockedCount }}</strong><span class="muted">blocked</span></div>
-        <div class="fact"><strong>{{ .Lifecycle.StaleCount }}</strong><span class="muted">stale</span></div>
-      </div>
-      <details class="evidence-flags">
-        <summary>Lifecycle posture evidence flags</summary>
-        <div class="flag-cloud" aria-label="Lifecycle value-free evidence flags">
-          <span class="pill ok">supported_states={{ len .Lifecycle.SupportedStates }}</span>
-          <span class="pill ok">active_count={{ .Lifecycle.ActiveCount }}</span>
-          <span class="pill {{ if .Lifecycle.BlockedCount }}warn{{ else }}ok{{ end }}">blocked_count={{ .Lifecycle.BlockedCount }}</span>
-          <span class="pill {{ if .Lifecycle.StaleCount }}warn{{ else }}ok{{ end }}">stale_count={{ .Lifecycle.StaleCount }}</span>
-          <span class="pill {{ if .Lifecycle.Gates }}warn{{ else }}ok{{ end }}">gate_count={{ .Lifecycle.GateCount }}</span>
-          <span class="pill ok">normal_use_fail_closed=true</span>
-          <span class="pill ok">secret_value_returned=false</span>
-          <span class="pill ok">backend_path_returned=false</span>
-          <span class="pill ok">request_body_returned=false</span>
-          <span class="pill ok">value_returned=false</span>
-        </div>
-      </details>
-      {{ range .Lifecycle.Gates }}<p class="warn">{{ .SecretRef }}: {{ .Message }}</p>{{ end }}
-    </div>
-  </div>
-</section>
-	<section class="grid" id="audit">
-	  <div class="panel">
-	    <div class="panel-head">
-	      <h2>Audit trail</h2>
-	      {{ if .CanViewAudit }}
-	      <span class="pill {{ .AuditTrail.ChainTone }}">{{ .AuditTrail.ChainState }}</span>
-	      {{ else }}
-	      <span class="pill warn">auditor required</span>
-	      {{ end }}
-	    </div>
-	    <div class="panel-body stack">
-	      <p>{{ .AuditTrail.Summary }}</p>
-	      {{ if .CanViewAudit }}
-	      <p>
-	      {{ range .Posture.SeverityCounts }}
-	        <span class="pill {{ if or (eq .Severity "critical") (eq .Severity "warning") }}warn{{ else }}info{{ end }}">{{ .Severity }} {{ .Count }}</span>
-	      {{ end }}
-	      <span class="pill info">visible {{ .AuditTrail.VisibleCount }}</span>
-	      <span class="pill ok">value_returned=false</span>
-	      </p>
-	      <div class="witness-grid" aria-label="Recent audit trail witness">
-	        <div class="witness-card ok">
-	          <span>Chronological history</span>
-	          <strong>{{ .AuditTrail.VisibleCount }} visible</strong>
-	          <p>Rows show safe action labels in event order with raw route paths and raw reasons withheld.</p>
-	        </div>
-	        <div class="witness-card {{ .AuditTrail.ChainTone }}">
-	          <span>Hash chain</span>
-	          <strong>{{ .AuditTrail.ChainState }}</strong>
-	          <p>Each chained event keeps a previous hash and event hash for tamper review.</p>
-	        </div>
-	        <div class="witness-card info">
-	          <span>Receipt linkage</span>
-	          <strong>request id</strong>
-	          <p>Request ids connect browser actions, action receipts, and audit events without identity values.</p>
-	        </div>
-	        <div class="witness-card ok">
-	          <span>Value boundary</span>
-	          <strong>metadata only</strong>
-	          <p>Subjects, claims, tokens, cookies, request bodies, env data, backend paths, and secret values stay out.</p>
-	        </div>
-	      </div>
-	      <details class="evidence-flags">
-	        <summary>Recent audit evidence flags</summary>
-	        <div class="flag-cloud" aria-label="Recent audit value-free evidence flags">
-	          <span class="pill ok">audit_entries={{ .AuditTrail.EntryCount }}</span>
-	          <span class="pill ok">visible_audit_rows={{ .AuditTrail.VisibleCount }}</span>
-	          <span class="pill ok">chronological_history=true</span>
-	          <span class="pill {{ if .Posture.ChainVerified }}ok{{ else }}warn{{ end }}">hash_chain_verified={{ .Posture.ChainVerified }}</span>
-	          <span class="pill ok">receipt_hash_linkage=true</span>
-	          <span class="pill ok">raw_path_returned=false</span>
-	          <span class="pill ok">raw_reason_returned=false</span>
-	          <span class="pill ok">subject_returned=false</span>
-	          <span class="pill ok">email_returned=false</span>
-	          <span class="pill ok">name_returned=false</span>
-	          <span class="pill ok">group_claim_returned=false</span>
-	          <span class="pill ok">token_returned=false</span>
-	          <span class="pill ok">cookie_value_returned=false</span>
-	          <span class="pill ok">request_body_returned=false</span>
-	          <span class="pill ok">env_returned=false</span>
-	          <span class="pill ok">backend_path_returned=false</span>
-	          <span class="pill ok">source_path_returned=false</span>
-	          <span class="pill ok">connector_output_returned=false</span>
-	          <span class="pill ok">permit_payload_value_returned=false</span>
-	          <span class="pill ok">secret_value_returned=false</span>
-	          <span class="pill ok">value_returned=false</span>
-	        </div>
-	      </details>
-	      {{ if .AuditTrail.Rows }}
-	      <div class="audit-timeline" aria-label="Recent audit action history">
-	        {{ range .AuditTrail.Rows }}
-	        <div class="audit-event {{ .OutcomeTone }}">
-	          <div class="audit-index">
-	            <span>event {{ .Step }}</span>
-	            <strong>{{ .TimeLabel }}</strong>
-	          </div>
-	          <div class="audit-main">
-	            <div class="audit-title">
-	              <strong>{{ .Action }}</strong>
-	              <span class="pill {{ .OutcomeTone }}">{{ .Outcome }}</span>
-	              <span class="pill {{ .SeverityTone }}">{{ .Severity }}</span>
-	            </div>
-	            <p><span class="pill info">{{ .Channel }}</span> <span class="pill ok">scope {{ .Scope }}</span> <span class="pill info">{{ .ReasonClass }}</span></p>
-	            <p class="mono">request_id={{ .RequestID }}</p>
-	          </div>
-	          <div class="audit-proof" aria-label="Audit hash link">
-	            <span>prev</span><strong class="mono">{{ .PrevHashShort }}</strong>
-	            <span>event</span><strong class="mono">{{ .EventHashShort }}</strong>
-	          </div>
-	        </div>
-	        {{ end }}
-	      </div>
-	      {{ end }}
-	      {{ else }}
-	      <div class="witness-grid" aria-label="Restricted audit trail witness">
-	        <div class="witness-card warn">
-	          <span>Audit rows</span>
-	          <strong>restricted</strong>
-	          <p>Auditor role required before Janus renders recent audit rows.</p>
-	        </div>
-	        <div class="witness-card warn">
-	          <span>Evidence hash</span>
-	          <strong>auditor only</strong>
-	          <p>Exact audit and evidence hashes are withheld from this session.</p>
-	        </div>
-	        <div class="witness-card ok">
-	          <span>Value boundary</span>
-	          <strong>protected</strong>
-	          <p>Restricted sessions do not receive audit refs, request ids, subjects, claims, tokens, cookies, or values.</p>
-	        </div>
-	      </div>
-	      <p class="warn">Auditor role required.</p>
-	      <p>Audit rows and evidence hashes are restricted to auditor sessions.</p>
-	      <details class="evidence-flags">
-	        <summary>Restricted audit evidence flags</summary>
-	        <div class="flag-cloud" aria-label="Restricted audit value-free evidence flags">
-	          <span class="pill warn">auditor_required=true</span>
-	          <span class="pill ok">audit_rows_rendered=false</span>
-	          <span class="pill ok">request_id_returned=false</span>
-	          <span class="pill ok">subject_returned=false</span>
-	          <span class="pill ok">group_claim_returned=false</span>
-	          <span class="pill ok">token_returned=false</span>
-	          <span class="pill ok">cookie_value_returned=false</span>
-	          <span class="pill ok">secret_ref_returned=false</span>
-	          <span class="pill ok">secret_value_returned=false</span>
-	          <span class="pill ok">value_returned=false</span>
-	        </div>
-	      </details>
-	      {{ end }}
-	    </div>
-	  </div>
-	</section>
-{{ if .CatalogGates }}
-<section class="grid" id="catalog-gates">
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Catalog gates</h2>
-      <span class="pill warn">{{ len .CatalogGates }} open</span>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Secret ref</th><th>Severity</th><th>Code</th><th>Message</th></tr></thead>
-        <tbody>
-        {{ range .CatalogGates }}
-          <tr>
-            <td>{{ .SecretRef }}</td>
-            <td>{{ .Severity }}</td>
-            <td>{{ .Code }}</td>
-            <td>{{ .Message }}</td>
-          </tr>
-        {{ end }}
-        </tbody>
-      </table>
-    </div>
-  </div>
-</section>
-{{ end }}
-<section class="grid" id="catalog">
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Warden descriptors</h2>
-      <span class="pill ok">values never returned</span>
-    </div>
-    <div class="panel-body stack">
-      <div class="witness-grid" aria-label="Warden descriptor catalog witness">
-        <div class="witness-card ok">
-          <span>Visible metadata</span>
-          <strong>{{ len .Descriptors }} descriptors</strong>
-          <p>Catalog rows describe ownership, scope, lifecycle, and use posture without exposing secret material.</p>
-        </div>
-        <div class="witness-card {{ if .Scope.Gates }}warn{{ else }}ok{{ end }}">
-          <span>Scope boundary</span>
-          <strong>{{ if .Scope.Strict }}strict{{ else }}open{{ end }}</strong>
-          <p>Broker-filtered descriptors stay inside the configured scope before any handle or permit is offered.</p>
-        </div>
-        <div class="witness-card {{ if .ApprovedUse.BlockedCount }}warn{{ else }}ok{{ end }}">
-          <span>Use profile</span>
-          <strong>{{ .ApprovedUse.ProfiledCount }} profiled</strong>
-          <p>{{ .ApprovedUse.BlockedCount }} descriptors still need an approved metadata-only use profile.</p>
-        </div>
-        <div class="witness-card ok">
-          <span>Value boundary</span>
-          <strong>reveal disabled</strong>
-          <p>Secret values, backend paths, source files, request bodies, and env data are not returned here.</p>
-        </div>
-      </div>
-      <details class="evidence-flags">
-        <summary>Warden catalog evidence flags</summary>
-        <div class="flag-cloud" aria-label="Warden catalog value-free evidence flags">
-          <span class="pill ok">descriptor_count={{ len .Descriptors }}</span>
-          <span class="pill {{ if .Scope.Strict }}ok{{ else }}warn{{ end }}">scope_strict={{ .Scope.Strict }}</span>
-          <span class="pill ok">profiled_count={{ .ApprovedUse.ProfiledCount }}</span>
-          <span class="pill {{ if .ApprovedUse.BlockedCount }}warn{{ else }}ok{{ end }}">unprofiled_count={{ .ApprovedUse.BlockedCount }}</span>
-          <span class="pill ok">reveal_allowed=false</span>
-          <span class="pill ok">secret_value_returned=false</span>
-          <span class="pill ok">backend_path_returned=false</span>
-          <span class="pill ok">source_path_returned=false</span>
-          <span class="pill ok">request_body_returned=false</span>
-          <span class="pill ok">env_returned=false</span>
-          <span class="pill ok">value_returned=false</span>
-        </div>
-      </details>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Name</th><th>Provider</th><th>Scope</th><th>Owner</th><th>Class</th><th>Lifecycle</th><th>Status</th><th>Consumers</th><th>Rotation</th><th>Use</th><th>Reveal</th><th>Inspect</th></tr></thead>
-        <tbody>
-        {{ range .Descriptors }}
-          <tr {{ if eq .ID $.SelectedRef }}class="selected"{{ end }}>
-            <td><strong>{{ .DisplayName }}</strong><br><span class="muted">{{ .ID }}</span></td>
-            <td>{{ .Provider }}</td>
-            <td>{{ .Scope }}</td>
-            <td>{{ .Owner }}</td>
-            <td>{{ .Classification }}</td>
-            <td>{{ .Lifecycle }}</td>
-            <td>{{ .Status }}</td>
-            <td>{{ .ConsumerCount }}</td>
-            <td>{{ .RotationDays }} days</td>
-            <td>{{ if .UseEnabled }}<span class="pill">profiled</span>{{ else }}<span class="pill">blocked</span>{{ end }}</td>
-            <td><span class="pill">disabled</span></td>
-            <td><a class="button quiet" href="/?ref={{ .ID }}#focus">Inspect</a></td>
-          </tr>
-        {{ end }}
-        </tbody>
-      </table>
-    </div>
-  </div>
-	</section>
-		{{ template "base_bottom" . }}
-		{{- end }}
-
-		{{ define "browser_smoke_receipt" -}}
-		{{ template "base_top" . }}
-		<section class="overview" id="command-center">
-		  <div class="intro">
-		    <div class="intro-copy">
-		      <div class="eyebrow">{{ .Mode }} / browser smoke receipt / copy-safe</div>
-		      <h1>Browser smoke receipt</h1>
-		      <p>The signed browser action completed. Keep the request id and verification hash; Janus did not return identity, cookie, token, request body, proof body, backend, env, or secret values.</p>
-		    </div>
-		    <div class="toolbar">
-		      <a class="button primary" href="/auth/smoke">Auth smoke</a>
-		      <a class="button quiet" href="/session-witness/verify">Verifier</a>
-		      <a class="button quiet" href="/session-witness">Full witness</a>
-		      <a class="button quiet" href="/">Dashboard</a>
-		      <form method="post" action="/session-witness/evidence/browser-smoke-receipt">
-		        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-		        <input type="hidden" name="format" value="text">
-		        <button class="button quiet" type="submit">Text artifact</button>
-		      </form>
-		    </div>
-		    <div class="evidence-workstation" aria-label="Browser smoke receipt path">
-		      <div class="workstation-head">
-		        <span>Proof result</span>
-		        <strong>{{ if .Verification.Verified }}Smoke verified{{ else }}Review needed{{ end }}</strong>
-		        <p>Receipt fields below are safe to retain and compare with the audit chain. Raw evidence records and proof bodies are not rendered.</p>
-		      </div>
-		      <div class="handoff-path">
-		        <div class="handoff-step {{ if .Verification.Verified }}ok{{ else }}warn{{ end }}">
-		          <b>1</b>
-		          <strong>{{ .Verification.Status }}</strong>
-		          <p>The browser action produced a normalized verification receipt.</p>
-		          <a class="button quiet" href="/auth/smoke">Run again</a>
-		        </div>
-		        <div class="handoff-step {{ if .Verification.AuditRowFound }}ok{{ else }}warn{{ end }}">
-		          <b>2</b>
-		          <strong>Audit row</strong>
-		          <p>Janus checked the stored audit row, chain link, action, severity, reason, and request id.</p>
-		          <a class="button quiet" href="/session-witness/verify">Open verifier</a>
-		        </div>
-		        <div class="handoff-step ok">
-		          <b>3</b>
-		          <strong>Retain</strong>
-		          <p>Keep the request id and hash. Leave cookies, tokens, identity values, and secret material out.</p>
-		          <a class="button quiet" href="/">Dashboard</a>
-		        </div>
-		      </div>
-		      <p><span class="pill ok">browser_smoke_receipt_html=true</span> <span class="pill ok">copy_safe=true</span> <span class="pill ok">record_returned=false</span> <span class="pill ok">value_returned=false</span></p>
-		    </div>
-		    <div class="safety-ribbon" aria-label="Browser smoke receipt posture">
-		      <div class="safety-chip {{ if .Verification.Verified }}ok{{ else }}warn{{ end }}">
-		        <span>Smoke</span>
-		        <strong>{{ .Verification.Status }}</strong>
-		      </div>
-		      <div class="safety-chip {{ if .Verification.AuditRowFound }}ok{{ else }}warn{{ end }}">
-		        <span>Audit row</span>
-		        <strong>{{ .Verification.AuditRowFound }}</strong>
-		      </div>
-		      <div class="safety-chip {{ if .Verification.ChainLinkMatch }}ok{{ else }}warn{{ end }}">
-		        <span>Chain</span>
-		        <strong>{{ .Verification.ChainLinkMatch }}</strong>
-		      </div>
-		      <div class="safety-chip ok">
-		        <span>Values</span>
-		        <strong>withheld</strong>
-		      </div>
-		    </div>
-		  </div>
-		  <div class="status">
-		    <div class="status-head"><h2>Receipt facts</h2><span class="pill {{ if .Verification.Verified }}ok{{ else }}warn{{ end }}">{{ .Verification.Status }}</span></div>
-		    <div class="panel-body stack">
-		      <div class="receipt-proof" aria-label="Copy-safe browser smoke receipt fields">
-		        {{ if .Verification.Receipt }}
-		        <span>Request<strong>{{ .Verification.Receipt.RequestID }}</strong></span>
-		        <span>Verification hash<strong class="mono">{{ .Verification.Receipt.Hash }}</strong></span>
-		        <span>Hash header<strong>{{ .Verification.Receipt.HashHeader }}</strong></span>
-		        <span>Body field<strong>{{ .Verification.Receipt.BodyField }}</strong></span>
-		        <span>Receipt algorithm<strong>{{ .Verification.Receipt.Algorithm }}</strong></span>
-		        {{ end }}
-		        <span>Record request<strong>{{ .Verification.RecordRequestID }}</strong></span>
-		        <span>Audit hash<strong class="mono">{{ .Verification.AuditEventHash }}</strong></span>
-		        <span>Previous hash<strong class="mono">{{ .Verification.AuditPrevHash }}</strong></span>
-		        <span>Chain link<strong>{{ .Verification.AuditChainLink }}</strong></span>
-		        <span>Audit severity<strong>{{ .Verification.AuditSeverity }}</strong></span>
-		        <span>Audit algorithm<strong>{{ .Verification.AuditHashAlgorithm }}</strong></span>
-		      </div>
-		      <div class="receipt-copy" aria-label="Browser smoke copy-safe retention fields">
-		        <label>Status<input readonly value="smoke_status={{ .Verification.Status }}"></label>
-		        <label>Verified<input readonly value="verified={{ .Verification.Verified }}"></label>
-		        {{ if .Verification.Receipt }}
-		        <label>Request<input readonly value="request_id={{ .Verification.Receipt.RequestID }}"></label>
-		        <label>Hash<input readonly value="verification_hash={{ .Verification.Receipt.Hash }}"></label>
-		        {{ end }}
-		      </div>
-		      <div class="witness-grid" aria-label="Browser smoke receipt checks">
-		        {{ range .Verification.Checks }}
-		        <div class="witness-card {{ .Tone }}">
-		          <span>{{ .Label }}</span>
-		          <strong>{{ .State }}</strong>
-		          <p>{{ .Detail }}</p>
-		        </div>
-		        {{ end }}
-		      </div>
-		      <details class="evidence-flags">
-		        <summary>Browser smoke receipt evidence flags</summary>
-		        <div class="flag-cloud" aria-label="Browser smoke receipt value-free flags">
-		          <span class="pill {{ if .Verification.Verified }}ok{{ else }}warn{{ end }}">verified={{ .Verification.Verified }}</span>
-		          <span class="pill ok">record_request_id={{ .Verification.RecordRequestID }}</span>
-		          <span class="pill {{ if .Verification.AuditRecorded }}ok{{ else }}warn{{ end }}">audit_recorded={{ .Verification.AuditRecorded }}</span>
-		          <span class="pill {{ if .Verification.AuditRowFound }}ok{{ else }}warn{{ end }}">audit_row_found={{ .Verification.AuditRowFound }}</span>
-		          <span class="pill {{ if .Verification.AuditChainVerified }}ok{{ else }}warn{{ end }}">audit_chain_verified={{ .Verification.AuditChainVerified }}</span>
-		          <span class="pill {{ if .Verification.HashShapeValid }}ok{{ else }}warn{{ end }}">hash_shape_valid={{ .Verification.HashShapeValid }}</span>
-		          <span class="pill {{ if .Verification.ChainLinkMatch }}ok{{ else }}warn{{ end }}">chain_link_match={{ .Verification.ChainLinkMatch }}</span>
-		          <span class="pill {{ if .Verification.ActionMatch }}ok{{ else }}warn{{ end }}">action_match={{ .Verification.ActionMatch }}</span>
-		          <span class="pill {{ if .Verification.RequestIDMatch }}ok{{ else }}warn{{ end }}">request_id_match={{ .Verification.RequestIDMatch }}</span>
-		          <span class="pill {{ if .Verification.SeverityMatch }}ok{{ else }}warn{{ end }}">severity_match={{ .Verification.SeverityMatch }}</span>
-		          <span class="pill {{ if .Verification.ReasonMatch }}ok{{ else }}warn{{ end }}">reason_match={{ .Verification.ReasonMatch }}</span>
-		          <span class="pill {{ if .Verification.ValueBoundaryValid }}ok{{ else }}warn{{ end }}">value_boundary_valid={{ .Verification.ValueBoundaryValid }}</span>
-		          <span class="pill ok">csrf_source={{ .CSRFSource }}</span>
-		          {{ if .Verification.Receipt }}
-		          <span class="pill ok">verification_hash_header={{ .Verification.Receipt.HashHeader }}</span>
-		          <span class="pill ok">verification_hash_body_field={{ .Verification.Receipt.BodyField }}</span>
-		          {{ end }}
-		          <span class="pill ok">record_returned=false</span>
-		          <span class="pill ok">input_returned={{ .Verification.InputReturned }}</span>
-		          <span class="pill ok">request_body_returned={{ .Verification.RequestBodyReturned }}</span>
-		          <span class="pill ok">proof_pack_returned=false</span>
-		          <span class="pill ok">identity_values_returned=false</span>
-		          <span class="pill ok">subject_returned=false</span>
-		          <span class="pill ok">email_returned=false</span>
-		          <span class="pill ok">name_returned=false</span>
-		          <span class="pill ok">claim_values_returned=false</span>
-		          <span class="pill ok">group_values_returned=false</span>
-		          <span class="pill ok">token_returned=false</span>
-		          <span class="pill ok">cookie_value_returned=false</span>
-		          <span class="pill ok">env_values_returned=false</span>
-		          <span class="pill ok">backend_path_returned=false</span>
-		          <span class="pill ok">connector_output_returned=false</span>
-		          <span class="pill ok">permit_payload_returned=false</span>
-		          <span class="pill ok">secret_value_returned=false</span>
-		          <span class="pill ok">value_returned=false</span>
-		        </div>
-		      </details>
-		    </div>
-		  </div>
-		</section>
-		{{ template "base_bottom" . }}
-		{{- end }}
-
 		{{ define "auth_smoke" -}}
 		{{ template "base_top" . }}
 		<section class="overview" id="command-center">
@@ -7647,10 +3908,7 @@ func mustTemplates() *template.Template {
 		          <b>2</b>
 		          <strong>Prove session</strong>
 		          <p>This browser reached an auth-only page and has a signed Janus session. The proof is the request id and witness hash.</p>
-		          <form method="post" action="/session-witness/evidence/browser-smoke-receipt">
-		            <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-		            <button class="button primary" type="submit">Browser smoke receipt</button>
-		          </form>
+		          <a class="button primary" href="/session-witness">Session witness</a>
 		        </div>
 		        <div class="handoff-step ok">
 		          <b>3</b>
@@ -7659,7 +3917,7 @@ func mustTemplates() *template.Template {
 		          <a class="button quiet" href="/session-witness/verify">Open verifier</a>
 		        </div>
 		      </div>
-		      <p><span class="pill ok">auth_smoke_launchpad=true</span> <span class="pill ok">csrf_bound=true</span> <span class="pill ok">browser_smoke_receipt=true</span> <span class="pill ok">value_returned=false</span></p>
+		      <p><span class="pill ok">auth_smoke_launchpad=true</span> <span class="pill ok">csrf_bound=true</span> <span class="pill ok">value_returned=false</span></p>
 		    </div>
 		    <div class="safety-ribbon" aria-label="Authenticated smoke posture">
 		      <div class="safety-chip {{ if eq .AuthenticatedBrowser.State "authenticated" }}ok{{ else if eq .AuthenticatedBrowser.State "local_smoke" }}info{{ else }}warn{{ end }}">
@@ -7762,53 +4020,44 @@ func mustTemplates() *template.Template {
 	    </div>
 	    <div class="toolbar">
 	      <a class="button quiet" href="/session-witness">Witness</a>
-	      <a class="button primary" href="/session-witness/evidence.txt">Evidence text</a>
 	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
-	      <a class="button quiet" href="/session-witness/proof.txt">Proof pack</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
-		      <form method="post" action="/session-witness/verify-current-pack">
+		      <form method="post" action="/session-witness/verify-current">
 		        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-		        <button class="button quiet" type="submit">Verify current proof pack</button>
-		      </form>
-		      <form method="post" action="/session-witness/evidence/verify-current-record">
-		        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-		        <button class="button quiet" type="submit">Verify current evidence</button>
+		        <button class="button quiet" type="submit">Verify current session</button>
 		      </form>
 	      <a class="button quiet" href="/">Dashboard</a>
 	    </div>
 	    <div class="evidence-workstation" aria-label="Evidence verification workstation">
 	      <div class="workstation-head">
 	        <span>Evidence workstation</span>
-	        <strong>Use current evidence first</strong>
-	        <p>One click records current evidence and checks its audit row.</p>
+	        <strong>Verify without pasting values</strong>
+	        <p>One click verifies the current session witness receipt.</p>
 	      </div>
 	      <div class="handoff-path">
 	        <div class="handoff-step ok">
 	          <b>1</b>
 	          <strong>Verify this session</strong>
-	          <p>Runs the current evidence roundtrip. No paste needed.</p>
-		          <form method="post" action="/session-witness/evidence/verify-current-record">
+	          <p>Runs the current witness roundtrip. No paste needed.</p>
+		          <form method="post" action="/session-witness/verify-current">
 		            <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-		            <button class="button primary" type="submit">Verify current evidence</button>
+		            <button class="button primary" type="submit">Verify current session</button>
 		          </form>
 	        </div>
 	        <div class="handoff-step info">
 	          <b>2</b>
-	          <strong>Paste a record</strong>
-	          <p>Use this when a reviewer sends a record from another browser session.</p>
-	          <a class="button quiet" href="#evidence-record-form">Paste evidence record</a>
+	          <strong>Paste a proof line</strong>
+	          <p>Use this when a reviewer sends a proof line and hash from another browser session.</p>
+	          <a class="button quiet" href="#proof-line-form">Paste proof line</a>
 	        </div>
 	        <div class="handoff-step ok">
 	          <b>3</b>
 	          <strong>Keep the receipt</strong>
-	          <p>Verification returns normalized facts and a receipt hash, never the submitted record body.</p>
-		          <form method="post" action="/session-witness/evidence/browser-smoke-receipt">
-		            <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-		            <button class="button primary" type="submit">Browser smoke receipt</button>
-		          </form>
+	          <p>Verification returns normalized facts and a receipt hash, never the submitted input.</p>
+	          <a class="button quiet" href="/session-witness.txt">Open proof text</a>
 	        </div>
 	      </div>
-	      <p><span class="pill ok">browser_smoke_receipt=true</span> <span class="pill ok">input_not_returned=true</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">value_returned=false</span></p>
+	      <p><span class="pill ok">input_not_returned=true</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">value_returned=false</span></p>
 	    </div>
 	    <div class="safety-ribbon" aria-label="Witness verifier posture">
 	      <div class="safety-chip {{ if and .Verification .Verification.Verified }}ok{{ else if .Verification }}warn{{ else }}info{{ end }}">
@@ -7838,30 +4087,7 @@ func mustTemplates() *template.Template {
 	      {{ end }}
 	    </div>
 	  </div>
-	  <div class="status" id="evidence-record-form">
-	    <div class="status-head"><h2>Verify evidence record</h2><span class="pill ok">input not returned</span></div>
-	    <div class="panel-body stack">
-	      <form class="stack" method="post" action="/session-witness/evidence/verify-record" aria-describedby="evidence-record-help">
-	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-	        <label>Evidence record<textarea name="evidence_record" required spellcheck="false" autocomplete="off" placeholder="Paste evidence record here"></textarea></label>
-	        <button class="button primary" type="submit">Verify evidence record</button>
-	      </form>
-	      <p id="evidence-record-help">Paste only a Janus evidence record. Verification returns facts and a receipt, not the pasted body.</p>
-	      <p><span class="pill ok">input_returned=false</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">value_returned=false</span></p>
-	    </div>
-	  </div>
-	  <div class="status">
-	    <div class="status-head"><h2>Verify proof pack</h2><span class="pill ok">input not returned</span></div>
-	    <div class="panel-body stack">
-	      <form class="stack" method="post" action="/session-witness/verify-pack">
-	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-	        <label>Proof pack<textarea name="proof_pack" required spellcheck="false" autocomplete="off"></textarea></label>
-	        <button class="button primary" type="submit">Verify proof pack</button>
-	      </form>
-	      <p><span class="pill ok">proof_pack_returned=false</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">value_returned=false</span></p>
-	    </div>
-	  </div>
-	  <div class="status">
+	  <div class="status" id="proof-line-form">
 	    <div class="status-head"><h2>Verify proof line</h2><span class="pill ok">input not returned</span></div>
 	    <div class="panel-body stack">
 	      <form class="stack" method="post" action="/session-witness/verify">
@@ -7874,51 +4100,6 @@ func mustTemplates() *template.Template {
 	    </div>
 	  </div>
 	</section>
-	{{ if .EvidenceRecordVerification }}
-	<section class="panel" style="margin-bottom:16px" id="evidence-record-verification">
-	  <div class="panel-head">
-	    <h2>Evidence record verification</h2>
-	    <span class="pill {{ if .EvidenceRecordVerification.Verified }}ok{{ else }}warn{{ end }}">{{ .EvidenceRecordVerification.Status }}</span>
-	  </div>
-	  <div class="panel-body stack">
-	    <p>{{ .EvidenceRecordVerification.Summary }}</p>
-	    <div class="receipt-proof" aria-label="Normalized evidence record verification fields">
-	      <span>Record request<strong>{{ .EvidenceRecordVerification.RecordRequestID }}</strong></span>
-	      <span>Audit hash<strong class="mono">{{ .EvidenceRecordVerification.AuditEventHash }}</strong></span>
-	      <span>Previous hash<strong class="mono">{{ .EvidenceRecordVerification.AuditPrevHash }}</strong></span>
-	      <span>Chain link<strong>{{ .EvidenceRecordVerification.AuditChainLink }}</strong></span>
-	      <span>Severity<strong>{{ .EvidenceRecordVerification.AuditSeverity }}</strong></span>
-	      <span>Algorithm<strong>{{ .EvidenceRecordVerification.AuditHashAlgorithm }}</strong></span>
-	      {{ if .EvidenceRecordVerification.Receipt }}
-	      <span>Verification hash<strong class="mono">{{ .EvidenceRecordVerification.Receipt.Hash }}</strong></span>
-	      <span>Receipt algorithm<strong>{{ .EvidenceRecordVerification.Receipt.Algorithm }}</strong></span>
-	      {{ end }}
-	    </div>
-	    {{ if .EvidenceRecordVerification.Receipt }}
-	    <p class="capture-line mono">{{ .EvidenceRecordVerification.Receipt.Input }}</p>
-	    {{ end }}
-	    <p><span class="pill {{ if .EvidenceRecordVerification.AuditRecorded }}ok{{ else }}warn{{ end }}">audit_recorded={{ .EvidenceRecordVerification.AuditRecorded }}</span> <span class="pill {{ if .EvidenceRecordVerification.AuditRowFound }}ok{{ else }}warn{{ end }}">audit_row_found={{ .EvidenceRecordVerification.AuditRowFound }}</span> <span class="pill {{ if .EvidenceRecordVerification.AuditChainVerified }}ok{{ else }}warn{{ end }}">audit_chain_verified={{ .EvidenceRecordVerification.AuditChainVerified }}</span> <span class="pill {{ if .EvidenceRecordVerification.HashShapeValid }}ok{{ else }}warn{{ end }}">hash_shape_valid={{ .EvidenceRecordVerification.HashShapeValid }}</span> <span class="pill {{ if .EvidenceRecordVerification.ChainLinkMatch }}ok{{ else }}warn{{ end }}">chain_link_match={{ .EvidenceRecordVerification.ChainLinkMatch }}</span> <span class="pill {{ if .EvidenceRecordVerification.ValueBoundaryValid }}ok{{ else }}warn{{ end }}">value_boundary_valid={{ .EvidenceRecordVerification.ValueBoundaryValid }}</span></p>
-	    <p><span class="pill {{ if .EvidenceRecordVerification.ActionMatch }}ok{{ else }}warn{{ end }}">action_match={{ .EvidenceRecordVerification.ActionMatch }}</span> <span class="pill {{ if .EvidenceRecordVerification.RequestIDMatch }}ok{{ else }}warn{{ end }}">request_id_match={{ .EvidenceRecordVerification.RequestIDMatch }}</span> <span class="pill {{ if .EvidenceRecordVerification.SeverityMatch }}ok{{ else }}warn{{ end }}">severity_match={{ .EvidenceRecordVerification.SeverityMatch }}</span> <span class="pill {{ if .EvidenceRecordVerification.ReasonMatch }}ok{{ else }}warn{{ end }}">reason_match={{ .EvidenceRecordVerification.ReasonMatch }}</span> <span class="pill ok">input_returned={{ .EvidenceRecordVerification.InputReturned }}</span> <span class="pill ok">request_body_returned={{ .EvidenceRecordVerification.RequestBodyReturned }}</span> <span class="pill ok">value_returned={{ .EvidenceRecordVerification.ValueReturned }}</span></p>
-	  </div>
-	</section>
-	<section class="panel" style="margin-bottom:16px" id="evidence-record-checks">
-	  <div class="panel-head">
-	    <h2>Evidence record checks</h2>
-	    <span class="pill info">{{ len .EvidenceRecordVerification.Checks }} checks</span>
-	  </div>
-	  <div class="panel-body">
-	    <div class="witness-grid" aria-label="Evidence record verification checks">
-	      {{ range .EvidenceRecordVerification.Checks }}
-	      <div class="witness-card {{ .Tone }}">
-	        <span>{{ .Label }}</span>
-	        <strong>{{ .State }}</strong>
-	        <p>{{ .Detail }}</p>
-	      </div>
-	      {{ end }}
-	    </div>
-	  </div>
-	</section>
-	{{ end }}
 	{{ if .Verification }}
 	<section class="panel" style="margin-bottom:16px" id="verification-result">
 	  <div class="panel-head">
@@ -8007,57 +4188,37 @@ func mustTemplates() *template.Template {
 	      <p>{{ .AuthenticatedBrowser.Summary }}</p>
 	    </div>
 	    <div class="toolbar">
-	      <a class="button primary" href="/session-witness/evidence.txt">Evidence text</a>
 	      <a class="button quiet" href="/">Dashboard</a>
 	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
-	      <a class="button quiet" href="/session-witness/proof.txt">Proof pack</a>
 	      <a class="button quiet" href="/session-witness/verify">Verify proof</a>
 	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
-		      <form method="post" action="/session-witness/verify-current-pack">
-		        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-		        <button class="button quiet" type="submit">Verify current proof pack</button>
-		      </form>
 	    </div>
 	    <div class="evidence-workstation" aria-label="Evidence handoff workstation">
 	      <div class="workstation-head">
 	        <span>Evidence handoff</span>
-	        <strong>Record, verify, retain</strong>
-	        <p>Write the current-session evidence record, check the audit row, then keep the copy-safe receipt.</p>
+	        <strong>Capture, verify, retain</strong>
+	        <p>Capture the copy-safe session witness, verify it, then keep the receipt.</p>
 	      </div>
 	      <div class="handoff-path">
 	        <div class="handoff-step ok">
 	          <b>1</b>
-	          <strong>Record evidence</strong>
-	          <p>Writes one audit-linked record without exposing identity or secret values.</p>
-		          <form method="post" action="/session-witness/evidence/record">
-		            <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-		            <button class="button primary" type="submit">Record evidence</button>
-		          </form>
+	          <strong>Capture the witness</strong>
+	          <p>This page is the capture: a copy-safe proof line and hash for the signed session.</p>
+	          <a class="button quiet" href="/session-witness.txt">Open proof text</a>
 	        </div>
 	        <div class="handoff-step ok">
 	          <b>2</b>
-	          <strong>Verify current evidence</strong>
-	          <p>Checks the stored audit row without copying, pasting, or returning the record body.</p>
-		          <form method="post" action="/session-witness/evidence/verify-current-record">
-		            <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-		            <button class="button primary" type="submit">Verify current evidence</button>
-		          </form>
+	          <strong>Verify the session</strong>
+	          <p>The verifier checks the current session or a pasted proof line without returning the input.</p>
+	          <a class="button primary" href="/session-witness/verify">Open verifier</a>
 	        </div>
 	        <div class="handoff-step info">
 	          <b>3</b>
 	          <strong>Keep the receipt</strong>
-	          <p>Evidence text is the safe handoff. Proof-pack details remain available for deeper review.</p>
-	          <div class="handoff-actions">
-		            <form method="post" action="/session-witness/evidence/browser-smoke-receipt">
-		              <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-		              <button class="button primary" type="submit">Browser smoke receipt</button>
-		            </form>
-	            <a class="button quiet" href="/session-witness/evidence.txt">Open evidence text</a>
-	            <a class="button quiet" href="/session-witness/verify">Open verifier</a>
-	          </div>
+	          <p>Keep the request id and proof hash. Identity, cookie, and secret values stay out.</p>
 	        </div>
 	      </div>
-	      <p><span class="pill ok">evidence_record_primary=true</span> <span class="pill ok">current_evidence_verifier=true</span> <span class="pill ok">browser_smoke_receipt=true</span> <span class="pill ok">value_returned=false</span></p>
+	      <p><span class="pill ok">current_session_verifier=true</span> <span class="pill ok">value_returned=false</span></p>
 	    </div>
 	    <div class="reviewer-flow" aria-label="Reviewer launch checklist">
 	      {{ range .LaunchChecklist }}

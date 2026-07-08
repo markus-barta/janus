@@ -1,7 +1,6 @@
 package main
 
 // JANUS-271: invariants of the doorkeeper vault page (the new "/" dashboard).
-// The exhaustive legacy witness suite keeps running against /legacy in main_test.go.
 
 import (
 	"net/http"
@@ -26,7 +25,7 @@ func TestVaultPageRendersCardsTilesAndBrand(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "/static/janus-logo.svg", "Secrets", "Need attention", "value_returned=false", `href="/legacy"`, "rotates every"} {
+	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "/static/janus-logo.svg", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("vault page should render %q: %s", want, body)
 		}
@@ -424,20 +423,5 @@ func TestVaultStaticAssetsServed(t *testing.T) {
 	app.routes().ServeHTTP(out, req)
 	if out.Code != http.StatusNotFound {
 		t.Fatalf("unknown static asset should 404, got %d", out.Code)
-	}
-}
-
-func TestLegacyConsoleStillReachable(t *testing.T) {
-	app := newTestApp(t)
-	app.cfg.RequireAuth = false
-
-	req := httptest.NewRequest(http.MethodGet, "/legacy", nil)
-	out := httptest.NewRecorder()
-	app.routes().ServeHTTP(out, req)
-	if out.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
-	}
-	if !strings.Contains(out.Body.String(), "Command center") {
-		t.Fatalf("legacy console should render the old dashboard: %s", out.Body.String())
 	}
 }

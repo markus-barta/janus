@@ -33,7 +33,6 @@
     </nav>
     <div class="spacer"></div>
     <div class="foot">
-      <a href="/legacy">legacy console →</a>
       <div class="userchip">
         <span>{{ if .Session.Name }}{{ .Session.Name }}{{ else }}{{ .Session.Subject }}{{ end }}</span>
         <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button type="submit" title="Sign out">sign out</button></form>

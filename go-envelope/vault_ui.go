@@ -2,7 +2,7 @@ package main
 
 // JANUS-271: doorkeeper vault UI — first strangler slice. The embedded
 // "dashboard" template (ui/vault.html) replaced the inline legacy page at /;
-// the legacy console stays reachable at /legacy until the JANUS-269 cull.
+// the legacy console was removed in the JANUS-269 cull.
 
 import (
 	"embed"
@@ -452,10 +452,4 @@ func (app *App) handleAssurancePage(w http.ResponseWriter, r *http.Request) {
 	data := app.dashboardData(r, session, nil, "")
 	data["ActivePage"] = "assurance"
 	renderTemplate(w, app.templates, "assurance_page", data)
-}
-
-func (app *App) handleLegacyDashboard(w http.ResponseWriter, r *http.Request) {
-	app.audit(r, "dashboard.view", "allowed", actorFromContext(r.Context()), "legacy console")
-	session := currentSession(r.Context())
-	renderTemplate(w, app.templates, "legacy_dashboard", app.dashboardData(r, session, nil, r.URL.Query().Get("ref")))
 }

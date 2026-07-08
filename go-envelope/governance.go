@@ -24,51 +24,36 @@ type ApprovedUsePosture struct {
 }
 
 type EvidencePack struct {
-	GeneratedAt          time.Time                      `json:"generated_at"`
-	Service              string                         `json:"service"`
-	Mode                 string                         `json:"mode"`
-	Posture              map[string]any                 `json:"posture"`
-	Operational          OperationalStatus              `json:"operational_status"`
-	SupplyChain          SupplyChainPosture             `json:"supply_chain_posture"`
-	AuthFailure          AuthFailurePosture             `json:"auth_failure_posture"`
-	AuthenticatedRole    SessionRoleEvidence            `json:"authenticated_role_evidence"`
-	AuthenticatedBrowser AuthenticatedBrowserWitness    `json:"authenticated_browser_witness"`
-	RolePolicyReadiness  RolePolicyReadiness            `json:"role_policy_readiness"`
-	ModeGuardrails       ModeGuardrails                 `json:"mode_guardrails"`
-	ActionReadiness      ActionReadiness                `json:"action_readiness"`
-	AssuranceGates       AssuranceGates                 `json:"assurance_gates"`
-	NegativePath         NegativePathAssurance          `json:"negative_path_assurance"`
-	Guidance             DegradedGuidance               `json:"degraded_guidance"`
-	AuditDrill           AuditFailureDrill              `json:"audit_failure_drill"`
-	RestoreProof         RestoreDrillProof              `json:"restore_drill_proof"`
-	RestoreWorkflow      RestoreDrillWorkflow           `json:"restore_drill_workflow"`
-	ReleaseWorkflow      ReleaseProvenanceWorkflow      `json:"release_provenance_workflow"`
-	PrivacyWorkflow      PrivacyRetentionWorkflow       `json:"privacy_retention_workflow"`
-	IntegrationWorkflow  IntegrationConformanceWorkflow `json:"integration_conformance_workflow"`
-	RemoteAuditWorkflow  RemoteAuditWorkflow            `json:"remote_audit_workflow"`
-	BreakGlassWorkflow   BreakGlassReviewWorkflow       `json:"break_glass_review_workflow"`
-	AssuranceSummary     AssuranceSummary               `json:"assurance_summary"`
-	Enterprise           EnterpriseValidation           `json:"enterprise_validation"`
-	EnterpriseDryRun     EnterpriseDryRun               `json:"enterprise_dry_run"`
-	EnterpriseClaim      EnterpriseClaimReview          `json:"enterprise_claim_review"`
-	EnterpriseRelease    EnterpriseReleaseGate          `json:"enterprise_release_gate"`
-	AttachmentReview     AttachmentReview               `json:"attachment_review"`
-	ExternalEvidence     ExternalEvidencePosture        `json:"external_evidence"`
-	Privacy              PrivacyPosture                 `json:"privacy_posture"`
-	EvidenceBoundary     EvidenceBoundary               `json:"evidence_boundary"`
-	Descriptors          []SecretDescriptor             `json:"descriptors"`
-	CatalogGates         []CatalogGate                  `json:"catalog_gates"`
-	ScopePosture         ScopePosture                   `json:"scope_posture"`
-	LifecyclePosture     LifecyclePosture               `json:"lifecycle_posture"`
-	PermitPosture        PermitPosture                  `json:"permit_posture"`
-	AccessPosture        AccessPosture                  `json:"access_posture"`
-	AuditPosture         AuditPosture                   `json:"audit_posture"`
-	AuditTrail           AuditTrailWitness              `json:"audit_trail"`
-	RecentAudit          []AuditTrailRow                `json:"recent_audit"`
-	Integrity            *EvidenceIntegrity             `json:"integrity,omitempty"`
-	Receipt              *EvidenceReceipt               `json:"evidence_receipt,omitempty"`
-	ValueReturned        bool                           `json:"value_returned"`
-	RedactionModel       string                         `json:"redaction_model"`
+	GeneratedAt          time.Time                   `json:"generated_at"`
+	Service              string                      `json:"service"`
+	Mode                 string                      `json:"mode"`
+	Posture              map[string]any              `json:"posture"`
+	Operational          OperationalStatus           `json:"operational_status"`
+	AuthFailure          AuthFailurePosture          `json:"auth_failure_posture"`
+	AuthenticatedRole    SessionRoleEvidence         `json:"authenticated_role_evidence"`
+	AuthenticatedBrowser AuthenticatedBrowserWitness `json:"authenticated_browser_witness"`
+	RolePolicyReadiness  RolePolicyReadiness         `json:"role_policy_readiness"`
+	ActionReadiness      ActionReadiness             `json:"action_readiness"`
+	AssuranceGates       AssuranceGates              `json:"assurance_gates"`
+	NegativePath         NegativePathAssurance       `json:"negative_path_assurance"`
+	Guidance             DegradedGuidance            `json:"degraded_guidance"`
+	AuditDrill           AuditFailureDrill           `json:"audit_failure_drill"`
+	AssuranceSummary     AssuranceSummary            `json:"assurance_summary"`
+	Privacy              PrivacyPosture              `json:"privacy_posture"`
+	EvidenceBoundary     EvidenceBoundary            `json:"evidence_boundary"`
+	Descriptors          []SecretDescriptor          `json:"descriptors"`
+	CatalogGates         []CatalogGate               `json:"catalog_gates"`
+	ScopePosture         ScopePosture                `json:"scope_posture"`
+	LifecyclePosture     LifecyclePosture            `json:"lifecycle_posture"`
+	PermitPosture        PermitPosture               `json:"permit_posture"`
+	AccessPosture        AccessPosture               `json:"access_posture"`
+	AuditPosture         AuditPosture                `json:"audit_posture"`
+	AuditTrail           AuditTrailWitness           `json:"audit_trail"`
+	RecentAudit          []AuditTrailRow             `json:"recent_audit"`
+	Integrity            *EvidenceIntegrity          `json:"integrity,omitempty"`
+	Receipt              *EvidenceReceipt            `json:"evidence_receipt,omitempty"`
+	ValueReturned        bool                        `json:"value_returned"`
+	RedactionModel       string                      `json:"redaction_model"`
 }
 
 type EvidenceBoundary struct {
@@ -112,27 +97,6 @@ type OperationalStatusItem struct {
 	Tone   string `json:"tone"`
 }
 
-type ModeGuardrails struct {
-	Summary       string              `json:"summary"`
-	Current       string              `json:"current"`
-	Claim         string              `json:"claim"`
-	Boundary      string              `json:"boundary"`
-	Items         []ModeGuardrailItem `json:"items"`
-	BlockedCount  int                 `json:"blocked_count"`
-	ReviewCount   int                 `json:"review_count"`
-	ValueReturned bool                `json:"value_returned"`
-}
-
-type ModeGuardrailItem struct {
-	Key   string `json:"key"`
-	Label string `json:"label"`
-	State string `json:"state"`
-	Claim string `json:"claim"`
-	Limit string `json:"limit"`
-	Next  string `json:"next"`
-	Tone  string `json:"tone"`
-}
-
 type ActionReadiness struct {
 	Summary       string                `json:"summary"`
 	Actions       []ActionReadinessItem `json:"actions"`
@@ -149,38 +113,6 @@ type ActionReadinessItem struct {
 	RequiredRole  string `json:"required_role"`
 	Reason        string `json:"reason"`
 	Next          string `json:"next"`
-	Safety        string `json:"safety"`
-	ValueReturned bool   `json:"value_returned"`
-	Tone          string `json:"tone"`
-}
-
-type CommandCenter struct {
-	Summary          string                `json:"summary"`
-	State            string                `json:"state"`
-	Boundary         string                `json:"boundary"`
-	AvailableActions int                   `json:"available_actions"`
-	BlockedActions   int                   `json:"blocked_actions"`
-	ReviewCount      int                   `json:"review_count"`
-	Cards            []CommandCenterCard   `json:"cards"`
-	QuickActions     []CommandCenterAction `json:"quick_actions"`
-	ValueReturned    bool                  `json:"value_returned"`
-}
-
-type CommandCenterCard struct {
-	Key    string `json:"key"`
-	Label  string `json:"label"`
-	State  string `json:"state"`
-	Detail string `json:"detail"`
-	Next   string `json:"next"`
-	Tone   string `json:"tone"`
-}
-
-type CommandCenterAction struct {
-	Key           string `json:"key"`
-	Label         string `json:"label"`
-	State         string `json:"state"`
-	Href          string `json:"href"`
-	RequiredRole  string `json:"required_role"`
 	Safety        string `json:"safety"`
 	ValueReturned bool   `json:"value_returned"`
 	Tone          string `json:"tone"`
@@ -277,116 +209,6 @@ type AuditFailureDrillItem struct {
 	ValueReturned bool   `json:"value_returned"`
 }
 
-type RestoreDrillProof struct {
-	Summary             string                  `json:"summary"`
-	Mode                string                  `json:"mode"`
-	Status              string                  `json:"status"`
-	Attachment          string                  `json:"attachment"`
-	EvidenceSignal      string                  `json:"evidence_signal"`
-	EvidenceRefReturned bool                    `json:"evidence_ref_returned"`
-	Checks              []RestoreDrillProofItem `json:"checks"`
-	BlockedCount        int                     `json:"blocked_count"`
-	ReviewCount         int                     `json:"review_count"`
-	RecoveryRole        string                  `json:"recovery_role"`
-	ValueReturned       bool                    `json:"value_returned"`
-}
-
-type RestoreDrillProofItem struct {
-	Key           string `json:"key"`
-	Label         string `json:"label"`
-	State         string `json:"state"`
-	Proof         string `json:"proof"`
-	Next          string `json:"next"`
-	Tone          string `json:"tone"`
-	ValueReturned bool   `json:"value_returned"`
-}
-
-type EnterpriseValidation struct {
-	Mode          string                        `json:"mode"`
-	Status        string                        `json:"status"`
-	Summary       string                        `json:"summary"`
-	MissingCount  int                           `json:"missing_count"`
-	Controls      []EnterpriseValidationControl `json:"controls"`
-	ValueReturned bool                          `json:"value_returned"`
-}
-
-type EnterpriseValidationControl struct {
-	Key                 string `json:"key"`
-	Label               string `json:"label"`
-	State               string `json:"state"`
-	Required            bool   `json:"required"`
-	Detail              string `json:"detail"`
-	OwnerRole           string `json:"owner_role"`
-	Attachment          string `json:"attachment"`
-	EvidenceSignal      string `json:"evidence_signal"`
-	Next                string `json:"next"`
-	EvidenceRefReturned bool   `json:"evidence_ref_returned"`
-	ValueReturned       bool   `json:"value_returned"`
-	Tone                string `json:"tone"`
-}
-
-type EnterpriseDryRun struct {
-	Summary       string                 `json:"summary"`
-	CurrentMode   string                 `json:"current_mode"`
-	TargetMode    string                 `json:"target_mode"`
-	Status        string                 `json:"status"`
-	Required      int                    `json:"required"`
-	Ready         int                    `json:"ready"`
-	Attached      int                    `json:"attached"`
-	Missing       int                    `json:"missing"`
-	Checks        []EnterpriseDryRunItem `json:"checks"`
-	ValueReturned bool                   `json:"value_returned"`
-}
-
-type EnterpriseDryRunItem struct {
-	Key                 string `json:"key"`
-	Label               string `json:"label"`
-	State               string `json:"state"`
-	Required            bool   `json:"required"`
-	Detail              string `json:"detail"`
-	OwnerRole           string `json:"owner_role"`
-	Attachment          string `json:"attachment"`
-	EvidenceSignal      string `json:"evidence_signal"`
-	Next                string `json:"next"`
-	Tone                string `json:"tone"`
-	EvidenceRefReturned bool   `json:"evidence_ref_returned"`
-	ValueReturned       bool   `json:"value_returned"`
-}
-
-type AttachmentReview struct {
-	Summary       string                  `json:"summary"`
-	Status        string                  `json:"status"`
-	Required      int                     `json:"required"`
-	Attached      int                     `json:"attached"`
-	Missing       int                     `json:"missing"`
-	ReviewCount   int                     `json:"review_count"`
-	Owners        []AttachmentReviewOwner `json:"owners"`
-	ValueReturned bool                    `json:"value_returned"`
-}
-
-type AttachmentReviewOwner struct {
-	Role          string                    `json:"role"`
-	Required      int                       `json:"required"`
-	Attached      int                       `json:"attached"`
-	Missing       int                       `json:"missing"`
-	ReviewCount   int                       `json:"review_count"`
-	Controls      []AttachmentReviewControl `json:"controls"`
-	ValueReturned bool                      `json:"value_returned"`
-}
-
-type AttachmentReviewControl struct {
-	Key                 string `json:"key"`
-	Label               string `json:"label"`
-	State               string `json:"state"`
-	Required            bool   `json:"required"`
-	Attachment          string `json:"attachment"`
-	EvidenceSignal      string `json:"evidence_signal"`
-	Next                string `json:"next"`
-	Tone                string `json:"tone"`
-	EvidenceRefReturned bool   `json:"evidence_ref_returned"`
-	ValueReturned       bool   `json:"value_returned"`
-}
-
 type PrivacyPosture struct {
 	Summary       string           `json:"summary"`
 	Redaction     string           `json:"redaction"`
@@ -427,16 +249,6 @@ func EvidenceBoundaryFor(canExport, hashAvailable bool) EvidenceBoundary {
 			"authenticated_role_evidence",
 			"authenticated_browser_witness",
 			"role_policy_readiness",
-			"enterprise_release_gate",
-			"enterprise_claim_review",
-			"external_evidence_presence",
-			"restore_drill_workflow",
-			"release_provenance_workflow",
-			"privacy_retention_workflow",
-			"integration_conformance_workflow",
-			"remote_audit_workflow",
-			"break_glass_review_workflow",
-			"supply_chain_posture",
 			"audit_posture",
 			"audit_trail_witness",
 			"safe_recent_audit_rows",
@@ -556,305 +368,6 @@ func (s *OperationalStatus) add(ok bool, key, label, okState, reviewState, okDet
 	s.Items = append(s.Items, OperationalStatusItem{Key: key, Label: label, State: reviewState, Detail: reviewDetail, Tone: "warn"})
 }
 
-func CommandCenterFor(ready bool, operational OperationalStatus, actions ActionReadiness, mode ModeGuardrails, attachments AttachmentReview, boundary EvidenceBoundary) CommandCenter {
-	reviewCount := actions.Gated + mode.ReviewCount + attachments.ReviewCount
-	blockedActions := actions.Blocked
-	blockedCount := blockedActions + mode.BlockedCount + attachments.Missing
-	center := CommandCenter{
-		Summary:          "Safe metadata controls are available; review items stay visible before stronger claims.",
-		State:            "review",
-		Boundary:         "metadata_only",
-		AvailableActions: actions.Available,
-		BlockedActions:   blockedActions,
-		ReviewCount:      reviewCount,
-		ValueReturned:    false,
-	}
-	if !ready {
-		center.State = "restricted"
-		center.Summary = "Sensitive actions are fail-closed until readiness returns."
-	} else if blockedCount > 0 {
-		center.State = "blocked"
-		center.Summary = "Some controls are blocked; read-only posture stays available while fixes happen."
-	} else if operational.Verdict == "operational" && reviewCount == 0 {
-		center.State = "ready"
-		center.Summary = "Current session is ready, scoped, role-complete, and value-free."
-	}
-
-	safetyState := "ready"
-	safetyTone := "ok"
-	safetyNext := "Use the available role actions or keep reviewing posture."
-	if !ready {
-		safetyState = "restricted"
-		safetyTone = "warn"
-		safetyNext = "Recover readiness before using sensitive actions."
-	}
-	center.Cards = append(center.Cards, CommandCenterCard{
-		Key:    "safety_state",
-		Label:  "Safety state",
-		State:  safetyState,
-		Detail: operational.Summary,
-		Next:   safetyNext,
-		Tone:   safetyTone,
-	})
-
-	roleTone := "ok"
-	roleNext := "Use the available dashboard actions."
-	if actions.Blocked > 0 {
-		roleTone = "warn"
-		roleNext = "Recover readiness before using blocked actions."
-	} else if actions.Gated > 0 {
-		roleTone = "info"
-		roleNext = "Use a session with the matching role for gated duties."
-	}
-	center.Cards = append(center.Cards, CommandCenterCard{
-		Key:    "role_access",
-		Label:  "Role access",
-		State:  fmt.Sprintf("%d available", actions.Available),
-		Detail: fmt.Sprintf("%d role gated, %d readiness blocked.", actions.Gated, actions.Blocked),
-		Next:   roleNext,
-		Tone:   roleTone,
-	})
-
-	enterpriseTone := "info"
-	enterpriseNext := "Stay self-hosted until external evidence is reviewed."
-	if attachments.Missing > 0 || attachments.Status == "blocked" {
-		enterpriseTone = "warn"
-		enterpriseNext = "Attach missing external evidence outside Janus."
-	} else if attachments.Status == "candidate" {
-		enterpriseTone = "ok"
-		enterpriseNext = "Keep owner review current outside Janus."
-	}
-	center.Cards = append(center.Cards, CommandCenterCard{
-		Key:    "enterprise_review",
-		Label:  "Enterprise review",
-		State:  attachments.Status,
-		Detail: fmt.Sprintf("%d required, %d attached, %d missing.", attachments.Required, attachments.Attached, attachments.Missing),
-		Next:   enterpriseNext,
-		Tone:   enterpriseTone,
-	})
-
-	evidenceTone := "warn"
-	evidenceNext := "Use an auditor session to export evidence."
-	evidenceDetail := "Evidence JSON is role-gated and values stay withheld."
-	if boundary.Gate == "export_ready" {
-		evidenceTone = "ok"
-		evidenceNext = "Download the evidence JSON when an audit pack is needed."
-		if boundary.HashAvailable {
-			evidenceDetail = "Evidence JSON and receipt hash are ready."
-		} else {
-			evidenceDetail = "Evidence JSON is available; exact hash is returned on download."
-		}
-	}
-	center.Cards = append(center.Cards, CommandCenterCard{
-		Key:    "evidence_export",
-		Label:  "Evidence export",
-		State:  boundary.Gate,
-		Detail: evidenceDetail,
-		Next:   evidenceNext,
-		Tone:   evidenceTone,
-	})
-
-	for _, action := range actions.Actions {
-		if action.State != "available" {
-			continue
-		}
-		if href := commandActionHref(action.Key); href != "" {
-			center.QuickActions = append(center.QuickActions, CommandCenterAction{
-				Key:           action.Key,
-				Label:         action.Label,
-				State:         action.State,
-				Href:          href,
-				RequiredRole:  action.RequiredRole,
-				Safety:        action.Safety,
-				ValueReturned: false,
-				Tone:          action.Tone,
-			})
-		}
-	}
-	return center
-}
-
-func commandActionHref(key string) string {
-	switch key {
-	case "posture_view":
-		return "#posture"
-	case "evidence_export":
-		return "/api/evidence"
-	case "handle_issue":
-		return "#warden"
-	case "permit_create":
-		return "#permit"
-	case "permit_run_check":
-		return "#permit"
-	case "admin_policy_review":
-		return "#role-workbench"
-	default:
-		return ""
-	}
-}
-
-func ModeGuardrailsFor(cfg Config, ready bool, issues []string, access AccessPosture, audit AuditPosture, catalogGateCount int, enterprise EnterpriseValidation) ModeGuardrails {
-	mode := strings.TrimSpace(cfg.ProductMode)
-	if mode == "" {
-		mode = "self_hosted"
-	}
-	posture := ProductModePostureFor(cfg, ready, issues, access, audit, catalogGateCount)
-	guardrails := ModeGuardrails{
-		Summary:       "Mode guardrails keep local, self-hosted, and enterprise promises separate.",
-		Current:       posture.Current,
-		Claim:         posture.Baseline,
-		Boundary:      "enterprise_not_claimed",
-		ValueReturned: false,
-	}
-
-	localState := "review"
-	localTone := "warn"
-	localLimit := "Do not rely on stronger claims until readiness, catalog, roles, and audit are clear."
-	if ready && len(issues) == 0 && catalogGateCount == 0 && access.ExplicitBindings && audit.ChainVerified {
-		localState = "ready"
-		localTone = "ok"
-		localLimit = "Secure local baseline only; this is not enterprise evidence."
-	}
-
-	switch mode {
-	case "dev":
-		guardrails.Claim = "local_only"
-		guardrails.Boundary = "no_production_or_enterprise_claim"
-		guardrails.Summary = "Dev mode is local proof only; it cannot claim production or enterprise readiness."
-		guardrails.BlockedCount++
-		guardrails.ReviewCount++
-		guardrails.add(ModeGuardrailItem{
-			Key:   "current_mode",
-			Label: "Current mode",
-			State: "dev_only",
-			Claim: "Local proof and UI testing.",
-			Limit: "No production or enterprise claim.",
-			Next:  "Switch to self-hosted before serving real users.",
-			Tone:  "warn",
-		})
-		guardrails.add(ModeGuardrailItem{
-			Key:   "self_hosted_baseline",
-			Label: "Self-hosted baseline",
-			State: "not_claimed",
-			Claim: "Not claimed in dev mode.",
-			Limit: "Dev mode may skip production packaging and recovery expectations.",
-			Next:  "Use self-hosted mode for a secure local deployment.",
-			Tone:  "warn",
-		})
-		guardrails.add(ModeGuardrailItem{
-			Key:   "enterprise_claim",
-			Label: "Enterprise claim",
-			State: "blocked",
-			Claim: "Never claimed in dev mode.",
-			Limit: "External controls and review evidence are required.",
-			Next:  "Attach enterprise controls and change mode explicitly.",
-			Tone:  "warn",
-		})
-		return guardrails
-	case "enterprise":
-		guardrails.Boundary = "external_evidence_required"
-		guardrails.Claim = enterprise.Status
-		if guardrails.Claim == "" {
-			guardrails.Claim = "blocked"
-		}
-		guardrails.Summary = "Enterprise mode only passes when local controls and external evidence are attached."
-		guardrails.add(ModeGuardrailItem{
-			Key:   "current_mode",
-			Label: "Current mode",
-			State: "enterprise",
-			Claim: "Enterprise review path is active.",
-			Limit: "No pass until required evidence is attached.",
-			Next:  "Keep external evidence with the release.",
-			Tone:  "info",
-		})
-		guardrails.add(ModeGuardrailItem{
-			Key:   "self_hosted_baseline",
-			Label: "Local baseline",
-			State: localState,
-			Claim: "Local readiness must pass first.",
-			Limit: localLimit,
-			Next:  "Clear local readiness, role, audit, and catalog gates.",
-			Tone:  localTone,
-		})
-		externalTone := "ok"
-		externalState := "attached"
-		externalLimit := "External controls are attached for review."
-		externalNext := "Keep review evidence current."
-		if enterprise.Status != "candidate" {
-			externalTone = "warn"
-			externalState = "missing"
-			externalLimit = fmt.Sprintf("%d enterprise controls need evidence.", enterprise.MissingCount)
-			externalNext = "Attach remote audit, restore, integration, release, privacy, and break-glass evidence."
-			guardrails.BlockedCount++
-			guardrails.ReviewCount++
-		}
-		guardrails.add(ModeGuardrailItem{
-			Key:   "external_controls",
-			Label: "External controls",
-			State: externalState,
-			Claim: "Enterprise evidence depends on external controls.",
-			Limit: externalLimit,
-			Next:  externalNext,
-			Tone:  externalTone,
-		})
-		claimTone := "ok"
-		claimState := "candidate"
-		claimLimit := "Candidate means ready for review, not a silent guarantee."
-		if enterprise.Status != "candidate" {
-			claimTone = "warn"
-			claimState = "blocked"
-			claimLimit = "Enterprise-ready claim is blocked."
-		}
-		guardrails.add(ModeGuardrailItem{
-			Key:   "enterprise_claim",
-			Label: "Enterprise claim",
-			State: claimState,
-			Claim: "Only allowed when every required control has evidence.",
-			Limit: claimLimit,
-			Next:  "Review the evidence pack before relying on the claim.",
-			Tone:  claimTone,
-		})
-		return guardrails
-	default:
-		guardrails.Summary = "Self-hosted mode can be ready with local controls while enterprise remains not claimed."
-		if localState != "ready" {
-			guardrails.ReviewCount++
-		}
-		guardrails.add(ModeGuardrailItem{
-			Key:   "current_mode",
-			Label: "Current mode",
-			State: "self_hosted",
-			Claim: "Secure local control plane.",
-			Limit: "No enterprise claim.",
-			Next:  "Keep local controls clear and visible.",
-			Tone:  "info",
-		})
-		guardrails.add(ModeGuardrailItem{
-			Key:   "self_hosted_baseline",
-			Label: "Self-hosted baseline",
-			State: localState,
-			Claim: "Redacted readiness, explicit roles, catalog gates, and local audit.",
-			Limit: localLimit,
-			Next:  "Fix open local gates before stronger claims.",
-			Tone:  localTone,
-		})
-		guardrails.add(ModeGuardrailItem{
-			Key:   "enterprise_claim",
-			Label: "Enterprise claim",
-			State: "not_claimed",
-			Claim: "Not claimed in self-hosted mode.",
-			Limit: "Remote audit, restore drills, release provenance, integrations, privacy policy, and review evidence are outside this claim.",
-			Next:  "Switch to enterprise only after external controls exist.",
-			Tone:  "warn",
-		})
-		return guardrails
-	}
-}
-
-func (g *ModeGuardrails) add(item ModeGuardrailItem) {
-	g.Items = append(g.Items, item)
-}
-
 func AssuranceGatesFor(ready bool, catalogGateCount int, access AccessPosture) AssuranceGates {
 	gates := AssuranceGates{
 		Summary:       "Abuse gates are enforced by tests and surfaced here without secret values.",
@@ -953,7 +466,7 @@ func (p *NegativePathAssurance) add(ok bool, key, label, okState, reviewState, o
 	p.Cases = append(p.Cases, NegativePathCase{Key: key, Label: label, State: state, Detail: detail, Tone: tone})
 }
 
-func DegradedGuidanceFor(ready bool, audit AuditPosture, boundary EvidenceBoundary, enterprise EnterpriseValidation) DegradedGuidance {
+func DegradedGuidanceFor(ready bool, audit AuditPosture, boundary EvidenceBoundary) DegradedGuidance {
 	guidance := DegradedGuidance{
 		Summary:       "Janus names blocked states and the next safe action without exposing sensitive data.",
 		ValueReturned: false,
@@ -1020,34 +533,6 @@ func DegradedGuidanceFor(ready bool, audit AuditPosture, boundary EvidenceBounda
 		Action: evidenceAction,
 		Role:   boundary.Audience,
 		Tone:   evidenceTone,
-	})
-
-	enterpriseState := enterprise.Status
-	if enterpriseState == "" {
-		enterpriseState = "not_claimed"
-	}
-	enterpriseTone := "info"
-	enterpriseImpact := "Current mode does not claim enterprise readiness."
-	enterpriseAction := "Keep self-hosted evidence clear before making enterprise claims."
-	if enterpriseState == "candidate" {
-		enterpriseTone = "ok"
-		enterpriseImpact = "Enterprise controls are attached for review."
-		enterpriseAction = "Keep external review evidence with the release."
-	} else if enterpriseState == "blocked" {
-		enterpriseTone = "warn"
-		enterpriseImpact = fmt.Sprintf("%d enterprise controls need evidence.", enterprise.MissingCount)
-		enterpriseAction = "Attach external evidence before claiming enterprise readiness."
-		guidance.BlockedCount++
-		guidance.ReviewCount++
-	}
-	guidance.add(DegradedGuidanceItem{
-		Key:    "enterprise_controls",
-		Label:  "Enterprise controls",
-		State:  enterpriseState,
-		Impact: enterpriseImpact,
-		Action: enterpriseAction,
-		Role:   "admin",
-		Tone:   enterpriseTone,
 	})
 
 	return guidance
@@ -1153,262 +638,6 @@ func (d *AuditFailureDrill) add(item AuditFailureDrillItem) {
 		d.BlockedCount++
 	}
 	d.Checks = append(d.Checks, item)
-}
-
-func RestoreDrillProofFor(enterprise EnterpriseValidation) RestoreDrillProof {
-	control := enterpriseControlByKey(enterprise.Controls, "restore_drill")
-	mode := strings.TrimSpace(enterprise.Mode)
-	if mode == "" {
-		mode = "self_hosted"
-	}
-	attachment := control.Attachment
-	if attachment == "" {
-		attachment = "not_claimed"
-	}
-	evidenceSignal := control.EvidenceSignal
-	if evidenceSignal == "" {
-		evidenceSignal = "presence_only_env_flag"
-	}
-
-	proof := RestoreDrillProof{
-		Summary:             "Restore drill proof names the recovery checks Janus expects before enterprise recovery claims.",
-		Mode:                mode,
-		Status:              "not_claimed",
-		Attachment:          attachment,
-		EvidenceSignal:      evidenceSignal,
-		EvidenceRefReturned: false,
-		RecoveryRole:        "operator",
-		ValueReturned:       false,
-	}
-
-	state := "external"
-	tone := "info"
-	next := "Run and attach a restore drill record outside Janus before claiming enterprise recovery."
-	if mode == "enterprise" {
-		state = "blocked"
-		tone = "warn"
-		proof.Status = "blocked"
-		next = "Attach a recent restore drill record outside Janus."
-		if control.State == "attached" {
-			state = "attached"
-			tone = "ok"
-			proof.Status = "candidate"
-			next = "Keep the restore drill record current and reviewed outside Janus."
-		}
-	}
-
-	proof.add(RestoreDrillProofItem{
-		Key:   "metadata_restore",
-		Label: "Metadata restore",
-		State: state,
-		Proof: "Restore evidence must show descriptors, owners, classes, scope, lifecycle, and approved-use metadata survive restore.",
-		Next:  next,
-		Tone:  tone,
-	})
-	proof.add(RestoreDrillProofItem{
-		Key:   "audit_continuity",
-		Label: "Audit continuity",
-		State: state,
-		Proof: "Restore evidence must show audit entries and hash-chain continuity after restore.",
-		Next:  next,
-		Tone:  tone,
-	})
-	proof.add(RestoreDrillProofItem{
-		Key:   "policy_scope_restore",
-		Label: "Policy and scope",
-		State: state,
-		Proof: "Restore evidence must show role bindings, scope filters, and catalog gates come back with the service.",
-		Next:  next,
-		Tone:  tone,
-	})
-	proof.add(RestoreDrillProofItem{
-		Key:   "readiness_after_restore",
-		Label: "Readiness after restore",
-		State: state,
-		Proof: "Restore evidence must show readiness returns without exposing secret values or backend paths.",
-		Next:  next,
-		Tone:  tone,
-	})
-	proof.add(RestoreDrillProofItem{
-		Key:   "evidence_boundary",
-		Label: "Evidence boundary",
-		State: "withheld",
-		Proof: "Janus records only presence and review state; external restore files and refs are not returned.",
-		Next:  "Keep the drill record outside Janus and use this presence signal for review.",
-		Tone:  "ok",
-	})
-
-	return proof
-}
-
-func EnterpriseDryRunFor(currentMode string, enterprise EnterpriseValidation) EnterpriseDryRun {
-	currentMode = strings.TrimSpace(currentMode)
-	if currentMode == "" {
-		currentMode = "self_hosted"
-	}
-	targetMode := strings.TrimSpace(enterprise.Mode)
-	if targetMode == "" {
-		targetMode = "enterprise"
-	}
-
-	dryRun := EnterpriseDryRun{
-		Summary:       "Enterprise dry-run shows what would block an enterprise claim today without changing modes.",
-		CurrentMode:   currentMode,
-		TargetMode:    targetMode,
-		Status:        "candidate",
-		ValueReturned: false,
-	}
-	for _, control := range enterprise.Controls {
-		attachment := control.Attachment
-		if attachment == "" {
-			attachment = "not_claimed"
-		}
-		state := control.State
-		if state == "" {
-			state = "not_claimed"
-		}
-		tone := control.Tone
-		if tone == "" {
-			tone = "info"
-		}
-		item := EnterpriseDryRunItem{
-			Key:                 control.Key,
-			Label:               control.Label,
-			State:               state,
-			Required:            control.Required,
-			Detail:              control.Detail,
-			OwnerRole:           control.OwnerRole,
-			Attachment:          attachment,
-			EvidenceSignal:      control.EvidenceSignal,
-			Next:                control.Next,
-			Tone:                tone,
-			EvidenceRefReturned: false,
-			ValueReturned:       false,
-		}
-		if item.Required {
-			dryRun.Required++
-		}
-		if item.State == "ready" || item.State == "attached" {
-			dryRun.Ready++
-		}
-		if item.Attachment == "attached_presence_only" {
-			dryRun.Attached++
-		}
-		if item.State == "missing" || item.State == "review" || item.Attachment == "missing" {
-			dryRun.Missing++
-			item.Tone = "warn"
-		}
-		dryRun.Checks = append(dryRun.Checks, item)
-	}
-	if dryRun.Missing > 0 {
-		dryRun.Status = "blocked"
-		dryRun.Summary = fmt.Sprintf("Enterprise dry-run is blocked by %d required checks.", dryRun.Missing)
-	} else {
-		dryRun.Summary = "Enterprise dry-run is a candidate; keep external evidence reviewed outside Janus."
-	}
-	return dryRun
-}
-
-func AttachmentReviewFor(enterprise EnterpriseValidation) AttachmentReview {
-	status := strings.TrimSpace(enterprise.Status)
-	if status == "" {
-		status = "not_claimed"
-	}
-	review := AttachmentReview{
-		Summary:       "Self-hosted mode lists enterprise attachments for review without claiming them.",
-		Status:        status,
-		ValueReturned: false,
-	}
-	switch status {
-	case "blocked":
-		review.Summary = "Enterprise mode is blocked until required attachments are present and reviewed outside Janus."
-	case "candidate":
-		review.Summary = "Required attachments are present as presence-only signals; keep owner review current outside Janus."
-	}
-
-	for _, control := range enterprise.Controls {
-		if control.EvidenceSignal != "presence_only_env_flag" {
-			continue
-		}
-		attachment := control.Attachment
-		if attachment == "" {
-			attachment = "not_claimed"
-		}
-		state := control.State
-		if state == "" {
-			state = "not_claimed"
-		}
-		tone := control.Tone
-		if tone == "" {
-			tone = "info"
-		}
-		owner := review.ensureOwner(control.OwnerRole)
-		item := AttachmentReviewControl{
-			Key:                 control.Key,
-			Label:               control.Label,
-			State:               state,
-			Required:            control.Required,
-			Attachment:          attachment,
-			EvidenceSignal:      control.EvidenceSignal,
-			Next:                control.Next,
-			Tone:                tone,
-			EvidenceRefReturned: false,
-			ValueReturned:       false,
-		}
-		owner.Controls = append(owner.Controls, item)
-		if item.Required {
-			owner.Required++
-			review.Required++
-		}
-		switch item.Attachment {
-		case "attached_presence_only":
-			owner.Attached++
-			review.Attached++
-		case "missing":
-			owner.Missing++
-			review.Missing++
-			owner.ReviewCount++
-			review.ReviewCount++
-		default:
-			owner.ReviewCount++
-			review.ReviewCount++
-		}
-	}
-	return review
-}
-
-func (r *AttachmentReview) ensureOwner(role string) *AttachmentReviewOwner {
-	role = strings.TrimSpace(role)
-	if role == "" {
-		role = "admin"
-	}
-	for i := range r.Owners {
-		if r.Owners[i].Role == role {
-			return &r.Owners[i]
-		}
-	}
-	r.Owners = append(r.Owners, AttachmentReviewOwner{Role: role, ValueReturned: false})
-	return &r.Owners[len(r.Owners)-1]
-}
-
-func enterpriseControlByKey(items []EnterpriseValidationControl, key string) EnterpriseValidationControl {
-	for _, item := range items {
-		if item.Key == key {
-			return item
-		}
-	}
-	return EnterpriseValidationControl{Key: key, State: "not_claimed", Attachment: "not_claimed", EvidenceSignal: "presence_only_env_flag"}
-}
-
-func (p *RestoreDrillProof) add(item RestoreDrillProofItem) {
-	item.ValueReturned = false
-	if item.Tone == "warn" || item.State == "blocked" {
-		p.BlockedCount++
-	}
-	if item.Tone == "info" || item.State == "external" || item.State == "not_claimed" {
-		p.ReviewCount++
-	}
-	p.Checks = append(p.Checks, item)
 }
 
 func PrivacyPostureFor(boundary EvidenceBoundary, audit AuditPosture) PrivacyPosture {
