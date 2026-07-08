@@ -89,7 +89,7 @@ func TestVaultPageGatesLedgerByRole(t *testing.T) {
 	viewer := Session{Subject: "viewer", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
 	viewerCookie := httptest.NewRecorder()
 	app.writeSession(viewerCookie, viewer)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/ledger", nil)
 	req.AddCookie(viewerCookie.Result().Cookies()[0])
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
@@ -98,19 +98,70 @@ func TestVaultPageGatesLedgerByRole(t *testing.T) {
 		t.Fatalf("viewer should see the ledger role gate: %s", viewerBody)
 	}
 	if strings.Contains(viewerBody, "private-ref") {
-		t.Fatalf("viewer vault page leaked audit ref: %s", viewerBody)
+		t.Fatalf("viewer ledger page leaked audit ref: %s", viewerBody)
 	}
 
 	auditor := Session{Subject: "auditor", Roles: []string{RoleAuditor, RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
 	auditorCookie := httptest.NewRecorder()
 	app.writeSession(auditorCookie, auditor)
-	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req = httptest.NewRequest(http.MethodGet, "/ledger", nil)
 	req.AddCookie(auditorCookie.Result().Cookies()[0])
 	out = httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
 	auditorBody := out.Body.String()
 	if !strings.Contains(auditorBody, "private-ref") || !strings.Contains(auditorBody, "secret.review") {
 		t.Fatalf("auditor should see ledger rows: %s", auditorBody)
+	}
+	if !strings.Contains(auditorBody, "hash chain") {
+		t.Fatalf("auditor ledger should show the chain panel: %s", auditorBody)
+	}
+}
+
+func TestRequestsAndAssurancePagesRender(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/requests", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("requests page: expected 200, got %d", out.Code)
+	}
+	for _, want := range []string{"what may happen", "Pending", "No pending permits"} {
+		if !strings.Contains(out.Body.String(), want) {
+			t.Fatalf("requests page should render %q: %s", want, out.Body.String())
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/assurance", nil)
+	out = httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("assurance page: expected 200, got %d", out.Code)
+	}
+	for _, want := range []string{"is the doorkeeper healthy?", "Readiness", "Lifecycle", "value_returned=false"} {
+		if !strings.Contains(out.Body.String(), want) {
+			t.Fatalf("assurance page should render %q: %s", want, out.Body.String())
+		}
+	}
+}
+
+func TestNewSecretInputsAutoNormalize(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/vault/new?service=Home+Assistant&host=hsb1", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	body := out.Body.String()
+	if !strings.Contains(body, "hsb1-home-assistant-env") {
+		t.Fatalf("inputs should normalize into a usable name: %s", body)
+	}
+	if !strings.Contains(body, "tidied up for you") {
+		t.Fatalf("normalization should be surfaced as a friendly note: %s", body)
+	}
+	if strings.Contains(body, "Plan not ready") || strings.Contains(body, "not usable yet") {
+		t.Fatalf("normalizable input must not produce an error: %s", body)
 	}
 }
 
@@ -236,11 +287,11 @@ func TestNewSecretScriptDownloadIsGatedAndValueFree(t *testing.T) {
 		}
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/vault/new/plan.sh?service=Bad_Name!", nil)
+	req = httptest.NewRequest(http.MethodGet, "/vault/new/plan.sh?service=!!!", nil)
 	out = httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
 	if out.Code != http.StatusBadRequest {
-		t.Fatalf("invalid plan should 400, got %d", out.Code)
+		t.Fatalf("underivable plan should 400, got %d", out.Code)
 	}
 }
 
@@ -332,18 +383,18 @@ in
 	}
 }
 
-func TestNewSecretPlanRejectsUnusableNames(t *testing.T) {
+func TestNewSecretPlanRejectsUnderivableNames(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
 
-	req := httptest.NewRequest(http.MethodGet, "/vault/new?service=Bad_Name!", nil)
+	req := httptest.NewRequest(http.MethodGet, "/vault/new?service=!!!", nil)
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
-	if !strings.Contains(out.Body.String(), "Plan not ready") {
-		t.Fatalf("invalid service name should block the plan: %s", out.Body.String())
+	if !strings.Contains(out.Body.String(), "could not derive a usable name") {
+		t.Fatalf("underivable service name should block the plan: %s", out.Body.String())
 	}
 	if strings.Contains(out.Body.String(), "agenix -e secrets/") {
-		t.Fatalf("invalid plan should not emit commands: %s", out.Body.String())
+		t.Fatalf("blocked plan should not emit commands: %s", out.Body.String())
 	}
 }
 

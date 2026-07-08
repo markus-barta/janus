@@ -25,11 +25,11 @@
       <span>JANUS</span>
     </div>
     <nav class="nav" aria-label="Main">
-      <a {{ if ne .ActivePage "access" }}class="active" {{ end }}href="/">Vault</a>
+      <a {{ if eq .ActivePage "vault" }}class="active" {{ end }}href="/">Vault</a>
       <a {{ if eq .ActivePage "access" }}class="active" {{ end }}href="/access">Access</a>
-      <a href="/#requests">Requests</a>
-      <a href="/#ledger">Ledger</a>
-      <a href="/#assurance">Assurance</a>
+      <a {{ if eq .ActivePage "requests" }}class="active" {{ end }}href="/requests">Requests</a>
+      <a {{ if eq .ActivePage "ledger" }}class="active" {{ end }}href="/ledger">Ledger</a>
+      <a {{ if eq .ActivePage "assurance" }}class="active" {{ end }}href="/assurance">Assurance</a>
     </nav>
     <div class="spacer"></div>
     <div class="foot">
@@ -267,71 +267,9 @@
     </div>
     {{ end }}
 
-    <h2 id="requests">Requests</h2>
-    {{ if and .CanOperate .Permits }}
-    <div class="panel">
-      <table class="ledger">
-        <tr><th>permit</th><th>ref</th><th>action</th><th>status</th><th>expires</th><th></th></tr>
-        {{ range .Permits }}
-        <tr>
-          <td class="mono">{{ .ID }}</td>
-          <td class="mono">{{ .SecretRef }}</td>
-          <td>{{ .Action }}</td>
-          <td>{{ if eq .Status "approved" }}<span class="state ok">{{ .Status }}</span>{{ else if eq .Status "denied" }}<span class="state bad">{{ .Status }}</span>{{ else }}<span class="state warn">{{ .Status }}</span>{{ end }}</td>
-          <td>{{ since .ExpiresAt }}</td>
-          <td>
-            <form method="post" action="/ui/permits/{{ .ID }}/run">
-              <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
-              <button class="btn quiet" type="submit">safety check</button>
-            </form>
-          </td>
-        </tr>
-        {{ end }}
-      </table>
-    </div>
-    {{ else if .CanOperate }}
-    <div class="empty">No permits right now. Quiet doors are good doors.</div>
-    {{ else }}
-    <div class="empty">Permit requests are operator-gated. Viewing the vault posture is all this role allows.</div>
-    {{ end }}
-
-    <h2 id="ledger">Ledger</h2>
-    {{ if and .CanViewAudit .Audit }}
-    <div class="panel">
-      <table class="ledger">
-        <tr><th>when</th><th>action</th><th>outcome</th><th>ref</th></tr>
-        {{ range .Audit }}
-        <tr>
-          <td>{{ since .Time }}</td>
-          <td class="mono">{{ .Action }}</td>
-          <td>{{ if eq .Outcome "allowed" }}<span class="state ok">{{ .Outcome }}</span>{{ else }}<span class="state bad">{{ .Outcome }}</span>{{ end }}</td>
-          <td class="mono">{{ .SecretRef }}</td>
-        </tr>
-        {{ end }}
-      </table>
-    </div>
-    {{ else if .CanViewAudit }}
-    <div class="empty">The ledger is empty — nothing witnessed yet.</div>
-    {{ else }}
-    <div class="empty">The ledger needs the auditor role. Every touch is still being witnessed.</div>
-    {{ end }}
-
-    <h2 id="assurance">Assurance</h2>
-    <div class="panel">
-      <div class="chips">
-        {{ if .Ready }}<span class="chip teal">readiness ok</span>{{ else }}<span class="chip danger">degraded — sensitive actions fail closed</span>{{ end }}
-        <span class="chip">{{ .Lifecycle.ActiveCount }} active</span>
-        {{ if .Lifecycle.BlockedCount }}<span class="chip amber">{{ .Lifecycle.BlockedCount }} blocked</span>{{ end }}
-        {{ if .Lifecycle.StaleCount }}<span class="chip amber">{{ .Lifecycle.StaleCount }} stale</span>{{ end }}
-        {{ if .Lifecycle.GateCount }}<span class="chip amber">{{ .Lifecycle.GateCount }} lifecycle gates</span>{{ end }}
-        <span class="chip">mode {{ .Mode }}</span>
-      </div>
-      <p class="lead">Janus looks both ways: what may happen is permitted above; what did happen is witnessed in the ledger. No secret value crosses this page — <span class="mono">value_returned=false</span>, always. Full posture detail remains on the <a href="/legacy">legacy console</a>.</p>
-    </div>
-
     <div class="footer">
       <span>janus · build {{ buildCommitShort }}</span>
-      <span>witnessed · metadata only</span>
+      <span>witnessed · metadata only · <span class="mono">value_returned=false</span></span>
     </div>
   </main>
 </div>

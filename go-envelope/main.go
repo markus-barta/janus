@@ -588,6 +588,9 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /ui/permits/{permitID}/run", app.withAuth(app.handleRunPermitUI))
 	mux.HandleFunc("GET /legacy", app.withAuth(app.handleLegacyDashboard))
 	mux.HandleFunc("GET /access", app.withAuth(app.handleAccessPage))
+	mux.HandleFunc("GET /requests", app.withAuth(app.handleRequestsPage))
+	mux.HandleFunc("GET /ledger", app.withAuth(app.handleLedgerPage))
+	mux.HandleFunc("GET /assurance", app.withAuth(app.handleAssurancePage))
 	mux.HandleFunc("GET /vault/new", app.withAuth(app.handleNewSecretPage))
 	mux.HandleFunc("GET /vault/new/plan.sh", app.withAuth(app.handleNewSecretScript))
 	mux.HandleFunc("GET /static/", app.handleStatic)
@@ -613,7 +616,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/legacy", "/access", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/legacy", "/access", "/requests", "/ledger", "/assurance", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true

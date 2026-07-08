@@ -1,0 +1,62 @@
+{{ define "assurance_page" -}}
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Janus — Assurance</title>
+  {{ template "doorkeeper_head" . }}
+</head>
+<body>
+<div class="layout">
+  {{ template "doorkeeper_side" . }}
+
+  <main class="main">
+    <div class="pagehead">
+      <div>
+        <h1>Assurance</h1>
+        <div class="sub">is the doorkeeper healthy?</div>
+      </div>
+      <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC</span>
+    </div>
+
+    <div class="grid2">
+      <div class="panel">
+        <strong>Readiness</strong>
+        <div class="chips">
+          {{ if .Ready }}<span class="chip teal">ready</span>{{ else }}<span class="chip danger">degraded — sensitive actions fail closed</span>{{ end }}
+          <span class="chip">mode {{ .Mode }}</span>
+        </div>
+        <p class="lead">{{ if .Ready }}All redacted public checks are healthy. Handles, permits, and attachments are available to their roles.{{ else }}A readiness check is failing. Janus blocks sensitive actions until it recovers — that is the designed behavior, not an outage.{{ end }}</p>
+      </div>
+      <div class="panel">
+        <strong>Lifecycle</strong>
+        <div class="chips">
+          <span class="chip teal">{{ .Lifecycle.ActiveCount }} active</span>
+          {{ if .Lifecycle.BlockedCount }}<span class="chip amber">{{ .Lifecycle.BlockedCount }} blocked</span>{{ end }}
+          {{ if .Lifecycle.StaleCount }}<span class="chip amber">{{ .Lifecycle.StaleCount }} stale</span>{{ end }}
+          {{ if not (or .Lifecycle.BlockedCount .Lifecycle.StaleCount) }}<span class="chip">nothing blocked or stale</span>{{ end }}
+        </div>
+        {{ range .Lifecycle.Gates }}<p class="lead"><span class="state warn">{{ .Code }}</span> <span class="mono">{{ .SecretRef }}</span> — {{ .Message }}</p>{{ end }}
+      </div>
+    </div>
+
+    {{ if .CatalogGates }}
+    <h2>Catalog gates</h2>
+    <div class="panel">
+      {{ range .CatalogGates }}<p class="lead"><span class="state {{ if eq .Severity "error" }}bad{{ else }}warn{{ end }}">{{ .Code }}</span> <span class="mono">{{ .SecretRef }}</span> — {{ .Message }}</p>{{ end }}
+    </div>
+    {{ end }}
+
+    <div class="panel">
+      <strong>The boundary, in one line</strong>
+      <p class="lead">Janus looks both ways — <a href="/requests">what may happen</a> and <a href="/ledger">what happened</a> — and in neither direction does a secret value cross this app: <span class="mono">value_returned=false</span>, always. Deep posture detail lives on the <a href="/legacy">legacy console</a> until it is retired.</p>
+    </div>
+
+    <div class="footer">
+      <span>janus · build {{ buildCommitShort }}</span>
+      <span>fail closed by design</span>
+    </div>
+  </main>
+</div>
+</body>
+</html>
+{{- end }}

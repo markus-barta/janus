@@ -141,6 +141,22 @@ func applyVaultFilters(data map[string]any, r *http.Request) {
 
 var secretNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
 
+var (
+	slugInvalidChars = regexp.MustCompile(`[^a-z0-9-]+`)
+	slugDashRuns     = regexp.MustCompile(`-{2,}`)
+)
+
+// normalizeSlug turns free-form input into a usable name part instead of
+// rejecting it: "Home Assistant" → "home-assistant".
+func normalizeSlug(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.ReplaceAll(s, " ", "-")
+	s = strings.ReplaceAll(s, "_", "-")
+	s = slugInvalidChars.ReplaceAllString(s, "")
+	s = slugDashRuns.ReplaceAllString(s, "-")
+	return strings.Trim(s, "-")
+}
+
 // NewSecretPlan is the guided "server needs a new secret" flow: Janus never
 // touches the value — it generates the declarative steps (1Password → agenix
 // → nixcfg wiring → catalog descriptor) as copy-paste artifacts.
@@ -149,6 +165,7 @@ type NewSecretPlan struct {
 	DisplayName    string
 	Host           string
 	Service        string
+	NormalizedNote string
 	Classification string
 	RotationDays   int
 	Tags           []string
@@ -161,13 +178,30 @@ type NewSecretPlan struct {
 }
 
 func newSecretPlanFromQuery(query url.Values) *NewSecretPlan {
-	service := strings.ToLower(strings.TrimSpace(query.Get("service")))
-	if service == "" {
+	rawService := strings.TrimSpace(query.Get("service"))
+	if rawService == "" {
 		return nil
 	}
-	host := strings.ToLower(strings.TrimSpace(query.Get("host")))
+	rawHost := strings.TrimSpace(query.Get("host"))
+	service := normalizeSlug(rawService)
+	host := normalizeSlug(rawHost)
 	if host == "" {
 		host = "csb1"
+	}
+	if service == "" {
+		return &NewSecretPlan{
+			Service:  rawService,
+			Host:     host,
+			Problems: []string{"could not derive a usable name from '" + rawService + "' — use letters, digits, spaces, or dashes."},
+		}
+	}
+	var normalizedNote string
+	if service != rawService || (rawHost != "" && host != rawHost) {
+		normalizedNote = rawService
+		if rawHost != "" && host != rawHost {
+			normalizedNote = rawService + " @ " + rawHost
+		}
+		normalizedNote += " → " + host + "-" + service + "-env"
 	}
 	classification := query.Get("classification")
 	switch classification {
@@ -197,6 +231,7 @@ func newSecretPlanFromQuery(query url.Values) *NewSecretPlan {
 		DisplayName:    display,
 		Host:           host,
 		Service:        service,
+		NormalizedNote: normalizedNote,
 		Classification: classification,
 		RotationDays:   rotation,
 		Tags:           tags,
@@ -375,6 +410,48 @@ func (app *App) handleAccessPage(w http.ResponseWriter, r *http.Request) {
 	data := app.dashboardData(r, session, nil, "")
 	data["ActivePage"] = "access"
 	renderTemplate(w, app.templates, "access_page", data)
+}
+
+func splitPermits(permits []Permit, now time.Time) (pending, past []Permit) {
+	for _, p := range permits {
+		if p.ExpiresAt.After(now) {
+			pending = append(pending, p)
+		} else {
+			past = append(past, p)
+		}
+	}
+	return pending, past
+}
+
+func (app *App) handleRequestsPage(w http.ResponseWriter, r *http.Request) {
+	app.audit(r, "requests.view", "allowed", actorFromContext(r.Context()), "")
+	session := currentSession(r.Context())
+	data := app.dashboardData(r, session, nil, "")
+	data["ActivePage"] = "requests"
+	permits, _ := data["Permits"].([]Permit)
+	pending, past := splitPermits(permits, time.Now().UTC())
+	data["PendingPermits"] = pending
+	data["PastPermits"] = past
+	renderTemplate(w, app.templates, "requests_page", data)
+}
+
+func (app *App) handleLedgerPage(w http.ResponseWriter, r *http.Request) {
+	app.audit(r, "ledger.view", "allowed", actorFromContext(r.Context()), "")
+	session := currentSession(r.Context())
+	data := app.dashboardData(r, session, nil, "")
+	data["ActivePage"] = "ledger"
+	if canView, _ := data["CanViewAudit"].(bool); canView {
+		data["Audit"] = app.store.RecentAudit(50)
+	}
+	renderTemplate(w, app.templates, "ledger_page", data)
+}
+
+func (app *App) handleAssurancePage(w http.ResponseWriter, r *http.Request) {
+	app.audit(r, "assurance.view", "allowed", actorFromContext(r.Context()), "")
+	session := currentSession(r.Context())
+	data := app.dashboardData(r, session, nil, "")
+	data["ActivePage"] = "assurance"
+	renderTemplate(w, app.templates, "assurance_page", data)
 }
 
 func (app *App) handleLegacyDashboard(w http.ResponseWriter, r *http.Request) {

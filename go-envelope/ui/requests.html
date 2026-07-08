@@ -1,0 +1,88 @@
+{{ define "requests_page" -}}
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Janus — Requests</title>
+  {{ template "doorkeeper_head" . }}
+</head>
+<body>
+<div class="layout">
+  {{ template "doorkeeper_side" . }}
+
+  <main class="main">
+    <div class="pagehead">
+      <div>
+        <h1>Requests</h1>
+        <div class="sub">what may happen</div>
+      </div>
+      <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC</span>
+    </div>
+
+    {{ if .CanOperate }}
+    <div class="tiles">
+      <div class="tile {{ if .PendingPermits }}warm{{ end }}"><strong>{{ len .PendingPermits }}</strong><span>Pending</span></div>
+      <div class="tile"><strong>{{ len .PastPermits }}</strong><span>Recently decided</span></div>
+      <div class="tile"><strong>{{ .PermitPosture.Count }}</strong><span>Recorded total</span></div>
+    </div>
+
+    <h2>Pending</h2>
+    {{ if .PendingPermits }}
+    <div class="cards">
+      {{ range .PendingPermits }}
+      <div class="card">
+        <div class="name"><span>{{ .SecretRef }}</span></div>
+        <div class="owner mono">{{ .ID }}</div>
+        <div class="chips">
+          <span class="chip">{{ .Action }}</span>
+          {{ if eq .Status "approved" }}<span class="chip teal">{{ .Status }}</span>{{ else if eq .Status "denied" }}<span class="chip danger">{{ .Status }}</span>{{ else }}<span class="chip amber">{{ .Status }}</span>{{ end }}
+        </div>
+        <div class="meta">
+          {{ if .Reason }}<span>“{{ .Reason }}”</span>{{ end }}
+          <span>expires <b>{{ since .ExpiresAt }}</b>{{ if .Destination }} · for <b>{{ .Destination }}</b>{{ end }}</span>
+        </div>
+        <div class="foot">
+          <form method="post" action="/ui/permits/{{ .ID }}/run">
+            <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+            <button class="btn quiet" type="submit">Run safety check</button>
+          </form>
+        </div>
+      </div>
+      {{ end }}
+    </div>
+    {{ else }}
+    <div class="empty">No pending permits. Quiet doors are good doors — request one from a secret's <a href="/">focus panel</a>.</div>
+    {{ end }}
+
+    <h2>History</h2>
+    {{ if .PastPermits }}
+    <div class="panel">
+      <table class="ledger">
+        <tr><th>permit</th><th>ref</th><th>action</th><th>status</th><th>created</th><th>expired</th></tr>
+        {{ range .PastPermits }}
+        <tr>
+          <td class="mono">{{ .ID }}</td>
+          <td class="mono">{{ .SecretRef }}</td>
+          <td>{{ .Action }}</td>
+          <td>{{ if eq .Status "approved" }}<span class="state ok">{{ .Status }}</span>{{ else if eq .Status "denied" }}<span class="state bad">{{ .Status }}</span>{{ else }}<span class="state warn">{{ .Status }}</span>{{ end }}</td>
+          <td>{{ since .CreatedAt }}</td>
+          <td>{{ since .ExpiresAt }}</td>
+        </tr>
+        {{ end }}
+      </table>
+    </div>
+    {{ else }}
+    <div class="empty">Nothing decided recently.</div>
+    {{ end }}
+    {{ else }}
+    <div class="empty">Permit requests are operator-gated. You are signed in, but this role only views posture — ask the operator for the operator role if you need it.</div>
+    {{ end }}
+
+    <div class="footer">
+      <span>janus · build {{ buildCommitShort }}</span>
+      <span>permits are metadata records — no connector runs, no value moves</span>
+    </div>
+  </main>
+</div>
+</body>
+</html>
+{{- end }}

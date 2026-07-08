@@ -1,0 +1,76 @@
+{{ define "ledger_page" -}}
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Janus — Ledger</title>
+  {{ template "doorkeeper_head" . }}
+</head>
+<body>
+<div class="layout">
+  {{ template "doorkeeper_side" . }}
+
+  <main class="main">
+    <div class="pagehead">
+      <div>
+        <h1>Ledger</h1>
+        <div class="sub">what happened — every touch, witnessed</div>
+      </div>
+      <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC</span>
+    </div>
+
+    {{ if .CanViewAudit }}
+    <div class="grid2 ledgergrid">
+      <div>
+        {{ if .Audit }}
+        <div class="panel">
+          <table class="ledger">
+            <tr><th>when</th><th>action</th><th>outcome</th><th>ref</th><th>witness</th></tr>
+            {{ range .Audit }}
+            <tr>
+              <td>{{ since .Time }}</td>
+              <td class="mono">{{ .Action }}</td>
+              <td>{{ if eq .Outcome "allowed" }}<span class="state ok">{{ .Outcome }}</span>{{ else }}<span class="state bad">{{ .Outcome }}</span>{{ end }}</td>
+              <td class="mono">{{ .SecretRef }}</td>
+              <td class="mono">{{ printf "%.8s" .EventHash }}</td>
+            </tr>
+            {{ end }}
+          </table>
+        </div>
+        {{ else }}
+        <div class="empty">The ledger is empty — nothing witnessed yet.</div>
+        {{ end }}
+      </div>
+      <div>
+        <div class="panel">
+          <strong>Chain</strong>
+          <div class="chips">
+            {{ if .Posture.ChainVerified }}<span class="chip teal">hash chain verified</span>{{ else }}<span class="chip danger">chain unverified</span>{{ end }}
+            {{ if .Posture.SinkWritable }}<span class="chip teal">sink writable</span>{{ else }}<span class="chip danger">sink degraded — fail closed</span>{{ end }}
+            <span class="chip">{{ .Posture.Entries }} entries</span>
+            {{ if .Posture.CriticalCount }}<span class="chip danger">{{ .Posture.CriticalCount }} critical</span>{{ end }}
+            {{ if .Posture.WarningCount }}<span class="chip amber">{{ .Posture.WarningCount }} warnings</span>{{ end }}
+          </div>
+          {{ if .Posture.LastEventAt }}<p class="lead">last event {{ since .Posture.LastEventAt }}</p>{{ end }}
+        </div>
+        {{ if .CanExportEvidence }}
+        <div class="panel">
+          <strong>Evidence</strong>
+          <p class="lead">Copy-safe evidence pack with integrity hash{{ if .EvidenceHash }} — current pack <span class="mono">{{ .EvidenceHash }}…</span>{{ end }}.</p>
+          <a class="btn quiet" href="/api/evidence">Download evidence JSON</a>
+        </div>
+        {{ end }}
+      </div>
+    </div>
+    {{ else }}
+    <div class="empty">The ledger needs the auditor role. Every touch is still being witnessed — you just can't read the trail with this role.</div>
+    {{ end }}
+
+    <div class="footer">
+      <span>janus · build {{ buildCommitShort }}</span>
+      <span>hash-chained · raw paths and reasons stay out of the trail</span>
+    </div>
+  </main>
+</div>
+</body>
+</html>
+{{- end }}
