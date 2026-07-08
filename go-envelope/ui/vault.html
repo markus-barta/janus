@@ -1,11 +1,7 @@
-{{ define "dashboard" -}}
-<!doctype html>
-<html lang="en">
-<head>
+{{ define "doorkeeper_head" -}}
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {{ if .CSRF }}<meta name="csrf-token" content="{{ .CSRF }}">{{ end }}
-  <title>Janus — Vault</title>
   <link rel="icon" type="image/svg+xml" href="/static/janus-logo.svg">
   <link rel="stylesheet" href="/static/janus.css">
   <style nonce="{{ .CSPNonce }}">
@@ -20,20 +16,20 @@
         radial-gradient(90rem 60rem at 120% -10%, rgba(201, 145, 63, 0.07), transparent 55%);
     }
   </style>
-</head>
-<body>
-<div class="layout">
+{{- end }}
+
+{{ define "doorkeeper_side" -}}
   <aside class="side">
     <div class="brand">
       <img src="/static/janus-logo.svg" alt="">
       <span>JANUS</span>
     </div>
     <nav class="nav" aria-label="Main">
-      <a class="active" href="/">Vault</a>
-      <a href="#focus">Access</a>
-      <a href="#requests">Requests</a>
-      <a href="#ledger">Ledger</a>
-      <a href="#assurance">Assurance</a>
+      <a {{ if ne .ActivePage "access" }}class="active" {{ end }}href="/">Vault</a>
+      <a {{ if eq .ActivePage "access" }}class="active" {{ end }}href="/access">Access</a>
+      <a href="/#requests">Requests</a>
+      <a href="/#ledger">Ledger</a>
+      <a href="/#assurance">Assurance</a>
     </nav>
     <div class="spacer"></div>
     <div class="foot">
@@ -44,6 +40,18 @@
       </div>
     </div>
   </aside>
+{{- end }}
+
+{{ define "dashboard" -}}
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Janus — Vault</title>
+  {{ template "doorkeeper_head" . }}
+</head>
+<body>
+<div class="layout">
+  {{ template "doorkeeper_side" . }}
 
   <main class="main">
     <div class="pagehead">

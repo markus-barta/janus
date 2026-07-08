@@ -1,0 +1,92 @@
+{{ define "access_page" -}}
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Janus — Access</title>
+  {{ template "doorkeeper_head" . }}
+</head>
+<body>
+<div class="layout">
+  {{ template "doorkeeper_side" . }}
+
+  <main class="main">
+    <div class="pagehead">
+      <div>
+        <h1>Access</h1>
+        <div class="sub">who may open which door</div>
+      </div>
+      <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC</span>
+    </div>
+
+    <div class="grid2">
+      <div class="panel">
+        <strong>Signed in</strong>
+        <p class="lead">{{ if .Session.Name }}{{ .Session.Name }}{{ else }}{{ .Session.Subject }}{{ end }} — identity comes from Zitadel SSO; Janus only maps it to roles.</p>
+        <div class="chips">
+          {{ range .Session.Roles }}<span class="chip teal">{{ . }}</span>{{ end }}
+        </div>
+      </div>
+      <div class="panel">
+        <strong>Policy posture</strong>
+        <div class="chips">
+          {{ if .Access.ExplicitBindings }}<span class="chip teal">explicit bindings</span>{{ else if .Access.BootstrapOwner }}<span class="chip amber">bootstrap owner — all roles granted to authenticated users</span>{{ else }}<span class="chip danger">no bindings — sensitive APIs deny</span>{{ end }}
+          <span class="chip">claim policy {{ .Access.ClaimPolicy }}</span>
+          <span class="chip">{{ .Access.SubjectBindingCount }} subject binding{{ if ne .Access.SubjectBindingCount 1 }}s{{ end }}</span>
+          <span class="chip">{{ .Access.GroupBindingCount }} group binding{{ if ne .Access.GroupBindingCount 1 }}s{{ end }}</span>
+        </div>
+        {{ range .Access.Gates }}<p class="lead"><span class="state warn">{{ .Code }}</span> {{ .Message }}</p>{{ end }}
+        <p class="lead">Binding identities are counted, never displayed — <span class="mono">value_returned=false</span>.</p>
+      </div>
+    </div>
+
+    <h2>Role lanes</h2>
+    <div class="cards">
+      {{ range .RolePolicyReadiness.Lanes }}
+      <div class="card {{ if not .Ready }}attention{{ end }}">
+        <div class="name"><span>{{ .Label }}</span></div>
+        <div class="chips">
+          {{ if .Ready }}<span class="chip teal">{{ .State }}</span>{{ else }}<span class="chip amber">{{ .State }}</span>{{ end }}
+          <span class="chip">{{ .SubjectBindingCount }} subject{{ if ne .SubjectBindingCount 1 }}s{{ end }}</span>
+          <span class="chip">{{ .GroupBindingCount }} group{{ if ne .GroupBindingCount 1 }}s{{ end }}</span>
+        </div>
+        <div class="meta"><span>{{ .Detail }}</span></div>
+      </div>
+      {{ end }}
+    </div>
+
+    <h2>Duties</h2>
+    <div class="panel">
+      <table class="ledger">
+        <tr><th>role</th><th>duty</th><th>allowed</th><th>boundary</th><th></th></tr>
+        {{ range .RoleBoundaries }}
+        <tr>
+          <td class="mono">{{ .Role }}</td>
+          <td>{{ .Duty }}</td>
+          <td>{{ .Allowed }}</td>
+          <td>{{ .Blocked }}</td>
+          <td>{{ if .Active }}<span class="state ok">you</span>{{ end }}</td>
+        </tr>
+        {{ end }}
+      </table>
+    </div>
+
+    <h2>Route gates</h2>
+    <div class="panel">
+      <table class="ledger">
+        <tr><th>route</th><th>required role</th></tr>
+        {{ range $route, $role := .Access.RequiredRoles }}
+        <tr><td class="mono">{{ $route }}</td><td class="mono">{{ $role }}</td></tr>
+        {{ end }}
+      </table>
+      <p class="lead">Everything else is deny-by-default: an authenticated identity with no matching role sees posture only.</p>
+    </div>
+
+    <div class="footer">
+      <span>janus · build {{ buildCommitShort }}</span>
+      <span>authn: Zitadel · authz: Janus role bindings</span>
+    </div>
+  </main>
+</div>
+</body>
+</html>
+{{- end }}

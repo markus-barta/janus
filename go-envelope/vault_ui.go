@@ -15,7 +15,7 @@ import (
 //go:embed ui/janus.css ui/janus-logo.svg
 var uiStaticFS embed.FS
 
-//go:embed ui/vault.html
+//go:embed ui/*.html
 var vaultTemplateFS embed.FS
 
 type VaultTiles struct {
@@ -80,6 +80,14 @@ func (app *App) handleStatic(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	_, _ = w.Write(data)
+}
+
+func (app *App) handleAccessPage(w http.ResponseWriter, r *http.Request) {
+	app.audit(r, "access.view", "allowed", actorFromContext(r.Context()), "")
+	session := currentSession(r.Context())
+	data := app.dashboardData(r, session, nil, "")
+	data["ActivePage"] = "access"
+	renderTemplate(w, app.templates, "access_page", data)
 }
 
 func (app *App) handleLegacyDashboard(w http.ResponseWriter, r *http.Request) {

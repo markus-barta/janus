@@ -587,6 +587,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /ui/permits", app.withAuth(app.handleCreatePermitUI))
 	mux.HandleFunc("POST /ui/permits/{permitID}/run", app.withAuth(app.handleRunPermitUI))
 	mux.HandleFunc("GET /legacy", app.withAuth(app.handleLegacyDashboard))
+	mux.HandleFunc("GET /access", app.withAuth(app.handleAccessPage))
 	mux.HandleFunc("GET /static/", app.handleStatic)
 	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
 	return app.securityHeaders(app.requestIDs(app.rateLimit(app.limitRequestBody(app.safeHTTPBoundary(mux)))))
@@ -610,7 +611,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/legacy", "/auth/smoke", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/legacy", "/access", "/auth/smoke", "/session-witness", "/session-witness.txt", "/session-witness/proof.txt", "/session-witness/evidence.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
@@ -1022,6 +1023,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	commandCenter := CommandCenterFor(ready, operationalStatus, actionReadiness, modeGuardrails, attachmentReview, evidenceBoundary)
 	data := map[string]any{
 		"Title":                "Janus",
+		"ActivePage":           "vault",
 		"CSPNonce":             cspNonceFromContext(r.Context()),
 		"Now":                  time.Now().UTC(),
 		"VaultTiles":           vaultTilesFor(descriptors, lifecyclePosture, permitPosture),
@@ -8296,5 +8298,5 @@ func mustTemplates() *template.Template {
 {{ template "base_bottom" . }}
 {{- end }}
 `))
-	return template.Must(t.ParseFS(vaultTemplateFS, "ui/vault.html"))
+	return template.Must(t.ParseFS(vaultTemplateFS, "ui/*.html"))
 }

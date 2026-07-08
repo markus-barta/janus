@@ -110,6 +110,46 @@ func TestVaultPageGatesLedgerByRole(t *testing.T) {
 	}
 }
 
+func TestAccessPageRendersLanesWithoutIdentityValues(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	app.cfg.RolePolicy = RolePolicy{
+		AdminSubjects:   map[string]bool{"markus@barta.com": true},
+		AuditorSubjects: map[string]bool{"markus@barta.com": true},
+		AdminGroups:     map[string]bool{"janus-admins": true},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/access", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"who may open which door", "Admin lane", "Auditor lane", "Operator lane", "Policy and ownership", "/api/audit/recent", "deny-by-default", "value_returned=false", "Zitadel"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("access page should render %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"markus@barta.com", "janus-admins"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("access page leaked binding identity %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestVaultSidebarLinksAccessPage(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if !strings.Contains(out.Body.String(), `href="/access"`) {
+		t.Fatalf("vault sidebar should link the access page: %s", out.Body.String())
+	}
+}
+
 func TestVaultStaticAssetsServed(t *testing.T) {
 	app := newTestApp(t)
 	cases := []struct {
