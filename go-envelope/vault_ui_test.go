@@ -6,6 +6,10 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -209,6 +213,122 @@ func TestNewSecretPlanGeneratesDeclarativeSteps(t *testing.T) {
 	}
 	if strings.Contains(body, `name="value"`) || strings.Contains(body, "type=\"password\"") {
 		t.Fatalf("new-secret flow must never ask for the secret value: %s", body)
+	}
+}
+
+func TestNewSecretScriptDownloadIsGatedAndValueFree(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/vault/new/plan.sh?service=xyz&host=csb1", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	if got := out.Header().Get("Content-Type"); !strings.Contains(got, "shellscript") {
+		t.Fatalf("expected shellscript content type, got %q", got)
+	}
+	body := out.Body.String()
+	for _, want := range []string{"set -euo pipefail", "agenix -e secrets/csb1-xyz-env.age", "idempotent", "1Password"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("plan script should contain %q: %s", want, body)
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/vault/new/plan.sh?service=Bad_Name!", nil)
+	out = httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusBadRequest {
+		t.Fatalf("invalid plan should 400, got %d", out.Code)
+	}
+}
+
+func TestNewSecretScriptAppliesToNixcfgFixtureIdempotently(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash unavailable")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 unavailable")
+	}
+
+	dir := t.TempDir()
+	mustWrite := func(rel, content string) {
+		t.Helper()
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite("secrets/secrets.nix", `let
+  markus = [ "ssh-ed25519 AAA" ];
+  csb1 = [ "ssh-ed25519 BBB" ];
+in
+{
+  "existing.age".publicKeys = markus ++ csb1;
+}
+`)
+	mustWrite("hosts/csb1/configuration.nix", `{ config, ... }:
+{
+  networking.hostName = "csb1";
+}
+`)
+	mustWrite("hosts/csb1/docker/janus/catalog/agenix-catalog.json", "[]\n")
+
+	plan := newSecretPlanFromQuery(url.Values{"service": {"xyz"}, "host": {"csb1"}, "rotation": {"90"}})
+	if plan == nil || len(plan.Problems) > 0 {
+		t.Fatalf("plan should be valid: %+v", plan)
+	}
+	scriptPath := filepath.Join(dir, "plan.sh")
+	if err := os.WriteFile(scriptPath, []byte(newSecretScript(plan)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	runScript := func(pass int) string {
+		t.Helper()
+		cmd := exec.Command("bash", scriptPath)
+		cmd.Dir = dir
+		outBytes, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("pass %d: script failed: %v\n%s", pass, err, outBytes)
+		}
+		return string(outBytes)
+	}
+
+	first := runScript(1)
+	for _, want := range []string{"+ secrets/secrets.nix", "age.secrets.csb1-xyz-env wired", "descriptor added"} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("first run should report %q: %s", want, first)
+		}
+	}
+
+	second := runScript(2)
+	for _, want := range []string{"= secrets/secrets.nix already declares", "already wires", "catalog already lists"} {
+		if !strings.Contains(second, want) {
+			t.Fatalf("second run should be a no-op reporting %q: %s", want, second)
+		}
+	}
+
+	secretsNix, _ := os.ReadFile(filepath.Join(dir, "secrets/secrets.nix"))
+	if got := strings.Count(string(secretsNix), `"csb1-xyz-env.age".publicKeys = markus ++ csb1;`); got != 1 {
+		t.Fatalf("secrets.nix should declare the recipient exactly once, got %d:\n%s", got, secretsNix)
+	}
+	conf, _ := os.ReadFile(filepath.Join(dir, "hosts/csb1/configuration.nix"))
+	if got := strings.Count(string(conf), "age.secrets.csb1-xyz-env = {"); got != 1 {
+		t.Fatalf("configuration.nix should wire the secret exactly once, got %d:\n%s", got, conf)
+	}
+	if !strings.Contains(string(conf), `path = "/run/agenix/csb1-xyz-env";`) {
+		t.Fatalf("configuration.nix missing materialization path:\n%s", conf)
+	}
+	catalog, _ := os.ReadFile(filepath.Join(dir, "hosts/csb1/docker/janus/catalog/agenix-catalog.json"))
+	if got := strings.Count(string(catalog), `"id": "csb1-xyz-env"`); got != 1 {
+		t.Fatalf("catalog should list the descriptor exactly once, got %d:\n%s", got, catalog)
+	}
+	if strings.Contains(string(catalog), "rotation_days\": 90") == false {
+		t.Fatalf("catalog should carry rotation_days 90:\n%s", catalog)
 	}
 }
 
