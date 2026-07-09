@@ -340,6 +340,44 @@ h2 {
 }
 .panel + .panel { margin-top: 12px; }
 .panel .lead { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+.vault-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, .36fr);
+  gap: 12px;
+  align-items: start;
+}
+.vault-results { min-width: 0; }
+.vault-results h2 { margin-top: 34px; }
+.focus-rail {
+  position: sticky;
+  top: 18px;
+  margin-top: 34px;
+}
+.rail-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.rail-head b {
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ink);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.focus-rail h3 {
+  font-size: 18px;
+  margin: 14px 0 4px;
+}
+.rail-section {
+  border-top: 1px solid var(--hairline);
+  margin-top: 16px;
+  padding-top: 14px;
+}
 .grid2 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
@@ -644,9 +682,11 @@ table.ledger tr:last-child td { border-bottom: 0; }
   .tile strong { max-width: 100%; }
   .filterbar { display: grid; grid-template-columns: 1fr; }
   .newbtn { margin-left: 0; }
+  .vault-workspace,
   .access-layout,
   .settings-grid,
   .workflow-row { grid-template-columns: 1fr; }
+  .focus-rail { position: static; margin-top: 12px; }
   .access-rail { position: static; }
   table.ledger { min-width: 560px; }
 }

@@ -22,12 +22,12 @@
       <img class="brand-full" src="/static/janus-logo-full.png" alt="JANUS">
     </div>
     <nav class="nav" aria-label="Main">
-      <a {{ if eq .ActivePage "vault" }}class="active" {{ end }}href="/"><span class="nav-ico nav-vault"></span><span>Vault</span></a>
-      <a {{ if eq .ActivePage "requests" }}class="active" {{ end }}href="/requests"><span class="nav-ico nav-permits"></span><span>Permits</span></a>
-      <a {{ if eq .ActivePage "access" }}class="active" {{ end }}href="/access"><span class="nav-ico nav-access"></span><span>Access</span></a>
-      <a {{ if eq .ActivePage "ledger" }}class="active" {{ end }}href="/ledger"><span class="nav-ico nav-audit"></span><span>Audit</span></a>
-      <a {{ if eq .ActivePage "assurance" }}class="active" {{ end }}href="/assurance"><span class="nav-ico nav-health"></span><span>Health</span></a>
-      <a {{ if eq .ActivePage "settings" }}class="active" {{ end }}href="/settings"><span class="nav-ico nav-settings"></span><span>Settings</span></a>
+      <a {{ if eq .ActivePage "vault" }}class="active" aria-current="page" {{ end }}href="/"><span class="nav-ico nav-vault"></span><span>Vault</span></a>
+      <a {{ if eq .ActivePage "requests" }}class="active" aria-current="page" {{ end }}href="/requests"><span class="nav-ico nav-permits"></span><span>Permits</span></a>
+      <a {{ if eq .ActivePage "access" }}class="active" aria-current="page" {{ end }}href="/access"><span class="nav-ico nav-access"></span><span>Access</span></a>
+      <a {{ if eq .ActivePage "ledger" }}class="active" aria-current="page" {{ end }}href="/ledger"><span class="nav-ico nav-audit"></span><span>Audit</span></a>
+      <a {{ if eq .ActivePage "assurance" }}class="active" aria-current="page" {{ end }}href="/assurance"><span class="nav-ico nav-health"></span><span>Health</span></a>
+      <a {{ if eq .ActivePage "settings" }}class="active" aria-current="page" {{ end }}href="/settings"><span class="nav-ico nav-settings"></span><span>Settings</span></a>
     </nav>
     <div class="spacer"></div>
     <div class="foot">
@@ -144,125 +144,135 @@
       <div class="tile {{ if .VaultTiles.Permits }}warm{{ end }}"><strong>{{ .VaultTiles.Permits }}</strong><span>Permits</span></div>
     </div>
 
-    <h2 id="vault">Secrets</h2>
-    <form class="filterbar" method="get" action="/#vault">
-      <input type="search" name="q" value="{{ .Query }}" placeholder="Search name, host, tag…" aria-label="Search secrets">
-      <select name="provider" aria-label="Backend">
-        <option value="">backend: all</option>
-        {{ range .Providers }}<option value="{{ . }}" {{ if eq . $.FilterProvider }}selected{{ end }}>{{ . }}</option>{{ end }}
-      </select>
-      <select name="state" aria-label="State">
-        <option value="">state: all</option>
-        <option value="active" {{ if eq .FilterState "active" }}selected{{ end }}>active</option>
-        <option value="attention" {{ if eq .FilterState "attention" }}selected{{ end }}>needs attention</option>
-      </select>
-      <input type="hidden" name="view" value="{{ .View }}">
-      <button class="btn quiet" type="submit">Filter</button>
-      <span class="viewtoggle">
-        <a {{ if eq .View "grid" }}class="on" {{ end }}href="/?q={{ .Query | urlquery }}&amp;provider={{ .FilterProvider | urlquery }}&amp;state={{ .FilterState | urlquery }}&amp;view=grid#vault">grid</a>
-        ·
-        <a {{ if eq .View "list" }}class="on" {{ end }}href="/?q={{ .Query | urlquery }}&amp;provider={{ .FilterProvider | urlquery }}&amp;state={{ .FilterState | urlquery }}&amp;view=list#vault">list</a>
-      </span>
-      <a class="btn newbtn" href="/vault/new">+ New secret</a>
-    </form>
-    {{ if .Descriptors }}
-    {{ if eq .View "list" }}
-    <div class="panel">
-      <table class="ledger">
-        <tr><th>secret</th><th>host</th><th>backend</th><th>class</th><th>state</th><th>rotates</th><th>last checked</th><th></th></tr>
-        {{ range .Descriptors }}
-        <tr>
-          <td class="mono">{{ .ID }}</td>
-          <td>{{ .Scope }}</td>
-          <td>{{ .Provider }}</td>
-          <td>{{ .Classification }}</td>
-          <td>{{ if eq .Lifecycle "active" }}<span class="state ok">active</span>{{ else if eq .Lifecycle "rotating" }}<span class="state warn">rotating</span>{{ else }}<span class="state bad">{{ .Lifecycle }}</span>{{ end }}</td>
-          <td>{{ .RotationDays }}d</td>
-          <td>{{ since .LastCheckedAt }}</td>
-          <td><a href="/?ref={{ .ID }}#focus">focus →</a></td>
-        </tr>
+    <div class="vault-workspace">
+      <section class="vault-results">
+        <h2 id="vault">Secrets</h2>
+        <form class="filterbar" method="get" action="/#vault">
+          <input type="search" name="q" value="{{ .Query }}" placeholder="Search name, host, tag…" aria-label="Search secrets">
+          <select name="provider" aria-label="Backend">
+            <option value="">backend: all</option>
+            {{ range .Providers }}<option value="{{ . }}" {{ if eq . $.FilterProvider }}selected{{ end }}>{{ . }}</option>{{ end }}
+          </select>
+          <select name="state" aria-label="State">
+            <option value="">state: all</option>
+            <option value="active" {{ if eq .FilterState "active" }}selected{{ end }}>active</option>
+            <option value="attention" {{ if eq .FilterState "attention" }}selected{{ end }}>needs attention</option>
+          </select>
+          <input type="hidden" name="view" value="{{ .View }}">
+          <button class="btn quiet" type="submit">Filter</button>
+          <span class="viewtoggle">
+            <a {{ if eq .View "grid" }}class="on" {{ end }}href="/?q={{ .Query | urlquery }}&amp;provider={{ .FilterProvider | urlquery }}&amp;state={{ .FilterState | urlquery }}&amp;view=grid#vault">grid</a>
+            ·
+            <a {{ if eq .View "list" }}class="on" {{ end }}href="/?q={{ .Query | urlquery }}&amp;provider={{ .FilterProvider | urlquery }}&amp;state={{ .FilterState | urlquery }}&amp;view=list#vault">list</a>
+          </span>
+          <a class="btn newbtn" href="/vault/new">+ New secret</a>
+        </form>
+        {{ if .Descriptors }}
+        {{ if eq .View "list" }}
+        <div class="panel">
+          <table class="ledger">
+            <tr><th>secret</th><th>host</th><th>backend</th><th>class</th><th>state</th><th>rotates</th><th>last checked</th><th></th></tr>
+            {{ range .Descriptors }}
+            <tr>
+              <td class="mono">{{ .ID }}</td>
+              <td>{{ .Scope }}</td>
+              <td>{{ .Provider }}</td>
+              <td>{{ .Classification }}</td>
+              <td>{{ if eq .Lifecycle "active" }}<span class="state ok">active</span>{{ else if eq .Lifecycle "rotating" }}<span class="state warn">rotating</span>{{ else }}<span class="state bad">{{ .Lifecycle }}</span>{{ end }}</td>
+              <td>{{ .RotationDays }}d</td>
+              <td>{{ since .LastCheckedAt }}</td>
+              <td><a href="/?ref={{ .ID }}#focus">focus →</a></td>
+            </tr>
+            {{ end }}
+          </table>
+        </div>
+        {{ else }}
+        <div class="cards">
+          {{ range .Descriptors }}
+          <div class="card {{ if ne .Lifecycle "active" }}attention{{ end }}">
+            <div class="name"><span>{{ .DisplayName }}</span>{{ if .RevealAllowed }}<span class="key" title="reveal permitted">⚿</span>{{ end }}</div>
+            <div class="owner">{{ .Owner }}{{ if .Scope }} · {{ .Scope }}{{ end }}</div>
+            <div class="chips">
+              <span class="chip">{{ .Provider }}</span>
+              <span class="chip">{{ .Classification }}</span>
+              {{ if eq .Lifecycle "active" }}<span class="chip teal">active</span>
+              {{ else if eq .Lifecycle "rotating" }}<span class="chip amber">rotating</span>
+              {{ else }}<span class="chip danger">{{ .Lifecycle }}</span>{{ end }}
+            </div>
+            <div class="meta">
+              <span>rotates every <b>{{ .RotationDays }}d</b> · <b>{{ .ConsumerCount }}</b> consumer{{ if ne .ConsumerCount 1 }}s{{ end }}</span>
+              <span>last checked <b>{{ since .LastCheckedAt }}</b></span>
+            </div>
+            <div class="foot">
+              <span class="mono">{{ .ID }}</span>
+              <a href="/?ref={{ .ID }}#focus">focus →</a>
+            </div>
+          </div>
+          {{ end }}
+        </div>
         {{ end }}
-      </table>
-    </div>
-    {{ else }}
-    <div class="cards">
-      {{ range .Descriptors }}
-      <div class="card {{ if ne .Lifecycle "active" }}attention{{ end }}">
-        <div class="name"><span>{{ .DisplayName }}</span>{{ if .RevealAllowed }}<span class="key" title="reveal permitted">⚿</span>{{ end }}</div>
-        <div class="owner">{{ .Owner }}{{ if .Scope }} · {{ .Scope }}{{ end }}</div>
-        <div class="chips">
-          <span class="chip">{{ .Provider }}</span>
-          <span class="chip">{{ .Classification }}</span>
-          {{ if eq .Lifecycle "active" }}<span class="chip teal">active</span>
-          {{ else if eq .Lifecycle "rotating" }}<span class="chip amber">rotating</span>
-          {{ else }}<span class="chip danger">{{ .Lifecycle }}</span>{{ end }}
-        </div>
-        <div class="meta">
-          <span>rotates every <b>{{ .RotationDays }}d</b> · <b>{{ .ConsumerCount }}</b> consumer{{ if ne .ConsumerCount 1 }}s{{ end }}</span>
-          <span>last checked <b>{{ since .LastCheckedAt }}</b></span>
-        </div>
-        <div class="foot">
-          <span class="mono">{{ .ID }}</span>
-          <a href="/?ref={{ .ID }}#focus">focus →</a>
-        </div>
-      </div>
-      {{ end }}
-    </div>
-    {{ end }}
-    {{ if ne (len .Descriptors) .TotalCount }}<p class="filternote">{{ len .Descriptors }} of {{ .TotalCount }} secrets shown — <a href="/#vault">clear filters</a></p>{{ end }}
-    {{ else if .TotalCount }}
-    <div class="empty">Nothing matches these filters. <a href="/#vault">Clear them</a> to see all {{ .TotalCount }} secrets.</div>
-    {{ else }}
-    <div class="empty">No secrets in the catalog yet. <a href="/vault/new">Add the first one</a> — Janus will walk you through it.</div>
-    {{ end }}
+        {{ if ne (len .Descriptors) .TotalCount }}<p class="filternote">{{ len .Descriptors }} of {{ .TotalCount }} secrets shown — <a href="/#vault">clear filters</a></p>{{ end }}
+        {{ else if .TotalCount }}
+        <div class="empty">Nothing matches these filters. <a href="/#vault">Clear them</a> to see all {{ .TotalCount }} secrets.</div>
+        {{ else }}
+        <div class="empty">No secrets in the catalog yet. <a href="/vault/new">Add the first one</a> — Janus will walk you through it.</div>
+        {{ end }}
+      </section>
 
-    {{ if .Focus.Descriptor.ID }}
-    <h2 id="focus">Focus — <span class="mono">{{ .Focus.Descriptor.ID }}</span></h2>
-    <div class="grid2">
-      <div class="panel">
-        <strong>{{ .Focus.Descriptor.DisplayName }}</strong>
+      {{ if .Focus.Descriptor.ID }}
+      <aside class="panel focus-rail" id="focus">
+        <div class="rail-head">
+          <span>Focus</span>
+          <b class="mono">{{ .Focus.Descriptor.ID }}</b>
+        </div>
+        <h3>{{ .Focus.Descriptor.DisplayName }}</h3>
         <p class="lead">{{ .Focus.Descriptor.Classification }} · lifecycle {{ .Focus.Lifecycle }} · owner {{ .Focus.Descriptor.Owner }}</p>
         {{ if .Focus.NormalUseBlocked }}<p class="lead"><span class="state warn">blocked</span> {{ .Focus.NormalUseReason }}</p>{{ end }}
         {{ range .Focus.Gates }}<p class="lead"><span class="state {{ if eq .Severity "error" }}bad{{ else }}warn{{ end }}">{{ .Code }}</span> {{ .Message }}</p>{{ end }}
         {{ if not .Focus.Gates }}<p class="lead"><span class="state ok">clear</span> no catalog gates on this descriptor.</p>{{ end }}
-      </div>
-      <div class="panel">
+
         {{ if .CanOperate }}
-        <strong>Request a metadata handle</strong>
-        <p class="lead">Issues a handle for metadata-only follow-up. The secret value is never returned here.</p>
-        <form class="action" method="post" action="/ui/warden/resolve">
-          <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-          <input type="hidden" name="ref" value="{{ .Focus.Descriptor.ID }}">
-          <label>Reason
-            <input name="reason" maxlength="160" required placeholder="maintenance, audit, rotation">
-          </label>
-          <button type="submit">Issue handle</button>
-        </form>
-        <strong>Request a permit</strong>
-        <form class="action" method="post" action="/ui/permits">
-          <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-          <input type="hidden" name="ref" value="{{ .Focus.Descriptor.ID }}">
-          <label>Action
-            <select name="action" required>
-              <option value="metadata_use">metadata_use</option>
-              <option value="resolve_handle">resolve_handle</option>
-            </select>
-          </label>
-          <label>Destination
-            <input name="destination" maxlength="120" placeholder="janus dashboard">
-          </label>
-          <label>Reason
-            <input name="reason" maxlength="160" required placeholder="audit, rotation, incident review">
-          </label>
-          <button type="submit">Create permit</button>
-        </form>
+        <div class="rail-section">
+          <strong>Issue metadata handle</strong>
+          <p class="lead">Metadata-only follow-up. The secret value is never returned here.</p>
+          <form class="action" method="post" action="/ui/warden/resolve">
+            <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+            <input type="hidden" name="ref" value="{{ .Focus.Descriptor.ID }}">
+            <label>Reason
+              <input name="reason" maxlength="160" required placeholder="maintenance, audit, rotation">
+            </label>
+            <button type="submit">Issue handle</button>
+          </form>
+        </div>
+        <div class="rail-section">
+          <strong>Create permit</strong>
+          <form class="action" method="post" action="/ui/permits">
+            <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+            <input type="hidden" name="ref" value="{{ .Focus.Descriptor.ID }}">
+            <label>Action
+              <select name="action" required>
+                <option value="metadata_use">metadata_use</option>
+                <option value="resolve_handle">resolve_handle</option>
+              </select>
+            </label>
+            <label>Destination
+              <input name="destination" maxlength="120" placeholder="janus dashboard">
+            </label>
+            <label>Reason
+              <input name="reason" maxlength="160" required placeholder="audit, rotation, incident review">
+            </label>
+            <button type="submit">Create permit</button>
+          </form>
+        </div>
         {{ else }}
-        <strong>No access yet</strong>
-        <p class="lead">You are signed in, but handle and permit actions need the operator role. Ask the operator to grant it — nothing is broken.</p>
+        <div class="rail-section">
+          <strong>No access yet</strong>
+          <p class="lead">Handle and permit actions need the operator role. Nothing is broken.</p>
+        </div>
         {{ end }}
-      </div>
+      </aside>
+      {{ end }}
     </div>
-    {{ end }}
 
     <div class="footer">
       <span>janus · build {{ buildCommitShort }}</span>
