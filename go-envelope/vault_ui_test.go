@@ -25,7 +25,7 @@ func TestVaultPageRendersCardsTilesAndBrand(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "/static/janus-logo-full.png", "operator session", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
+	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "brand-lockup", "/static/janus-logo.svg", "operator session", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("vault page should render %q: %s", want, body)
 		}

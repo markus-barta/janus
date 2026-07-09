@@ -987,6 +987,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"Access":              accessPosture,
 		"RolePolicyReadiness": rolePolicyReadiness,
 		"RoleBoundaries":      RoleBoundariesFor(session),
+		"RouteGates":          RouteGateViewsFor(session, accessPosture, ready),
 		"Ready":               ready,
 		"AuthRequired":        app.cfg.RequireAuth,
 		"OIDCConfigured":      app.cfg.OIDCConfigured(),

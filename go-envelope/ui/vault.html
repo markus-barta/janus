@@ -19,7 +19,10 @@
 {{ define "doorkeeper_side" -}}
   <aside class="side">
     <div class="brand">
-      <img class="brand-full" src="/static/janus-logo-full.png" alt="JANUS">
+      <div class="brand-lockup" aria-label="JANUS">
+        <img class="brand-mark" src="/static/janus-logo.svg" alt="">
+        <span class="brand-word">JANUS</span>
+      </div>
     </div>
     <nav class="nav" aria-label="Main">
       <a {{ if eq .ActivePage "vault" }}class="active" aria-current="page" {{ end }}href="/"><span class="nav-ico nav-vault"></span><span>Vault</span></a>

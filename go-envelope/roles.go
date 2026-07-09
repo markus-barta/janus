@@ -64,6 +64,13 @@ type RoleBoundary struct {
 	Active  bool
 }
 
+type RouteGateView struct {
+	Route        string
+	RequiredRole string
+	State        string
+	Tone         string
+}
+
 type RoleAvailability struct {
 	Label  string
 	State  string
@@ -703,6 +710,34 @@ func RoleBoundariesFor(session Session) []RoleBoundary {
 			Active:  HasRole(session, RoleViewer),
 		},
 	}
+}
+
+func RouteGateViewsFor(session Session, access AccessPosture, ready bool) []RouteGateView {
+	routes := make([]string, 0, len(access.RequiredRoles))
+	for route := range access.RequiredRoles {
+		routes = append(routes, route)
+	}
+	sort.Strings(routes)
+
+	views := make([]RouteGateView, 0, len(routes))
+	for _, route := range routes {
+		requiredRole := access.RequiredRoles[route]
+		view := RouteGateView{
+			Route:        route,
+			RequiredRole: requiredRole,
+			State:        "allowed",
+			Tone:         "ok",
+		}
+		if !HasRole(session, requiredRole) {
+			view.State = "role_gated"
+			view.Tone = "warn"
+		} else if !ready {
+			view.State = "readiness_blocked"
+			view.Tone = "warn"
+		}
+		views = append(views, view)
+	}
+	return views
 }
 
 func RoleAvailabilityFor(session Session) []RoleAvailability {

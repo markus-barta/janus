@@ -20,7 +20,7 @@
 
     <div class="access-layout">
       <div class="access-main">
-        <div class="grid2">
+        <div class="grid2 access-top-grid">
           <div class="panel">
             <strong>Signed in</strong>
             <p class="lead">Identity values are withheld here. Janus shows role and gate state only.</p>
@@ -43,47 +43,82 @@
           </div>
         </div>
 
-        <h2>Role lanes</h2>
-        <div class="cards">
-          {{ range .RolePolicyReadiness.Lanes }}
-          <div class="card {{ if not .Ready }}attention{{ end }}">
-            <div class="name"><span>{{ .Label }}</span></div>
-            <div class="chips">
-              {{ if .Ready }}<span class="chip teal">{{ .State }}</span>{{ else }}<span class="chip amber">{{ .State }}</span>{{ end }}
-              <span class="chip">{{ .SubjectBindingCount }} subject{{ if ne .SubjectBindingCount 1 }}s{{ end }}</span>
-              <span class="chip">{{ .GroupBindingCount }} group{{ if ne .GroupBindingCount 1 }}s{{ end }}</span>
-            </div>
-            <div class="meta"><span>{{ .Detail }}</span></div>
+        <div class="panel access-role-panel">
+          <div class="panel-title-row">
+            <strong>Role lanes</strong>
+            <span>Policy binding</span>
           </div>
-          {{ end }}
-        </div>
-
-        <h2>Duties</h2>
-        <div class="panel">
-          <table class="ledger">
-            <tr><th>role</th><th>duty</th><th>allowed</th><th>boundary</th><th></th></tr>
-            {{ range .RoleBoundaries }}
+          <table class="ledger role-lane-table">
+            <tr><th>role</th><th>session role</th><th>subjects</th><th>groups</th><th>readiness</th><th>detail</th></tr>
             <tr>
-              <td class="mono" data-label="role">{{ .Role }}</td>
-              <td data-label="duty">{{ .Duty }}</td>
-              <td data-label="allowed">{{ .Allowed }}</td>
-              <td data-label="boundary">{{ .Blocked }}</td>
-              <td data-label="current">{{ if .Active }}<span class="state ok">you</span>{{ end }}</td>
+              <td class="mono" data-label="role">Viewer lane</td>
+              <td data-label="session role"><span class="state ok">active</span></td>
+              <td data-label="subjects">0</td>
+              <td data-label="groups">0</td>
+              <td data-label="readiness"><span class="state ok">Ready</span></td>
+              <td data-label="detail">Read safe posture and descriptor metadata.</td>
+            </tr>
+            {{ range .RolePolicyReadiness.Lanes }}
+            <tr>
+              <td class="mono" data-label="role">{{ .Label }}</td>
+              <td data-label="session role">{{ if .Ready }}<span class="state ok">{{ .State }}</span>{{ else }}<span class="state warn">{{ .State }}</span>{{ end }}</td>
+              <td data-label="subjects">{{ .SubjectBindingCount }}</td>
+              <td data-label="groups">{{ .GroupBindingCount }}</td>
+              <td data-label="readiness">{{ if .Ready }}<span class="state ok">Ready</span>{{ else }}<span class="state warn">Limited</span>{{ end }}</td>
+              <td data-label="detail">{{ .Detail }}</td>
             </tr>
             {{ end }}
           </table>
         </div>
 
-        <h2>Route gates</h2>
-        <div class="panel">
-          <table class="ledger">
-            <tr><th>route</th><th>required role</th></tr>
-            {{ range $route, $role := .Access.RequiredRoles }}
-            <tr><td class="mono" data-label="route">{{ $route }}</td><td class="mono" data-label="required role">{{ $role }}</td></tr>
-            {{ end }}
-          </table>
-          <p class="lead">Everything else is deny-by-default: an authenticated identity with no matching role sees posture only.</p>
+        <div class="access-bottom-grid">
+          <div class="panel">
+            <div class="panel-title-row">
+              <strong>Duties</strong>
+              <span>separation of concerns</span>
+            </div>
+            <div class="duty-list">
+              {{ range .RoleBoundaries }}
+              <div class="duty-row">
+                <span class="duty-check">✓</span>
+                <div>
+                  <b>{{ .Duty }}</b>
+                  <small>{{ .Allowed }}</small>
+                </div>
+                <span class="mono">{{ .Role }}</span>
+              </div>
+              {{ end }}
+            </div>
+            <p class="lead"><b>Duty model</b> separated_admin_auditor_operator_viewer</p>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title-row">
+              <strong>Route gates</strong>
+              <span>enforced</span>
+            </div>
+            <table class="ledger route-gate-table">
+              <tr><th>route</th><th>required role</th><th>state</th></tr>
+              {{ range .RouteGates }}
+              <tr>
+                <td class="mono" data-label="route">{{ .Route }}</td>
+                <td class="mono" data-label="required role">{{ .RequiredRole }}</td>
+                <td data-label="state"><span class="state {{ if eq .Tone "ok" }}ok{{ else if eq .Tone "warn" }}warn{{ else }}bad{{ end }}">{{ .State }}</span></td>
+              </tr>
+              {{ end }}
+            </table>
+            <p class="lead">Everything else is deny-by-default: an authenticated identity with no matching role sees posture only.</p>
+          </div>
         </div>
+
+        <div class="access-status-strip">
+          <div><b>Identity provider</b><span>Zitadel</span></div>
+          <div><b>Time sync</b><span>{{ .Now.Format "15:04:05" }} UTC</span></div>
+          <div><b>Janus mode</b><span>{{ .Mode }}</span></div>
+          <div><b>Policy health</b><span>{{ .RolePolicyReadiness.Status }}</span></div>
+          <div><b>value_returned</b><span>false</span></div>
+        </div>
+
       </div>
 
       <aside class="panel access-rail">

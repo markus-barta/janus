@@ -3279,6 +3279,40 @@ func TestActionReadinessDistinguishesRoleAndReadinessGates(t *testing.T) {
 	}
 }
 
+func TestRouteGateViewsAreOrderedAndSessionAware(t *testing.T) {
+	access := AccessPostureFor(RolePolicy{})
+
+	viewer := RouteGateViewsFor(Session{Roles: []string{RoleViewer}}, access, true)
+	if len(viewer) != len(access.RequiredRoles) {
+		t.Fatalf("expected one view per required route: %#v", viewer)
+	}
+	if viewer[0].Route != "/api/audit/recent" || viewer[1].Route != "/api/evidence" {
+		t.Fatalf("route gate views should be sorted for stable rendering: %#v", viewer)
+	}
+	for _, gate := range viewer {
+		if gate.State != "role_gated" || gate.Tone != "warn" {
+			t.Fatalf("viewer session should not pass elevated route %s: %#v", gate.Route, viewer)
+		}
+	}
+
+	operator := RouteGateViewsFor(Session{Roles: []string{RoleOperator, RoleViewer}}, access, true)
+	for _, gate := range operator {
+		if gate.RequiredRole == RoleOperator && gate.State != "allowed" {
+			t.Fatalf("operator route should be allowed: %#v", gate)
+		}
+		if gate.RequiredRole == RoleAuditor && gate.State != "role_gated" {
+			t.Fatalf("auditor route should stay role gated for operator session: %#v", gate)
+		}
+	}
+
+	degraded := RouteGateViewsFor(Session{Roles: AllRoles()}, access, false)
+	for _, gate := range degraded {
+		if gate.State != "readiness_blocked" || gate.Tone != "warn" {
+			t.Fatalf("readiness degradation should block sensitive routes: %#v", degraded)
+		}
+	}
+}
+
 func TestWardenResolveUIReturnsValueFreeHandle(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
