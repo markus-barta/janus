@@ -27,11 +27,11 @@
             <tr><th>when</th><th>action</th><th>outcome</th><th>ref</th><th>witness</th></tr>
             {{ range .Audit }}
             <tr>
-              <td>{{ since .Time }}</td>
-              <td class="mono">{{ .Action }}</td>
-              <td>{{ if eq .Outcome "allowed" }}<span class="state ok">{{ .Outcome }}</span>{{ else }}<span class="state bad">{{ .Outcome }}</span>{{ end }}</td>
-              <td class="mono">{{ .SecretRef }}</td>
-              <td class="mono">{{ printf "%.8s" .EventHash }}</td>
+              <td data-label="when">{{ since .Time }}</td>
+              <td class="mono" data-label="action">{{ .Action }}</td>
+              <td data-label="outcome">{{ if eq .Outcome "allowed" }}<span class="state ok">{{ .Outcome }}</span>{{ else }}<span class="state bad">{{ .Outcome }}</span>{{ end }}</td>
+              <td class="mono" data-label="ref">{{ .SecretRef }}</td>
+              <td class="mono" data-label="witness">{{ printf "%.8s" .EventHash }}</td>
             </tr>
             {{ end }}
           </table>

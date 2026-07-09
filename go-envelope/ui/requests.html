@@ -67,12 +67,12 @@
         <tr><th>permit</th><th>ref</th><th>action</th><th>status</th><th>created</th><th>expired</th></tr>
         {{ range .PastPermits }}
         <tr>
-          <td class="mono">{{ .ID }}</td>
-          <td class="mono">{{ .SecretRef }}</td>
-          <td>{{ .Action }}</td>
-          <td>{{ if eq .Status "approved" }}<span class="state ok">{{ .Status }}</span>{{ else if eq .Status "denied" }}<span class="state bad">{{ .Status }}</span>{{ else }}<span class="state warn">{{ .Status }}</span>{{ end }}</td>
-          <td>{{ since .CreatedAt }}</td>
-          <td>{{ since .ExpiresAt }}</td>
+          <td class="mono" data-label="permit">{{ .ID }}</td>
+          <td class="mono" data-label="ref">{{ .SecretRef }}</td>
+          <td data-label="action">{{ .Action }}</td>
+          <td data-label="status">{{ if eq .Status "approved" }}<span class="state ok">{{ .Status }}</span>{{ else if eq .Status "denied" }}<span class="state bad">{{ .Status }}</span>{{ else }}<span class="state warn">{{ .Status }}</span>{{ end }}</td>
+          <td data-label="created">{{ since .CreatedAt }}</td>
+          <td data-label="expired">{{ since .ExpiresAt }}</td>
         </tr>
         {{ end }}
       </table>

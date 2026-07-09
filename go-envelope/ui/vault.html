@@ -174,14 +174,14 @@
             <tr><th>secret</th><th>host</th><th>backend</th><th>class</th><th>state</th><th>rotates</th><th>last checked</th><th></th></tr>
             {{ range .Descriptors }}
             <tr>
-              <td class="mono">{{ .ID }}</td>
-              <td>{{ .Scope }}</td>
-              <td>{{ .Provider }}</td>
-              <td>{{ .Classification }}</td>
-              <td>{{ if eq .Lifecycle "active" }}<span class="state ok">active</span>{{ else if eq .Lifecycle "rotating" }}<span class="state warn">rotating</span>{{ else }}<span class="state bad">{{ .Lifecycle }}</span>{{ end }}</td>
-              <td>{{ .RotationDays }}d</td>
-              <td>{{ since .LastCheckedAt }}</td>
-              <td><a href="/?ref={{ .ID }}#focus">focus →</a></td>
+              <td class="mono" data-label="secret">{{ .ID }}</td>
+              <td data-label="host">{{ .Scope }}</td>
+              <td data-label="backend">{{ .Provider }}</td>
+              <td data-label="class">{{ .Classification }}</td>
+              <td data-label="state">{{ if eq .Lifecycle "active" }}<span class="state ok">active</span>{{ else if eq .Lifecycle "rotating" }}<span class="state warn">rotating</span>{{ else }}<span class="state bad">{{ .Lifecycle }}</span>{{ end }}</td>
+              <td data-label="rotates">{{ .RotationDays }}d</td>
+              <td data-label="last checked">{{ since .LastCheckedAt }}</td>
+              <td data-label=""><a href="/?ref={{ .ID }}#focus">focus →</a></td>
             </tr>
             {{ end }}
           </table>

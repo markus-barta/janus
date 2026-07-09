@@ -64,11 +64,11 @@
             <tr><th>role</th><th>duty</th><th>allowed</th><th>boundary</th><th></th></tr>
             {{ range .RoleBoundaries }}
             <tr>
-              <td class="mono">{{ .Role }}</td>
-              <td>{{ .Duty }}</td>
-              <td>{{ .Allowed }}</td>
-              <td>{{ .Blocked }}</td>
-              <td>{{ if .Active }}<span class="state ok">you</span>{{ end }}</td>
+              <td class="mono" data-label="role">{{ .Role }}</td>
+              <td data-label="duty">{{ .Duty }}</td>
+              <td data-label="allowed">{{ .Allowed }}</td>
+              <td data-label="boundary">{{ .Blocked }}</td>
+              <td data-label="current">{{ if .Active }}<span class="state ok">you</span>{{ end }}</td>
             </tr>
             {{ end }}
           </table>
@@ -79,7 +79,7 @@
           <table class="ledger">
             <tr><th>route</th><th>required role</th></tr>
             {{ range $route, $role := .Access.RequiredRoles }}
-            <tr><td class="mono">{{ $route }}</td><td class="mono">{{ $role }}</td></tr>
+            <tr><td class="mono" data-label="route">{{ $route }}</td><td class="mono" data-label="required role">{{ $role }}</td></tr>
             {{ end }}
           </table>
           <p class="lead">Everything else is deny-by-default: an authenticated identity with no matching role sees posture only.</p>
