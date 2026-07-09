@@ -20,6 +20,7 @@
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --art-ease: cubic-bezier(.2, .72, .18, 1);
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -54,6 +55,24 @@ body {
 /* dual-tone wash lives inline in the page head under the CSP nonce */
 a { color: var(--ink); }
 
+@keyframes janus-art-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: var(--janus-art-opacity, 1);
+  }
+}
+
+@keyframes janus-brand-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: var(--janus-brand-opacity, .96);
+  }
+}
+
 .layout {
   position: relative;
   display: grid;
@@ -81,11 +100,21 @@ a { color: var(--ink); }
   min-height: 112px;
 }
 .brand-full {
+  --janus-brand-opacity: .96;
   width: min(154px, 100%);
   height: 108px;
   object-fit: contain;
   object-position: left top;
   mix-blend-mode: multiply;
+  opacity: var(--janus-brand-opacity);
+  animation: janus-brand-fade 520ms var(--art-ease) 80ms both;
+  transition: opacity 220ms var(--art-ease), transform 220ms var(--art-ease), filter 220ms var(--art-ease);
+}
+.brand:hover .brand-full {
+  --janus-brand-opacity: 1;
+  opacity: var(--janus-brand-opacity);
+  filter: saturate(1.04);
+  transform: translateY(-1px);
 }
 .nav { display: flex; flex-direction: column; gap: 2px; }
 .nav a {
@@ -129,13 +158,23 @@ a { color: var(--ink); }
 .nav-settings::after { left: 9px; top: 2px; width: 3px; height: 18px; background: currentColor; box-shadow: -6px 6px 0 -1px currentColor, 6px -6px 0 -1px currentColor; opacity: .8; transform: rotate(45deg); }
 .side .spacer { flex: 1; }
 .side .spacer::before {
+  --janus-art-opacity: .68;
   content: "";
   display: block;
   width: 100%;
   min-height: 260px;
   margin-top: 18px;
   background: url("/static/janus-side-bg.png") center bottom / contain no-repeat;
-  opacity: .74;
+  opacity: var(--janus-art-opacity);
+  -webkit-mask-image: radial-gradient(ellipse at center, #000 0 50%, rgba(0,0,0,.86) 64%, transparent 88%);
+  mask-image: radial-gradient(ellipse at center, #000 0 50%, rgba(0,0,0,.86) 64%, transparent 88%);
+  animation: janus-art-fade 700ms var(--art-ease) 180ms both;
+  transition: opacity 260ms var(--art-ease), transform 260ms var(--art-ease), filter 260ms var(--art-ease);
+}
+.side:hover .spacer::before {
+  --janus-art-opacity: .78;
+  filter: saturate(1.02);
+  transform: translateY(-2px);
 }
 .side .foot {
   display: flex;
@@ -187,14 +226,24 @@ a { color: var(--ink); }
   overflow: hidden;
 }
 .pagehead::after {
+  --janus-art-opacity: .82;
   content: "";
   position: absolute;
   inset: 0 8% 0 auto;
   width: min(720px, 66%);
   background: url("/static/janus-header-bg.png") center top / contain no-repeat;
-  opacity: .86;
+  opacity: var(--janus-art-opacity);
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, rgba(0,0,0,.72) 10%, #000 23%, #000 78%, rgba(0,0,0,.7) 90%, transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0%, rgba(0,0,0,.72) 10%, #000 23%, #000 78%, rgba(0,0,0,.7) 90%, transparent 100%);
   pointer-events: none;
   z-index: 0;
+  animation: janus-art-fade 680ms var(--art-ease) 120ms both;
+  transition: opacity 280ms var(--art-ease), transform 280ms var(--art-ease), filter 280ms var(--art-ease);
+}
+.pagehead:hover::after {
+  --janus-art-opacity: .9;
+  filter: saturate(1.03);
+  transform: translateX(3px);
 }
 .pagehead > * {
   position: relative;
@@ -670,10 +719,11 @@ table.ledger tr:last-child td { border-bottom: 0; }
     padding: 18px 0 16px;
   }
   .pagehead::after {
+    --janus-art-opacity: .45;
     inset: 0 -80px auto auto;
     width: 360px;
     height: 104px;
-    opacity: .45;
+    opacity: var(--janus-art-opacity);
   }
   .pagehead h1 { font-size: 34px; }
   .asof { white-space: normal; }
@@ -716,4 +766,14 @@ table.ledger tr:last-child td { border-bottom: 0; }
   }
   table.ledger td[data-label=""]::before,
   table.ledger td:empty { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .brand-full,
+  .pagehead::after,
+  .side .spacer::before {
+    animation: none;
+    transition: none;
+  }
 }
