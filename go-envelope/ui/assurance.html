@@ -2,7 +2,7 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <title>Janus — Assurance</title>
+  <title>Janus — Health</title>
   {{ template "doorkeeper_head" . }}
 </head>
 <body>
@@ -12,8 +12,8 @@
   <main class="main">
     <div class="pagehead">
       <div>
-        <h1>Assurance</h1>
-        <div class="sub">is the doorkeeper healthy?</div>
+        <h1>Health</h1>
+        <div class="sub">fail closed by design</div>
       </div>
       <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC</span>
     </div>
@@ -48,7 +48,8 @@
 
     <div class="panel">
       <strong>The boundary, in one line</strong>
-      <p class="lead">Janus looks both ways — <a href="/requests">what may happen</a> and <a href="/ledger">what happened</a> — and in neither direction does a secret value cross this app: <span class="mono">value_returned=false</span>, always.</p>
+      <p class="lead">Janus looks both ways — <a href="/requests">Permits</a> for what may happen and <a href="/ledger">Audit</a> for what happened — and in neither direction does a secret value cross this app: <span class="mono">value_returned=false</span>, always.</p>
+      <p class="lead">Configuration posture lives in <a href="/settings">Settings</a>; Health stays focused on readiness, lifecycle, catalog gates, and degraded guidance.</p>
     </div>
 
     <div class="footer">

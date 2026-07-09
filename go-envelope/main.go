@@ -569,6 +569,7 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("GET /requests", app.withAuth(app.handleRequestsPage))
 	mux.HandleFunc("GET /ledger", app.withAuth(app.handleLedgerPage))
 	mux.HandleFunc("GET /assurance", app.withAuth(app.handleAssurancePage))
+	mux.HandleFunc("GET /settings", app.withAuth(app.handleSettingsPage))
 	mux.HandleFunc("GET /vault/new", app.withAuth(app.handleNewSecretPage))
 	mux.HandleFunc("GET /vault/new/plan.sh", app.withAuth(app.handleNewSecretScript))
 	mux.HandleFunc("GET /static/", app.handleStatic)
@@ -594,7 +595,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/access", "/requests", "/ledger", "/assurance", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/access", "/requests", "/ledger", "/assurance", "/settings", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
@@ -987,9 +988,13 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		"RolePolicyReadiness": rolePolicyReadiness,
 		"RoleBoundaries":      RoleBoundariesFor(session),
 		"Ready":               ready,
+		"AuthRequired":        app.cfg.RequireAuth,
+		"OIDCConfigured":      app.cfg.OIDCConfigured(),
 		"Scope":               scopePosture,
 		"Lifecycle":           lifecyclePosture,
 		"EvidenceHash":        evidenceHash,
+		"EvidenceBoundary":    EvidenceBoundaryFor(canViewAudit, evidenceHash != ""),
+		"ActionReadiness":     ActionReadinessFor(session, ready),
 		"CanExportEvidence":   canViewAudit,
 		"CanViewAudit":        canViewAudit,
 		"CanOperate":          canOperate,

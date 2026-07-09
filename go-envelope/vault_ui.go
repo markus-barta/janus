@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-//go:embed ui/janus.css ui/janus-logo.svg
+//go:embed ui/janus.css ui/janus-logo.svg ui/janus-logo-full.png ui/janus-header-bg.png ui/janus-side-bg.png
 var uiStaticFS embed.FS
 
 //go:embed ui/*.html
@@ -87,6 +87,8 @@ func (app *App) handleStatic(w http.ResponseWriter, r *http.Request) {
 		contentType = "text/css; charset=utf-8"
 	case "janus-logo.svg":
 		contentType = "image/svg+xml"
+	case "janus-logo-full.png", "janus-header-bg.png", "janus-side-bg.png":
+		contentType = "image/png"
 	default:
 		app.renderSafeFailure(w, r, http.StatusNotFound, "route_not_found", "Janus does not expose that route.", nil)
 		return
@@ -452,4 +454,12 @@ func (app *App) handleAssurancePage(w http.ResponseWriter, r *http.Request) {
 	data := app.dashboardData(r, session, nil, "")
 	data["ActivePage"] = "assurance"
 	renderTemplate(w, app.templates, "assurance_page", data)
+}
+
+func (app *App) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
+	app.audit(r, "settings.view", "allowed", actorFromContext(r.Context()), "")
+	session := currentSession(r.Context())
+	data := app.dashboardData(r, session, nil, "")
+	data["ActivePage"] = "settings"
+	renderTemplate(w, app.templates, "settings_page", data)
 }

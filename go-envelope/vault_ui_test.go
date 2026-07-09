@@ -25,7 +25,7 @@ func TestVaultPageRendersCardsTilesAndBrand(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "/static/janus-logo.svg", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
+	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "/static/janus-logo-full.png", "operator session", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("vault page should render %q: %s", want, body)
 		}
@@ -93,7 +93,7 @@ func TestVaultPageGatesLedgerByRole(t *testing.T) {
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
 	viewerBody := out.Body.String()
-	if !strings.Contains(viewerBody, "needs the auditor role") {
+	if !strings.Contains(viewerBody, "Audit needs the auditor role") {
 		t.Fatalf("viewer should see the ledger role gate: %s", viewerBody)
 	}
 	if strings.Contains(viewerBody, "private-ref") {
@@ -126,9 +126,9 @@ func TestRequestsAndAssurancePagesRender(t *testing.T) {
 	if out.Code != http.StatusOK {
 		t.Fatalf("requests page: expected 200, got %d", out.Code)
 	}
-	for _, want := range []string{"what may happen", "Pending", "No pending permits"} {
+	for _, want := range []string{"Permits", "what may happen", "Pending", "Receipts", "No pending permits", "value_returned=false"} {
 		if !strings.Contains(out.Body.String(), want) {
-			t.Fatalf("requests page should render %q: %s", want, out.Body.String())
+			t.Fatalf("permits page should render %q: %s", want, out.Body.String())
 		}
 	}
 
@@ -138,9 +138,21 @@ func TestRequestsAndAssurancePagesRender(t *testing.T) {
 	if out.Code != http.StatusOK {
 		t.Fatalf("assurance page: expected 200, got %d", out.Code)
 	}
-	for _, want := range []string{"is the doorkeeper healthy?", "Readiness", "Lifecycle", "value_returned=false"} {
+	for _, want := range []string{"fail closed by design", "Readiness", "Lifecycle", "Settings", "value_returned=false"} {
 		if !strings.Contains(out.Body.String(), want) {
-			t.Fatalf("assurance page should render %q: %s", want, out.Body.String())
+			t.Fatalf("health page should render %q: %s", want, out.Body.String())
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/settings", nil)
+	out = httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("settings page: expected 200, got %d", out.Code)
+	}
+	for _, want := range []string{"configuration posture", "Product mode", "Role policy", "Evidence boundary", "Presence-only workflow", "value_returned=false"} {
+		if !strings.Contains(out.Body.String(), want) {
+			t.Fatalf("settings page should render %q: %s", want, out.Body.String())
 		}
 	}
 }
@@ -180,12 +192,12 @@ func TestAccessPageRendersLanesWithoutIdentityValues(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"who may open which door", "Admin lane", "Auditor lane", "Operator lane", "Policy and ownership", "/api/audit/recent", "deny-by-default", "value_returned=false", "Zitadel"} {
+	for _, want := range []string{"who may open which door", "identity values withheld", "Available now", "Action readiness", "Admin lane", "Auditor lane", "Operator lane", "Policy and ownership", "/api/audit/recent", "deny-by-default", "value_returned=false", "Zitadel"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("access page should render %q: %s", want, body)
 		}
 	}
-	for _, forbidden := range []string{"markus@barta.com", "janus-admins"} {
+	for _, forbidden := range []string{"markus@barta.com", "janus-admins", "dev-local", "Local Dev"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("access page leaked binding identity %q: %s", forbidden, body)
 		}
@@ -199,8 +211,10 @@ func TestVaultSidebarLinksAccessPage(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
-	if !strings.Contains(out.Body.String(), `href="/access"`) {
-		t.Fatalf("vault sidebar should link the access page: %s", out.Body.String())
+	for _, want := range []string{`href="/access"`, `href="/requests"`, `href="/ledger"`, `href="/assurance"`, `href="/settings"`, "Permits", "Audit", "Health", "Settings"} {
+		if !strings.Contains(out.Body.String(), want) {
+			t.Fatalf("vault sidebar should render %q: %s", want, out.Body.String())
+		}
 	}
 }
 

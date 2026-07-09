@@ -2,7 +2,7 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <title>Janus — Requests</title>
+  <title>Janus — Permits</title>
   {{ template "doorkeeper_head" . }}
 </head>
 <body>
@@ -12,7 +12,7 @@
   <main class="main">
     <div class="pagehead">
       <div>
-        <h1>Requests</h1>
+        <h1>Permits</h1>
         <div class="sub">what may happen</div>
       </div>
       <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC</span>
@@ -23,6 +23,13 @@
       <div class="tile {{ if .PendingPermits }}warm{{ end }}"><strong>{{ len .PendingPermits }}</strong><span>Pending</span></div>
       <div class="tile"><strong>{{ len .PastPermits }}</strong><span>Recently decided</span></div>
       <div class="tile"><strong>{{ .PermitPosture.Count }}</strong><span>Recorded total</span></div>
+      <div class="tile"><strong>{{ .ActionReadiness.Gated }}</strong><span>Role gated</span></div>
+    </div>
+
+    <div class="tabs" aria-label="Permit views">
+      <span class="on">Pending</span>
+      <span>History</span>
+      <span>Receipts</span>
     </div>
 
     <h2>Pending</h2>
@@ -79,7 +86,7 @@
 
     <div class="footer">
       <span>janus · build {{ buildCommitShort }}</span>
-      <span>permits are metadata records — no connector runs, no value moves</span>
+      <span>permits are metadata records · no connector runs · <span class="mono">value_returned=false</span></span>
     </div>
   </main>
 </div>

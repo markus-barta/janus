@@ -11,9 +11,7 @@
       position: fixed;
       inset: 0;
       pointer-events: none;
-      background:
-        radial-gradient(90rem 60rem at -20% -10%, rgba(61, 154, 139, 0.07), transparent 55%),
-        radial-gradient(90rem 60rem at 120% -10%, rgba(201, 145, 63, 0.07), transparent 55%);
+      background: linear-gradient(115deg, rgba(61, 154, 139, 0.06), transparent 35%, rgba(201, 145, 63, 0.06));
     }
   </style>
 {{- end }}
@@ -21,20 +19,20 @@
 {{ define "doorkeeper_side" -}}
   <aside class="side">
     <div class="brand">
-      <img src="/static/janus-logo.svg" alt="">
-      <span>JANUS</span>
+      <img class="brand-full" src="/static/janus-logo-full.png" alt="JANUS">
     </div>
     <nav class="nav" aria-label="Main">
-      <a {{ if eq .ActivePage "vault" }}class="active" {{ end }}href="/">Vault</a>
-      <a {{ if eq .ActivePage "access" }}class="active" {{ end }}href="/access">Access</a>
-      <a {{ if eq .ActivePage "requests" }}class="active" {{ end }}href="/requests">Requests</a>
-      <a {{ if eq .ActivePage "ledger" }}class="active" {{ end }}href="/ledger">Ledger</a>
-      <a {{ if eq .ActivePage "assurance" }}class="active" {{ end }}href="/assurance">Assurance</a>
+      <a {{ if eq .ActivePage "vault" }}class="active" {{ end }}href="/"><span class="nav-ico nav-vault"></span><span>Vault</span></a>
+      <a {{ if eq .ActivePage "requests" }}class="active" {{ end }}href="/requests"><span class="nav-ico nav-permits"></span><span>Permits</span></a>
+      <a {{ if eq .ActivePage "access" }}class="active" {{ end }}href="/access"><span class="nav-ico nav-access"></span><span>Access</span></a>
+      <a {{ if eq .ActivePage "ledger" }}class="active" {{ end }}href="/ledger"><span class="nav-ico nav-audit"></span><span>Audit</span></a>
+      <a {{ if eq .ActivePage "assurance" }}class="active" {{ end }}href="/assurance"><span class="nav-ico nav-health"></span><span>Health</span></a>
+      <a {{ if eq .ActivePage "settings" }}class="active" {{ end }}href="/settings"><span class="nav-ico nav-settings"></span><span>Settings</span></a>
     </nav>
     <div class="spacer"></div>
     <div class="foot">
       <div class="userchip">
-        <span>{{ if .Session.Name }}{{ .Session.Name }}{{ else }}{{ .Session.Subject }}{{ end }}</span>
+        <span>{{ if .CanOperate }}operator session{{ else if .CanViewAudit }}auditor session{{ else }}viewer session{{ end }}</span>
         <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button type="submit" title="Sign out">sign out</button></form>
       </div>
     </div>

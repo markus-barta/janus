@@ -1,0 +1,96 @@
+{{ define "settings_page" -}}
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Janus — Settings</title>
+  {{ template "doorkeeper_head" . }}
+</head>
+<body>
+<div class="layout">
+  {{ template "doorkeeper_side" . }}
+
+  <main class="main">
+    <div class="pagehead">
+      <div>
+        <h1>Settings</h1>
+        <div class="sub">configuration posture, without crossing the value boundary</div>
+      </div>
+      <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC</span>
+    </div>
+
+    <div class="tiles">
+      <div class="tile"><strong>{{ if eq .Mode "self_hosted" }}self-hosted{{ else }}{{ .Mode }}{{ end }}</strong><span>Mode</span></div>
+      <div class="tile {{ if not .OIDCConfigured }}warm{{ end }}"><strong>{{ if .OIDCConfigured }}on{{ else }}local{{ end }}</strong><span>Zitadel/OIDC</span></div>
+      <div class="tile {{ if not .RolePolicyReadiness.Ready }}warm{{ end }}"><strong>{{ .RolePolicyReadiness.ReadyLanes }}/{{ .RolePolicyReadiness.TotalLanes }}</strong><span>Role lanes ready</span></div>
+      <div class="tile"><strong>{{ if eq .EvidenceBoundary.Gate "export_ready" }}ready{{ else }}auditor{{ end }}</strong><span>Evidence gate</span></div>
+    </div>
+
+    <div class="settings-grid">
+      <div class="panel">
+        <strong>Product mode</strong>
+        <div class="kv">
+          <span>Mode</span><b>{{ .Mode }}</b>
+          <span>Readiness</span><b>{{ if .Ready }}ready{{ else }}degraded{{ end }}</b>
+          <span>Auth required</span><b>{{ .AuthRequired }}</b>
+          <span>OIDC configured</span><b>{{ .OIDCConfigured }}</b>
+        </div>
+      </div>
+
+      <div class="panel">
+        <strong>Role policy</strong>
+        <p class="lead">{{ .RolePolicyReadiness.Summary }}</p>
+        <div class="chips">
+          {{ if .RolePolicyReadiness.Ready }}<span class="chip teal">ready</span>{{ else }}<span class="chip amber">{{ .RolePolicyReadiness.Status }}</span>{{ end }}
+          <span class="chip">{{ .RolePolicyReadiness.ReadyLanes }} ready lanes</span>
+          <span class="chip">{{ .RolePolicyReadiness.MissingLanes }} missing lanes</span>
+          <span class="chip">bootstrap {{ .RolePolicyReadiness.BootstrapOwnerState }}</span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <strong>Evidence boundary</strong>
+        <p class="lead">Evidence export is role-gated and copy-safe. Values, request bodies, connector output, backend paths, and identity claim values stay out.</p>
+        <div class="chips">
+          <span class="chip">{{ .EvidenceBoundary.Audience }}</span>
+          <span class="chip">{{ .EvidenceBoundary.Gate }}</span>
+          <span class="chip">{{ .EvidenceBoundary.Integrity }}</span>
+          <span class="chip teal">value_returned=false</span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <strong>Action readiness</strong>
+        <p class="lead">{{ .ActionReadiness.Summary }}</p>
+        <div class="readiness-list">
+          {{ range .ActionReadiness.Actions }}
+          <div class="readiness-row">
+            <span>
+              <b>{{ .Label }}</b>
+              <small>{{ .Safety }}</small>
+            </span>
+            <span class="state {{ if eq .Tone "ok" }}ok{{ else if eq .Tone "warn" }}warn{{ else }}bad{{ end }}">{{ .State }}</span>
+          </div>
+          {{ end }}
+        </div>
+      </div>
+    </div>
+
+    <h2>Presence-only workflow placeholders</h2>
+    <div class="workflow-grid">
+      <div class="workflow-row"><b>Remote audit</b><span class="state warn">external presence</span><span>Attach presence outside Janus; no endpoint or payload values.</span></div>
+      <div class="workflow-row"><b>Restore drill</b><span class="state warn">external presence</span><span>Record reviewed drill presence only.</span></div>
+      <div class="workflow-row"><b>Release provenance</b><span class="state warn">external presence</span><span>Keep artifacts outside Janus; expose only posture.</span></div>
+      <div class="workflow-row"><b>Privacy retention</b><span class="state warn">external presence</span><span>Policy documents and raw metadata remain external.</span></div>
+      <div class="workflow-row"><b>Integration conformance</b><span class="state warn">external presence</span><span>Identity, ticketing, SIEM, and custody proof stay outside.</span></div>
+      <div class="workflow-row"><b>Break-glass review</b><span class="state warn">external presence</span><span>No procedure, contact path, target, or credential values.</span></div>
+    </div>
+
+    <div class="footer">
+      <span>janus · build {{ buildCommitShort }}</span>
+      <span>settings are posture only · <span class="mono">value_returned=false</span></span>
+    </div>
+  </main>
+</div>
+</body>
+</html>
+{{- end }}

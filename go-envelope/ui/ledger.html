@@ -2,7 +2,7 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <title>Janus — Ledger</title>
+  <title>Janus — Audit</title>
   {{ template "doorkeeper_head" . }}
 </head>
 <body>
@@ -12,7 +12,7 @@
   <main class="main">
     <div class="pagehead">
       <div>
-        <h1>Ledger</h1>
+        <h1>Audit</h1>
         <div class="sub">what happened — every touch, witnessed</div>
       </div>
       <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC</span>
@@ -62,7 +62,7 @@
       </div>
     </div>
     {{ else }}
-    <div class="empty">The ledger needs the auditor role. Every touch is still being witnessed — you just can't read the trail with this role.</div>
+    <div class="empty">Audit needs the auditor role. Every touch is still being witnessed — you just can't read the trail with this role.</div>
     {{ end }}
 
     <div class="footer">
