@@ -28,13 +28,13 @@ func TestVaultPageRendersCardsTilesAndBrand(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "brand-full", "/static/janus-logo-full.png", "Signed in", "3 elevated roles", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
+	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "brand-mark", "/static/janus-logo.svg", "Signed in", "3 elevated roles", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("vault page should render %q: %s", want, body)
 		}
 	}
-	if strings.Contains(body, "/static/janus-logo.svg") {
-		t.Fatalf("vault page returned to the synthetic logo: %s", body)
+	if strings.Contains(body, "/static/janus-logo-full.png") {
+		t.Fatalf("vault page returned to the vertical wordmark: %s", body)
 	}
 	assertRouteResponseValueFree(t, "vault page", out)
 }
@@ -681,7 +681,7 @@ func TestVaultStaticAssetsServed(t *testing.T) {
 	}
 }
 
-func TestBrandArtworkUsesIntendedScaleAlignmentAndSuppliedLogo(t *testing.T) {
+func TestBrandArtworkUsesIntendedScaleAlignmentAndCanonicalMark(t *testing.T) {
 	cssBytes, err := uiStaticFS.ReadFile("ui/janus.css")
 	if err != nil {
 		t.Fatal(err)
@@ -713,6 +713,7 @@ func TestBrandArtworkUsesIntendedScaleAlignmentAndSuppliedLogo(t *testing.T) {
 		}
 	}
 	assetHashes := map[string]string{
+		"janus-logo.svg":      "94603b8b3b0d61301d549f7ccfee0a12285bf2f8cec3e58c9b970637d24fb513",
 		"janus-logo-full.png": "2bb27f067c38c25d8e463ffc542cbc3653d3aa1b465accc212308b6f3c5f89dd",
 		"janus-header-bg.png": "d1047ff0489162ab2669fe9a1ef6bbbf1af1e50304005240f9bd25aa1783df01",
 		"janus-side-bg.png":   "b2ef2ccba869a4e075a3cb34c32ebd8c584f04d13fb46c40239ef824c651815b",
@@ -725,6 +726,21 @@ func TestBrandArtworkUsesIntendedScaleAlignmentAndSuppliedLogo(t *testing.T) {
 		sum := sha256.Sum256(assetBytes)
 		if got := hex.EncodeToString(sum[:]); got != want {
 			t.Fatalf("Janus brand asset %s changed: got sha256 %s want %s", name, got, want)
+		}
+	}
+	markBytes, err := uiStaticFS.ReadFile("ui/janus-logo.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mark := string(markBytes)
+	for _, want := range []string{`viewBox="-3 -3 222 231"`, `id="janus-faces"`, `<path`} {
+		if !strings.Contains(mark, want) {
+			t.Fatalf("canonical faces-only SVG should contain %q", want)
+		}
+	}
+	for _, forbidden := range []string{"<text", "<image", "#193251", "janus-logo-full.png"} {
+		if strings.Contains(mark, forbidden) {
+			t.Fatalf("canonical faces-only SVG must not embed the wordmark, separator rule, or raster source: found %q", forbidden)
 		}
 	}
 }

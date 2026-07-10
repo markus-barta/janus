@@ -2993,7 +2993,7 @@ func mustTemplates() *template.Template {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {{ if .CSRF }}<meta name="csrf-token" content="{{ .CSRF }}">{{ end }}
   <title>{{ .Title }}</title>
-  <link rel="icon" type="image/png" href="/static/janus-logo-full.png">
+  <link rel="icon" type="image/svg+xml" href="/static/janus-logo.svg">
   <style nonce="{{ .CSPNonce }}">
     :root {
       color-scheme: light dark;
@@ -3072,7 +3072,7 @@ func mustTemplates() *template.Template {
     .brand { display: flex; align-items: center; gap: 12px; font-weight: 760; letter-spacing: 0; min-width: 0; }
     .brand small { color: var(--muted); font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
     .brand-logo {
-      width: 82px;
+      width: 58px;
       height: auto;
       display: block;
       object-fit: contain;
@@ -3946,7 +3946,7 @@ func mustTemplates() *template.Template {
 	  body.auth-body main::after { background: linear-gradient(180deg, rgba(248,250,249,.12), rgba(248,250,249,.62) 52%, #f8faf9 84%); }
 	  .auth-landing { width: calc(100% - 24px); min-height: calc(100vh - 119px); padding: 220px 0 18px; }
 	  .auth-card { padding: 20px; background: rgba(255,255,255,.88); }
-	  .brand-logo { width: 68px; }
+	  .brand-logo { width: 48px; }
       main, .overview, .intro, .status, .panel, .intro-copy, .toolbar, .evidence-workstation, .handoff-path, .handoff-step, .workstation-head {
         min-width: 0;
         max-width: 100%;
@@ -3966,7 +3966,7 @@ func mustTemplates() *template.Template {
 <a class="skip-link" href="#command-center">Skip to command center</a>
 <header>
   <div class="bar">
-    <div class="brand"><img class="brand-logo" src="/static/janus-logo-full.png" alt="JANUS"><small>build {{ buildCommitShort }}</small></div>
+    <div class="brand"><img class="brand-logo" src="/static/janus-logo.svg" alt="JANUS"><small>build {{ buildCommitShort }}</small></div>
 		    {{ if .Session.Subject }}
 		    <nav class="nav" aria-label="Primary">
 			      {{ if .WitnessPage }}
