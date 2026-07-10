@@ -681,7 +681,7 @@ func TestVaultStaticAssetsServed(t *testing.T) {
 	}
 }
 
-func TestBrandArtworkCoversRegionsAndUsesSuppliedLogo(t *testing.T) {
+func TestBrandArtworkUsesIntendedScaleAlignmentAndSuppliedLogo(t *testing.T) {
 	cssBytes, err := uiStaticFS.ReadFile("ui/janus.css")
 	if err != nil {
 		t.Fatal(err)
@@ -691,23 +691,25 @@ func TestBrandArtworkCoversRegionsAndUsesSuppliedLogo(t *testing.T) {
 		t.Fatalf("janus.css has unbalanced blocks: opens=%d closes=%d", strings.Count(css, "{"), strings.Count(css, "}"))
 	}
 	for _, want := range []string{
-		`url("/static/janus-header-bg.png") center / cover no-repeat`,
-		`url("/static/janus-side-bg.png") center bottom / cover no-repeat`,
+		`url("/static/janus-header-bg.png") right center / contain no-repeat`,
+		`width: min(700px, calc(100% + 48px))`,
+		`url("/static/janus-side-bg.png") center / contain no-repeat`,
+		`height: min(390px, 100%)`,
 		`mask-composite: intersect`,
 		`transparent 0`,
 		`object-fit: contain`,
 	} {
 		if !strings.Contains(css, want) {
-			t.Fatalf("artwork CSS should cover each region and fade only at its edges via %q", want)
+			t.Fatalf("artwork CSS should preserve each asset's scale, alignment, and edge fade via %q", want)
 		}
 	}
 	for _, forbidden := range []string{
-		`url("/static/janus-header-bg.png") center / contain no-repeat`,
-		`url("/static/janus-side-bg.png") center / contain no-repeat`,
+		`url("/static/janus-header-bg.png") center / cover no-repeat`,
+		`url("/static/janus-side-bg.png") center bottom / cover no-repeat`,
 		`mask-image: radial-gradient`,
 	} {
 		if strings.Contains(css, forbidden) {
-			t.Fatalf("artwork CSS returned to inset treatment %q", forbidden)
+			t.Fatalf("artwork CSS returned to cropped or radial treatment %q", forbidden)
 		}
 	}
 	assetHashes := map[string]string{

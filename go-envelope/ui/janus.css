@@ -82,14 +82,18 @@ a { color: var(--ink); }
   overflow: hidden;
 }
 .brand {
-  display: grid;
-  place-items: start center;
-  padding: 0 8px 20px;
-  min-height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 152px;
+  min-height: 152px;
+  padding: 0 8px;
 }
 .brand-full {
   --janus-brand-opacity: .96;
   display: block;
+  flex: 0 0 auto;
   width: 100px;
   height: auto;
   max-width: 100%;
@@ -157,19 +161,26 @@ a { color: var(--ink); }
   --janus-art-opacity: 1;
   --edge-fade-x: 18px;
   --edge-fade-y: 24px;
+  --edge-fade-bottom: 10px;
   content: "";
   position: absolute;
-  inset: 0;
+  top: auto;
+  right: auto;
+  bottom: 0;
+  left: 50%;
+  height: min(390px, 100%);
+  aspect-ratio: 210 / 390;
+  transform: translateX(-50%);
   z-index: 0;
-  background: url("/static/janus-side-bg.png") center bottom / cover no-repeat;
+  background: url("/static/janus-side-bg.png") center / contain no-repeat;
   opacity: var(--janus-art-opacity);
   -webkit-mask-image:
     linear-gradient(to right, transparent 0, #000 var(--edge-fade-x), #000 calc(100% - var(--edge-fade-x)), transparent 100%),
-    linear-gradient(to bottom, transparent 0, #000 var(--edge-fade-y), #000 calc(100% - var(--edge-fade-y)), transparent 100%);
+    linear-gradient(to bottom, transparent 0, #000 var(--edge-fade-y), #000 calc(100% - var(--edge-fade-bottom)), transparent 100%);
   -webkit-mask-composite: source-in;
   mask-image:
     linear-gradient(to right, transparent 0, #000 var(--edge-fade-x), #000 calc(100% - var(--edge-fade-x)), transparent 100%),
-    linear-gradient(to bottom, transparent 0, #000 var(--edge-fade-y), #000 calc(100% - var(--edge-fade-y)), transparent 100%);
+    linear-gradient(to bottom, transparent 0, #000 var(--edge-fade-y), #000 calc(100% - var(--edge-fade-bottom)), transparent 100%);
   mask-composite: intersect;
   animation: none;
   transition: filter 260ms var(--art-ease);
@@ -250,12 +261,18 @@ a { color: var(--ink); }
 }
 .pagehead::after {
   --janus-art-opacity: 1;
-  --edge-fade-x: 30px;
-  --edge-fade-y: 18px;
+  --edge-fade-x: 24px;
+  --edge-fade-y: 12px;
   content: "";
   position: absolute;
-  inset: -20px -24px -12px;
-  background: url("/static/janus-header-bg.png") center / cover no-repeat;
+  top: 50%;
+  right: -24px;
+  bottom: auto;
+  left: auto;
+  width: min(700px, calc(100% + 48px));
+  aspect-ratio: 700 / 108;
+  transform: translateY(-50%);
+  background: url("/static/janus-header-bg.png") right center / contain no-repeat;
   opacity: var(--janus-art-opacity);
   -webkit-mask-image:
     linear-gradient(to right, transparent 0, #000 var(--edge-fade-x), #000 calc(100% - var(--edge-fade-x)), transparent 100%),
@@ -1031,7 +1048,7 @@ table.ledger tr:last-child td { border-bottom: 0; }
 
 @media (min-width: 861px) and (max-height: 760px) {
   .side { padding: 16px 18px 12px; }
-  .brand { min-height: 104px; padding-bottom: 12px; }
+  .brand { height: 104px; min-height: 104px; padding: 0 8px; }
   .brand-full { width: 72px; }
   .nav a { min-height: 40px; padding: 7px 14px; }
   .side-tail {
@@ -1055,7 +1072,7 @@ table.ledger tr:last-child td { border-bottom: 0; }
     height: auto;
     max-height: none;
   }
-  .brand { min-height: auto; padding: 0 4px; }
+  .brand { height: 82px; min-height: 82px; padding: 0 4px; }
   .brand-full {
     width: auto;
     height: 72px;
@@ -1088,8 +1105,9 @@ table.ledger tr:last-child td { border-bottom: 0; }
   }
   .pagehead::after {
     --edge-fade-x: 18px;
-    --edge-fade-y: 14px;
-    inset: -18px -12px -12px;
+    --edge-fade-y: 10px;
+    right: -12px;
+    width: min(700px, calc(100% + 24px));
     opacity: var(--janus-art-opacity);
   }
   .pagehead h1 { font-size: 34px; }
