@@ -3,6 +3,7 @@ package main
 // JANUS-271: invariants of the doorkeeper vault page (the new "/" dashboard).
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -25,7 +26,7 @@ func TestVaultPageRendersCardsTilesAndBrand(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "brand-lockup", "/static/janus-logo.svg", "operator session", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
+	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "brand-lockup", "/static/janus-logo.svg", "Signed in", "3 elevated roles", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("vault page should render %q: %s", want, body)
 		}
@@ -44,7 +45,7 @@ func TestVaultPageRendersFocusWithOperatorActions(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"csb1-age-identity", `action="/ui/warden/resolve"`, `action="/ui/permits"`, "Issue handle", "Create permit"} {
+	for _, want := range []string{"csb1-age-identity", `action="/ui/warden/resolve"`, `action="/ui/permits"`, "Create temporary metadata reference", "Record metadata authorization"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("vault focus should render %q: %s", want, body)
 		}
@@ -65,10 +66,10 @@ func TestVaultPageHidesOperatorFormsForViewer(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	if !strings.Contains(body, "No access yet") {
-		t.Fatalf("viewer should get the friendly no-access state: %s", body)
+	if !strings.Contains(body, "Metadata controls are role-gated") {
+		t.Fatalf("viewer should get the friendly role-gated state: %s", body)
 	}
-	for _, forbidden := range []string{`action="/ui/warden/resolve"`, `action="/ui/permits"`, "Issue handle", "Create permit"} {
+	for _, forbidden := range []string{`action="/ui/warden/resolve"`, `action="/ui/permits"`, "Create temporary metadata reference", "Record authorization"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("viewer vault page rendered operator form %q: %s", forbidden, body)
 		}
@@ -126,7 +127,7 @@ func TestRequestsAndAssurancePagesRender(t *testing.T) {
 	if out.Code != http.StatusOK {
 		t.Fatalf("requests page: expected 200, got %d", out.Code)
 	}
-	for _, want := range []string{"Permits", "what may happen", "Pending", "Receipts", "No pending permits", "value_returned=false"} {
+	for _, want := range []string{"Permits", "short-lived metadata authorizations", "Active records", "Expired records", "No active metadata authorizations", "What is a permit?", "value_returned=false"} {
 		if !strings.Contains(out.Body.String(), want) {
 			t.Fatalf("permits page should render %q: %s", want, out.Body.String())
 		}
@@ -157,18 +158,50 @@ func TestRequestsAndAssurancePagesRender(t *testing.T) {
 	}
 }
 
+func TestRequestsPageUsesPlainLanguageForInternalCodes(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	permit, err := app.broker.CreatePermit(PrincipalChain{HumanSubject: "operator"}, PermitRequest{
+		Ref:         "zitadel-janus-oidc",
+		Action:      "metadata_use",
+		Destination: "dashboard",
+		Reason:      "ticket 123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.permits.Put(permit); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/requests", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	body := out.Body.String()
+	for _, want := range []string{"Review metadata", "Recorded · metadata only", "Verify that execution is disabled", "What is a permit?"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("requests page should explain internal state as %q: %s", want, body)
+		}
+	}
+	for _, rawCode := range []string{"metadata_use", "approved_metadata_only", "not_executed"} {
+		if strings.Contains(body, rawCode) {
+			t.Fatalf("requests page exposed internal code %q instead of plain language: %s", rawCode, body)
+		}
+	}
+}
+
 func TestNewSecretInputsAutoNormalize(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
 
-	req := httptest.NewRequest(http.MethodGet, "/vault/new?service=Home+Assistant&host=hsb1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/vault/new?service=Home+Assistant&host=hsb1&env=HOME_ASSISTANT_TOKEN", nil)
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
 	body := out.Body.String()
 	if !strings.Contains(body, "hsb1-home-assistant-env") {
 		t.Fatalf("inputs should normalize into a usable name: %s", body)
 	}
-	if !strings.Contains(body, "tidied up for you") {
+	if !strings.Contains(body, "Tidied up safely") {
 		t.Fatalf("normalization should be surfaced as a friendly note: %s", body)
 	}
 	if strings.Contains(body, "Plan not ready") || strings.Contains(body, "not usable yet") {
@@ -180,9 +213,10 @@ func TestAccessPageRendersLanesWithoutIdentityValues(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
 	app.cfg.RolePolicy = RolePolicy{
-		AdminSubjects:   map[string]bool{"markus@barta.com": true},
-		AuditorSubjects: map[string]bool{"markus@barta.com": true},
-		AdminGroups:     map[string]bool{"janus-admins": true},
+		AdminSubjects:    map[string]bool{"markus@barta.com": true},
+		AuditorSubjects:  map[string]bool{"markus@barta.com": true},
+		OperatorSubjects: map[string]bool{"markus@barta.com": true},
+		AdminGroups:      map[string]bool{"janus-admins": true},
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/access", nil)
@@ -192,14 +226,45 @@ func TestAccessPageRendersLanesWithoutIdentityValues(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"who may open which door", "identity values withheld", "Available now", "Action readiness", "Admin lane", "Auditor lane", "Operator lane", "Policy and ownership", "/api/audit/recent", "deny-by-default", "value_returned=false", "Zitadel"} {
+	for _, want := range []string{"who may open which door", "identity values withheld", "Available now", "action readiness", "Role lanes", "Admin", "Auditor", "Operator", "Policy and ownership", "GET /api/audit/recent", "GET /vault/new/plan.sh", "Local development", "Baseline", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("access page should render %q: %s", want, body)
 		}
 	}
-	for _, forbidden := range []string{"markus@barta.com", "janus-admins", "dev-local", "Local Dev"} {
+	for _, forbidden := range []string{"markus@barta.com", "janus-admins", "dev-local", "Local Dev", "Zitadel + Janus", "signed_session_browser_proof"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("access page leaked binding identity %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestAccessPageDistinguishesAuthenticatedBrowserProof(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RolePolicy = RolePolicy{
+		AdminSubjects:    map[string]bool{"subject-secret-sentinel": true},
+		AuditorSubjects:  map[string]bool{"subject-secret-sentinel": true},
+		OperatorSubjects: map[string]bool{"subject-secret-sentinel": true},
+	}
+	session := Session{Subject: "subject-secret-sentinel", Roles: AllRoles(), Expiry: time.Now().UTC().Add(time.Hour)}
+	cookieWriter := httptest.NewRecorder()
+	app.writeSession(cookieWriter, session)
+
+	req := httptest.NewRequest(http.MethodGet, "/access", nil)
+	req.AddCookie(cookieWriter.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{"Zitadel + Janus", "signed_session_browser_proof", "Browser proof", "Explicit", "GET /vault/new/plan.sh"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("authenticated access page should render %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"subject-secret-sentinel", "local_development_session", "Local development"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("authenticated access page leaked or mislabeled %q: %s", forbidden, body)
 		}
 	}
 }
@@ -263,7 +328,7 @@ func TestNewSecretPlanGeneratesDeclarativeSteps(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
 
-	req := httptest.NewRequest(http.MethodGet, "/vault/new?service=xyz&host=csb1&rotation=90&tags=app-env", nil)
+	req := httptest.NewRequest(http.MethodGet, "/vault/new?service=xyz&host=csb1&env=XYZ_TOKEN&rotation=90&tags=app-env", nil)
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
 	if out.Code != http.StatusOK {
@@ -284,7 +349,7 @@ func TestNewSecretScriptDownloadIsGatedAndValueFree(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
 
-	req := httptest.NewRequest(http.MethodGet, "/vault/new/plan.sh?service=xyz&host=csb1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/vault/new/plan.sh?service=xyz&host=csb1&env=XYZ_TOKEN", nil)
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
 	if out.Code != http.StatusOK {
@@ -338,11 +403,13 @@ in
 	mustWrite("hosts/csb1/configuration.nix", `{ config, ... }:
 {
   networking.hostName = "csb1";
+  age.secrets.csb1-xyz-env-old = {};
 }
 `)
 	mustWrite("hosts/csb1/docker/janus/catalog/agenix-catalog.json", "[]\n")
 
-	plan := newSecretPlanFromQuery(url.Values{"service": {"xyz"}, "host": {"csb1"}, "rotation": {"90"}})
+	maliciousDisplay := `xyz '''; open('pwned', 'w').write('yes'); #`
+	plan := newSecretPlanFromQuery(url.Values{"service": {"xyz"}, "host": {"csb1"}, "env": {"XYZ_TOKEN"}, "display": {maliciousDisplay}, "rotation": {"90"}})
 	if plan == nil || len(plan.Problems) > 0 {
 		t.Fatalf("plan should be valid: %+v", plan)
 	}
@@ -394,20 +461,187 @@ in
 	if strings.Contains(string(catalog), "rotation_days\": 90") == false {
 		t.Fatalf("catalog should carry rotation_days 90:\n%s", catalog)
 	}
+	if _, err := os.Stat(filepath.Join(dir, "pwned")); !os.IsNotExist(err) {
+		t.Fatalf("display text escaped the catalog and executed code: %v", err)
+	}
+	var descriptors []newSecretCatalogDescriptor
+	if err := json.Unmarshal(catalog, &descriptors); err != nil {
+		t.Fatalf("catalog should remain valid JSON: %v\n%s", err, catalog)
+	}
+	if len(descriptors) != 1 || descriptors[0].DisplayName != maliciousDisplay {
+		t.Fatalf("catalog should preserve the display label as data, not code: %#v", descriptors)
+	}
 }
 
 func TestNewSecretPlanRejectsUnderivableNames(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
 
-	req := httptest.NewRequest(http.MethodGet, "/vault/new?service=!!!", nil)
+	req := httptest.NewRequest(http.MethodGet, "/vault/new?service=!!!&host=csb1&env=XYZ_TOKEN", nil)
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
-	if !strings.Contains(out.Body.String(), "could not derive a usable name") {
+	if !strings.Contains(out.Body.String(), "could not turn that service name into a safe configuration name") {
 		t.Fatalf("underivable service name should block the plan: %s", out.Body.String())
 	}
 	if strings.Contains(out.Body.String(), "agenix -e secrets/") {
 		t.Fatalf("blocked plan should not emit commands: %s", out.Body.String())
+	}
+}
+
+func TestNewSecretPlanPreservesExactEnvironmentNameAndRejectsHostMutation(t *testing.T) {
+	plan := newSecretPlanFromQuery(url.Values{
+		"service": {"Example API"},
+		"host":    {"csb1"},
+		"env":     {"apiKey"},
+	})
+	if plan == nil || len(plan.Problems) != 0 {
+		t.Fatalf("mixed-case environment name should be valid: %#v", plan)
+	}
+	if plan.EnvName != "apiKey" || !strings.Contains(plan.AgenixEdit, "apiKey=<value>") {
+		t.Fatalf("environment name is case-sensitive and must be preserved: %#v", plan)
+	}
+
+	for _, hostileHost := range []string{"csb!", "csb1/../../hsb1", "1server", "csb1\thsb1", "prod_db", "prod db", "CSB1"} {
+		blocked := newSecretPlanFromQuery(url.Values{
+			"service": {"Example API"},
+			"host":    {hostileHost},
+			"env":     {"API_KEY"},
+		})
+		if blocked == nil || len(blocked.Problems) == 0 || blocked.AgenixEdit != "" || blocked.Catalog != "" {
+			t.Fatalf("host %q must be rejected rather than changed into another machine: %#v", hostileHost, blocked)
+		}
+	}
+}
+
+func TestNewSecretInvalidOptionalFieldsStayVisible(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	req := httptest.NewRequest(http.MethodGet, "/vault/new?service=Example+API&host=csb1&env=API_KEY&display=Friendly&classification=unexpected&rotation=0&tags=one%2Ctwo", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected validation page, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{`class="optional-settings" open`, `value="Friendly"`, `value="0"`, `value="one,two"`, "Choose Standard, High, or Critical sensitivity", "Enter a review interval from 1 to 3650 days", "Nothing has changed"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("invalid optional settings should preserve and explain %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "Download setup script") || strings.Contains(body, "agenix -e secrets/") {
+		t.Fatalf("invalid optional settings must not generate an executable guide: %s", body)
+	}
+}
+
+func TestNewSecretViewerCanPreviewButCannotDownload(t *testing.T) {
+	app := newTestApp(t)
+	session := Session{Subject: "viewer-subject-secret", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	cookieWriter := httptest.NewRecorder()
+	app.writeSession(cookieWriter, session)
+	sessionCookie := cookieWriter.Result().Cookies()[0]
+
+	req := httptest.NewRequest(http.MethodGet, "/vault/new?service=Example+API&host=csb1&env=API_KEY", nil)
+	req.AddCookie(sessionCookie)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("viewer preview: expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	if !strings.Contains(body, "Operator required to download") || !strings.Contains(body, "Setup guide") {
+		t.Fatalf("viewer should see a useful preview and a clear role gate: %s", body)
+	}
+	if strings.Contains(body, `href="/vault/new/plan.sh`) || strings.Contains(body, "viewer-subject-secret") {
+		t.Fatalf("viewer preview exposed a download or identity value: %s", body)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/vault/new/plan.sh?service=Example+API&host=csb1&env=API_KEY", nil)
+	req.AddCookie(sessionCookie)
+	out = httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusForbidden {
+		t.Fatalf("viewer download: expected 403, got %d body=%s", out.Code, out.Body.String())
+	}
+	if strings.Contains(out.Body.String(), "#!/usr/bin/env bash") || strings.Contains(out.Body.String(), "viewer-subject-secret") {
+		t.Fatalf("viewer denial must not contain script bytes or identity values: %s", out.Body.String())
+	}
+}
+
+func TestVaultDoesNotAutoSelectAndUnknownRefCannotRenderActions(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+
+	for _, path := range []string{"/", "/?ref=not-a-real-secret"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		out := httptest.NewRecorder()
+		app.routes().ServeHTTP(out, req)
+		if out.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d", path, out.Code)
+		}
+		body := out.Body.String()
+		if strings.Contains(body, `action="/ui/warden/resolve"`) || strings.Contains(body, `action="/ui/permits"`) || strings.Contains(body, `name="ref" value=`) {
+			t.Fatalf("%s selected a mutation target without an exact known reference: %s", path, body)
+		}
+		if path != "/" && !strings.Contains(body, "Secret not found") {
+			t.Fatalf("unknown reference should render a safe not-found panel: %s", body)
+		}
+	}
+}
+
+func TestNewSecretScriptPreflightLeavesFilesUnchanged(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash unavailable")
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "secrets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "hosts", "csb1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("let\n  markus = [];\n  csb1 = [];\nin\n{\n}\n")
+	secretsPath := filepath.Join(dir, "secrets", "secrets.nix")
+	if err := os.WriteFile(secretsPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan := newSecretPlanFromQuery(url.Values{"service": {"xyz"}, "host": {"csb1"}, "env": {"XYZ_TOKEN"}})
+	if plan == nil || len(plan.Problems) != 0 {
+		t.Fatalf("expected valid plan: %#v", plan)
+	}
+	scriptPath := filepath.Join(dir, "plan.sh")
+	if err := os.WriteFile(scriptPath, []byte(newSecretScript(plan)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(output), "configuration.nix") {
+		t.Fatalf("missing target must fail during preflight: err=%v output=%s", err, output)
+	}
+	after, err := os.ReadFile(secretsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(original) {
+		t.Fatalf("preflight failure partially changed secrets.nix:\n%s", after)
+	}
+}
+
+func TestBrokerRejectsUnsafeMetadataText(t *testing.T) {
+	app := newTestApp(t)
+	principal := PrincipalChain{HumanSubject: "operator"}
+
+	if _, err := app.broker.ResolveHandle(principal, HandleRequest{Ref: "zitadel-janus-oidc"}); err == nil {
+		t.Fatal("handle reason should be required at the broker boundary")
+	}
+	if _, err := app.broker.ResolveHandle(principal, HandleRequest{Ref: "zitadel-janus-oidc", Reason: strings.Repeat("x", 161)}); err == nil {
+		t.Fatal("overlong handle reason should be rejected")
+	}
+	if _, err := app.broker.CreatePermit(principal, PermitRequest{Ref: "zitadel-janus-oidc", Action: "metadata_use", Reason: "ticket", Destination: "dashboard\nsecret"}); err == nil {
+		t.Fatal("control characters in persisted destination should be rejected")
+	}
+	if _, err := app.broker.CreatePermit(principal, PermitRequest{Ref: "zitadel-janus-oidc", Action: "metadata_use", Reason: strings.Repeat("x", 161)}); err == nil {
+		t.Fatal("overlong persisted reason should be rejected")
 	}
 }
 
@@ -419,6 +653,7 @@ func TestVaultStaticAssetsServed(t *testing.T) {
 	}{
 		{path: "/static/janus.css", contentType: "text/css; charset=utf-8"},
 		{path: "/static/janus-logo.svg", contentType: "image/svg+xml"},
+		{path: "/static/janus-login-hero.png", contentType: "image/png"},
 	}
 	for _, tc := range cases {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
@@ -437,5 +672,37 @@ func TestVaultStaticAssetsServed(t *testing.T) {
 	app.routes().ServeHTTP(out, req)
 	if out.Code != http.StatusNotFound {
 		t.Fatalf("unknown static asset should 404, got %d", out.Code)
+	}
+}
+
+func TestBrandArtworkIsContainedFadedAndUsesOpenMark(t *testing.T) {
+	cssBytes, err := uiStaticFS.ReadFile("ui/janus.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(cssBytes)
+	if strings.Count(css, "{") != strings.Count(css, "}") {
+		t.Fatalf("janus.css has unbalanced blocks: opens=%d closes=%d", strings.Count(css, "{"), strings.Count(css, "}"))
+	}
+	for _, want := range []string{
+		`url("/static/janus-header-bg.png") center / contain no-repeat`,
+		`url("/static/janus-side-bg.png") center / contain no-repeat`,
+		`mask-image: radial-gradient`,
+		`object-fit: contain`,
+	} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("artwork CSS should contain and edge-fade assets via %q", want)
+		}
+	}
+	logoBytes, err := uiStaticFS.ReadFile("ui/janus-logo.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logo := string(logoBytes)
+	if !strings.Contains(logo, `viewBox="15 14 90 108"`) || !strings.Contains(logo, `stroke="#23998f"`) || !strings.Contains(logo, `stroke="#d88910"`) {
+		t.Fatalf("canonical two-face Janus mark is incomplete: %s", logo)
+	}
+	if strings.Contains(logo, `stroke="#0f2744"`) {
+		t.Fatalf("old navy pedestal/baseline returned to the Janus mark: %s", logo)
 	}
 }

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -758,19 +760,23 @@ func TestSessionWitnessPageRequiresAuthentication(t *testing.T) {
 		req.Header.Set("X-Request-Id", "session-witness-auth-required")
 		out := httptest.NewRecorder()
 		app.routes().ServeHTTP(out, req)
-		wantLocation := "/login"
+		wantHref := ""
 		switch path {
 		case "/auth/smoke":
-			wantLocation = "/login?next=%2Fauth%2Fsmoke"
+			wantHref = "/login?next=%2Fauth%2Fsmoke"
 		case "/session-witness":
-			wantLocation = "/login?next=%2Fsession-witness"
+			wantHref = "/login?next=%2Fsession-witness"
 		case "/session-witness/verify":
-			wantLocation = "/login?next=%2Fsession-witness%2Fverify"
+			wantHref = "/login?next=%2Fsession-witness%2Fverify"
 		}
-		if out.Code != http.StatusFound || out.Header().Get("Location") != wantLocation {
-			t.Fatalf("%s expected browser auth redirect, got %d location=%q body=%s", path, out.Code, out.Header().Get("Location"), out.Body.String())
+		if wantHref == "" {
+			if out.Code != http.StatusFound || out.Header().Get("Location") != "/login" {
+				t.Fatalf("%s expected direct login redirect, got %d location=%q body=%s", path, out.Code, out.Header().Get("Location"), out.Body.String())
+			}
+		} else if out.Code != http.StatusOK || out.Header().Get("Location") != "" || !strings.Contains(out.Body.String(), `href="`+wantHref+`"`) || !strings.Contains(out.Body.String(), "janus-login-hero.png") {
+			t.Fatalf("%s expected branded login landing with return path %q, got %d location=%q body=%s", path, wantHref, out.Code, out.Header().Get("Location"), out.Body.String())
 		}
-		assertRouteResponseValueFree(t, "session witness auth redirect", out)
+		assertRouteResponseValueFree(t, "session witness auth boundary", out)
 	}
 }
 
@@ -1082,6 +1088,88 @@ func TestLoginRedirectBindsOIDCStateNonceAndPKCE(t *testing.T) {
 	}
 }
 
+func TestUnauthenticatedRootRendersBrandedLoginLanding(t *testing.T) {
+	app := newTestApp(t)
+	app.oauth = testOAuthConfig()
+
+	req := httptest.NewRequest(http.MethodGet, "/?ref=query-secret-sentinel", nil)
+	for _, cookie := range []*http.Cookie{
+		{Name: hostSessionCookie, Value: "session-cookie-sentinel"},
+		{Name: hostStateCookie, Value: "state-cookie-sentinel"},
+		{Name: hostNonceCookie, Value: "nonce-cookie-sentinel"},
+		{Name: hostPKCECookie, Value: "pkce-cookie-sentinel"},
+	} {
+		req.AddCookie(cookie)
+	}
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK || out.Header().Get("Location") != "" {
+		t.Fatalf("unauthenticated root should render the landing page, got %d location=%q body=%s", out.Code, out.Header().Get("Location"), out.Body.String())
+	}
+	body := out.Body.String()
+	for _, want := range []string{`class="auth-body"`, "/static/janus-logo.svg", `/static/janus-login-hero.png`, "Open Janus", "Continue with Zitadel", `href="/login"`, "value_returned=false"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("login landing should render %q: %s", want, body)
+		}
+	}
+	if strings.Count(body, `href="/login"`) != 1 {
+		t.Fatalf("login landing should have one clear sign-in action: %s", body)
+	}
+	for _, forbidden := range []string{"query-secret-sentinel", "session-cookie-sentinel", "state-cookie-sentinel", "nonce-cookie-sentinel", "pkce-cookie-sentinel", "zitadel-janus-oidc", "csb1-age-identity", "every secret, accounted for"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("unauthenticated landing leaked %q: %s", forbidden, body)
+		}
+	}
+	if len(out.Result().Cookies()) != 0 {
+		t.Fatalf("rendering the landing page must not start OIDC or set cookies: %#v", out.Result().Cookies())
+	}
+	assertStyleNonceMatchesCSP(t, out)
+	assertRouteResponseValueFree(t, "unauthenticated branded landing", out)
+}
+
+func TestUnauthenticatedRootHEADMatchesLandingAndAPIStaysJSON(t *testing.T) {
+	app := newTestApp(t)
+	app.oauth = testOAuthConfig()
+
+	head := httptest.NewRequest(http.MethodHead, "/", nil)
+	headOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(headOut, head)
+	if headOut.Code != http.StatusOK || headOut.Header().Get("Location") != "" {
+		t.Fatalf("HEAD / should match the unauthenticated landing status, got %d location=%q", headOut.Code, headOut.Header().Get("Location"))
+	}
+
+	api := httptest.NewRequest(http.MethodGet, "/api/posture", nil)
+	apiOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(apiOut, api)
+	if apiOut.Code != http.StatusUnauthorized || !strings.Contains(apiOut.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("unauthenticated API must remain a JSON 401, got %d type=%q body=%s", apiOut.Code, apiOut.Header().Get("Content-Type"), apiOut.Body.String())
+	}
+	if strings.Contains(apiOut.Body.String(), "auth-landing") || strings.Contains(apiOut.Body.String(), "janus-login-hero") || !strings.Contains(apiOut.Body.String(), `"value_returned":false`) {
+		t.Fatalf("API auth denial should be value-free JSON, not login HTML: %s", apiOut.Body.String())
+	}
+}
+
+func TestLoginHeroStaticAssetMatchesSuppliedImage(t *testing.T) {
+	app := newTestApp(t)
+	req := httptest.NewRequest(http.MethodGet, "/static/janus-login-hero.png", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK || out.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("expected embedded PNG, got %d type=%q", out.Code, out.Header().Get("Content-Type"))
+	}
+	if got := out.Header().Get("Cache-Control"); got != "public, max-age=300" {
+		t.Fatalf("expected static caching, got %q", got)
+	}
+	data := out.Body.Bytes()
+	if len(data) != 582567 || !strings.HasPrefix(string(data[:8]), "\x89PNG\r\n\x1a\n") {
+		t.Fatalf("unexpected hero asset: length=%d signature=%x", len(data), data[:min(8, len(data))])
+	}
+	sum := sha256.Sum256(data)
+	if got := hex.EncodeToString(sum[:]); got != "a9b5749e56a2e1d5adb01a16e047e208fea59a14c58e8a5a0f96bd3254a6fd79" {
+		t.Fatalf("hero does not match the supplied image: %s", got)
+	}
+}
+
 func TestAuthRequiredRedirectCarriesSafeReturnPath(t *testing.T) {
 	app := newTestApp(t)
 	app.oauth = testOAuthConfig()
@@ -1089,13 +1177,26 @@ func TestAuthRequiredRedirectCarriesSafeReturnPath(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/auth/smoke", nil)
 	out := httptest.NewRecorder()
 	app.routes().ServeHTTP(out, req)
-	if out.Code != http.StatusFound {
-		t.Fatalf("expected redirect, got %d body=%s", out.Code, out.Body.String())
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected branded login landing, got %d body=%s", out.Code, out.Body.String())
 	}
-	if got := out.Header().Get("Location"); got != "/login?next=%2Fauth%2Fsmoke" {
-		t.Fatalf("auth smoke redirect should carry safe return path, got %q", got)
+	if got := out.Header().Get("Location"); got != "" {
+		t.Fatalf("auth smoke landing should not redirect before the user chooses sign-in, got %q", got)
 	}
-	assertRouteResponseValueFree(t, "auth smoke auth-required return redirect", out)
+	if !strings.Contains(out.Body.String(), `href="/login?next=%2Fauth%2Fsmoke"`) || !strings.Contains(out.Body.String(), "janus-login-hero.png") {
+		t.Fatalf("auth smoke landing should preserve a safe return path and hero: %s", out.Body.String())
+	}
+	assertRouteResponseValueFree(t, "auth smoke auth-required landing", out)
+
+	req = httptest.NewRequest(http.MethodGet, "/access?ref=deep-link-secret-sentinel", nil)
+	out = httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK || !strings.Contains(out.Body.String(), `href="/login?next=%2Faccess"`) || !strings.Contains(out.Body.String(), "janus-login-hero.png") {
+		t.Fatalf("protected deep link should render the hero landing with a safe return path: status=%d body=%s", out.Code, out.Body.String())
+	}
+	if strings.Contains(out.Body.String(), "deep-link-secret-sentinel") {
+		t.Fatalf("protected deep-link query must not reach the login page: %s", out.Body.String())
+	}
 }
 
 func TestLoginRedirectStoresSafeReturnPathWithoutLeakingToProvider(t *testing.T) {
@@ -1146,6 +1247,12 @@ func TestSafeLoginReturnPathRejectsOpenRedirectAndUnsafeRoutes(t *testing.T) {
 		{raw: "/auth/smoke?ref=secret-cookie-secret", want: "/auth/smoke", ok: true},
 		{raw: "/session-witness", want: "/session-witness", ok: true},
 		{raw: "/session-witness/verify", want: "/session-witness/verify", ok: true},
+		{raw: "/access?ref=query-secret-sentinel", want: "/access", ok: true},
+		{raw: "/requests", want: "/requests", ok: true},
+		{raw: "/ledger", want: "/ledger", ok: true},
+		{raw: "/assurance", want: "/assurance", ok: true},
+		{raw: "/settings", want: "/settings", ok: true},
+		{raw: "/vault/new?service=query-secret-sentinel", want: "/vault/new", ok: true},
 		{raw: "/", want: "/", ok: true},
 		{raw: "https://evil.example/auth/smoke", want: "/", ok: false},
 		{raw: "//evil.example/auth/smoke", want: "/", ok: false},
@@ -1165,7 +1272,7 @@ func TestSafeLoginReturnPathRejectsOpenRedirectAndUnsafeRoutes(t *testing.T) {
 		if got != tc.want || ok != tc.ok {
 			t.Fatalf("safeLoginReturnPath(%q) got %q ok=%v, want %q ok=%v", tc.raw, got, ok, tc.want, tc.ok)
 		}
-		if strings.Contains(got, "secret-cookie-secret") || strings.Contains(got, "evil.example") {
+		if strings.Contains(got, "secret-cookie-secret") || strings.Contains(got, "query-secret-sentinel") || strings.Contains(got, "evil.example") {
 			t.Fatalf("safe return path retained unsafe value from %q: %q", tc.raw, got)
 		}
 	}
@@ -1962,7 +2069,7 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"operational_status"`) || !strings.Contains(body, `"key":"evidence_export"`) || !strings.Contains(body, `"key":"scope_boundary"`) {
 		t.Fatalf("evidence response should include operational status: %s", body)
 	}
-	if !strings.Contains(body, `"action_readiness"`) || !strings.Contains(body, `"key":"posture_view"`) || !strings.Contains(body, `"key":"admin_policy_review"`) || !strings.Contains(body, `"value_returned":false`) {
+	if !strings.Contains(body, `"action_readiness"`) || !strings.Contains(body, `"key":"posture_view"`) || !strings.Contains(body, `"key":"policy_posture"`) || !strings.Contains(body, `"value_returned":false`) {
 		t.Fatalf("evidence response should include action readiness: %s", body)
 	}
 	if !strings.Contains(body, `"authenticated_role_evidence"`) || !strings.Contains(body, `"label":"Signed-in role receipt"`) || !strings.Contains(body, `"evidence_signal":"signed_in_role_receipt_no_identity_values"`) || !strings.Contains(body, `"identity_values_returned":false`) || !strings.Contains(body, `"subject_returned":false`) || !strings.Contains(body, `"email_returned":false`) || !strings.Contains(body, `"name_returned":false`) || !strings.Contains(body, `"claim_values_returned":false`) || !strings.Contains(body, `"token_returned":false`) {
@@ -3246,27 +3353,32 @@ func TestRequestIDRejectsUnsafeInboundValue(t *testing.T) {
 
 func TestActionReadinessDistinguishesRoleAndReadinessGates(t *testing.T) {
 	viewer := ActionReadinessFor(Session{Roles: []string{RoleViewer}}, true)
-	if viewer.ValueReturned || viewer.Available != 1 || viewer.Gated != 5 || viewer.Blocked != 0 {
-		t.Fatalf("viewer readiness should show one safe action and role gates: %#v", viewer)
+	if viewer.ValueReturned || viewer.Available != 2 || viewer.Gated != 5 || viewer.Blocked != 0 {
+		t.Fatalf("viewer readiness should show two safe review actions and five role gates: %#v", viewer)
 	}
-	for _, key := range []string{"evidence_export", "handle_issue", "permit_create", "permit_run_check", "admin_policy_review"} {
+	for _, key := range []string{"evidence_export", "handle_issue", "permit_create", "permit_run_check", "service_setup_download"} {
 		if !actionReadinessHasState(viewer.Actions, key, "role_gated") {
 			t.Fatalf("viewer readiness should role-gate %s: %#v", key, viewer)
 		}
 	}
+	for _, key := range []string{"posture_view", "policy_posture"} {
+		if !actionReadinessHasState(viewer.Actions, key, "available") {
+			t.Fatalf("viewer readiness should allow safe review action %s: %#v", key, viewer)
+		}
+	}
 
 	allRoles := ActionReadinessFor(Session{Roles: AllRoles()}, true)
-	if allRoles.Available != 6 || allRoles.Gated != 0 || allRoles.Blocked != 0 || allRoles.ValueReturned {
+	if allRoles.Available != 7 || allRoles.Gated != 0 || allRoles.Blocked != 0 || allRoles.ValueReturned {
 		t.Fatalf("full-role readiness should make all actions available: %#v", allRoles)
 	}
-	for _, key := range []string{"evidence_export", "handle_issue", "permit_create", "permit_run_check", "admin_policy_review"} {
+	for _, key := range []string{"evidence_export", "handle_issue", "permit_create", "permit_run_check", "service_setup_download", "policy_posture"} {
 		if !actionReadinessHasState(allRoles.Actions, key, "available") {
 			t.Fatalf("full-role readiness should allow %s: %#v", key, allRoles)
 		}
 	}
 
 	degraded := ActionReadinessFor(Session{Roles: AllRoles()}, false)
-	if degraded.Available != 2 || degraded.Blocked != 4 || degraded.Gated != 0 {
+	if degraded.Available != 3 || degraded.Blocked != 4 || degraded.Gated != 0 {
 		t.Fatalf("degraded readiness should block sensitive actions while leaving safe views: %#v", degraded)
 	}
 	for _, key := range []string{"evidence_export", "handle_issue", "permit_create", "permit_run_check"} {
@@ -3274,7 +3386,7 @@ func TestActionReadinessDistinguishesRoleAndReadinessGates(t *testing.T) {
 			t.Fatalf("degraded readiness should block %s: %#v", key, degraded)
 		}
 	}
-	if !actionReadinessHasState(degraded.Actions, "posture_view", "available") || !actionReadinessHasState(degraded.Actions, "admin_policy_review", "available") {
+	if !actionReadinessHasState(degraded.Actions, "posture_view", "available") || !actionReadinessHasState(degraded.Actions, "policy_posture", "available") || !actionReadinessHasState(degraded.Actions, "service_setup_download", "available") {
 		t.Fatalf("degraded readiness should leave safe review actions available: %#v", degraded)
 	}
 }
@@ -3286,29 +3398,42 @@ func TestRouteGateViewsAreOrderedAndSessionAware(t *testing.T) {
 	if len(viewer) != len(access.RequiredRoles) {
 		t.Fatalf("expected one view per required route: %#v", viewer)
 	}
-	if viewer[0].Route != "/api/audit/recent" || viewer[1].Route != "/api/evidence" {
-		t.Fatalf("route gate views should be sorted for stable rendering: %#v", viewer)
+	wantOrder := []string{
+		"POST /api/warden/resolve",
+		"POST /api/permits",
+		"POST /api/permits/{permitID}/run",
+		"GET /vault/new/plan.sh",
+		"GET /api/audit/recent",
+		"GET /api/evidence",
+	}
+	for i, want := range wantOrder {
+		if viewer[i].Route != want {
+			t.Fatalf("route gate views should follow the operator workflow, index %d got %q want %q: %#v", i, viewer[i].Route, want, viewer)
+		}
 	}
 	for _, gate := range viewer {
-		if gate.State != "role_gated" || gate.Tone != "warn" {
+		if gate.State != "Role-gated" || gate.SessionState != "Missing" || gate.Tone != "warn" {
 			t.Fatalf("viewer session should not pass elevated route %s: %#v", gate.Route, viewer)
 		}
 	}
 
 	operator := RouteGateViewsFor(Session{Roles: []string{RoleOperator, RoleViewer}}, access, true)
 	for _, gate := range operator {
-		if gate.RequiredRole == RoleOperator && gate.State != "allowed" {
+		if gate.RequiredRole == RoleOperator && gate.State != "Allowed" {
 			t.Fatalf("operator route should be allowed: %#v", gate)
 		}
-		if gate.RequiredRole == RoleAuditor && gate.State != "role_gated" {
+		if gate.RequiredRole == RoleAuditor && gate.State != "Role-gated" {
 			t.Fatalf("auditor route should stay role gated for operator session: %#v", gate)
 		}
 	}
 
 	degraded := RouteGateViewsFor(Session{Roles: AllRoles()}, access, false)
 	for _, gate := range degraded {
-		if gate.State != "readiness_blocked" || gate.Tone != "warn" {
-			t.Fatalf("readiness degradation should block sensitive routes: %#v", degraded)
+		if gate.ReadinessGated && (gate.State != "Blocked" || gate.Tone != "warn") {
+			t.Fatalf("readiness degradation should block readiness-gated route %s: %#v", gate.Route, degraded)
+		}
+		if !gate.ReadinessGated && (gate.State != "Allowed" || gate.Tone != "ok") {
+			t.Fatalf("readiness degradation should leave the role-only audit view available: %#v", degraded)
 		}
 	}
 }
@@ -3325,7 +3450,7 @@ func TestWardenResolveUIReturnsValueFreeHandle(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Handle ready", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "Copy-safe action receipt fields", "Receipt id", "Receipt hash", "Request id", "Verify receipt", "Recompute the SHA-256 hash", "copy-safe", "Covered checks", "role_checked=true", "csrf_checked=true", "readiness_checked=true", "audit_recorded=true", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "value_returned=false", "zitadel-janus-oidc"} {
+	for _, want := range []string{"Metadata reference ready", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "Copy-safe action receipt fields", "Receipt id", "Receipt hash", "Request id", "Verify receipt", "Recompute the SHA-256 hash", "copy-safe", "Covered checks", "role_checked=true", "csrf_checked=true", "readiness_checked=true", "audit_recorded=true", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "value_returned=false", "zitadel-janus-oidc"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("UI handle response should render %q: %s", want, body)
 		}
@@ -3349,7 +3474,7 @@ func TestSensitiveUIFailsClosedWhenReadinessDegraded(t *testing.T) {
 		t.Fatalf("expected 503, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Handle blocked", "system_degraded", "request_id=degraded-ui-1", "sensitive action blocked", "value_returned=false"} {
+	for _, want := range []string{"Metadata reference blocked", "system_degraded", "request_id=degraded-ui-1", "sensitive action blocked", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("degraded UI denial should render %q: %s", want, body)
 		}
@@ -3407,7 +3532,7 @@ func TestPermitCreateUIReturnsValueFreePermit(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Permit recorded", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "Copy-safe action receipt fields", "Receipt id", "Receipt hash", "Request id", "Verify receipt", "Recompute the SHA-256 hash", "copy-safe", "Covered checks", "role_checked=true", "csrf_checked=true", "readiness_checked=true", "audit_recorded=true", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Audited", "approved_metadata_only", "Run safety check", "value_returned=false"} {
+	for _, want := range []string{"Metadata authorization recorded", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "Copy-safe action receipt fields", "Receipt id", "Receipt hash", "Request id", "Verify receipt", "Recompute the SHA-256 hash", "copy-safe", "Covered checks", "role_checked=true", "csrf_checked=true", "readiness_checked=true", "audit_recorded=true", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Authorization safety verdict", "Metadata only", "No connector", "Audited", "Recorded · metadata only", "Verify that execution is disabled", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("permit UI response should render %q: %s", want, body)
 		}
@@ -3456,7 +3581,7 @@ func TestPermitRunUIReturnsNoExecutionValueFreeResult(t *testing.T) {
 		t.Fatalf("expected 202, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"Safety check complete", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "Copy-safe action receipt fields", "Receipt id", "Receipt hash", "Request id", "Verify receipt", "Recompute the SHA-256 hash", "copy-safe", "Covered checks", "role_checked=true", "csrf_checked=true", "readiness_checked=true", "audit_recorded=true", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Permit safety check result witness", "Execution verdict", "Run denial reason", "Permit safety check evidence flags", "run_status=not_executed", "run_reason_returned=true", "connector_execution=false", "connector_output_returned=false", "permit_payload_returned=false", "backend_path_returned=false", "source_path_returned=false", "env_returned=false", "Permit safety verdict", "Metadata only", "No connector", "Scrubbed output", "not_executed", "output_scrubbed=true", "value_returned=false"} {
+	for _, want := range []string{"Safety check complete", "Action receipt", "Role", "CSRF", "Readiness", "Audit", "Proof", "hash locked", "ar_", "sha256-json-v1", "janus-action-receipt-v1", "Copy-safe action receipt fields", "Receipt id", "Receipt hash", "Request id", "Verify receipt", "Recompute the SHA-256 hash", "copy-safe", "Covered checks", "role_checked=true", "csrf_checked=true", "readiness_checked=true", "audit_recorded=true", "tamper_evident=true", "covers", "request_id=", "metadata_only", "secret_value_returned=false", "request_body_returned=false", "Authorization safety-check result", "Execution verdict", "Run denial reason", "Safety-check evidence", "Execution remained disabled", "run_reason_returned=true", "connector_execution=false", "connector_output_returned=false", "permit_payload_returned=false", "backend_path_returned=false", "source_path_returned=false", "env_returned=false", "Authorization safety verdict", "Metadata only", "No connector", "Scrubbed output", "Execution disabled", "output_scrubbed=true", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("permit run UI response should render %q: %s", want, body)
 		}

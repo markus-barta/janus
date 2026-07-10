@@ -102,6 +102,13 @@ func (b *Broker) ResolveHandle(principal PrincipalChain, req HandleRequest) (Sec
 	if principal.HumanSubject == "" {
 		return SecretHandle{}, ErrPolicyDenied
 	}
+	reason := stringsTrim(req.Reason)
+	if reason == "" {
+		return SecretHandle{}, fmt.Errorf("%w: reason required", ErrPolicyDenied)
+	}
+	if len(reason) > 160 || containsControl(reason) {
+		return SecretHandle{}, fmt.Errorf("%w: reason must be one line and at most 160 characters", ErrPolicyDenied)
+	}
 	return SecretHandle{
 		HandleID:      "h_" + randomToken(18),
 		SecretRef:     desc.ID,
@@ -157,8 +164,16 @@ func (b *Broker) CreatePermit(principal PrincipalChain, req PermitRequest) (Perm
 	if principal.HumanSubject == "" {
 		return Permit{}, ErrPolicyDenied
 	}
-	if stringsTrim(req.Reason) == "" {
+	reason := stringsTrim(req.Reason)
+	if reason == "" {
 		return Permit{}, fmt.Errorf("%w: reason required", ErrPolicyDenied)
+	}
+	if len(reason) > 160 || containsControl(reason) {
+		return Permit{}, fmt.Errorf("%w: reason must be one line and at most 160 characters", ErrPolicyDenied)
+	}
+	destination := stringsTrim(req.Destination)
+	if len(destination) > 120 || containsControl(destination) {
+		return Permit{}, fmt.Errorf("%w: destination must be one line and at most 120 characters", ErrPolicyDenied)
 	}
 
 	action := stringsTrim(req.Action)
@@ -170,8 +185,8 @@ func (b *Broker) CreatePermit(principal PrincipalChain, req PermitRequest) (Perm
 		ID:            "p_" + randomToken(18),
 		SecretRef:     desc.ID,
 		Action:        action,
-		Destination:   stringsTrim(req.Destination),
-		Reason:        stringsTrim(req.Reason),
+		Destination:   destination,
+		Reason:        reason,
 		Status:        "approved_metadata_only",
 		ValueReturned: false,
 		PrincipalHash: actorHash(principal.HumanSubject),

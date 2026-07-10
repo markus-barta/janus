@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -65,10 +66,51 @@ type RoleBoundary struct {
 }
 
 type RouteGateView struct {
-	Route        string
-	RequiredRole string
-	State        string
-	Tone         string
+	Route          string
+	RequiredRole   string
+	SessionState   string
+	SessionTone    string
+	State          string
+	Tone           string
+	ReadinessGated bool
+}
+
+type accessRouteDefinition struct {
+	Route          string
+	RequiredRole   string
+	ReadinessGated bool
+}
+
+var accessProtectedRoutes = []accessRouteDefinition{
+	{Route: "POST /api/warden/resolve", RequiredRole: RoleOperator, ReadinessGated: true},
+	{Route: "POST /api/permits", RequiredRole: RoleOperator, ReadinessGated: true},
+	{Route: "POST /api/permits/{permitID}/run", RequiredRole: RoleOperator, ReadinessGated: true},
+	{Route: "GET /vault/new/plan.sh", RequiredRole: RoleOperator, ReadinessGated: false},
+	{Route: "GET /api/audit/recent", RequiredRole: RoleAuditor, ReadinessGated: false},
+	{Route: "GET /api/evidence", RequiredRole: RoleAuditor, ReadinessGated: true},
+}
+
+type AccessSessionGateView struct {
+	Label string
+	State string
+	Tone  string
+}
+
+type AccessRoleLaneView struct {
+	Key           string
+	Label         string
+	SessionState  string
+	SessionTone   string
+	BindingLabel  string
+	Scope         string
+	SubjectLabel  string
+	GroupLabel    string
+	ServiceLabel  string
+	GateLabel     string
+	GateTone      string
+	Readiness     string
+	ReadinessTone string
+	ValueReturned bool
 }
 
 type RoleAvailability struct {
@@ -287,6 +329,11 @@ func AccessPostureFor(policy RolePolicy) AccessPosture {
 		})
 	}
 
+	requiredRoles := make(map[string]string, len(accessProtectedRoutes))
+	for _, definition := range accessProtectedRoutes {
+		requiredRoles[definition.Route] = definition.RequiredRole
+	}
+
 	return AccessPosture{
 		ExplicitBindings:       explicit,
 		BootstrapOwner:         !explicit && policy.BootstrapOwner,
@@ -297,18 +344,12 @@ func AccessPostureFor(policy RolePolicy) AccessPosture {
 		GroupBindingCount:      groupCount,
 		ElevatedBindingCount:   subjectCount + groupCount,
 		BindingSources:         RoleBindingSourcesFor(policy),
-		RequiredRoles: map[string]string{
-			"/api/audit/recent":          RoleAuditor,
-			"/api/evidence":              RoleAuditor,
-			"POST /api/warden/resolve":   RoleOperator,
-			"POST /api/permits":          RoleOperator,
-			"POST /api/permits/{id}/run": RoleOperator,
-		},
-		RoleDutyMatrix: true,
-		DutyModel:      "separated_admin_auditor_operator_viewer",
-		Gates:          gates,
-		GateCount:      len(gates),
-		ValueReturned:  false,
+		RequiredRoles:          requiredRoles,
+		RoleDutyMatrix:         true,
+		DutyModel:              "separated_admin_auditor_operator_viewer",
+		Gates:                  gates,
+		GateCount:              len(gates),
+		ValueReturned:          false,
 	}
 }
 
@@ -712,27 +753,164 @@ func RoleBoundariesFor(session Session) []RoleBoundary {
 	}
 }
 
-func RouteGateViewsFor(session Session, access AccessPosture, ready bool) []RouteGateView {
-	routes := make([]string, 0, len(access.RequiredRoles))
-	for route := range access.RequiredRoles {
-		routes = append(routes, route)
-	}
-	sort.Strings(routes)
-
-	views := make([]RouteGateView, 0, len(routes))
-	for _, route := range routes {
-		requiredRole := access.RequiredRoles[route]
-		view := RouteGateView{
-			Route:        route,
-			RequiredRole: requiredRole,
-			State:        "allowed",
-			Tone:         "ok",
+func SessionRoleBadge(session Session) string {
+	elevated := make([]string, 0, 3)
+	for _, role := range []string{RoleOperator, RoleAuditor, RoleAdmin} {
+		if HasRole(session, role) {
+			elevated = append(elevated, role)
 		}
-		if !HasRole(session, requiredRole) {
-			view.State = "role_gated"
+	}
+	if len(elevated) == 0 {
+		return "Viewer session"
+	}
+	if len(elevated) == 1 {
+		return roleTitle(elevated[0]) + " session"
+	}
+	return fmt.Sprintf("%d elevated roles", len(elevated))
+}
+
+func AccessSessionGateViewsFor(session Session, witness AuthenticatedBrowserWitness, posture SessionPosture, access AccessPosture, readiness RolePolicyReadiness, requireAuth, oidcConfigured bool) []AccessSessionGateView {
+	witnessLabel := "Local session"
+	witnessPresent := strings.TrimSpace(session.Subject) != ""
+	if requireAuth && oidcConfigured {
+		witnessLabel = "Browser proof"
+		witnessPresent = witness.Authenticated && witness.EvidenceSignal != ""
+	}
+	gates := []AccessSessionGateView{
+		accessSessionGate("Authenticated", witness.Authenticated, "Allowed", "Missing"),
+		accessSessionGate("Session valid", posture.SecondsRemaining > 0, "Allowed", "Expired"),
+		accessSessionGate(witnessLabel, witnessPresent, "Present", "Missing"),
+		accessSessionGate("Role session", len(session.Roles) > 0, "Allowed", "Missing"),
+	}
+	policyGate := AccessSessionGateView{Label: "Role policy", State: "Missing", Tone: "bad"}
+	if readiness.Ready {
+		policyGate.State = "Explicit"
+		policyGate.Tone = "ok"
+	} else if access.ExplicitBindings || access.BootstrapOwner {
+		policyGate.State = "Review"
+		policyGate.Tone = "warn"
+	}
+	return append(gates, policyGate)
+}
+
+func accessSessionGate(label string, allowed bool, allowedState, deniedState string) AccessSessionGateView {
+	if allowed {
+		return AccessSessionGateView{Label: label, State: allowedState, Tone: "ok"}
+	}
+	return AccessSessionGateView{Label: label, State: deniedState, Tone: "bad"}
+}
+
+func AccessRoleLaneViewsFor(session Session, readiness RolePolicyReadiness, globallyReady bool) []AccessRoleLaneView {
+	policyLanes := make(map[string]RolePolicyLane, len(readiness.Lanes))
+	for _, lane := range readiness.Lanes {
+		policyLanes[lane.Role] = lane
+	}
+
+	views := make([]AccessRoleLaneView, 0, 4)
+	for _, role := range []string{RoleViewer, RoleOperator, RoleAuditor, RoleAdmin} {
+		active := HasRole(session, role)
+		lane := policyLanes[role]
+		bindingReady := role == RoleViewer || lane.Ready
+		hasSurface := role != RoleAdmin
+		checks := []bool{session.Subject != "", active, bindingReady, hasSurface, globallyReady || role == RoleViewer || role == RoleAdmin}
+		score := 0
+		for _, check := range checks {
+			if check {
+				score++
+			}
+		}
+
+		view := AccessRoleLaneView{
+			Key:           role,
+			Label:         roleTitle(role),
+			SessionState:  "Not active",
+			SessionTone:   "info",
+			BindingLabel:  fmt.Sprintf("%d", lane.BindingCount),
+			Scope:         accessRoleScope(role),
+			SubjectLabel:  fmt.Sprintf("%d", lane.SubjectBindingCount),
+			GroupLabel:    fmt.Sprintf("%d", lane.GroupBindingCount),
+			ServiceLabel:  "—",
+			GateLabel:     fmt.Sprintf("%d / %d", score, len(checks)),
+			GateTone:      accessLaneTone(score, len(checks)),
+			Readiness:     "Not ready",
+			ReadinessTone: "bad",
+			ValueReturned: false,
+		}
+		if role == RoleViewer {
+			view.BindingLabel = "Baseline"
+			view.SubjectLabel = "—"
+			view.GroupLabel = "—"
+		}
+		if active {
+			view.SessionState = "Active"
+			view.SessionTone = "ok"
+		}
+		if active && !globallyReady && (role == RoleOperator || role == RoleAuditor) {
+			view.Readiness = "Blocked"
+			view.ReadinessTone = "bad"
+		} else if score == len(checks) {
+			view.Readiness = "Ready"
+			view.ReadinessTone = "ok"
+		} else if score >= 3 {
+			view.Readiness = "Limited"
+			view.ReadinessTone = "warn"
+		}
+		views = append(views, view)
+	}
+	return views
+}
+
+func accessRoleScope(role string) string {
+	switch role {
+	case RoleViewer:
+		return "Read only"
+	case RoleOperator:
+		return "Operate"
+	case RoleAuditor:
+		return "Audit & export"
+	case RoleAdmin:
+		return "Policy"
+	default:
+		return "—"
+	}
+}
+
+func accessLaneTone(score, total int) string {
+	if score == total {
+		return "ok"
+	}
+	if score >= 3 {
+		return "warn"
+	}
+	return "bad"
+}
+
+func RouteGateViewsFor(session Session, access AccessPosture, ready bool) []RouteGateView {
+	views := make([]RouteGateView, 0, len(accessProtectedRoutes))
+	for _, definition := range accessProtectedRoutes {
+		requiredRole := access.RequiredRoles[definition.Route]
+		view := RouteGateView{
+			Route:          definition.Route,
+			RequiredRole:   requiredRole,
+			SessionState:   "Active",
+			SessionTone:    "ok",
+			State:          "Allowed",
+			Tone:           "ok",
+			ReadinessGated: definition.ReadinessGated,
+		}
+		if requiredRole == "" {
+			view.RequiredRole = "Unmapped"
+			view.SessionState = "Missing"
+			view.SessionTone = "bad"
+			view.State = "Blocked"
+			view.Tone = "bad"
+		} else if !HasRole(session, requiredRole) {
+			view.SessionState = "Missing"
+			view.SessionTone = "warn"
+			view.State = "Role-gated"
 			view.Tone = "warn"
-		} else if !ready {
-			view.State = "readiness_blocked"
+		} else if definition.ReadinessGated && !ready {
+			view.State = "Blocked"
 			view.Tone = "warn"
 		}
 		views = append(views, view)
@@ -859,11 +1037,12 @@ func ActionReadinessFor(session Session, ready bool) ActionReadiness {
 		ValueReturned: false,
 		Tone:          "ok",
 	})
-	matrix.add(actionReadinessItem(session, ready, "evidence_export", "Evidence export", RoleAuditor, true, "Auditor role can download value-free evidence JSON.", "Use an auditor session to export evidence.", "Role-gated, readiness-gated, and value-free."))
 	matrix.add(actionReadinessItem(session, ready, "handle_issue", "Issue metadata handle", RoleOperator, true, "Operator role can issue metadata-only handles.", "Use an operator session after readiness is healthy.", "Never reveals a secret value."))
 	matrix.add(actionReadinessItem(session, ready, "permit_create", "Create permit", RoleOperator, true, "Operator role can create metadata-only permits.", "Use an operator session after readiness is healthy.", "Permit records are durable and value-free."))
 	matrix.add(actionReadinessItem(session, ready, "permit_run_check", "Run permit check", RoleOperator, true, "Operator role can run a no-connector safety check.", "Use an operator session after readiness is healthy.", "No connector executes and output is scrubbed."))
-	matrix.add(actionReadinessItem(session, true, "admin_policy_review", "Admin policy review", RoleAdmin, false, "Admin role can review ownership and role policy posture.", "Use an admin session to review policy posture.", "Does not bypass audit, approval, or value-return rules."))
+	matrix.add(actionReadinessItem(session, true, "service_setup_download", "Download service setup", RoleOperator, false, "Operator role can download a value-free machine configuration script.", "Use an operator session to apply reviewed service configuration.", "Configuration only; the secret value is never included."))
+	matrix.add(actionReadinessItem(session, ready, "evidence_export", "Evidence export", RoleAuditor, true, "Auditor role can download value-free evidence JSON.", "Use an auditor session to export evidence.", "Role-gated, readiness-gated, and value-free."))
+	matrix.add(actionReadinessItem(session, true, "policy_posture", "Review policy posture", RoleViewer, false, "Every signed-in viewer can review value-free role and ownership posture.", "Use a signed-in viewer session to review policy posture.", "Read-only and value-free."))
 	return matrix
 }
 

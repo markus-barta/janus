@@ -35,8 +35,9 @@
     <div class="spacer"></div>
     <div class="foot">
       <div class="userchip">
-        <span>{{ if .CanOperate }}operator session{{ else if .CanViewAudit }}auditor session{{ else }}viewer session{{ end }}</span>
-        <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button type="submit" title="Sign out">sign out</button></form>
+        <span class="user-avatar" aria-hidden="true">J</span>
+        <span class="user-copy"><b>Signed in</b><small>{{ .SessionRoleBadge }}</small></span>
+        <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button class="user-menu" type="submit" title="Sign out" aria-label="Sign out">⌄</button></form>
       </div>
     </div>
   </aside>
@@ -70,7 +71,7 @@
         {{ if .HandleID }}<span>handle <b>{{ .HandleID }}</b></span>{{ end }}
         {{ if .PermitID }}<span>permit <b>{{ .PermitID }}</b></span>{{ end }}
         {{ if .SecretRef }}<span>ref <b>{{ .SecretRef }}</b></span>{{ end }}
-        {{ if .Status }}<span>status <b>{{ .Status }}</b></span>{{ end }}
+        {{ if .Status }}<span>status <b>{{ permitStatusLabel .Status }}</b></span>{{ end }}
         {{ if .ExpiresAt }}<span>expires <b>{{ .ExpiresAt }}</b></span>{{ end }}
         {{ if .RunReason }}<span>reason <b>{{ .RunReason }}</b></span>{{ end }}
         {{ if .RequestID }}<span class="mono">request_id={{ .RequestID }}</span>{{ end }}
@@ -105,7 +106,7 @@
       <span class="m">Verify receipt: Recompute the SHA-256 hash over the copy-safe receipt fields — it matches the receipt hash. {{ if .Next }}{{ .Next }}{{ end }}</span>
       {{ end }}
       {{ if .PermitID }}
-      <div class="rh">Permit safety verdict</div>
+      <div class="rh">Authorization safety verdict</div>
       <div class="facts">
         <span class="state ok">Metadata only</span>
         <span class="state ok">No connector</span>
@@ -115,19 +116,19 @@
       {{ if and $.CanOperate (not .OutputScrubbed) }}
       <form method="post" action="/ui/permits/{{ .PermitID }}/run">
         <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
-        <button class="btn quiet" type="submit">Run safety check</button>
+        <button class="btn quiet" type="submit">Verify that execution is disabled</button>
       </form>
       {{ end }}
       {{ end }}
       {{ if .OutputScrubbed }}
-      <div class="rh">Permit safety check result witness</div>
+      <div class="rh">Authorization safety-check result</div>
       <div class="facts">
-        <span>Execution verdict <b>{{ .Status }}</b></span>
+        <span>Execution verdict <b>{{ permitStatusLabel .Status }}</b></span>
         <span>Run denial reason <b>{{ .RunReason }}</b></span>
       </div>
-      <div class="rh">Permit safety check evidence flags</div>
+      <div class="rh">Safety-check evidence</div>
       <div class="facts">
-        <span class="state ok">run_status={{ .Status }}</span>
+        <span class="state ok">Execution remained disabled</span>
         <span class="state ok">run_reason_returned=true</span>
         <span class="state ok">connector_execution=false</span>
         <span class="state ok">connector_output_returned=false</span>
@@ -168,7 +169,7 @@
             ·
             <a {{ if eq .View "list" }}class="on" {{ end }}href="/?q={{ .Query | urlquery }}&amp;provider={{ .FilterProvider | urlquery }}&amp;state={{ .FilterState | urlquery }}&amp;view=list#vault">list</a>
           </span>
-          <a class="btn newbtn" href="/vault/new">+ New secret</a>
+          <a class="btn newbtn" href="/vault/new">Set up service secret</a>
         </form>
         {{ if .Descriptors }}
         {{ if eq .View "list" }}
@@ -184,7 +185,7 @@
               <td data-label="state">{{ if eq .Lifecycle "active" }}<span class="state ok">active</span>{{ else if eq .Lifecycle "rotating" }}<span class="state warn">rotating</span>{{ else }}<span class="state bad">{{ .Lifecycle }}</span>{{ end }}</td>
               <td data-label="rotates">{{ .RotationDays }}d</td>
               <td data-label="last checked">{{ since .LastCheckedAt }}</td>
-              <td data-label=""><a href="/?ref={{ .ID }}#focus">focus →</a></td>
+              <td data-label=""><a href="/?ref={{ .ID }}#focus">View details →</a></td>
             </tr>
             {{ end }}
           </table>
@@ -208,7 +209,7 @@
             </div>
             <div class="foot">
               <span class="mono">{{ .ID }}</span>
-              <a href="/?ref={{ .ID }}#focus">focus →</a>
+              <a href="/?ref={{ .ID }}#focus">View details →</a>
             </div>
           </div>
           {{ end }}
@@ -218,11 +219,17 @@
         {{ else if .TotalCount }}
         <div class="empty">Nothing matches these filters. <a href="/#vault">Clear them</a> to see all {{ .TotalCount }} secrets.</div>
         {{ else }}
-        <div class="empty">No secrets in the catalog yet. <a href="/vault/new">Add the first one</a> — Janus will walk you through it.</div>
+        <div class="empty">No secrets in the catalog yet. <a href="/vault/new">Set up the first service secret</a> — Janus will walk you through it.</div>
         {{ end }}
       </section>
 
-      {{ if .Focus.Descriptor.ID }}
+      {{ if .SelectedRefMissing }}
+      <aside class="panel focus-rail" id="focus">
+        <strong>Secret not found</strong>
+        <p class="lead">That secret is not in the current Vault view. No action was selected or taken.</p>
+        <a class="btn quiet" href="/">Return to the Vault</a>
+      </aside>
+      {{ else if .Focus.Descriptor.ID }}
       <aside class="panel focus-rail" id="focus">
         <div class="rail-head">
           <span>Focus</span>
@@ -234,43 +241,55 @@
         {{ range .Focus.Gates }}<p class="lead"><span class="state {{ if eq .Severity "error" }}bad{{ else }}warn{{ end }}">{{ .Code }}</span> {{ .Message }}</p>{{ end }}
         {{ if not .Focus.Gates }}<p class="lead"><span class="state ok">clear</span> no catalog gates on this descriptor.</p>{{ end }}
 
+        <div class="rail-section service-setup-callout">
+          <strong>Need to create a new service secret?</strong>
+          <p class="lead">Create a reviewed setup guide for a new service-and-machine pairing. Janus never asks for the value.</p>
+          <a class="btn quiet" href="/vault/new">Set up service secret</a>
+        </div>
+
         {{ if .CanOperate }}
-        <div class="rail-section">
-          <strong>Issue metadata handle</strong>
-          <p class="lead">Metadata-only follow-up. The secret value is never returned here.</p>
+        <details class="rail-section advanced-controls">
+          <summary>Advanced metadata controls</summary>
+          <p class="lead">These controls create references and authorization records for tooling. They cannot deliver a secret to a service.</p>
+        <div class="advanced-control-block">
+          <strong>Create temporary metadata reference</strong>
+          <p class="lead">A short-lived reference to this record for API tooling. It cannot read the secret.</p>
           <form class="action" method="post" action="/ui/warden/resolve">
             <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
             <input type="hidden" name="ref" value="{{ .Focus.Descriptor.ID }}">
-            <label>Reason
-              <input name="reason" maxlength="160" required placeholder="maintenance, audit, rotation">
+            <label>Work item or reason
+              <span class="field-help">Describe the work only—never paste a password, token, or secret.</span>
+              <input name="reason" maxlength="160" required placeholder="maintenance ticket or rotation review">
             </label>
-            <button type="submit">Issue handle</button>
+            <button type="submit">Create metadata reference</button>
           </form>
         </div>
-        <div class="rail-section">
-          <strong>Create permit</strong>
+        <div class="advanced-control-block">
+          <strong>Record metadata authorization</strong>
           <form class="action" method="post" action="/ui/permits">
             <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
             <input type="hidden" name="ref" value="{{ .Focus.Descriptor.ID }}">
             <label>Action
               <select name="action" required>
-                <option value="metadata_use">metadata_use</option>
-                <option value="resolve_handle">resolve_handle</option>
+                <option value="metadata_use">Review metadata</option>
+                <option value="resolve_handle">Create temporary metadata reference</option>
               </select>
             </label>
-            <label>Destination
-              <input name="destination" maxlength="120" placeholder="janus dashboard">
+            <label>Tool or workflow <span class="opt">optional</span>
+              <input name="destination" maxlength="120" placeholder="Janus dashboard">
             </label>
-            <label>Reason
-              <input name="reason" maxlength="160" required placeholder="audit, rotation, incident review">
+            <label>Work item or reason
+              <span class="field-help">Describe the work only—never paste a password, token, or secret.</span>
+              <input name="reason" maxlength="160" required placeholder="audit ticket or incident review">
             </label>
-            <button type="submit">Create permit</button>
+            <button type="submit">Record authorization</button>
           </form>
         </div>
+        </details>
         {{ else }}
         <div class="rail-section">
-          <strong>No access yet</strong>
-          <p class="lead">Handle and permit actions need the operator role. Nothing is broken.</p>
+          <strong>Metadata controls are role-gated</strong>
+          <p class="lead">An operator can create metadata references and authorization records. You can still preview a service setup guide.</p>
         </div>
         {{ end }}
       </aside>

@@ -9,138 +9,175 @@
 <div class="layout">
   {{ template "doorkeeper_side" . }}
 
-  <main class="main">
+  <main class="main access-page">
     <div class="pagehead">
       <div>
-        <h1>Access</h1>
+        <h1>Access <span class="janus-flourish" aria-hidden="true"></span></h1>
         <div class="sub">who may open which door</div>
       </div>
-      <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC</span>
+      <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC <a class="refresh-link" href="/access" aria-label="Refresh access posture">↻</a></span>
     </div>
 
     <div class="access-layout">
       <div class="access-main">
-        <div class="grid2 access-top-grid">
-          <div class="panel">
-            <strong>Signed in</strong>
-            <p class="lead">Identity values are withheld here. Janus shows role and gate state only.</p>
-            <div class="chips">
-              {{ range .Session.Roles }}<span class="chip teal">{{ . }}</span>{{ end }}
-              <span class="chip">identity values withheld</span>
-              <span class="chip teal">value_returned=false</span>
+        <div class="access-top-grid">
+          <section class="panel access-summary-card">
+            <div class="access-card-heading">
+              <span class="access-heading-icon icon-shield" aria-hidden="true"></span>
+              <strong>Signed in</strong>
+              <span class="state ok">{{ .SessionRoleBadge }}</span>
             </div>
-          </div>
-          <div class="panel">
-            <strong>Policy posture</strong>
-            <div class="chips">
-              {{ if .Access.ExplicitBindings }}<span class="chip teal">explicit bindings</span>{{ else if .Access.BootstrapOwner }}<span class="chip amber">bootstrap owner — all roles granted to authenticated users</span>{{ else }}<span class="chip danger">no bindings — sensitive APIs deny</span>{{ end }}
-              <span class="chip">claim policy {{ .Access.ClaimPolicy }}</span>
-              <span class="chip">{{ .Access.SubjectBindingCount }} subject binding{{ if ne .Access.SubjectBindingCount 1 }}s{{ end }}</span>
-              <span class="chip">{{ .Access.GroupBindingCount }} group binding{{ if ne .Access.GroupBindingCount 1 }}s{{ end }}</span>
+            <div class="session-evidence-grid">
+              <div class="session-evidence">
+                <p class="access-kicker">identity values withheld <abbr class="info-tip" tabindex="0" title="Janus displays role and gate state without returning names, email addresses, subjects, groups, claims, cookies, or tokens.">i</abbr></p>
+                <div class="evidence-line">
+                  <span class="evidence-check" aria-hidden="true">✓</span>
+                  {{ if and .AuthRequired .OIDCConfigured }}
+                  <code>signed_session_browser_proof</code>
+                  <span>present</span>
+                  {{ else }}
+                  <code>local_development_session</code>
+                  <span>active</span>
+                  {{ end }}
+                </div>
+                <code class="value-boundary">value_returned=false</code>
+              </div>
+              <div class="session-gate-list" aria-label="Session gate state">
+                <span class="gate-list-title">Session gate state</span>
+                {{ range .AccessSessionGates }}
+                <div class="session-gate-row">
+                  <span><i class="gate-dot {{ .Tone }}" aria-hidden="true">✓</i>{{ .Label }}</span>
+                  <b class="gate-text {{ .Tone }}">{{ .State }}</b>
+                </div>
+                {{ end }}
+              </div>
             </div>
-            {{ range .Access.Gates }}<p class="lead"><span class="state warn">{{ .Code }}</span> {{ .Message }}</p>{{ end }}
-            <p class="lead">Binding identities are counted, never displayed — <span class="mono">value_returned=false</span>.</p>
-          </div>
+          </section>
+
+          <section class="panel policy-card">
+            <div class="access-card-heading">
+              <span class="access-heading-icon icon-shield" aria-hidden="true"></span>
+              <strong>Policy posture</strong>
+            </div>
+            <dl class="posture-list">
+              <div><dt>Source</dt><dd>{{ if and .AuthRequired .OIDCConfigured }}Zitadel + Janus{{ else }}Local development{{ end }}</dd></div>
+              <div><dt>Binding mode</dt><dd>{{ if .Access.ExplicitBindings }}Explicit only{{ else if .Access.BootstrapOwner }}Bootstrap review{{ else }}Deny by default{{ end }}</dd></div>
+              <div><dt>Implicit elevated claims <abbr class="info-tip" tabindex="0" title="Elevated roles are granted only when a claim matches an explicit Janus policy binding.">i</abbr></dt><dd>{{ if .Access.ImplicitElevatedClaims }}Enabled{{ else }}Disabled{{ end }}</dd></div>
+              <div><dt>Configured bindings</dt><dd>{{ .Access.ElevatedBindingCount }}</dd></div>
+              <div><dt>Policy health</dt><dd><span class="state {{ if .RolePolicyReadiness.Ready }}ok{{ else }}warn{{ end }}">{{ .RolePolicyReadiness.Status }}</span></dd></div>
+            </dl>
+            {{ if not .RolePolicyReadiness.Ready }}<p class="policy-note">{{ .RolePolicyReadiness.Next }}</p>{{ end }}
+          </section>
         </div>
 
-        <div class="panel access-role-panel">
+        <section class="panel access-role-panel">
           <div class="panel-title-row">
             <strong>Role lanes</strong>
             <span>Policy binding</span>
           </div>
           <table class="ledger role-lane-table">
-            <tr><th>role</th><th>session role</th><th>subjects</th><th>groups</th><th>readiness</th><th>detail</th></tr>
+            <thead><tr><th>Role</th><th>Session role</th><th>Binding</th><th>Scope</th><th>Subjects</th><th>Groups</th><th>Service</th><th>Gates <abbr class="info-tip" tabindex="0" title="Five checks: signed session, role in session, valid binding source, implemented protected surface, and applicable global readiness.">i</abbr></th><th>Readiness</th></tr></thead>
+            <tbody>
+            {{ range .AccessRoleLanes }}
             <tr>
-              <td class="mono" data-label="role">Viewer lane</td>
-              <td data-label="session role"><span class="state ok">active</span></td>
-              <td data-label="subjects">0</td>
-              <td data-label="groups">0</td>
-              <td data-label="readiness"><span class="state ok">Ready</span></td>
-              <td data-label="detail">Read safe posture and descriptor metadata.</td>
-            </tr>
-            {{ range .RolePolicyReadiness.Lanes }}
-            <tr>
-              <td class="mono" data-label="role">{{ .Label }}</td>
-              <td data-label="session role">{{ if .Ready }}<span class="state ok">{{ .State }}</span>{{ else }}<span class="state warn">{{ .State }}</span>{{ end }}</td>
-              <td data-label="subjects">{{ .SubjectBindingCount }}</td>
-              <td data-label="groups">{{ .GroupBindingCount }}</td>
-              <td data-label="readiness">{{ if .Ready }}<span class="state ok">Ready</span>{{ else }}<span class="state warn">Limited</span>{{ end }}</td>
-              <td data-label="detail">{{ .Detail }}</td>
+              <td data-label="Role"><span class="role-name"><i class="role-icon role-{{ .Key }}" aria-hidden="true"></i>{{ .Label }}</span></td>
+              <td data-label="Session role"><span class="state {{ .SessionTone }}">{{ .SessionState }}</span></td>
+              <td data-label="Binding">{{ .BindingLabel }}</td>
+              <td data-label="Scope">{{ .Scope }}</td>
+              <td data-label="Subjects">{{ .SubjectLabel }}</td>
+              <td data-label="Groups">{{ .GroupLabel }}</td>
+              <td data-label="Service"><span tabindex="0" aria-label="Service-level role bindings are not modeled by the current policy engine" title="Service-level role bindings are not modeled by the current policy engine.">{{ .ServiceLabel }}</span></td>
+              <td data-label="Gates"><span class="state {{ .GateTone }}">{{ .GateLabel }}</span></td>
+              <td data-label="Readiness"><span class="state {{ .ReadinessTone }}">{{ .Readiness }}</span></td>
             </tr>
             {{ end }}
+            </tbody>
           </table>
-        </div>
+        </section>
 
         <div class="access-bottom-grid">
-          <div class="panel">
-            <div class="panel-title-row">
-              <strong>Duties</strong>
-              <span>separation of concerns</span>
+          <section class="panel duties-panel">
+            <div class="panel-title-row title-with-icon">
+              <strong><i class="section-icon icon-duties" aria-hidden="true"></i>Duties <small>(separation of concerns)</small></strong>
             </div>
             <div class="duty-list">
-              {{ range .RoleBoundaries }}
+              {{ range .RoleBoundaries }}{{ if ne .Role "viewer" }}
               <div class="duty-row">
-                <span class="duty-check">✓</span>
-                <div>
-                  <b>{{ .Duty }}</b>
-                  <small>{{ .Allowed }}</small>
-                </div>
+                <span class="duty-check" aria-hidden="true">✓</span>
+                <b>{{ .Duty }}</b>
+                <small>{{ .Allowed }}</small>
                 <span class="mono">{{ .Role }}</span>
               </div>
-              {{ end }}
+              {{ end }}{{ end }}
             </div>
-            <p class="lead"><b>Duty model</b> separated_admin_auditor_operator_viewer</p>
-          </div>
+            <div class="duty-model"><b>Duty model</b><code>{{ .Access.DutyModel }}</code></div>
+          </section>
 
-          <div class="panel">
-            <div class="panel-title-row">
-              <strong>Route gates</strong>
-              <span>enforced</span>
+          <section class="panel route-panel">
+            <div class="panel-title-row title-with-icon">
+              <strong><i class="section-icon icon-routes" aria-hidden="true"></i>Route gates <small>(enforced)</small></strong>
             </div>
             <table class="ledger route-gate-table">
-              <tr><th>route</th><th>required role</th><th>state</th></tr>
+              <thead><tr><th>Route</th><th>Required role</th><th>Required role in session</th><th>Gate state <abbr class="info-tip" tabindex="0" title="Allowed means the role and readiness gates pass. CSRF, input, and record checks still apply to the request.">i</abbr></th></tr></thead>
+              <tbody>
               {{ range .RouteGates }}
               <tr>
-                <td class="mono" data-label="route">{{ .Route }}</td>
-                <td class="mono" data-label="required role">{{ .RequiredRole }}</td>
-                <td data-label="state"><span class="state {{ if eq .Tone "ok" }}ok{{ else if eq .Tone "warn" }}warn{{ else }}bad{{ end }}">{{ .State }}</span></td>
+                <td class="mono" data-label="Route">{{ .Route }}</td>
+                <td data-label="Required role">{{ .RequiredRole }}</td>
+                <td data-label="Required role in session"><span class="gate-text {{ .SessionTone }}">{{ .SessionState }}</span></td>
+                <td data-label="State"><span class="state {{ .Tone }}">{{ .State }}</span></td>
               </tr>
               {{ end }}
+              </tbody>
             </table>
-            <p class="lead">Everything else is deny-by-default: an authenticated identity with no matching role sees posture only.</p>
-          </div>
-        </div>
-
-        <div class="access-status-strip">
-          <div><b>Identity provider</b><span>Zitadel</span></div>
-          <div><b>Time sync</b><span>{{ .Now.Format "15:04:05" }} UTC</span></div>
-          <div><b>Janus mode</b><span>{{ .Mode }}</span></div>
-          <div><b>Policy health</b><span>{{ .RolePolicyReadiness.Status }}</span></div>
-          <div><b>value_returned</b><span>false</span></div>
+          </section>
         </div>
 
       </div>
 
       <aside class="panel access-rail">
-        <strong>Available now</strong>
-        <p class="lead">Action readiness for this session.</p>
+        <div class="rail-title">
+          <strong>Available now</strong>
+          <span>action readiness <abbr class="info-tip" tabindex="0" title="Role-gated means the current session lacks the required role. Blocked means the role is present but readiness is degraded.">i</abbr></span>
+        </div>
         <div class="readiness-list">
-          {{ range .ActionReadiness.Actions }}
-          <div class="readiness-row">
+          {{ range .ActionReadiness.Actions }}{{ if and (ne .Key "posture_view") (ne .Key "policy_posture") }}
+          <div class="readiness-row action-{{ .Key }}" data-action="{{ .Key }}">
+            <i class="action-icon" aria-hidden="true"></i>
             <span>
               <b>{{ .Label }}</b>
-              <small>{{ .Key }}</small>
+              <small>{{ .Safety }}</small>
             </span>
-            <span class="state {{ if eq .Tone "ok" }}ok{{ else if eq .Tone "warn" }}warn{{ else }}bad{{ end }}">{{ .State }}</span>
+            <span class="state {{ .Tone }}">{{ if eq .State "available" }}Allowed{{ else if eq .State "role_gated" }}Role-gated{{ else }}Blocked{{ end }}</span>
           </div>
-          {{ end }}
+          {{ end }}{{ end }}
         </div>
+        <div class="access-notes">
+          <strong>Notes</strong>
+          <p><i class="note-icon note-record" aria-hidden="true"></i>All actions keep <code>value_returned=false</code></p>
+          <p><i class="note-icon note-shield" aria-hidden="true"></i>No secrets or identity values are shown</p>
+          <p><i class="note-icon note-route" aria-hidden="true"></i>Sensitive routes check roles; duties describe separation</p>
+        </div>
+        <details class="term-glossary rail-glossary">
+          <summary>Access terms</summary>
+          <p><b>Browser proof</b> confirms that a signed session reached Janus without showing identity values.</p>
+          <p><b>Binding</b> is an explicit policy link that grants an elevated role to an approved subject or group.</p>
+          <p><b>Gate</b> is a check that must pass before a protected action or route can continue.</p>
+          <p><b>Implicit elevated claims</b> would trust a claim by name alone; Janus keeps this disabled.</p>
+          <p><b>Duty model</b> separates operating, auditing, and policy-review responsibilities.</p>
+          <p><b>Policy posture</b> is a read-only summary of bindings, roles, and enforcement health.</p>
+          <p><b>Readiness</b> is the health check applied before sensitive actions run.</p>
+        </details>
       </aside>
-    </div>
 
-    <div class="footer">
-      <span>janus · build {{ buildCommitShort }}</span>
-      <span>authn: Zitadel · authz: Janus role bindings</span>
+      <section class="access-status-strip" aria-label="Access posture summary">
+        <div class="status-strip-item status-provider"><i aria-hidden="true"></i><span><b>Identity provider</b><em>{{ if and .AuthRequired .OIDCConfigured }}Zitadel{{ else }}Local development{{ end }}</em></span></div>
+        <div class="status-strip-item status-time"><i aria-hidden="true"></i><span><b>Server time</b><em>{{ .Now.Format "15:04:05" }} UTC</em></span></div>
+        <div class="status-strip-item status-mode"><i aria-hidden="true"></i><span><b>Janus mode <abbr class="info-tip" tabindex="0" title="Configured operating mode; this is not a certification claim.">i</abbr></b><em>{{ .Mode }}</em></span></div>
+        <div class="status-strip-item status-policy"><i aria-hidden="true"></i><span><b>Policy health</b><em>{{ .RolePolicyReadiness.Status }}</em></span></div>
+        <div class="status-strip-item status-value"><i aria-hidden="true"></i><span><b>value_returned</b><em>false</em></span></div>
+        <a class="posture-link" href="/api/posture">View full posture <span aria-hidden="true">→</span></a>
+      </section>
     </div>
   </main>
 </div>

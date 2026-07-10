@@ -406,6 +406,7 @@ type AuthErrorView struct {
 	Posture       AuthFailurePosture
 	RequestID     string
 	ValueReturned bool
+	AuthScreen    bool
 }
 
 type AuthResetView struct {
@@ -417,6 +418,7 @@ type AuthResetView struct {
 	RequestID     string
 	Posture       AuthFailurePosture
 	ValueReturned bool
+	AuthScreen    bool
 }
 
 type SafeFailureView struct {
@@ -425,12 +427,17 @@ type SafeFailureView struct {
 	Mode           string
 	Session        Session
 	CSRF           string
+	WitnessPage    bool
+	CanOperate     bool
+	CanViewAudit   bool
+	Permits        []Permit
 	StatusCode     int
 	ReasonCode     string
 	Message        string
 	RequestID      string
 	AllowedMethods []string
 	ValueReturned  bool
+	AuthScreen     bool
 }
 
 type DescriptorFocus struct {
@@ -761,6 +768,12 @@ func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 				writeJSONError(w, r, http.StatusUnauthorized, "auth_required", "Authentication required")
 				return
 			}
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				if _, safe := safeLoginReturnPath(r.URL.RequestURI()); safe {
+					app.renderLoginLanding(w, r)
+					return
+				}
+			}
 			http.Redirect(w, r, loginRedirectTarget(r), http.StatusFound)
 			return
 		}
@@ -934,6 +947,7 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		selectedRef = actionResult.SecretRef
 	}
 	focus := focusDescriptor(descriptors, selectedRef)
+	selectedRefMissing := strings.TrimSpace(selectedRef) != "" && focus.Descriptor.ID == ""
 	canViewAudit := HasRole(session, RoleAuditor)
 	auditPosture := app.store.AuditPosture()
 	var recentAudit []AuditEntry
@@ -944,6 +958,9 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 	accessPosture := app.accessPosture()
 	rolePolicyReadiness := RolePolicyReadinessFor(app.cfg.RolePolicy, accessPosture)
 	_, ready := app.readinessBody()
+	sessionPosture := app.sessionPosture(session)
+	authenticatedRole := SessionRoleEvidenceFor(session, app.cfg.RequireAuth, app.cfg.OIDCConfigured(), ready)
+	authenticatedBrowser := app.authenticatedBrowserWitness(session, authenticatedRole, ready)
 	scopePosture := app.scopePosture(app.store.Descriptors())
 	lifecyclePosture := LifecyclePostureFor(descriptors, time.Now().UTC())
 	permitPosture := PermitPosture{ValueReturned: false}
@@ -966,44 +983,51 @@ func (app *App) dashboardData(r *http.Request, session Session, actionResult *UI
 		}
 	}
 	data := map[string]any{
-		"Title":               "Janus",
-		"ActivePage":          "vault",
-		"CSPNonce":            cspNonceFromContext(r.Context()),
-		"Now":                 time.Now().UTC(),
-		"VaultTiles":          vaultTilesFor(descriptors, lifecyclePosture, permitPosture),
-		"View":                "grid",
-		"Query":               "",
-		"FilterProvider":      "",
-		"FilterState":         "",
-		"Providers":           descriptorProviders(descriptors),
-		"TotalCount":          len(descriptors),
-		"Session":             session,
-		"CSRF":                app.csrfToken(session),
-		"Descriptors":         descriptors,
-		"Mode":                app.cfg.ProductMode,
-		"Audit":               recentAudit,
-		"Posture":             auditPosture,
-		"CatalogGates":        catalogGates,
-		"Access":              accessPosture,
-		"RolePolicyReadiness": rolePolicyReadiness,
-		"RoleBoundaries":      RoleBoundariesFor(session),
-		"RouteGates":          RouteGateViewsFor(session, accessPosture, ready),
-		"Ready":               ready,
-		"AuthRequired":        app.cfg.RequireAuth,
-		"OIDCConfigured":      app.cfg.OIDCConfigured(),
-		"Scope":               scopePosture,
-		"Lifecycle":           lifecyclePosture,
-		"EvidenceHash":        evidenceHash,
-		"EvidenceBoundary":    EvidenceBoundaryFor(canViewAudit, evidenceHash != ""),
-		"ActionReadiness":     ActionReadinessFor(session, ready),
-		"CanExportEvidence":   canViewAudit,
-		"CanViewAudit":        canViewAudit,
-		"CanOperate":          canOperate,
-		"ActionResult":        actionResult,
-		"Permits":             recentPermits,
-		"PermitPosture":       permitPosture,
-		"SelectedRef":         focus.Descriptor.ID,
-		"Focus":               focus,
+		"Title":                "Janus",
+		"ActivePage":           "vault",
+		"CSPNonce":             cspNonceFromContext(r.Context()),
+		"Now":                  time.Now().UTC(),
+		"VaultTiles":           vaultTilesFor(descriptors, lifecyclePosture, permitPosture),
+		"View":                 "grid",
+		"Query":                "",
+		"FilterProvider":       "",
+		"FilterState":          "",
+		"Providers":            descriptorProviders(descriptors),
+		"TotalCount":           len(descriptors),
+		"Session":              session,
+		"CSRF":                 app.csrfToken(session),
+		"Descriptors":          descriptors,
+		"Mode":                 app.cfg.ProductMode,
+		"Audit":                recentAudit,
+		"Posture":              auditPosture,
+		"CatalogGates":         catalogGates,
+		"Access":               accessPosture,
+		"RolePolicyReadiness":  rolePolicyReadiness,
+		"AuthenticatedRole":    authenticatedRole,
+		"AuthenticatedBrowser": authenticatedBrowser,
+		"SessionPosture":       sessionPosture,
+		"SessionRoleBadge":     SessionRoleBadge(session),
+		"AccessSessionGates":   AccessSessionGateViewsFor(session, authenticatedBrowser, sessionPosture, accessPosture, rolePolicyReadiness, app.cfg.RequireAuth, app.cfg.OIDCConfigured()),
+		"AccessRoleLanes":      AccessRoleLaneViewsFor(session, rolePolicyReadiness, ready),
+		"RoleBoundaries":       RoleBoundariesFor(session),
+		"RouteGates":           RouteGateViewsFor(session, accessPosture, ready),
+		"Ready":                ready,
+		"AuthRequired":         app.cfg.RequireAuth,
+		"OIDCConfigured":       app.cfg.OIDCConfigured(),
+		"Scope":                scopePosture,
+		"Lifecycle":            lifecyclePosture,
+		"EvidenceHash":         evidenceHash,
+		"EvidenceBoundary":     EvidenceBoundaryFor(canViewAudit, evidenceHash != ""),
+		"ActionReadiness":      ActionReadinessFor(session, ready),
+		"CanExportEvidence":    canViewAudit,
+		"CanViewAudit":         canViewAudit,
+		"CanOperate":           canOperate,
+		"ActionResult":         actionResult,
+		"Permits":              recentPermits,
+		"PermitPosture":        permitPosture,
+		"SelectedRef":          focus.Descriptor.ID,
+		"SelectedRefMissing":   selectedRefMissing,
+		"Focus":                focus,
 	}
 	return data
 }
@@ -1053,16 +1077,19 @@ func attachWitnessEvidence(w http.ResponseWriter, verification WitnessReceiptVer
 }
 
 func focusDescriptor(descriptors []SecretDescriptor, selectedRef string) DescriptorFocus {
-	if len(descriptors) == 0 {
+	selectedRef = strings.TrimSpace(selectedRef)
+	if len(descriptors) == 0 || selectedRef == "" {
 		return DescriptorFocus{}
 	}
-	selectedRef = strings.TrimSpace(selectedRef)
-	focus := descriptors[0]
+	var focus SecretDescriptor
 	for _, desc := range descriptors {
 		if desc.ID == selectedRef {
 			focus = desc
 			break
 		}
+	}
+	if focus.ID == "" {
+		return DescriptorFocus{}
 	}
 	gates := ValidateCatalog([]SecretDescriptor{focus})
 	lifecycleBlocked, lifecycleReason := LifecycleBlocksNormalUse(focus)
@@ -1371,13 +1398,13 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "warden.resolve.ui", "denied", session.Subject, "csrf failed")
-		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
+		result := UIActionResult{Title: "Metadata reference blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
 		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(r, session, &result, ""))
 		return
 	}
 	if err := r.ParseForm(); err != nil {
 		app.audit(r, "warden.resolve.ui", "denied", session.Subject, "bad form")
-		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: "Request form could not be read.", ValueReturned: false}
+		result := UIActionResult{Title: "Metadata reference blocked", Outcome: "denied", Message: "Request form could not be read.", ValueReturned: false}
 		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(r, session, &result, ""))
 		return
 	}
@@ -1390,11 +1417,11 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Reason == "" {
 		app.audit(r, "warden.resolve.ui", "denied", session.Subject, "reason required")
-		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: "Reason required.", ValueReturned: false}
+		result := UIActionResult{Title: "Metadata reference blocked", Outcome: "denied", Message: "Reason required.", ValueReturned: false}
 		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(r, session, &result, req.Ref))
 		return
 	}
-	if !app.requireReadyUI(w, r, session, "warden.resolve.ui", "Handle blocked", req.Ref) {
+	if !app.requireReadyUI(w, r, session, "warden.resolve.ui", "Metadata reference blocked", req.Ref) {
 		return
 	}
 	handle, err := app.broker.ResolveHandle(principalFromSession(session), req)
@@ -1413,16 +1440,16 @@ func (app *App) handleResolveHandleUI(w http.ResponseWriter, r *http.Request) {
 		default:
 			app.auditWithRef(r, "warden.resolve.ui", "denied", session.Subject, "", "broker error")
 		}
-		result := UIActionResult{Title: "Handle blocked", Outcome: "denied", Message: message, ValueReturned: false}
+		result := UIActionResult{Title: "Metadata reference blocked", Outcome: "denied", Message: message, ValueReturned: false}
 		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(r, session, &result, req.Ref))
 		return
 	}
 	app.auditWithRef(r, "warden.resolve.ui", "allowed", session.Subject, handle.SecretRef, "")
 	receipt := actionReceipt(r, "warden.resolve.ui", "allowed", "Use this handle for metadata-only follow-up or request a permit.")
 	result := UIActionResult{
-		Title:         "Handle ready",
+		Title:         "Metadata reference ready",
 		Outcome:       "allowed",
-		Message:       "Metadata handle issued. Secret value was not returned.",
+		Message:       "Temporary metadata reference created. Secret value was not returned.",
 		Receipt:       &receipt,
 		HandleID:      handle.HandleID,
 		SecretRef:     handle.SecretRef,
@@ -1499,13 +1526,13 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "permit.create.ui", "denied", session.Subject, "csrf failed")
-		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
+		result := UIActionResult{Title: "Metadata authorization blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
 		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(r, session, &result, ""))
 		return
 	}
 	if err := r.ParseForm(); err != nil {
 		app.audit(r, "permit.create.ui", "denied", session.Subject, "bad form")
-		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "Request form could not be read.", ValueReturned: false}
+		result := UIActionResult{Title: "Metadata authorization blocked", Outcome: "denied", Message: "Request form could not be read.", ValueReturned: false}
 		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(r, session, &result, ""))
 		return
 	}
@@ -1520,11 +1547,11 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Reason == "" {
 		app.audit(r, "permit.create.ui", "denied", session.Subject, "reason required")
-		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "Reason required.", ValueReturned: false}
+		result := UIActionResult{Title: "Metadata authorization blocked", Outcome: "denied", Message: "Reason required.", ValueReturned: false}
 		renderTemplateStatus(w, app.templates, "dashboard", http.StatusBadRequest, app.dashboardData(r, session, &result, req.Ref))
 		return
 	}
-	if !app.requireReadyUI(w, r, session, "permit.create.ui", "Permit blocked", req.Ref) {
+	if !app.requireReadyUI(w, r, session, "permit.create.ui", "Metadata authorization blocked", req.Ref) {
 		return
 	}
 
@@ -1544,24 +1571,24 @@ func (app *App) handleCreatePermitUI(w http.ResponseWriter, r *http.Request) {
 		default:
 			app.auditWithRef(r, "permit.create.ui", "denied", session.Subject, "", "broker error")
 		}
-		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: message, ValueReturned: false}
+		result := UIActionResult{Title: "Metadata authorization blocked", Outcome: "denied", Message: message, ValueReturned: false}
 		renderTemplateStatus(w, app.templates, "dashboard", status, app.dashboardData(r, session, &result, req.Ref))
 		return
 	}
 
 	if err := app.permits.Put(permit); err != nil {
 		app.auditWithRef(r, "permit.create.ui", "denied", session.Subject, permit.SecretRef, "permit persistence failed")
-		result := UIActionResult{Title: "Permit blocked", Outcome: "denied", Message: "Permit could not be recorded.", ValueReturned: false}
+		result := UIActionResult{Title: "Metadata authorization blocked", Outcome: "denied", Message: "Authorization record could not be saved.", ValueReturned: false}
 		renderTemplateStatus(w, app.templates, "dashboard", http.StatusInternalServerError, app.dashboardData(r, session, &result, permit.SecretRef))
 		return
 	}
 	app.auditWithRef(r, "permit.create.ui", permit.Status, session.Subject, permit.SecretRef, permit.DenialReason)
 	outcome := "allowed"
-	title := "Permit recorded"
-	message := "Metadata-only permit created. Execution stays blocked until an approved connector exists."
+	title := "Metadata authorization recorded"
+	message := "Short-lived metadata authorization recorded. It cannot deliver a secret or run a connector."
 	if permit.Status == "denied" {
 		outcome = "denied"
-		title = "Permit denied"
+		title = "Metadata authorization denied"
 		message = permit.DenialReason
 	}
 	receipt := actionReceipt(r, "permit.create.ui", permit.Status, "Run the safety check when you need a no-connector execution verdict.")
@@ -1584,21 +1611,21 @@ func (app *App) handleRunPermitUI(w http.ResponseWriter, r *http.Request) {
 	session := currentSession(r.Context())
 	if !app.csrfAllowed(r, session) {
 		app.audit(r, "permit.run.ui", "denied", session.Subject, "csrf failed")
-		result := UIActionResult{Title: "Run blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
+		result := UIActionResult{Title: "Safety check blocked", Outcome: "denied", Message: "CSRF token required.", ValueReturned: false}
 		renderTemplateStatus(w, app.templates, "dashboard", http.StatusForbidden, app.dashboardData(r, session, &result, ""))
 		return
 	}
 	if !app.requireOperatorUI(w, r, session, "permit.run.ui", "") {
 		return
 	}
-	if !app.requireReadyUI(w, r, session, "permit.run.ui", "Run blocked", "") {
+	if !app.requireReadyUI(w, r, session, "permit.run.ui", "Safety check blocked", "") {
 		return
 	}
 	permitID := r.PathValue("permitID")
 	permit, ok := app.permits.Get(permitID)
 	if !ok {
 		app.audit(r, "permit.run.ui", "denied", session.Subject, "permit not found")
-		result := UIActionResult{Title: "Run blocked", Outcome: "denied", Message: "Permit not found.", ValueReturned: false}
+		result := UIActionResult{Title: "Safety check blocked", Outcome: "denied", Message: "Authorization record not found.", ValueReturned: false}
 		renderTemplateStatus(w, app.templates, "dashboard", http.StatusNotFound, app.dashboardData(r, session, &result, ""))
 		return
 	}
@@ -1698,6 +1725,19 @@ func (app *App) handleAuthReset(w http.ResponseWriter, r *http.Request) {
 		RequestID:     requestID(r),
 		Posture:       AuthFailurePostureFor(app.cfg),
 		ValueReturned: false,
+		AuthScreen:    true,
+	})
+}
+
+func (app *App) renderLoginLanding(w http.ResponseWriter, r *http.Request) {
+	renderTemplateStatus(w, app.templates, "login_landing", http.StatusOK, map[string]any{
+		"Title":         "Janus login",
+		"CSPNonce":      cspNonceFromContext(r.Context()),
+		"Mode":          app.cfg.ProductMode,
+		"Session":       Session{},
+		"AuthScreen":    true,
+		"StartHref":     loginRedirectTarget(r),
+		"ValueReturned": false,
 	})
 }
 
@@ -1829,10 +1869,11 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (app *App) renderSetup(w http.ResponseWriter, r *http.Request) {
 	app.audit(r, "setup.view", "allowed", "", "auth incomplete")
 	renderTemplateStatus(w, app.templates, "setup", http.StatusServiceUnavailable, map[string]any{
-		"Title":    "Janus setup",
-		"CSPNonce": cspNonceFromContext(r.Context()),
-		"Mode":     app.cfg.ProductMode,
-		"Session":  Session{},
+		"Title":      "Janus setup",
+		"CSPNonce":   cspNonceFromContext(r.Context()),
+		"Mode":       app.cfg.ProductMode,
+		"Session":    Session{},
+		"AuthScreen": true,
 		"Issues": []string{
 			"OIDC issuer, client id, client secret, and cookie key must be present before Janus exposes secret metadata.",
 			"The service is live, but locked to setup status until Zitadel credentials are configured.",
@@ -1869,6 +1910,7 @@ func (app *App) renderAuthError(w http.ResponseWriter, r *http.Request, status i
 		Posture:       AuthFailurePostureFor(app.cfg),
 		RequestID:     requestID(r),
 		ValueReturned: false,
+		AuthScreen:    true,
 	})
 }
 
@@ -1960,7 +2002,7 @@ func safeLoginReturnPath(raw string) (string, bool) {
 
 func loginReturnPathAllowed(returnPath string) bool {
 	switch returnPath {
-	case "/", "/auth/smoke", "/session-witness", "/session-witness/verify":
+	case "/", "/access", "/requests", "/ledger", "/assurance", "/settings", "/vault/new", "/auth/smoke", "/session-witness", "/session-witness/verify":
 		return true
 	default:
 		return false
@@ -2540,11 +2582,15 @@ func (app *App) renderSafeFailure(w http.ResponseWriter, r *http.Request, status
 		writeJSON(w, status, body)
 		return
 	}
+	session := currentSession(r.Context())
 	renderTemplateStatus(w, app.templates, "safe_error", status, SafeFailureView{
 		Title:          "Janus",
 		CSPNonce:       cspNonceFromContext(r.Context()),
 		Mode:           app.cfg.ProductMode,
-		Session:        currentSession(r.Context()),
+		Session:        session,
+		CSRF:           app.csrfToken(session),
+		CanOperate:     HasRole(session, RoleOperator),
+		CanViewAudit:   HasRole(session, RoleAuditor),
 		StatusCode:     status,
 		ReasonCode:     code,
 		Message:        message,
@@ -2933,8 +2979,11 @@ func renderTemplateStatus(w http.ResponseWriter, templates *template.Template, n
 
 func mustTemplates() *template.Template {
 	t := template.Must(template.New("janus").Funcs(template.FuncMap{
-		"buildCommitShort": func() string { return shortCommit(buildCommit) },
-		"since":            humanSince,
+		"buildCommitShort":  func() string { return shortCommit(buildCommit) },
+		"since":             humanSince,
+		"permitActionLabel": permitActionLabel,
+		"permitStatusLabel": permitStatusLabel,
+		"permitStatusTone":  permitStatusTone,
 	}).Parse(`
 {{ define "base_top" -}}
 <!doctype html>
@@ -3022,15 +3071,86 @@ func mustTemplates() *template.Template {
     .brand { display: flex; align-items: center; gap: 12px; font-weight: 760; letter-spacing: 0; min-width: 0; }
     .brand small { color: var(--muted); font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
     .mark {
-      width: 34px;
-      height: 34px;
-      border-radius: 8px;
-      display: grid;
-      place-items: center;
-      color: #fff;
-      background: var(--accent);
-      font-weight: 820;
+      width: 42px;
+      height: 42px;
+      display: block;
+      object-fit: contain;
+      object-position: center;
     }
+	.brand-wordmark { color: #0f2744; font-family: Georgia, "Times New Roman", serif; font-size: 24px; font-weight: 500; letter-spacing: .08em; }
+	.header-boundary { color: var(--muted); font-size: 12px; }
+	body.auth-body {
+	  --bg: #f3f5f7;
+	  --ink: #111418;
+	  --muted: #66717d;
+	  --line: #d9e0e7;
+	  --panel: #ffffff;
+	  --panel-soft: #f8fafb;
+	  --accent: #126a5a;
+	  --accent-ink: #ffffff;
+	  --blue: #2f5fb3;
+	  --amber: #9b5d00;
+	  --danger: #a64242;
+	  --shadow: 0 18px 44px rgba(18, 25, 33, .08);
+	  background: #f8faf9;
+	  color-scheme: light;
+	}
+	body.auth-body header { background: rgba(255,255,255,.78); }
+	body.auth-body main {
+	  position: relative;
+	  isolation: isolate;
+	  width: 100%;
+	  min-height: calc(100vh - 67px);
+	  padding: 0;
+	  overflow: hidden;
+	}
+	body.auth-body main::before {
+	  content: "";
+	  position: absolute;
+	  z-index: -2;
+	  inset: clamp(12px, 2vw, 32px);
+	  background: url("/static/janus-login-hero.png") center / cover no-repeat;
+	  opacity: .94;
+	  -webkit-mask-image: radial-gradient(ellipse 86% 88% at center, #000 0 64%, rgba(0,0,0,.84) 77%, transparent 100%);
+	  mask-image: radial-gradient(ellipse 86% 88% at center, #000 0 64%, rgba(0,0,0,.84) 77%, transparent 100%);
+	  -webkit-mask-repeat: no-repeat;
+	  mask-repeat: no-repeat;
+	}
+	body.auth-body main::after {
+	  content: "";
+	  position: absolute;
+	  z-index: -1;
+	  inset: 0;
+	  background: linear-gradient(90deg, rgba(248,250,249,.82) 0%, rgba(248,250,249,.38) 38%, rgba(248,250,249,.06) 68%, rgba(248,250,249,.4) 100%);
+	  pointer-events: none;
+	}
+	.auth-landing {
+	  width: min(1180px, calc(100% - 40px));
+	  min-height: calc(100vh - 67px);
+	  margin: 0 auto;
+	  display: flex;
+	  align-items: center;
+	  padding: 46px 0;
+	}
+	.auth-card {
+	  width: min(440px, 100%);
+	  display: grid;
+	  gap: 18px;
+	  border: 1px solid rgba(217,224,231,.88);
+	  border-radius: 12px;
+	  background: rgba(255,255,255,.76);
+	  box-shadow: 0 24px 70px rgba(30,55,66,.12);
+	  padding: clamp(24px, 4vw, 38px);
+	  backdrop-filter: blur(15px);
+	}
+	.auth-card h1 { color: #0f2744; font-family: Georgia, "Times New Roman", serif; font-weight: 600; }
+	.auth-card .eyebrow { color: #197f73; }
+	.auth-card .toolbar { margin-top: 2px; }
+	.auth-card .button { min-height: 44px; padding-inline: 18px; }
+	.auth-trust { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 15px; color: var(--muted); font-size: 12px; }
+	.auth-trust span { display: flex; align-items: center; gap: 8px; }
+	.auth-trust i { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+	body.auth-body .overview { position: relative; z-index: 1; width: min(1120px, calc(100% - 40px)); margin: 0 auto; padding-top: clamp(36px, 8vh, 90px); }
     .nav { display: flex; justify-content: center; gap: 6px; min-width: 0; }
     .nav a {
       color: var(--muted);
@@ -3766,7 +3886,10 @@ func mustTemplates() *template.Template {
 	      .receipt-copy { grid-template-columns: 1fr; }
 	      .audit-event { grid-template-columns: 1fr; }
 	      .audit-proof { grid-template-columns: minmax(0, .3fr) minmax(0, .7fr); }
-	      .capture-header { grid-template-columns: 1fr; align-items: start; }
+      .capture-header { grid-template-columns: 1fr; align-items: start; }
+	  body.auth-body main::before { inset: 10px; background-position: 58% center; }
+	  .auth-landing { align-items: flex-end; padding: 28px 0; }
+	  body.auth-body .overview { padding-top: 28px; }
 	      .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-step:nth-child(2n) { border-right: 0; }
@@ -3814,6 +3937,16 @@ func mustTemplates() *template.Template {
       .signal { border-right: 0; }
       .toolbar { display: grid; grid-template-columns: 1fr; }
       .toolbar .button { width: 100%; }
+	  body.auth-body main::before {
+	    inset: 0;
+	    background-position: 58% center;
+	    -webkit-mask-image: linear-gradient(180deg, #000 0 64%, transparent 100%);
+	    mask-image: linear-gradient(180deg, #000 0 64%, transparent 100%);
+	  }
+	  body.auth-body main::after { background: linear-gradient(180deg, rgba(248,250,249,.12), rgba(248,250,249,.62) 52%, #f8faf9 84%); }
+	  .auth-landing { width: calc(100% - 24px); min-height: calc(100vh - 67px); padding: 220px 0 18px; }
+	  .auth-card { padding: 20px; background: rgba(255,255,255,.88); }
+	  .brand-wordmark { font-size: 20px; }
       main, .overview, .intro, .status, .panel, .intro-copy, .toolbar, .evidence-workstation, .handoff-path, .handoff-step, .workstation-head {
         min-width: 0;
         max-width: 100%;
@@ -3829,11 +3962,11 @@ func mustTemplates() *template.Template {
     }
   </style>
 </head>
-<body>
+<body{{ if .AuthScreen }} class="auth-body"{{ end }}>
 <a class="skip-link" href="#command-center">Skip to command center</a>
 <header>
   <div class="bar">
-    <div class="brand"><div class="mark">J</div><div>Janus</div><small>build {{ buildCommitShort }}</small></div>
+    <div class="brand"><img class="mark" src="/static/janus-logo.svg" alt=""><div class="brand-wordmark">JANUS</div><small>build {{ buildCommitShort }}</small></div>
 		    {{ if .Session.Subject }}
 		    <nav class="nav" aria-label="Primary">
 			      {{ if .WitnessPage }}
@@ -3864,10 +3997,12 @@ func mustTemplates() *template.Template {
 	    {{ end }}
 	    {{ if .Session.Subject }}
 	    <div class="account" aria-label="Session identity">
-	      <strong>{{ .AuthenticatedRole.IdentityLabel }}</strong>
+	      <strong>Signed in</strong>
 	      <span>{{ range .Session.Roles }}{{ . }} {{ end }} identity values withheld</span>
 	    </div>
     <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button type="submit">Sign out</button></form>
+    {{ else if .AuthScreen }}
+    <span class="header-boundary">identity and secret values withheld</span>
     {{ else }}
     <a class="button primary" href="/login">Sign in</a>
     {{ end }}
@@ -4342,9 +4477,31 @@ func mustTemplates() *template.Template {
 	{{ template "base_bottom" . }}
 	{{- end }}
 
+	{{ define "login_landing" -}}
+{{ template "base_top" . }}
+<section class="auth-landing" id="command-center">
+  <div class="auth-card">
+    <div class="intro-copy">
+      <div class="eyebrow">{{ .Mode }} · secure sign-in</div>
+      <h1>Open Janus</h1>
+      <p>Sign in with Zitadel to see the secret catalog, role-gated actions, and value-free evidence for this browser.</p>
+    </div>
+    <div class="toolbar">
+      <a class="button primary" href="{{ .StartHref }}">Continue with Zitadel</a>
+    </div>
+    <div class="auth-trust" aria-label="Login safety boundary">
+      <span><i aria-hidden="true"></i>Janus never asks for or displays a secret value.</span>
+      <span><i aria-hidden="true"></i>Identity values stay out of the access and evidence pages.</span>
+      <span><i aria-hidden="true"></i><code>value_returned=false</code></span>
+    </div>
+  </div>
+</section>
+{{ template "base_bottom" . }}
+{{- end }}
+
 	{{ define "setup" -}}
 {{ template "base_top" . }}
-<section class="overview">
+<section class="overview" id="command-center">
   <div class="intro">
     <div class="intro-copy">
       <div class="eyebrow">{{ .Mode }} / locked</div>
@@ -4364,7 +4521,7 @@ func mustTemplates() *template.Template {
 
 {{ define "auth_error" -}}
 {{ template "base_top" . }}
-<section class="overview">
+<section class="overview" id="command-center">
   <div class="intro">
     <div class="intro-copy">
       <div class="eyebrow">{{ .Mode }} / login</div>
@@ -4408,7 +4565,7 @@ func mustTemplates() *template.Template {
 
 	{{ define "auth_reset" -}}
 	{{ template "base_top" . }}
-	<section class="overview">
+	<section class="overview" id="command-center">
 	  <div class="intro">
 	    <div class="intro-copy">
 	      <div class="eyebrow">{{ .Mode }} / login recovery</div>
@@ -4452,7 +4609,7 @@ func mustTemplates() *template.Template {
 
 	{{ define "safe_error" -}}
 	{{ template "base_top" . }}
-	<section class="overview">
+	<section class="overview" id="command-center">
   <div class="intro">
     <div class="intro-copy">
       <div class="eyebrow">{{ .Mode }} / boundary</div>

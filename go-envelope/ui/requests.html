@@ -13,26 +13,21 @@
     <div class="pagehead">
       <div>
         <h1>Permits</h1>
-        <div class="sub">what may happen</div>
+        <div class="sub">short-lived metadata authorizations</div>
       </div>
       <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC</span>
     </div>
 
     {{ if .CanOperate }}
     <div class="tiles">
-      <div class="tile {{ if .PendingPermits }}warm{{ end }}"><strong>{{ len .PendingPermits }}</strong><span>Pending</span></div>
-      <div class="tile"><strong>{{ len .PastPermits }}</strong><span>Recently decided</span></div>
+      <div class="tile {{ if .PendingPermits }}warm{{ end }}"><strong>{{ len .PendingPermits }}</strong><span>Active records</span></div>
+      <div class="tile"><strong>{{ len .PastPermits }}</strong><span>Expired records</span></div>
       <div class="tile"><strong>{{ .PermitPosture.Count }}</strong><span>Recorded total</span></div>
       <div class="tile"><strong>{{ .ActionReadiness.Gated }}</strong><span>Role gated</span></div>
     </div>
 
-    <div class="tabs" aria-label="Permit views">
-      <span class="on">Pending</span>
-      <span>History</span>
-      <span>Receipts</span>
-    </div>
-
-    <h2>Pending</h2>
+    <h2>Active metadata authorizations</h2>
+    <p class="filternote">These are short-lived metadata records. They do not deliver a secret or run a service action.</p>
     {{ if .PendingPermits }}
     <div class="cards">
       {{ range .PendingPermits }}
@@ -40,8 +35,8 @@
         <div class="name"><span>{{ .SecretRef }}</span></div>
         <div class="owner mono">{{ .ID }}</div>
         <div class="chips">
-          <span class="chip">{{ .Action }}</span>
-          {{ if eq .Status "approved" }}<span class="chip teal">{{ .Status }}</span>{{ else if eq .Status "denied" }}<span class="chip danger">{{ .Status }}</span>{{ else }}<span class="chip amber">{{ .Status }}</span>{{ end }}
+          <span class="chip">{{ permitActionLabel .Action }}</span>
+          <span class="chip {{ if eq (permitStatusTone .Status) "ok" }}teal{{ else if eq (permitStatusTone .Status) "bad" }}danger{{ else }}amber{{ end }}">{{ permitStatusLabel .Status }}</span>
         </div>
         <div class="meta">
           {{ if .Reason }}<span>“{{ .Reason }}”</span>{{ end }}
@@ -50,17 +45,17 @@
         <div class="foot">
           <form method="post" action="/ui/permits/{{ .ID }}/run">
             <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
-            <button class="btn quiet" type="submit">Run safety check</button>
+            <button class="btn quiet" type="submit">Verify that execution is disabled</button>
           </form>
         </div>
       </div>
       {{ end }}
     </div>
     {{ else }}
-    <div class="empty">No pending permits. Quiet doors are good doors — request one from a secret's <a href="/">focus panel</a>.</div>
+    <div class="empty">No active metadata authorizations. Create one from a secret's <a href="/">details panel</a> when API tooling needs a temporary record.</div>
     {{ end }}
 
-    <h2>History</h2>
+    <h2>Expired records</h2>
     {{ if .PastPermits }}
     <div class="panel">
       <table class="ledger">
@@ -69,8 +64,8 @@
         <tr>
           <td class="mono" data-label="permit">{{ .ID }}</td>
           <td class="mono" data-label="ref">{{ .SecretRef }}</td>
-          <td data-label="action">{{ .Action }}</td>
-          <td data-label="status">{{ if eq .Status "approved" }}<span class="state ok">{{ .Status }}</span>{{ else if eq .Status "denied" }}<span class="state bad">{{ .Status }}</span>{{ else }}<span class="state warn">{{ .Status }}</span>{{ end }}</td>
+          <td data-label="action">{{ permitActionLabel .Action }}</td>
+          <td data-label="status"><span class="state {{ permitStatusTone .Status }}">{{ permitStatusLabel .Status }}</span></td>
           <td data-label="created">{{ since .CreatedAt }}</td>
           <td data-label="expired">{{ since .ExpiresAt }}</td>
         </tr>
@@ -81,8 +76,13 @@
     <div class="empty">Nothing decided recently.</div>
     {{ end }}
     {{ else }}
-    <div class="empty">Permit requests are operator-gated. You are signed in, but this role only views posture — ask the operator for the operator role if you need it.</div>
+    <div class="empty">Metadata authorization records are managed by operator sessions. This session can still review safe posture and catalog metadata.</div>
     {{ end }}
+
+    <details class="term-glossary">
+      <summary>What is a permit?</summary>
+      <p><b>Permit</b> is Janus’s name for a short-lived, audited metadata authorization record. It does not contain or deliver a secret, and no connector runs from this page.</p>
+    </details>
 
     <div class="footer">
       <span>janus · build {{ buildCommitShort }}</span>
