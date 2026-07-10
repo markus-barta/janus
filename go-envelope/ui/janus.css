@@ -118,7 +118,7 @@ a { color: var(--ink); }
   color: var(--navy);
   font-family: var(--serif);
   font-size: 22px;
-  font-weight: 500;
+  font-weight: 600;
   font-kerning: normal;
   letter-spacing: .18em;
   line-height: 1;

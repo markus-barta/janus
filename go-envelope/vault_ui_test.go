@@ -74,7 +74,7 @@ func TestVaultBrandUsesCenteredHorizontalLockup(t *testing.T) {
 			t.Fatalf("vault brand rule should preserve the centered Pharos-family lockup via %q: %s", want, brandRule)
 		}
 	}
-	for _, want := range []string{`.brand-mark-slot {`, `flex: 0 0 36px`, `width: 31px`, `.brand-wordmark {`, `font-size: 22px`, `letter-spacing: .18em`} {
+	for _, want := range []string{`.brand-mark-slot {`, `flex: 0 0 36px`, `width: 31px`, `.brand-wordmark {`, `font-size: 22px`, `font-weight: 600`, `letter-spacing: .18em`} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("vault brand CSS should preserve the horizontal mark and wordmark via %q", want)
 		}
@@ -755,7 +755,7 @@ func TestBrandArtworkUsesIntendedScaleAlignmentAndCanonicalMark(t *testing.T) {
 		}
 	}
 	assetHashes := map[string]string{
-		"janus-logo.svg":      "94603b8b3b0d61301d549f7ccfee0a12285bf2f8cec3e58c9b970637d24fb513",
+		"janus-logo.svg":      "ce742e36dc48230bc0e600d428d1613c3066e901970d1a4d706dfc0e4481220f",
 		"janus-logo-full.png": "2bb27f067c38c25d8e463ffc542cbc3653d3aa1b465accc212308b6f3c5f89dd",
 		"janus-header-bg.png": "d1047ff0489162ab2669fe9a1ef6bbbf1af1e50304005240f9bd25aa1783df01",
 		"janus-side-bg.png":   "b2ef2ccba869a4e075a3cb34c32ebd8c584f04d13fb46c40239ef824c651815b",
@@ -775,7 +775,7 @@ func TestBrandArtworkUsesIntendedScaleAlignmentAndCanonicalMark(t *testing.T) {
 		t.Fatal(err)
 	}
 	mark := string(markBytes)
-	for _, want := range []string{`viewBox="-3 -3 222 231"`, `id="janus-faces"`, `<path`} {
+	for _, want := range []string{`viewBox="-6 -6 228 237"`, `id="janus-faces"`, `stroke-width="80"`, `<path`} {
 		if !strings.Contains(mark, want) {
 			t.Fatalf("canonical faces-only SVG should contain %q", want)
 		}
