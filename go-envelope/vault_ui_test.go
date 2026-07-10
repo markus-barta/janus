@@ -3,6 +3,8 @@ package main
 // JANUS-271: invariants of the doorkeeper vault page (the new "/" dashboard).
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -26,10 +28,13 @@ func TestVaultPageRendersCardsTilesAndBrand(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "brand-lockup", "/static/janus-logo.svg", "Signed in", "3 elevated roles", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
+	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "brand-full", "/static/janus-logo-full.png", "Signed in", "3 elevated roles", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("vault page should render %q: %s", want, body)
 		}
+	}
+	if strings.Contains(body, "/static/janus-logo.svg") {
+		t.Fatalf("vault page returned to the synthetic logo: %s", body)
 	}
 	assertRouteResponseValueFree(t, "vault page", out)
 }
@@ -653,6 +658,7 @@ func TestVaultStaticAssetsServed(t *testing.T) {
 	}{
 		{path: "/static/janus.css", contentType: "text/css; charset=utf-8"},
 		{path: "/static/janus-logo.svg", contentType: "image/svg+xml"},
+		{path: "/static/janus-logo-full.png", contentType: "image/png"},
 		{path: "/static/janus-login-hero.png", contentType: "image/png"},
 	}
 	for _, tc := range cases {
@@ -675,7 +681,7 @@ func TestVaultStaticAssetsServed(t *testing.T) {
 	}
 }
 
-func TestBrandArtworkIsContainedFadedAndUsesOpenMark(t *testing.T) {
+func TestBrandArtworkCoversRegionsAndUsesSuppliedLogo(t *testing.T) {
 	cssBytes, err := uiStaticFS.ReadFile("ui/janus.css")
 	if err != nil {
 		t.Fatal(err)
@@ -685,24 +691,38 @@ func TestBrandArtworkIsContainedFadedAndUsesOpenMark(t *testing.T) {
 		t.Fatalf("janus.css has unbalanced blocks: opens=%d closes=%d", strings.Count(css, "{"), strings.Count(css, "}"))
 	}
 	for _, want := range []string{
-		`url("/static/janus-header-bg.png") center / contain no-repeat`,
-		`url("/static/janus-side-bg.png") center / contain no-repeat`,
-		`mask-image: radial-gradient`,
+		`url("/static/janus-header-bg.png") center / cover no-repeat`,
+		`url("/static/janus-side-bg.png") center bottom / cover no-repeat`,
+		`mask-composite: intersect`,
+		`transparent 0`,
 		`object-fit: contain`,
 	} {
 		if !strings.Contains(css, want) {
-			t.Fatalf("artwork CSS should contain and edge-fade assets via %q", want)
+			t.Fatalf("artwork CSS should cover each region and fade only at its edges via %q", want)
 		}
 	}
-	logoBytes, err := uiStaticFS.ReadFile("ui/janus-logo.svg")
-	if err != nil {
-		t.Fatal(err)
+	for _, forbidden := range []string{
+		`url("/static/janus-header-bg.png") center / contain no-repeat`,
+		`url("/static/janus-side-bg.png") center / contain no-repeat`,
+		`mask-image: radial-gradient`,
+	} {
+		if strings.Contains(css, forbidden) {
+			t.Fatalf("artwork CSS returned to inset treatment %q", forbidden)
+		}
 	}
-	logo := string(logoBytes)
-	if !strings.Contains(logo, `viewBox="15 14 90 108"`) || !strings.Contains(logo, `stroke="#23998f"`) || !strings.Contains(logo, `stroke="#d88910"`) {
-		t.Fatalf("canonical two-face Janus mark is incomplete: %s", logo)
+	assetHashes := map[string]string{
+		"janus-logo-full.png": "2bb27f067c38c25d8e463ffc542cbc3653d3aa1b465accc212308b6f3c5f89dd",
+		"janus-header-bg.png": "d1047ff0489162ab2669fe9a1ef6bbbf1af1e50304005240f9bd25aa1783df01",
+		"janus-side-bg.png":   "b2ef2ccba869a4e075a3cb34c32ebd8c584f04d13fb46c40239ef824c651815b",
 	}
-	if strings.Contains(logo, `stroke="#0f2744"`) {
-		t.Fatalf("old navy pedestal/baseline returned to the Janus mark: %s", logo)
+	for name, want := range assetHashes {
+		assetBytes, err := uiStaticFS.ReadFile("ui/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(assetBytes)
+		if got := hex.EncodeToString(sum[:]); got != want {
+			t.Fatalf("Janus brand asset %s changed: got sha256 %s want %s", name, got, want)
+		}
 	}
 }

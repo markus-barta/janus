@@ -1107,7 +1107,7 @@ func TestUnauthenticatedRootRendersBrandedLoginLanding(t *testing.T) {
 		t.Fatalf("unauthenticated root should render the landing page, got %d location=%q body=%s", out.Code, out.Header().Get("Location"), out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{`class="auth-body"`, "/static/janus-logo.svg", `/static/janus-login-hero.png`, "Open Janus", "Continue with Zitadel", `href="/login"`, "value_returned=false"} {
+	for _, want := range []string{`class="auth-body"`, "/static/janus-logo-full.png", `/static/janus-login-hero.png`, "Open Janus", "Continue with Zitadel", `href="/login"`, "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("login landing should render %q: %s", want, body)
 		}
@@ -1115,7 +1115,7 @@ func TestUnauthenticatedRootRendersBrandedLoginLanding(t *testing.T) {
 	if strings.Count(body, `href="/login"`) != 1 {
 		t.Fatalf("login landing should have one clear sign-in action: %s", body)
 	}
-	for _, forbidden := range []string{"query-secret-sentinel", "session-cookie-sentinel", "state-cookie-sentinel", "nonce-cookie-sentinel", "pkce-cookie-sentinel", "zitadel-janus-oidc", "csb1-age-identity", "every secret, accounted for"} {
+	for _, forbidden := range []string{"query-secret-sentinel", "session-cookie-sentinel", "state-cookie-sentinel", "nonce-cookie-sentinel", "pkce-cookie-sentinel", "zitadel-janus-oidc", "csb1-age-identity", "every secret, accounted for", "/static/janus-logo.svg"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("unauthenticated landing leaked %q: %s", forbidden, body)
 		}

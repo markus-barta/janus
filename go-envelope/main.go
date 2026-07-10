@@ -2993,6 +2993,7 @@ func mustTemplates() *template.Template {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {{ if .CSRF }}<meta name="csrf-token" content="{{ .CSRF }}">{{ end }}
   <title>{{ .Title }}</title>
+  <link rel="icon" type="image/png" href="/static/janus-logo-full.png">
   <style nonce="{{ .CSPNonce }}">
     :root {
       color-scheme: light dark;
@@ -3062,7 +3063,7 @@ func mustTemplates() *template.Template {
     .bar, main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
     section { scroll-margin-top: 82px; }
     .bar {
-      min-height: 66px;
+      min-height: 118px;
       display: grid;
       grid-template-columns: auto minmax(0, 1fr) auto auto;
       align-items: center;
@@ -3070,14 +3071,13 @@ func mustTemplates() *template.Template {
     }
     .brand { display: flex; align-items: center; gap: 12px; font-weight: 760; letter-spacing: 0; min-width: 0; }
     .brand small { color: var(--muted); font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
-    .mark {
-      width: 42px;
-      height: 42px;
+    .brand-logo {
+      width: 82px;
+      height: auto;
       display: block;
       object-fit: contain;
       object-position: center;
     }
-	.brand-wordmark { color: #0f2744; font-family: Georgia, "Times New Roman", serif; font-size: 24px; font-weight: 500; letter-spacing: .08em; }
 	.header-boundary { color: var(--muted); font-size: 12px; }
 	body.auth-body {
 	  --bg: #f3f5f7;
@@ -3100,7 +3100,7 @@ func mustTemplates() *template.Template {
 	  position: relative;
 	  isolation: isolate;
 	  width: 100%;
-	  min-height: calc(100vh - 67px);
+	  min-height: calc(100vh - 119px);
 	  padding: 0;
 	  overflow: hidden;
 	}
@@ -3126,7 +3126,7 @@ func mustTemplates() *template.Template {
 	}
 	.auth-landing {
 	  width: min(1180px, calc(100% - 40px));
-	  min-height: calc(100vh - 67px);
+	  min-height: calc(100vh - 119px);
 	  margin: 0 auto;
 	  display: flex;
 	  align-items: center;
@@ -3944,9 +3944,9 @@ func mustTemplates() *template.Template {
 	    mask-image: linear-gradient(180deg, #000 0 64%, transparent 100%);
 	  }
 	  body.auth-body main::after { background: linear-gradient(180deg, rgba(248,250,249,.12), rgba(248,250,249,.62) 52%, #f8faf9 84%); }
-	  .auth-landing { width: calc(100% - 24px); min-height: calc(100vh - 67px); padding: 220px 0 18px; }
+	  .auth-landing { width: calc(100% - 24px); min-height: calc(100vh - 119px); padding: 220px 0 18px; }
 	  .auth-card { padding: 20px; background: rgba(255,255,255,.88); }
-	  .brand-wordmark { font-size: 20px; }
+	  .brand-logo { width: 68px; }
       main, .overview, .intro, .status, .panel, .intro-copy, .toolbar, .evidence-workstation, .handoff-path, .handoff-step, .workstation-head {
         min-width: 0;
         max-width: 100%;
@@ -3966,7 +3966,7 @@ func mustTemplates() *template.Template {
 <a class="skip-link" href="#command-center">Skip to command center</a>
 <header>
   <div class="bar">
-    <div class="brand"><img class="mark" src="/static/janus-logo.svg" alt=""><div class="brand-wordmark">JANUS</div><small>build {{ buildCommitShort }}</small></div>
+    <div class="brand"><img class="brand-logo" src="/static/janus-logo-full.png" alt="JANUS"><small>build {{ buildCommitShort }}</small></div>
 		    {{ if .Session.Subject }}
 		    <nav class="nav" aria-label="Primary">
 			      {{ if .WitnessPage }}

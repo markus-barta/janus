@@ -2,7 +2,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {{ if .CSRF }}<meta name="csrf-token" content="{{ .CSRF }}">{{ end }}
-  <link rel="icon" type="image/svg+xml" href="/static/janus-logo.svg">
+  <link rel="icon" type="image/png" href="/static/janus-logo-full.png">
   <link rel="stylesheet" href="/static/janus.css">
   <style nonce="{{ .CSPNonce }}">
     /* dual-tone light of the hero: cool looks back, warm looks forward */
@@ -19,10 +19,7 @@
 {{ define "doorkeeper_side" -}}
   <aside class="side">
     <div class="brand">
-      <div class="brand-lockup" aria-label="JANUS">
-        <img class="brand-mark" src="/static/janus-logo.svg" alt="">
-        <span class="brand-word">JANUS</span>
-      </div>
+      <img class="brand-full" src="/static/janus-logo-full.png" alt="JANUS">
     </div>
     <nav class="nav" aria-label="Main">
       <a {{ if eq .ActivePage "vault" }}class="active" aria-current="page" {{ end }}href="/"><span class="nav-ico nav-vault"></span><span>Vault</span></a>
@@ -32,12 +29,14 @@
       <a {{ if eq .ActivePage "assurance" }}class="active" aria-current="page" {{ end }}href="/assurance"><span class="nav-ico nav-health"></span><span>Health</span></a>
       <a {{ if eq .ActivePage "settings" }}class="active" aria-current="page" {{ end }}href="/settings"><span class="nav-ico nav-settings"></span><span>Settings</span></a>
     </nav>
-    <div class="spacer"></div>
-    <div class="foot">
-      <div class="userchip">
-        <span class="user-avatar" aria-hidden="true">J</span>
-        <span class="user-copy"><b>Signed in</b><small>{{ .SessionRoleBadge }}</small></span>
-        <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button class="user-menu" type="submit" title="Sign out" aria-label="Sign out">⌄</button></form>
+    <div class="side-tail">
+      <div class="spacer"></div>
+      <div class="foot">
+        <div class="userchip">
+          <span class="user-avatar" aria-hidden="true">J</span>
+          <span class="user-copy"><b>Signed in</b><small>{{ .SessionRoleBadge }}</small></span>
+          <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button class="user-menu" type="submit" title="Sign out" aria-label="Sign out">⌄</button></form>
+        </div>
       </div>
     </div>
   </aside>
