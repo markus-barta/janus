@@ -85,16 +85,25 @@ a { color: var(--ink); }
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 13px;
   width: 100%;
-  height: 152px;
-  min-height: 152px;
-  padding: 0 8px;
+  height: 50px;
+  min-height: 50px;
+  margin-bottom: 14px;
+  padding: 0 12px;
+}
+.brand-mark-slot {
+  display: grid;
+  place-items: center;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 50px;
 }
 .brand-mark {
   --janus-brand-opacity: .96;
   display: block;
   flex: 0 0 auto;
-  width: 72px;
+  width: 31px;
   height: auto;
   max-width: 100%;
   object-fit: contain;
@@ -103,12 +112,29 @@ a { color: var(--ink); }
   animation: janus-brand-fade 520ms var(--art-ease) 80ms both;
   transition: opacity 220ms var(--art-ease), transform 220ms var(--art-ease), filter 220ms var(--art-ease);
 }
-.brand:hover .brand-mark {
+.brand-wordmark {
+  --janus-brand-opacity: .96;
+  flex: 0 0 auto;
+  color: var(--navy);
+  font-family: var(--serif);
+  font-size: 22px;
+  font-weight: 500;
+  font-kerning: normal;
+  letter-spacing: .18em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+  opacity: var(--janus-brand-opacity);
+  animation: janus-brand-fade 520ms var(--art-ease) 80ms both;
+  transition: opacity 220ms var(--art-ease), transform 220ms var(--art-ease);
+}
+.brand:hover .brand-mark,
+.brand:hover .brand-wordmark {
   --janus-brand-opacity: 1;
   opacity: var(--janus-brand-opacity);
-  filter: saturate(1.04);
   transform: translateY(-1px);
 }
+.brand:hover .brand-mark { filter: saturate(1.04); }
 .nav { display: flex; flex-direction: column; gap: 2px; }
 .nav a {
   display: flex;
@@ -1047,8 +1073,9 @@ table.ledger tr:last-child td { border-bottom: 0; }
 
 @media (min-width: 861px) and (max-height: 760px) {
   .side { padding: 16px 18px 12px; }
-  .brand { height: 104px; min-height: 104px; padding: 0 8px; }
-  .brand-mark { width: 51px; }
+  .brand { height: 50px; min-height: 50px; padding: 0 12px; }
+  .brand-mark { width: 31px; }
+  .brand-wordmark { font-size: 22px; letter-spacing: .18em; }
   .nav a { min-height: 40px; padding: 7px 14px; }
   .side-tail {
     margin-bottom: -12px;
@@ -1071,8 +1098,10 @@ table.ledger tr:last-child td { border-bottom: 0; }
     height: auto;
     max-height: none;
   }
-  .brand { height: 82px; min-height: 82px; padding: 0 4px; }
-  .brand-mark { width: 40px; }
+  .brand { gap: 10px; height: 56px; min-height: 56px; margin-bottom: 0; padding: 0 4px; }
+  .brand-mark-slot { flex-basis: 34px; width: 34px; height: 56px; }
+  .brand-mark { width: 30px; }
+  .brand-wordmark { font-size: 20px; letter-spacing: .16em; }
   .nav {
     flex: 1 1 100%;
     display: grid;
@@ -1173,6 +1202,7 @@ table.ledger tr:last-child td { border-bottom: 0; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .brand-mark,
+  .brand-wordmark,
   .pagehead::after,
   .side-tail::before {
     animation: none;

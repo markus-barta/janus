@@ -28,7 +28,7 @@ func TestVaultPageRendersCardsTilesAndBrand(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "brand-mark", "/static/janus-logo.svg", "Signed in", "3 elevated roles", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
+	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "brand-mark", "brand-wordmark", "/static/janus-logo.svg", "Signed in", "3 elevated roles", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("vault page should render %q: %s", want, body)
 		}
@@ -37,6 +37,48 @@ func TestVaultPageRendersCardsTilesAndBrand(t *testing.T) {
 		t.Fatalf("vault page returned to the vertical wordmark: %s", body)
 	}
 	assertRouteResponseValueFree(t, "vault page", out)
+}
+
+func TestVaultBrandUsesCenteredHorizontalLockup(t *testing.T) {
+	templateBytes, err := vaultTemplateFS.ReadFile("ui/vault.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateBody := string(templateBytes)
+	for _, want := range []string{
+		`<div class="brand">`,
+		`<span class="brand-mark-slot" aria-hidden="true"><img class="brand-mark" src="/static/janus-logo.svg" alt=""></span>`,
+		`<span class="brand-wordmark">JANUS</span>`,
+	} {
+		if !strings.Contains(templateBody, want) {
+			t.Fatalf("vault brand should use the accessible horizontal lockup %q", want)
+		}
+	}
+
+	cssBytes, err := uiStaticFS.ReadFile("ui/janus.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(cssBytes)
+	brandStart := strings.Index(css, ".brand {")
+	if brandStart < 0 {
+		t.Fatal("vault brand CSS is missing the brand selector")
+	}
+	brandEnd := strings.Index(css[brandStart:], "}")
+	if brandEnd < 0 {
+		t.Fatal("vault brand CSS has an unterminated brand selector")
+	}
+	brandRule := css[brandStart : brandStart+brandEnd]
+	for _, want := range []string{`align-items: center`, `justify-content: center`, `gap: 13px`, `height: 50px`} {
+		if !strings.Contains(brandRule, want) {
+			t.Fatalf("vault brand rule should preserve the centered Pharos-family lockup via %q: %s", want, brandRule)
+		}
+	}
+	for _, want := range []string{`.brand-mark-slot {`, `flex: 0 0 36px`, `width: 31px`, `.brand-wordmark {`, `font-size: 22px`, `letter-spacing: .18em`} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("vault brand CSS should preserve the horizontal mark and wordmark via %q", want)
+		}
+	}
 }
 
 func TestVaultPageRendersFocusWithOperatorActions(t *testing.T) {
