@@ -31,7 +31,7 @@ use janus_core::{
 };
 use janus_executor::{
     ApprovedUseExecutor, EnvFileHashSidecarFormat, EnvFileHashSidecarSpec, EnvFilePlan,
-    EnvFileProfile, EnvFileProfileSpec, EnvFileRequest, ManagedCommandProfile,
+    EnvFileProfile, EnvFileProfileSpec, EnvFileRequest, ManagedCommandPlan, ManagedCommandProfile,
     ManagedCommandProfileSpec, ManagedCommandRequest, ManagedCommandRuntimeLimits,
 };
 use janus_forge::{
@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::ForgeRotateGenerated(config) => run_forge_rotate_generated(config).await,
+        Command::RunManagedPreflight(config) => run_managed_command_preflight(config).await,
         Command::RunManaged(config) => run_managed_command(config).await,
         Command::EnvFilePreflight(config) => run_env_file_preflight(config).await,
         Command::EnvFile(config) => run_env_file(config).await,
@@ -84,6 +85,7 @@ async fn main() -> Result<()> {
 enum Command {
     Help,
     ForgeRotateGenerated(ForgeRotateGeneratedConfig),
+    RunManagedPreflight(RunManagedPreflightConfig),
     RunManaged(RunManagedCommandConfig),
     EnvFilePreflight(EnvFilePreflightConfig),
     EnvFile(EnvFileConfig),
@@ -119,6 +121,12 @@ struct ForgeRotateGeneratedConfig {
 struct RunManagedCommandConfig {
     profile_id: ProfileId,
     permit: PermitToken,
+    requested_args: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RunManagedPreflightConfig {
+    profile_id: ProfileId,
     requested_args: Vec<String>,
 }
 
@@ -387,6 +395,14 @@ async fn run_managed_command(config: RunManagedCommandConfig) -> Result<()> {
     let lifecycle_evidence = FileLifecycleEvidenceRegistry::new(lifecycle_evidence_registry_dir());
     record_managed_command_evidence(&outcome, &lifecycle_evidence, SystemTime::now())?;
     emit_run_managed_outcome(&outcome);
+    Ok(())
+}
+
+async fn run_managed_command_preflight(config: RunManagedPreflightConfig) -> Result<()> {
+    let manifest_path = run_profile_manifest_path()?;
+    let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
+    let outcome = run_managed_command_preflight_with(&config, &profiles)?;
+    emit_run_managed_preflight_outcome(&outcome);
     Ok(())
 }
 
@@ -1271,6 +1287,16 @@ where
     runner.run(config).await
 }
 
+fn run_managed_command_preflight_with(
+    config: &RunManagedPreflightConfig,
+    profiles: &ManagedCommandProfileCatalog,
+) -> Result<ManagedCommandPlan> {
+    let profile = profiles
+        .profile(&config.profile_id)
+        .context("managed command profile not found")?;
+    Ok(profile.preflight_command(&config.requested_args)?)
+}
+
 #[async_trait]
 trait ManagedCommandRunner {
     async fn run(&mut self, config: &RunManagedCommandConfig) -> Result<ManagedCommandCliOutcome>;
@@ -1538,6 +1564,23 @@ fn emit_run_managed_outcome(outcome: &ManagedCommandCliOutcome) {
     eprintln!(
         "janusd run completed exit_success={} exit_code={:?} reason_code={} value_returned={}",
         outcome.exit_success, outcome.exit_code, outcome.reason_code, outcome.value_returned
+    );
+}
+
+fn emit_run_managed_preflight_outcome(outcome: &ManagedCommandPlan) {
+    println!(
+        "janusd run preflight ok secret_ref={} profile_id={} executor={} destination={} binary={} args_count={} timeout_seconds={} max_stdout_bytes={} max_stderr_bytes={} consumer_ref={} reason_code=ok value_returned={}",
+        outcome.secret_ref.as_str(),
+        outcome.profile_id.as_str(),
+        outcome.executor.as_str(),
+        outcome.destination.as_str(),
+        outcome.binary.display(),
+        outcome.args.len(),
+        outcome.runtime_limits.timeout.as_secs(),
+        outcome.runtime_limits.max_stdout_bytes,
+        outcome.runtime_limits.max_stderr_bytes,
+        outcome.consumer_ref.as_str(),
+        outcome.value_returned
     );
 }
 
@@ -2094,6 +2137,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         [forge, rotate, rest @ ..] if forge == "forge" && rotate == "rotate-generated" => {
             parse_forge_rotate_generated(rest.iter().cloned()).map(Command::ForgeRotateGenerated)
         }
+        [run, preflight, rest @ ..] if run == "run" && preflight == "preflight" => {
+            parse_run_managed_preflight(rest.iter().cloned()).map(Command::RunManagedPreflight)
+        }
         [run, rest @ ..] if run == "run" => {
             parse_run_managed(rest.iter().cloned()).map(Command::RunManaged)
         }
@@ -2649,6 +2695,54 @@ fn parse_run_managed(args: impl IntoIterator<Item = String>) -> Result<RunManage
     })
 }
 
+fn parse_run_managed_preflight(
+    args: impl IntoIterator<Item = String>,
+) -> Result<RunManagedPreflightConfig> {
+    let mut profile_id = None;
+    let mut requested_args = Vec::new();
+    let mut saw_separator = false;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--profile" => {
+                if profile_id
+                    .replace(ProfileId::new(required_arg("--profile", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--profile may only be provided once");
+                }
+            }
+            "--" => {
+                saw_separator = true;
+                requested_args.extend(args);
+                break;
+            }
+            "--permit" => anyhow::bail!("run preflight does not accept a permit"),
+            "--secret" | "--secret-ref" | "--value" | "--env" | "--binary" | "--destination"
+            | "--executor" => {
+                anyhow::bail!("run preflight policy fields come from the reviewed profile")
+            }
+            other if other.starts_with('-') => {
+                anyhow::bail!("unsupported janusd run preflight flag")
+            }
+            _ => anyhow::bail!("janusd run preflight command arguments must follow --"),
+        }
+    }
+
+    let Some(profile_id) = profile_id else {
+        anyhow::bail!("--profile is required");
+    };
+    if !saw_separator {
+        anyhow::bail!("janusd run preflight requires -- before command arguments");
+    }
+
+    Ok(RunManagedPreflightConfig {
+        profile_id,
+        requested_args,
+    })
+}
+
 fn parse_env_file(args: impl IntoIterator<Item = String>) -> Result<EnvFileConfig> {
     let mut profile_id = None;
     let mut permit = None;
@@ -3174,6 +3268,9 @@ fn print_usage() {
     eprintln!(
         "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE --permit use_...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  lifecycle destroy-finalize --secret-ref REF [--metadata-file PATH]\n  lifecycle destroy-reconcile [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd env-file preflight checks the reviewed env-file profile and target path without a permit, backend, or secret read.\njanusd env-file writes a reviewed private env file from JANUS_RUN_PROFILE_MANIFEST; callers cannot choose env name, output path, executor, destination, or value.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\njanusd lifecycle destroy-finalize requires a tombstone and writes destroyed metadata only; it never deletes provider values.\njanusd lifecycle destroy-reconcile reads metadata and tombstones only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
+    eprintln!(
+        "\nManaged command preflight:\n  run preflight --profile PROFILE -- ARG...\n\nThis validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read."
+    );
 }
 
 #[cfg(test)]
@@ -3198,6 +3295,7 @@ mod tests {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::ForgeRotateGenerated(config) => config,
             Command::Help => panic!("expected forge config"),
+            Command::RunManagedPreflight(_) => panic!("expected forge config"),
             Command::RunManaged(_) => panic!("expected forge config"),
             Command::EnvFilePreflight(_) => panic!("expected forge config"),
             Command::EnvFile(_) => panic!("expected forge config"),
@@ -3213,6 +3311,7 @@ mod tests {
     fn parse_run_ok(args: &[&str]) -> RunManagedCommandConfig {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::RunManaged(config) => config,
+            Command::RunManagedPreflight(_) => panic!("expected run config"),
             Command::ForgeRotateGenerated(_) => panic!("expected run config"),
             Command::EnvFilePreflight(_) => panic!("expected run config"),
             Command::EnvFile(_) => panic!("expected run config"),
@@ -3226,11 +3325,19 @@ mod tests {
         }
     }
 
+    fn parse_run_preflight_ok(args: &[&str]) -> RunManagedPreflightConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::RunManagedPreflight(config) => config,
+            _ => panic!("expected run preflight config"),
+        }
+    }
+
     fn parse_env_file_ok(args: &[&str]) -> EnvFileConfig {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::EnvFile(config) => config,
             Command::EnvFilePreflight(_) => panic!("expected env-file config"),
             Command::ForgeRotateGenerated(_) => panic!("expected env-file config"),
+            Command::RunManagedPreflight(_) => panic!("expected env-file config"),
             Command::RunManaged(_) => panic!("expected env-file config"),
             Command::Approve(_) => panic!("expected env-file config"),
             Command::Help => panic!("expected env-file config"),
@@ -3247,6 +3354,7 @@ mod tests {
             Command::EnvFilePreflight(config) => config,
             Command::EnvFile(_) => panic!("expected env-file preflight config"),
             Command::ForgeRotateGenerated(_) => panic!("expected env-file preflight config"),
+            Command::RunManagedPreflight(_) => panic!("expected env-file preflight config"),
             Command::RunManaged(_) => panic!("expected env-file preflight config"),
             Command::Approve(_) => panic!("expected env-file preflight config"),
             Command::Help => panic!("expected env-file preflight config"),
@@ -3262,6 +3370,7 @@ mod tests {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::Approve(ApproveCommand::Issue(config)) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected approve issue config"),
+            Command::RunManagedPreflight(_) => panic!("expected approve issue config"),
             Command::RunManaged(_) => panic!("expected approve issue config"),
             Command::EnvFilePreflight(_) => panic!("expected approve issue config"),
             Command::EnvFile(_) => panic!("expected approve issue config"),
@@ -3279,6 +3388,7 @@ mod tests {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::Approve(ApproveCommand::Permit(config)) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected approve permit config"),
+            Command::RunManagedPreflight(_) => panic!("expected approve permit config"),
             Command::RunManaged(_) => panic!("expected approve permit config"),
             Command::EnvFilePreflight(_) => panic!("expected approve permit config"),
             Command::EnvFile(_) => panic!("expected approve permit config"),
@@ -3296,6 +3406,7 @@ mod tests {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::Approve(ApproveCommand::Revoke(config)) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected approve revoke config"),
+            Command::RunManagedPreflight(_) => panic!("expected approve revoke config"),
             Command::RunManaged(_) => panic!("expected approve revoke config"),
             Command::EnvFilePreflight(_) => panic!("expected approve revoke config"),
             Command::EnvFile(_) => panic!("expected approve revoke config"),
@@ -3313,6 +3424,7 @@ mod tests {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::LifecycleTransition(config) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected lifecycle config"),
+            Command::RunManagedPreflight(_) => panic!("expected lifecycle config"),
             Command::RunManaged(_) => panic!("expected lifecycle config"),
             Command::EnvFilePreflight(_) => panic!("expected lifecycle config"),
             Command::EnvFile(_) => panic!("expected lifecycle config"),
@@ -3330,6 +3442,9 @@ mod tests {
             Command::LifecycleStaleReport(config) => config,
             Command::LifecycleTransition(_) => panic!("expected lifecycle stale-report config"),
             Command::ForgeRotateGenerated(_) => panic!("expected lifecycle stale-report config"),
+            Command::RunManagedPreflight(_) => {
+                panic!("expected lifecycle stale-report config")
+            }
             Command::RunManaged(_) => panic!("expected lifecycle stale-report config"),
             Command::EnvFilePreflight(_) => panic!("expected lifecycle stale-report config"),
             Command::EnvFile(_) => panic!("expected lifecycle stale-report config"),
@@ -3353,6 +3468,9 @@ mod tests {
                 panic!("expected lifecycle destroy-record config")
             }
             Command::ForgeRotateGenerated(_) => panic!("expected lifecycle destroy-record config"),
+            Command::RunManagedPreflight(_) => {
+                panic!("expected lifecycle destroy-record config")
+            }
             Command::RunManaged(_) => panic!("expected lifecycle destroy-record config"),
             Command::EnvFilePreflight(_) => panic!("expected lifecycle destroy-record config"),
             Command::EnvFile(_) => panic!("expected lifecycle destroy-record config"),
@@ -3378,6 +3496,9 @@ mod tests {
                 panic!("expected lifecycle destroy-finalize config")
             }
             Command::ForgeRotateGenerated(_) => {
+                panic!("expected lifecycle destroy-finalize config")
+            }
+            Command::RunManagedPreflight(_) => {
                 panic!("expected lifecycle destroy-finalize config")
             }
             Command::RunManaged(_) => panic!("expected lifecycle destroy-finalize config"),
@@ -3409,6 +3530,9 @@ mod tests {
             Command::ForgeRotateGenerated(_) => {
                 panic!("expected lifecycle destroy-reconcile config")
             }
+            Command::RunManagedPreflight(_) => {
+                panic!("expected lifecycle destroy-reconcile config")
+            }
             Command::RunManaged(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::EnvFilePreflight(_) => {
                 panic!("expected lifecycle destroy-reconcile config")
@@ -3436,6 +3560,69 @@ mod tests {
         assert_eq!(config.permit.as_str(), "use_abc123");
         assert_eq!(config.requested_args, vec!["release", "upload"]);
         assert!(!format!("{config:?}").contains("use_abc123"));
+    }
+
+    #[test]
+    fn parses_run_preflight_without_permit_or_policy_overrides() {
+        let config = parse_run_preflight_ok(&[
+            "run",
+            "preflight",
+            "--profile",
+            "profile.canary",
+            "--",
+            "deploy",
+            "hsb0",
+        ]);
+
+        assert_eq!(config.profile_id.as_str(), "profile.canary");
+        assert_eq!(config.requested_args, ["deploy", "hsb0"]);
+
+        let err = parse_args(
+            [
+                "run",
+                "preflight",
+                "--profile",
+                "profile.canary",
+                "--permit",
+                "use_abc123",
+                "--",
+                "deploy",
+                "hsb0",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not accept a permit"));
+        assert!(!err.to_string().contains("use_abc123"));
+
+        for flag in [
+            "--secret-ref",
+            "--value",
+            "--env",
+            "--binary",
+            "--destination",
+            "--executor",
+        ] {
+            let err = parse_args(
+                [
+                    "run",
+                    "preflight",
+                    "--profile",
+                    "profile.canary",
+                    flag,
+                    "unreviewed",
+                    "--",
+                    "deploy",
+                    "hsb0",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("reviewed profile"));
+            assert!(!err.to_string().contains("unreviewed"));
+        }
     }
 
     #[test]
@@ -4075,6 +4262,17 @@ mod tests {
 
     fn toml_string(value: &str) -> String {
         format!("{value:?}")
+    }
+
+    fn true_program() -> &'static str {
+        [
+            "/usr/bin/true",
+            "/run/current-system/sw/bin/true",
+            "/bin/true",
+        ]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .expect("test platform provides an absolute true binary")
     }
 
     fn toml_string_array(values: &[String]) -> String {
@@ -5611,6 +5809,42 @@ mod tests {
         assert!(err.to_string().contains("duplicate"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn managed_command_preflight_uses_only_reviewed_manifest_and_filesystem_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("pharos-deploy");
+        fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o500)).unwrap();
+        let secret_ref = SecretRef::new("sec_pharos_deploy_hsb0").unwrap();
+        let allowed_args = vec!["deploy".to_string(), "hsb0".to_string()];
+        let manifest = managed_profile_toml(&secret_ref, &allowed_args).replace(
+            "binary = \"/bin/sh\"",
+            &format!(
+                "binary = {}",
+                toml_string(binary.to_string_lossy().as_ref())
+            ),
+        );
+        let profiles = ManagedCommandProfileCatalog::parse(&manifest).unwrap();
+        let config = RunManagedPreflightConfig {
+            profile_id: ProfileId::new("profile.canary").unwrap(),
+            requested_args: allowed_args,
+        };
+
+        let plan = run_managed_command_preflight_with(&config, &profiles).unwrap();
+
+        assert_eq!(plan.binary, fs::canonicalize(&binary).unwrap());
+        assert_eq!(plan.args, ["deploy", "hsb0"]);
+        assert_eq!(plan.secret_ref, secret_ref);
+        assert!(!plan.value_returned);
+
+        fs::set_permissions(&plan.binary, fs::Permissions::from_mode(0o520)).unwrap();
+        let err = run_managed_command_preflight_with(&config, &profiles).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("must not be group or world writable"));
+    }
+
     #[tokio::test]
     async fn profile_manifest_runner_rejects_unreviewed_args_before_permit_lookup() {
         let secret_ref = SecretRef::new("sec_fixture").unwrap();
@@ -6625,14 +6859,15 @@ mod tests {
 
     #[tokio::test]
     async fn hook_manifest_runs_validation_without_capturing_output() {
+        let manifest = format!(
+            r#"
+                [validation."deploy-smoke"]
+                program = {}
+            "#,
+            toml_string(true_program()),
+        );
         let mut hooks = ManifestRotationHooks {
-            manifest: HookManifest::parse(
-                r#"
-                    [validation."deploy-smoke"]
-                    program = "/usr/bin/true"
-                "#,
-            )
-            .unwrap(),
+            manifest: HookManifest::parse(&manifest).unwrap(),
         };
 
         hooks

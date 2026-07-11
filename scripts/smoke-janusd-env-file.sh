@@ -152,7 +152,9 @@ printf '%s' "${canary_value}" | age -r "${recipient}" -o "${store_dir}/janus/def
   >>"${log_file}" 2>&1
 chmod 600 "${store_dir}/janus/default/CANARY.age"
 
-cargo build --quiet -p janusd
+if [ -z "${JANUSD_BIN:-}" ]; then
+  cargo build --quiet --locked -p janusd
+fi
 janusd_bin="${JANUSD_BIN:-${repo}/target/debug/janusd}"
 [ -x "${janusd_bin}" ] || fail "janusd binary is not executable"
 

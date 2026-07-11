@@ -445,6 +445,14 @@ impl ManagedCommandProfile {
         &self.consumer
     }
 
+    /// Validate the reviewed command and exact argv without reading a secret,
+    /// resolving a permit, or spawning the process.
+    pub fn preflight_command(&self, requested_args: &[String]) -> JanusResult<ManagedCommandPlan> {
+        let mut plan = self.plan_for_args(requested_args)?;
+        plan.binary = preflight_managed_command_binary(&plan.binary)?;
+        Ok(plan)
+    }
+
     fn plan_for_args(&self, requested_args: &[String]) -> JanusResult<ManagedCommandPlan> {
         if requested_args != self.allowed_args.as_slice() {
             return Err(JanusError::policy_denied(
@@ -888,7 +896,7 @@ where
                 "permit secret does not match managed command profile",
             ));
         }
-        let plan = request.profile.plan_for_args(&request.requested_args)?;
+        let plan = request.profile.preflight_command(&request.requested_args)?;
         let value = self
             .broker
             .use_permit(
@@ -1103,6 +1111,37 @@ fn write_hash_sidecar_atomic(sidecar: &EnvFileHashSidecar, value: &SecretValue) 
 fn preflight_env_file_target(path: &Path, env_name: &SafeLabel) -> JanusResult<()> {
     validate_env_file_name(env_name)?;
     preflight_private_output_path(path, "env-file output")
+}
+
+fn preflight_managed_command_binary(path: &Path) -> JanusResult<PathBuf> {
+    let resolved = fs::canonicalize(path).map_err(|_| JanusError::InvalidManifest {
+        detail: "managed command binary is unavailable".to_string(),
+    })?;
+    let metadata = fs::metadata(&resolved).map_err(|_| JanusError::InvalidManifest {
+        detail: "managed command binary is unavailable".to_string(),
+    })?;
+    if !metadata.is_file() {
+        return Err(JanusError::InvalidManifest {
+            detail: "managed command binary must resolve to a regular file".to_string(),
+        });
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = metadata.permissions().mode();
+        if mode & 0o111 == 0 {
+            return Err(JanusError::InvalidManifest {
+                detail: "managed command binary must be executable".to_string(),
+            });
+        }
+        if mode & 0o022 != 0 {
+            return Err(JanusError::InvalidManifest {
+                detail: "managed command binary must not be group or world writable".to_string(),
+            });
+        }
+    }
+    Ok(resolved)
 }
 
 fn preflight_hash_sidecar_target(path: &Path) -> JanusResult<()> {
@@ -1375,7 +1414,7 @@ mod tests {
             secret_ref,
             executor,
             destination,
-            PathBuf::from("/usr/bin/gh"),
+            std::env::current_exe().expect("test binary path is available"),
             vec!["release".to_string(), "upload".to_string()],
         )
     }
@@ -1691,7 +1730,7 @@ mod tests {
                     now: run_at(),
                 },
                 |execution| {
-                    assert_eq!(execution.plan().binary, PathBuf::from("/usr/bin/gh"));
+                    assert_eq!(&execution.plan().binary, profile.binary());
                     assert_eq!(
                         execution.plan().args,
                         vec!["release".to_string(), "upload".to_string()]
@@ -1772,7 +1811,7 @@ mod tests {
 
         assert!(!outcome.value_returned);
         assert!(!outcome.plan.value_returned);
-        assert_eq!(outcome.plan.binary, PathBuf::from("/bin/sh"));
+        assert_eq!(outcome.plan.binary, fs::canonicalize("/bin/sh").unwrap());
         assert_eq!(outcome.output.stdout, "stdout:[REDACTED]");
         assert_eq!(outcome.output.stderr, "stderr:[REDACTED]");
         assert!(outcome.output.exit_success);
@@ -1925,6 +1964,133 @@ mod tests {
         assert_eq!(outcome.output.stdout, "");
         assert_eq!(outcome.output.stderr, "");
         assert!(!format!("{outcome:?}").contains("expected-canary"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_command_preflight_validates_exact_executable_without_secret_use() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_executor, permit, _principal, executor_ref, destination, _profile) =
+            executor_fixture().await;
+        let binary = marker_path("managed-command-preflight-ok");
+        fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o500)).unwrap();
+        let profile = managed_command_profile_with_command(
+            permit.profile_id().clone(),
+            permit.secret_ref().clone(),
+            executor_ref,
+            destination,
+            binary.clone(),
+            vec!["deploy".to_string(), "hsb0".to_string()],
+        );
+
+        let plan = profile.preflight_command(profile.allowed_args()).unwrap();
+
+        assert_eq!(plan.binary, fs::canonicalize(&binary).unwrap());
+        assert_eq!(plan.args, ["deploy", "hsb0"]);
+        assert_eq!(plan.secret_ref, permit.secret_ref().clone());
+        assert!(!plan.value_returned);
+        assert!(!format!("{plan:?}").contains("expected-canary"));
+
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o520)).unwrap();
+        let err = profile
+            .preflight_command(profile.allowed_args())
+            .unwrap_err();
+        assert!(matches!(err, JanusError::InvalidManifest { .. }));
+        assert!(err
+            .to_string()
+            .contains("must not be group or world writable"));
+
+        let _ = fs::remove_file(binary);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_command_preflight_resolves_symlink_and_rejects_unreviewed_args() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let (_executor, permit, _principal, executor_ref, destination, _profile) =
+            executor_fixture().await;
+        let target = marker_path("managed-command-preflight-target");
+        let binary = marker_path("managed-command-preflight-link");
+        fs::write(&target, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o500)).unwrap();
+        symlink(&target, &binary).unwrap();
+        let profile = managed_command_profile_with_command(
+            permit.profile_id().clone(),
+            permit.secret_ref().clone(),
+            executor_ref,
+            destination,
+            binary.clone(),
+            vec!["deploy".to_string(), "hsb0".to_string()],
+        );
+
+        let plan = profile.preflight_command(profile.allowed_args()).unwrap();
+        assert_eq!(plan.binary, fs::canonicalize(&target).unwrap());
+
+        let err = profile
+            .preflight_command(&["deploy".to_string(), "csb0".to_string()])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "denied_unreviewed_command_args",
+                ..
+            }
+        ));
+
+        let _ = fs::remove_file(binary);
+        let _ = fs::remove_file(target);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_command_execution_rejects_tampered_binary_before_secret_use() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (mut executor, permit, principal, executor_ref, destination, _profile) =
+            executor_fixture().await;
+        let binary = marker_path("managed-command-execution-tampered");
+        fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o520)).unwrap();
+        let profile = managed_command_profile_with_command(
+            permit.profile_id().clone(),
+            permit.secret_ref().clone(),
+            executor_ref,
+            destination,
+            binary.clone(),
+            vec!["deploy".to_string(), "hsb0".to_string()],
+        );
+        let mut callback_called = false;
+
+        let err = executor
+            .execute_managed_command(
+                ManagedCommandRequest {
+                    profile: &profile,
+                    permit: &permit,
+                    principal: &principal,
+                    requested_args: profile.allowed_args().to_vec(),
+                    now: run_at(),
+                },
+                |_execution| {
+                    callback_called = true;
+                    Ok(ManagedCommandOutput::from_raw("", ""))
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(!callback_called);
+        assert!(err
+            .to_string()
+            .contains("must not be group or world writable"));
+        let (_store, _policy, audit) = executor.into_broker().into_parts();
+        assert!(!audit.events().iter().any(|event| {
+            event.action == AuditAction::SecretUse && event.outcome == AuditOutcome::Allowed
+        }));
+
+        let _ = fs::remove_file(binary);
     }
 
     #[cfg(unix)]

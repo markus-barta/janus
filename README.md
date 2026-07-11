@@ -235,6 +235,14 @@ environment = "prod"
 blast_radius = "deploy-api"
 ```
 
+Validate the reviewed executable and exact argv before issuing approval or
+permit material. This path does not initialize a secret backend or consume a
+permit:
+
+```bash
+janusd run preflight --profile profile.deploy -- release apply
+```
+
 ```bash
 janusd run --profile profile.deploy --permit use_... -- release apply
 ```
