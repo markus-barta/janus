@@ -4264,17 +4264,6 @@ mod tests {
         format!("{value:?}")
     }
 
-    fn true_program() -> &'static str {
-        [
-            "/usr/bin/true",
-            "/run/current-system/sw/bin/true",
-            "/bin/true",
-        ]
-        .into_iter()
-        .find(|path| Path::new(path).is_file())
-        .expect("test platform provides an absolute true binary")
-    }
-
     fn toml_string_array(values: &[String]) -> String {
         format!(
             "[{}]",
@@ -6857,14 +6846,19 @@ mod tests {
         assert!(err.to_string().contains("absolute"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn hook_manifest_runs_validation_without_capturing_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("deploy-smoke");
+        fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o500)).unwrap();
         let manifest = format!(
             r#"
                 [validation."deploy-smoke"]
                 program = {}
             "#,
-            toml_string(true_program()),
+            toml_string(program.to_string_lossy().as_ref()),
         );
         let mut hooks = ManifestRotationHooks {
             manifest: HookManifest::parse(&manifest).unwrap(),

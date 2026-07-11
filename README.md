@@ -80,6 +80,7 @@ direnv exec . cargo test --workspace --locked
 cargo build              # workspace build (skeleton until the engine tickets land)
 cargo test --workspace --locked
 cargo clippy --all-targets --all-features -- -D warnings
+nix build .#janus-engine # native janusd + janus-warden package for NixOS consumers
 ```
 
 **Engine release assurance gate:**
