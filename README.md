@@ -89,8 +89,8 @@ devenv shell -- ./scripts/assure-engine-release.sh
 
 The Rust release workflow uses this same gate before publishing/signing
 `rust-engine-v*` images. It runs the workspace tests, the value-free Warden MCP
-smoke against both `cargo run` and the engine container image, and the local
-`janusd env-file` operator smoke.
+smoke against both the prebuilt local binary and the engine container image,
+and the local `janusd env-file` operator smoke.
 
 **Local Warden MCP smoke:**
 ```bash
