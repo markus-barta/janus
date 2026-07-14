@@ -16,6 +16,9 @@ python3 scripts/smoke-warden-mcp.py --bin target/debug/janus-warden
 echo "==> janus engine release assurance: local janusd env-file smoke"
 JANUSD_BIN="${repo}/target/debug/janusd" scripts/smoke-janusd-env-file.sh
 
+echo "==> janus engine release assurance: local Pharos retirement smoke"
+JANUSD_BIN="${repo}/target/debug/janusd" scripts/smoke-janusd-pharos-retirement.sh
+
 echo "==> janus engine release assurance: engine container Warden MCP smoke"
 scripts/smoke-engine-container.sh
 

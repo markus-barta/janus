@@ -297,6 +297,16 @@ janusd env-file --profile profile.deploy-env --permit use_...
 caller-supplied env names, output paths, raw values, executors, and
 destinations.
 
+For declared Pharos host retirement, `janusd pharos-beacon retire` consumes the
+reviewed retirement intent and matching env-file profile. It disables approved
+use before quarantining generated outputs, advances lifecycle metadata through
+`pending_delete` to `destroyed`, and records a durable tombstone. The encrypted
+provider value is retained; no command output contains the credential or its
+derived hash. A repeated invocation resumes from persisted evidence and is a
+no-op after completion. `janusd pharos-beacon reconcile` reports value-free
+`complete`, `needs_finalize`, `drift`, or `action_required` state without
+mutating lifecycle state.
+
 The permit id is power-bearing and should not be logged casually. A copied or
 stale permit still has to pass principal, executor, destination, profile, secret
 ref, manifest membership, expiry, and audit checks before a value is read.
