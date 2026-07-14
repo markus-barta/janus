@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+mod pharos_retirement;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
@@ -46,6 +48,12 @@ use janus_local::{
     TombstoneRegistry as SharedTombstoneRegistry,
 };
 use janus_provider_age::AgeSecretStore;
+use pharos_retirement::{
+    execute_retirement, expected_profile_id, prepare_binding, reconcile,
+    FilePharosRetirementRegistry, PharosCredentialEvidence, PharosReconcileOutcome,
+    PharosRetirementBinding, PharosRetirementFailure, PharosRetirementLifecycle,
+    PharosRetirementRequest,
+};
 use serde::Deserialize;
 use tokio::process::Command as TokioCommand;
 use tokio::time::timeout;
@@ -54,6 +62,7 @@ const DEFAULT_HOOK_TIMEOUT_SECONDS: u64 = 30;
 const MAX_APPROVAL_TTL_SECONDS: u64 = 3600;
 const DEFAULT_STALE_AFTER_DAYS: u64 = 90;
 const DEFAULT_MISSING_EVIDENCE_AFTER_DAYS: u64 = 7;
+const DEFAULT_PHAROS_RETENTION_DAYS: u64 = 365;
 const METADATA_ENV_KEYS: &[&str] = &[
     "JANUS_AGE_METADATA_FILE",
     "JANUS_WARDEN_AGE_METADATA_FILE",
@@ -78,6 +87,7 @@ async fn main() -> Result<()> {
         Command::LifecycleDestroyRecord(config) => run_lifecycle_destroy_record(config).await,
         Command::LifecycleDestroyFinalize(config) => run_lifecycle_destroy_finalize(config).await,
         Command::LifecycleDestroyReconcile(config) => run_lifecycle_destroy_reconcile(config).await,
+        Command::PharosBeacon(command) => run_pharos_beacon(command).await,
     }
 }
 
@@ -95,6 +105,13 @@ enum Command {
     LifecycleDestroyRecord(LifecycleDestroyRecordConfig),
     LifecycleDestroyFinalize(LifecycleDestroyFinalizeConfig),
     LifecycleDestroyReconcile(LifecycleDestroyReconcileConfig),
+    PharosBeacon(PharosBeaconCommand),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PharosBeaconCommand {
+    Retire(PharosRetirementRequest),
+    Reconcile(PharosRetirementRequest),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -561,6 +578,242 @@ async fn run_lifecycle_destroy_reconcile(config: LifecycleDestroyReconcileConfig
         build_lifecycle_destroy_reconcile_with(store, &registry, &principal, &mut audit).await?;
     emit_lifecycle_destroy_reconcile_report(&rows);
     Ok(())
+}
+
+async fn run_pharos_beacon(command: PharosBeaconCommand) -> Result<()> {
+    let result = match command {
+        PharosBeaconCommand::Retire(request) => run_pharos_beacon_retire(&request).await,
+        PharosBeaconCommand::Reconcile(request) => run_pharos_beacon_reconcile(&request).await,
+    };
+    if let Err(failure) = result {
+        emit_pharos_beacon_failure(failure);
+        return Err(anyhow::anyhow!(failure.reason_code()));
+    }
+    Ok(())
+}
+
+async fn run_pharos_beacon_retire(
+    request: &PharosRetirementRequest,
+) -> Result<(), PharosRetirementFailure> {
+    let binding = load_pharos_retirement_binding(request)?;
+    let registry = FilePharosRetirementRegistry::new(&request.state_dir);
+    let mut backend = JanusPharosRetirementBackend::new(&request.metadata_file)?;
+    let outcome = execute_retirement(request, &binding, &registry, &mut backend, None).await?;
+    emit_pharos_beacon_outcome("retire", &outcome);
+    Ok(())
+}
+
+async fn run_pharos_beacon_reconcile(
+    request: &PharosRetirementRequest,
+) -> Result<(), PharosRetirementFailure> {
+    let binding = load_pharos_retirement_binding(request)?;
+    let registry = FilePharosRetirementRegistry::new(&request.state_dir);
+    let mut backend = JanusPharosRetirementBackend::new(&request.metadata_file)?;
+    let evidence = backend.evidence(&binding).await?;
+    let record = registry.load(&binding)?;
+    let outcome = reconcile(
+        &binding,
+        evidence.lifecycle,
+        evidence.tombstone_present,
+        record.as_ref(),
+        binding.outputs().inspect()?,
+    );
+    emit_pharos_beacon_outcome("reconcile", &outcome);
+    Ok(())
+}
+
+fn load_pharos_retirement_binding(
+    request: &PharosRetirementRequest,
+) -> Result<PharosRetirementBinding, PharosRetirementFailure> {
+    let profile_id = ProfileId::new(expected_profile_id(request)?)
+        .map_err(|_| PharosRetirementFailure::new("pharos_beacon_retirement_profile_invalid"))?;
+    let profiles = ManagedCommandProfileCatalog::load(&request.profile_manifest).map_err(|_| {
+        PharosRetirementFailure::new("pharos_beacon_retirement_profile_manifest_unavailable")
+    })?;
+    let profile = profiles
+        .env_file_profile(&profile_id)
+        .ok_or_else(|| PharosRetirementFailure::new("pharos_beacon_retirement_unknown_host"))?;
+    prepare_binding(request, profile)
+}
+
+struct JanusPharosRetirementBackend {
+    metadata_file: PathBuf,
+    principal: PrincipalChain,
+    tombstones: FileTombstoneRegistry,
+}
+
+impl JanusPharosRetirementBackend {
+    fn new(metadata_file: &Path) -> Result<Self, PharosRetirementFailure> {
+        let principal = lifecycle_principal_from_env().map_err(|_| {
+            PharosRetirementFailure::new("pharos_beacon_retirement_principal_invalid")
+        })?;
+        Ok(Self {
+            metadata_file: metadata_file.to_path_buf(),
+            principal,
+            tombstones: FileTombstoneRegistry::new(lifecycle_tombstone_registry_dir()),
+        })
+    }
+
+    fn secret_ref(binding: &PharosRetirementBinding) -> Result<SecretRef, PharosRetirementFailure> {
+        SecretRef::new(binding.secret_ref())
+            .map_err(|_| PharosRetirementFailure::new("pharos_beacon_retirement_profile_mismatch"))
+    }
+
+    async fn descriptor(
+        &self,
+        binding: &PharosRetirementBinding,
+    ) -> Result<SecretDescriptor, PharosRetirementFailure> {
+        let secret_ref = Self::secret_ref(binding)?;
+        let store = load_age_store_from_env_with_metadata_path(Some(&self.metadata_file)).map_err(
+            |_| PharosRetirementFailure::new("pharos_beacon_retirement_metadata_unavailable"),
+        )?;
+        let descriptors = store.list().await.map_err(|_| {
+            PharosRetirementFailure::new("pharos_beacon_retirement_metadata_unavailable")
+        })?;
+        let descriptor = descriptors
+            .into_iter()
+            .find(|descriptor| descriptor.secret_ref == secret_ref)
+            .ok_or_else(|| {
+                PharosRetirementFailure::new("pharos_beacon_retirement_credential_unknown")
+            })?;
+        if descriptor.name.as_str() != binding.expected_secret_name() {
+            return Err(PharosRetirementFailure::new(
+                "pharos_beacon_retirement_credential_mismatch",
+            ));
+        }
+        Ok(descriptor)
+    }
+
+    fn tombstone_present(&self, secret_ref: &SecretRef) -> Result<bool, PharosRetirementFailure> {
+        let tombstones = SharedTombstoneRegistry::list(&self.tombstones).map_err(|_| {
+            PharosRetirementFailure::new("pharos_beacon_retirement_tombstone_unavailable")
+        })?;
+        Ok(tombstones
+            .iter()
+            .any(|tombstone| &tombstone.secret_ref == secret_ref))
+    }
+}
+
+#[async_trait]
+impl PharosRetirementLifecycle for JanusPharosRetirementBackend {
+    async fn evidence(
+        &mut self,
+        binding: &PharosRetirementBinding,
+    ) -> Result<PharosCredentialEvidence, PharosRetirementFailure> {
+        let descriptor = self.descriptor(binding).await?;
+        Ok(PharosCredentialEvidence {
+            lifecycle: descriptor.lifecycle,
+            tombstone_present: self.tombstone_present(&descriptor.secret_ref)?,
+        })
+    }
+
+    async fn transition(
+        &mut self,
+        binding: &PharosRetirementBinding,
+        to: SecretLifecycle,
+    ) -> Result<(), PharosRetirementFailure> {
+        let config = LifecycleTransitionConfig {
+            secret_ref: Self::secret_ref(binding)?,
+            to,
+            reason: SafeLabel::new("pharos-beacon-retirement").map_err(|_| {
+                PharosRetirementFailure::new("pharos_beacon_retirement_policy_invalid")
+            })?,
+            metadata_file: Some(self.metadata_file.clone()),
+        };
+        let store = load_age_store_from_env_with_metadata_path(Some(&self.metadata_file)).map_err(
+            |_| PharosRetirementFailure::new("pharos_beacon_retirement_metadata_unavailable"),
+        )?;
+        let mut audit = AuditWrite::accepting();
+        apply_lifecycle_transition_with(
+            &config,
+            &self.metadata_file,
+            store,
+            &self.principal,
+            &mut audit,
+        )
+        .await
+        .map_err(|_| PharosRetirementFailure::new("pharos_beacon_retirement_transition_failed"))?;
+        Ok(())
+    }
+
+    async fn record_tombstone(
+        &mut self,
+        binding: &PharosRetirementBinding,
+        retain_for_days: u64,
+    ) -> Result<(), PharosRetirementFailure> {
+        let retain_for = retain_for_days
+            .checked_mul(24 * 60 * 60)
+            .map(Duration::from_secs)
+            .ok_or_else(|| {
+                PharosRetirementFailure::new("pharos_beacon_retirement_retention_invalid")
+            })?;
+        let config = LifecycleDestroyRecordConfig {
+            secret_ref: Self::secret_ref(binding)?,
+            reason: SafeLabel::new("pharos-beacon-retirement").map_err(|_| {
+                PharosRetirementFailure::new("pharos_beacon_retirement_policy_invalid")
+            })?,
+            retain_for,
+            metadata_file: Some(self.metadata_file.clone()),
+        };
+        let store = load_age_store_from_env_with_metadata_path(Some(&self.metadata_file)).map_err(
+            |_| PharosRetirementFailure::new("pharos_beacon_retirement_metadata_unavailable"),
+        )?;
+        let mut audit = AuditWrite::accepting();
+        record_lifecycle_destroy_with(
+            &config,
+            store,
+            &self.tombstones,
+            &self.principal,
+            &mut audit,
+            SystemTime::now(),
+        )
+        .await
+        .map_err(|_| PharosRetirementFailure::new("pharos_beacon_retirement_tombstone_failed"))?;
+        Ok(())
+    }
+
+    async fn finalize(
+        &mut self,
+        binding: &PharosRetirementBinding,
+    ) -> Result<(), PharosRetirementFailure> {
+        let config = LifecycleDestroyFinalizeConfig {
+            secret_ref: Self::secret_ref(binding)?,
+            metadata_file: Some(self.metadata_file.clone()),
+        };
+        let store = load_age_store_from_env_with_metadata_path(Some(&self.metadata_file)).map_err(
+            |_| PharosRetirementFailure::new("pharos_beacon_retirement_metadata_unavailable"),
+        )?;
+        let mut audit = AuditWrite::accepting();
+        finalize_lifecycle_destroy_with(
+            &config,
+            &self.metadata_file,
+            store,
+            &self.tombstones,
+            &self.principal,
+            &mut audit,
+        )
+        .await
+        .map_err(|_| PharosRetirementFailure::new("pharos_beacon_retirement_finalize_failed"))?;
+        Ok(())
+    }
+}
+
+fn emit_pharos_beacon_outcome(action: &str, outcome: &PharosReconcileOutcome) {
+    println!(
+        "janusd pharos-beacon {action} host={} state={} reason_code={} value_returned={} provider_deleted={}",
+        outcome.host,
+        outcome.state.as_str(),
+        outcome.reason_code,
+        outcome.value_returned,
+        outcome.provider_deleted
+    );
+}
+
+fn emit_pharos_beacon_failure(failure: PharosRetirementFailure) {
+    eprintln!(
+        "janusd pharos-beacon failed state=action_required reason_code={} value_returned=false provider_deleted=false",
+        failure.reason_code()
+    );
 }
 
 async fn build_lifecycle_stale_report_with<S, A>(
@@ -2195,8 +2448,109 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
             parse_lifecycle_destroy_reconcile(rest.iter().cloned())
                 .map(Command::LifecycleDestroyReconcile)
         }
+        [pharos, retire, rest @ ..] if pharos == "pharos-beacon" && retire == "retire" => {
+            parse_pharos_retirement(rest.iter().cloned())
+                .map(PharosBeaconCommand::Retire)
+                .map(Command::PharosBeacon)
+        }
+        [pharos, reconcile, rest @ ..] if pharos == "pharos-beacon" && reconcile == "reconcile" => {
+            parse_pharos_retirement(rest.iter().cloned())
+                .map(PharosBeaconCommand::Reconcile)
+                .map(Command::PharosBeacon)
+        }
         _ => anyhow::bail!("unsupported janusd command; run `janusd --help`"),
     }
+}
+
+fn parse_pharos_retirement(
+    args: impl IntoIterator<Item = String>,
+) -> Result<PharosRetirementRequest> {
+    let mut host = None;
+    let mut disposition = None;
+    let mut successor = None;
+    let mut intent_file = None;
+    let mut metadata_file = None;
+    let mut profile_manifest = None;
+    let mut state_dir = None;
+    let mut retain_for_days = DEFAULT_PHAROS_RETENTION_DAYS;
+    let mut retain_for_days_set = false;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--host" => replace_once(&mut host, "--host", required_arg("--host", args.next())?)?,
+            "--disposition" => replace_once(
+                &mut disposition,
+                "--disposition",
+                required_arg("--disposition", args.next())?,
+            )?,
+            "--successor" => replace_once(
+                &mut successor,
+                "--successor",
+                required_arg("--successor", args.next())?,
+            )?,
+            "--intent-file" => replace_once(
+                &mut intent_file,
+                "--intent-file",
+                PathBuf::from(required_arg("--intent-file", args.next())?),
+            )?,
+            "--metadata-file" => replace_once(
+                &mut metadata_file,
+                "--metadata-file",
+                PathBuf::from(required_arg("--metadata-file", args.next())?),
+            )?,
+            "--profile-manifest" => replace_once(
+                &mut profile_manifest,
+                "--profile-manifest",
+                PathBuf::from(required_arg("--profile-manifest", args.next())?),
+            )?,
+            "--state-dir" => replace_once(
+                &mut state_dir,
+                "--state-dir",
+                PathBuf::from(required_arg("--state-dir", args.next())?),
+            )?,
+            "--retain-for-days" => {
+                if retain_for_days_set {
+                    anyhow::bail!("--retain-for-days may only be provided once");
+                }
+                retain_for_days = required_arg("--retain-for-days", args.next())?
+                    .parse::<u64>()
+                    .context("invalid --retain-for-days")?;
+                if retain_for_days == 0 {
+                    anyhow::bail!("--retain-for-days must be greater than zero");
+                }
+                retain_for_days_set = true;
+            }
+            "--secret" | "--secret-ref" | "--name" | "--value" | "--raw-value" | "--token"
+            | "--delete" | "--provider-delete" => {
+                anyhow::bail!(
+                    "pharos-beacon retirement accepts only value-free retirement controls"
+                )
+            }
+            other if other.starts_with('-') => {
+                anyhow::bail!("unsupported janusd pharos-beacon flag")
+            }
+            _ => anyhow::bail!("unsupported janusd pharos-beacon argument"),
+        }
+    }
+
+    Ok(PharosRetirementRequest {
+        host: host.context("--host is required")?,
+        disposition: disposition.context("--disposition is required")?,
+        successor,
+        intent_file: intent_file.context("--intent-file is required")?,
+        metadata_file: metadata_file.context("--metadata-file is required")?,
+        profile_manifest: profile_manifest.context("--profile-manifest is required")?,
+        state_dir: state_dir.context("--state-dir is required")?,
+        retain_for_days,
+    })
+}
+
+fn replace_once<T>(slot: &mut Option<T>, flag: &'static str, value: T) -> Result<()> {
+    if slot.replace(value).is_some() {
+        anyhow::bail!("{flag} may only be provided once");
+    }
+    Ok(())
 }
 
 fn parse_lifecycle_transition(
@@ -3269,6 +3623,9 @@ fn print_usage() {
         "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE --permit use_...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  lifecycle destroy-finalize --secret-ref REF [--metadata-file PATH]\n  lifecycle destroy-reconcile [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd env-file preflight checks the reviewed env-file profile and target path without a permit, backend, or secret read.\njanusd env-file writes a reviewed private env file from JANUS_RUN_PROFILE_MANIFEST; callers cannot choose env name, output path, executor, destination, or value.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\njanusd lifecycle destroy-finalize requires a tombstone and writes destroyed metadata only; it never deletes provider values.\njanusd lifecycle destroy-reconcile reads metadata and tombstones only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
     );
     eprintln!(
+        "\nPharos beacon retirement:\n  pharos-beacon retire --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH [--retain-for-days N]\n  pharos-beacon reconcile --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH\n\nThese commands consume reviewed host-retirement intent and profile bindings, return no value, retain provider material, and fail closed on drift."
+    );
+    eprintln!(
         "\nManaged command preflight:\n  run preflight --profile PROFILE -- ARG...\n\nThis validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read."
     );
 }
@@ -3305,6 +3662,7 @@ mod tests {
             Command::LifecycleDestroyRecord(_) => panic!("expected forge config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected forge config"),
             Command::LifecycleDestroyReconcile(_) => panic!("expected forge config"),
+            Command::PharosBeacon(_) => panic!("expected forge config"),
         }
     }
 
@@ -3322,6 +3680,7 @@ mod tests {
             Command::LifecycleDestroyRecord(_) => panic!("expected run config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected run config"),
             Command::LifecycleDestroyReconcile(_) => panic!("expected run config"),
+            Command::PharosBeacon(_) => panic!("expected run config"),
         }
     }
 
@@ -3346,6 +3705,7 @@ mod tests {
             Command::LifecycleDestroyRecord(_) => panic!("expected env-file config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected env-file config"),
             Command::LifecycleDestroyReconcile(_) => panic!("expected env-file config"),
+            Command::PharosBeacon(_) => panic!("expected env-file config"),
         }
     }
 
@@ -3363,6 +3723,7 @@ mod tests {
             Command::LifecycleDestroyRecord(_) => panic!("expected env-file preflight config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected env-file preflight config"),
             Command::LifecycleDestroyReconcile(_) => panic!("expected env-file preflight config"),
+            Command::PharosBeacon(_) => panic!("expected env-file preflight config"),
         }
     }
 
@@ -3381,6 +3742,7 @@ mod tests {
             Command::LifecycleDestroyRecord(_) => panic!("expected approve issue config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected approve issue config"),
             Command::LifecycleDestroyReconcile(_) => panic!("expected approve issue config"),
+            Command::PharosBeacon(_) => panic!("expected approve issue config"),
         }
     }
 
@@ -3399,6 +3761,7 @@ mod tests {
             Command::LifecycleDestroyRecord(_) => panic!("expected approve permit config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected approve permit config"),
             Command::LifecycleDestroyReconcile(_) => panic!("expected approve permit config"),
+            Command::PharosBeacon(_) => panic!("expected approve permit config"),
         }
     }
 
@@ -3417,6 +3780,7 @@ mod tests {
             Command::LifecycleDestroyRecord(_) => panic!("expected approve revoke config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected approve revoke config"),
             Command::LifecycleDestroyReconcile(_) => panic!("expected approve revoke config"),
+            Command::PharosBeacon(_) => panic!("expected approve revoke config"),
         }
     }
 
@@ -3434,6 +3798,7 @@ mod tests {
             Command::LifecycleDestroyRecord(_) => panic!("expected lifecycle config"),
             Command::LifecycleDestroyFinalize(_) => panic!("expected lifecycle config"),
             Command::LifecycleDestroyReconcile(_) => panic!("expected lifecycle config"),
+            Command::PharosBeacon(_) => panic!("expected lifecycle config"),
         }
     }
 
@@ -3457,6 +3822,7 @@ mod tests {
             Command::LifecycleDestroyReconcile(_) => {
                 panic!("expected lifecycle stale-report config")
             }
+            Command::PharosBeacon(_) => panic!("expected lifecycle stale-report config"),
         }
     }
 
@@ -3482,6 +3848,7 @@ mod tests {
             Command::LifecycleDestroyReconcile(_) => {
                 panic!("expected lifecycle destroy-record config")
             }
+            Command::PharosBeacon(_) => panic!("expected lifecycle destroy-record config"),
         }
     }
 
@@ -3509,6 +3876,7 @@ mod tests {
             Command::LifecycleDestroyReconcile(_) => {
                 panic!("expected lifecycle destroy-finalize config")
             }
+            Command::PharosBeacon(_) => panic!("expected lifecycle destroy-finalize config"),
         }
     }
 
@@ -3540,6 +3908,14 @@ mod tests {
             Command::EnvFile(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::Help => panic!("expected lifecycle destroy-reconcile config"),
+            Command::PharosBeacon(_) => panic!("expected lifecycle destroy-reconcile config"),
+        }
+    }
+
+    fn parse_pharos_retire_ok(args: &[&str]) -> PharosRetirementRequest {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::PharosBeacon(PharosBeaconCommand::Retire(config)) => config,
+            _ => panic!("expected pharos-beacon retire config"),
         }
     }
 
@@ -4123,6 +4499,42 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("value-free"));
         assert!(!err.to_string().contains("sec_do_not_echo"));
+    }
+
+    #[test]
+    fn parses_value_free_pharos_retirement_controls() {
+        let config = parse_pharos_retire_ok(&[
+            "pharos-beacon",
+            "retire",
+            "--host",
+            "ares",
+            "--disposition",
+            "rebuilt",
+            "--successor",
+            "hera",
+            "--intent-file",
+            "/tmp/retired-hosts.json",
+            "--metadata-file",
+            "/tmp/metadata.toml",
+            "--profile-manifest",
+            "/tmp/profiles.toml",
+            "--state-dir",
+            "/tmp/state",
+        ]);
+
+        assert_eq!(config.host, "ares");
+        assert_eq!(config.disposition, "rebuilt");
+        assert_eq!(config.successor.as_deref(), Some("hera"));
+        assert_eq!(config.retain_for_days, DEFAULT_PHAROS_RETENTION_DAYS);
+
+        let err = parse_args(
+            ["pharos-beacon", "retire", "--token", "do-not-echo-me"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("value-free"));
+        assert!(!err.to_string().contains("do-not-echo-me"));
     }
 
     #[test]
