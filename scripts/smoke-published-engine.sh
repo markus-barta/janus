@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${JANUS_PUBLISHED_ENGINE_IMAGE:-ghcr.io/markus-barta/janus/janus-engine}"
-tag="${JANUS_PUBLISHED_ENGINE_TAG:-rust-engine-v0.1.1}"
+tag="${JANUS_PUBLISHED_ENGINE_TAG:-rust-engine-v0.1.6}"
 platform="${JANUS_PUBLISHED_ENGINE_PLATFORM:-}"
 repo_slug="${JANUS_PUBLISHED_ENGINE_REPO:-markus-barta/janus}"
 signer_workflow="${JANUS_PUBLISHED_ENGINE_SIGNER_WORKFLOW:-${repo_slug}/.github/workflows/rust.yml}"

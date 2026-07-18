@@ -1,331 +1,295 @@
 # Janus
 
-The Inspire-family secrets/password **unification layer** — one brokered,
-policy-gated, audited surface over your secrets for **services, users, and AI**
-at once. secretspec-backed, vendor-neutral, runs from a laptop hobbyist install
-to a big-corp fleet. Roman god of gates: one face to the consumer (service /
-human / AI), one to the backend.
+**Govern secrets without turning people or AI agents into secret couriers.**
 
-> **Canonical design & decisions live in PPM, not here.** This repo is code.
-> The architecture, ADRs, and reference material are knowledge entries under
-> PPM project **JANUS** (`pm.barta.cm`):
->
-> - `guideline/architecture-v1` — the engineering design (the "how")
-> - `guideline/backend-decision` — the storage-backend ADR (the "why we pivoted")
-> - `guideline/repo-topology-adr` — repo + language ADR (why this repo exists)
-> - `guideline/where-janus-lives` — the orientation map (three homes)
->
-> Fetch e.g. `paimos knowledge get guideline architecture-v1 --project JANUS`.
+Janus is the INSPR governance and approved-use layer for credentials. It keeps
+secret values behind a policy boundary, gives consumers opaque references and
+single-use permits, emits value-free audit events, and persists value-free
+lifecycle evidence on supported operator paths.
 
-## Status — envelope shipped, engine greenfield
+The result is one deliberate control plane for services, operators, and AI
+agents - without making raw credentials part of prompts, command arguments,
+logs, or application code.
 
-Janus is being built in two layers, and they are at very different maturity:
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.6-cb7c28.svg)](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.6)
 
-| Layer | What | Language | State |
+[Product site](https://janus.inspr.at) ·
+[Rust engine v0.1.6](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.6) ·
+[INSPR](https://www.inspr.at)
+
+## What Janus does
+
+- **Reference-only discovery** - Warden exposes `SecretRef` metadata over MCP,
+  never secret literals.
+- **Policy-gated use** - approvals and short-lived, single-use `UsePermit`
+  handles bind a secret to a reviewed purpose, executor, destination, and
+  profile.
+- **Managed execution** - `janusd run` launches exact reviewed commands and
+  arguments without handing the credential back to the caller.
+- **Private service handoff** - `janusd env-file` renders reviewed `0600` env
+  files and optional value-free hash sidecars atomically.
+- **Generated rotation** - Forge creates replacement values internally and can
+  run reviewed validation and reload hooks. There is deliberately no
+  caller-supplied `--value` argument.
+- **Lifecycle evidence** - state transitions, stale reports, destroy
+  tombstones, finalization, and reconciliation remain value-free.
+- **Pharos retirement** - a declared host-retirement flow disables approved
+  use, quarantines generated outputs, and records durable evidence.
+- **Backend portability** - the core contract is provider-neutral; the current
+  self-hosted path uses native age encryption and secretspec allowlists.
+
+## The boundary that matters
+
+Janus is designed around one rule:
+
+> A model or untrusted caller may name an approved capability. It must not
+> receive the credential that powers it.
+
+That rule is reflected in the API and runtime:
+
+1. Warden lists and describes opaque references.
+2. Policy evaluates a concrete purpose and reviewed profile.
+3. When the policy class requires approval, Janus validates an exact grant.
+4. Policy issues a bounded permit.
+5. The executor consumes the permit once.
+6. The credential is injected only inside the approved-use boundary.
+7. Output and evidence contain outcomes, references, and reason codes - never
+   the raw value.
+
+Janus does not claim that software can erase every operational risk. Host
+access, backend custody, profile review, and deployment hardening still matter.
+What it does is make the credential boundary explicit, testable, and much
+harder to bypass accidentally.
+
+## Project status
+
+Janus has two layers with different histories:
+
+| Layer | Role | Language | Status |
 |---|---|---|---|
-| **Envelope** | governance / audit / evidence / oversight plane | Go (REST) | **shipped & live** at `vault.barta.cm`, iterated V1.1→V1.146 by an autonomous loop. Brokers **no secret values** (`value_returned:false`). Lives in [`go-envelope/`](go-envelope/). |
-| **Engine** | the secret-handling core: `SecretStore`, opaque handles, MCP warden, providers | **Rust** | **JANUS-14/21/22 slices landing** — async core contracts, mock/conformance, wrapped secretspec/dotenv, reference-only MCP stdio, and the first native age provider are in [`crates/`](crates/). Execution is next. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.6`. |
+| **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
-**The plan (see `repo-topology-adr`):** build the missing engine fresh in Rust;
-keep the Go envelope running and **frozen** (no rewrite); port/retire the
-envelope into the Rust binary incrementally once the engine reaches parity. The
-envelope is transitional, not throwaway — it is 144 iterations of working
-oversight UX.
+The Rust engine is no longer a skeleton. Core execution paths ship with unit,
+conformance, MCP, operator-flow, and container smoke tests. The project is
+still pre-1.0: interfaces and deployment contracts may evolve as the Rust
+engine absorbs the remaining envelope responsibilities.
 
-## Why Rust for the engine
+## Architecture
 
-It is a secret-handling security core (memory safety, zeroization, no-GC control
-over secret material, constant-time comparisons), and the entire backend the
-design already chose is Rust-native: **secretspec** (manifest = allowlist),
-**age/rage** (self-host default key custody), and the official **MCP** Rust SDK
-(`rmcp`) for the AI surface. Single static binary scales from laptop to fleet.
-
-## Layout
-
-```
-janus/
-├── crates/                  # the Rust engine (greenfield)
-│   ├── janus-core/          # SecretStore trait, SecretRef/UsePermit, policy+audit  (JANUS-14, 28)
-│   ├── janus-conformance/   # reusable SecretStore + broker contract battery       (JANUS-14)
-│   ├── janus-mock/          # in-memory conformance/tracer backend                  (JANUS-14)
-│   ├── janus-provider-age/  # native age encrypted-file SecretStore                 (JANUS-21)
-│   ├── janus-warden/        # reference-only MCP surface (read side)                (JANUS-22)
-│   ├── janus-forge/         # rotation/write broker — not MCP, not LLM-driven       (JANUS-219)
-│   ├── janus-providers/     # wrapped secretspec adapter; OpenBao/keyring next      (JANUS-12)
-│   └── janusd/              # the daemon that supersedes the envelope's serving
-├── go-envelope/             # the shipped Go REST envelope (frozen, transitional)
-├── docs/
-│   ├── destroy-lifecycle-runbook.md  # metadata-only destroy operator flow
-│   ├── env-file-handoff-runbook.md   # repo-local env-file service handoff flow
-│   └── extraction-cutover.md         # how to repoint the live nixcfg deploy at a published image
-├── examples/
-│   └── env-file-handoff/             # checked nonprod env-file handoff bundle
-├── scripts/                 # repo-local smoke and operator helpers
-├── Cargo.toml               # Rust workspace
-└── .github/workflows/       # rust CI + go-envelope build+sign+SBOM+provenance
+```text
+consumer / operator / AI agent
+              |
+              v
+      Warden reference surface
+              |
+       policy + approval
+              |
+       opaque UsePermit
+              |
+              v
+  janusd approved-use executor
+              |
+       reviewed profile
+              |
+              v
+     SecretStore provider
 ```
 
-## Build
+### Workspace map
 
-Use the repo-local dev shell for local work:
+```text
+crates/
+  janus-core/          contracts, opaque handles, policy, and evidence
+  janus-conformance/   reusable provider contract tests
+  janus-executor/      permit consumption and approved-use execution
+  janus-provider-age/  native age-backed encrypted store
+  janus-providers/     provider adapters
+  janus-local/         local runtime integrations
+  janus-warden/        reference-only MCP server
+  janus-forge/         generated rotation and reviewed hooks
+  janus-mock/          in-memory test provider
+  janusd/              approved-use runtime and operator CLI
+go-envelope/           shipped transitional Go envelope
+docs/                  focused operator and cutover runbooks
+examples/              checked non-production handoff fixtures
+scripts/               release assurance and smoke tests
+```
+
+Canonical architecture decisions live in PPM project **JANUS** at
+`pm.barta.cm`, not as parallel design documents in this repository. Useful
+entries include:
+
+- `guideline/architecture-v1`
+- `guideline/backend-decision`
+- `guideline/repo-topology-adr`
+- `guideline/where-janus-lives`
+
+Fetch an entry with:
+
+```bash
+paimos knowledge get guideline architecture-v1 --project JANUS
+```
+
+## Build and test
+
+Use the repo-local development shell:
 
 ```bash
 direnv allow
 direnv exec . cargo test --workspace --locked
-# or: devenv shell -- cargo test --workspace --locked
 ```
 
-**Engine (Rust):**
+Or enter it explicitly:
+
 ```bash
-cargo build              # workspace build (skeleton until the engine tickets land)
-cargo test --workspace --locked
+devenv shell
+cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
-nix build .#janus-engine # native janusd + janus-warden package for NixOS consumers
+cargo test --workspace --locked
 ```
 
-**Engine release assurance gate:**
+On a supported Linux system, build the native Nix package:
+
+```bash
+nix build .#janus-engine
+```
+
+The package installs both `janusd` and `janus-warden` for supported Linux
+systems.
+
+### Release assurance
+
+Run the complete local gate with:
+
 ```bash
 devenv shell -- ./scripts/assure-engine-release.sh
 ```
 
-The Rust release workflow uses this same gate before publishing/signing
-`rust-engine-v*` images. It runs the workspace tests, the value-free Warden MCP
-smoke against both the prebuilt local binary and the engine container image,
-and the local `janusd env-file` operator smoke.
+The complete gate requires a working Docker CLI and daemon in addition to the
+tools supplied by the development shell.
 
-**Local Warden MCP smoke:**
-```bash
-devenv shell -- python3 scripts/smoke-warden-mcp.py
-```
+It exercises:
 
-The smoke launches `janus-warden` as a real MCP stdio process against a
-disposable `secretspec`/dotenv fixture, then verifies `initialize`,
-`tools/list`, `health`, `list_secrets`, `describe_secret`, and `request_use`.
-It asserts the transcript never contains the fixture secret value.
+- the locked Rust workspace test suite;
+- a real reference-only Warden MCP session;
+- the approval-to-env-file operator flow;
+- the Pharos beacon retirement flow; and
+- the engine container with the same value-free MCP assertions.
 
-**Local janusd env-file smoke:**
-```bash
-devenv shell -- ./scripts/smoke-janusd-env-file.sh
-```
+Rust engine releases publish a GHCR image, SPDX SBOM, build provenance, and a
+keyless cosign signature. Release CI verifies and smokes the exact digest it
+publishes.
 
-The smoke builds the repo-local `janusd`, seeds a disposable age-backed store,
-preflights the reviewed env-file target without a permit or secret read, then
-runs the real `approve issue` -> `approve permit` -> `env-file` flow. It
-verifies the rendered service env file is private, consumed by a tiny fixture
-service, and that command output never contains the fixture secret value. The
-checked fixture bundle lives in `examples/env-file-handoff/`; the operator
-handoff runbook is `docs/env-file-handoff-runbook.md`.
+The transitional envelope remains independently testable:
 
-**Engine container smoke:**
-```bash
-devenv shell -- ./scripts/smoke-engine-container.sh
-```
-
-The container smoke builds `Dockerfile.engine`, runs `janus-warden` from that
-image over MCP stdio, and reuses the same value-free assertions against a
-mounted disposable fixture. Containers are run with `--rm` and no network.
-
-**Published engine image smoke:**
-```bash
-devenv shell -- ./scripts/smoke-published-engine.sh
-```
-
-This resolves the published `rust-engine-v0.1.1` GHCR image to `image@sha256`,
-verifies GitHub build provenance and the keyless cosign signature for the
-release tag, then runs the same Warden MCP smoke against the digest-pinned
-image. Override `JANUS_PUBLISHED_ENGINE_TAG` to check another release.
-Release CI runs the same smoke after publishing, signing, and attesting a
-`rust-engine-v*` image, using the exact digest returned by the build step.
-
-**Engine image:**
-Publish a signed Rust engine image by creating a GitHub Release whose tag
-matches `rust-engine-v*`:
-
-```bash
-gh release create rust-engine-v0.1.0 --target main \
-  --title "Rust engine v0.1.0" \
-  --notes "First signed Janus Rust engine image."
-```
-
-The release workflow pushes `ghcr.io/markus-barta/janus/janus-engine`, signs it
-keyless with cosign, uploads an SPDX SBOM, publishes build provenance, then
-verifies and smokes the exact published digest before the job can pass.
-
-**Envelope (Go):**
 ```bash
 cd go-envelope
-go build ./... && go test ./...
+go build ./...
+go test ./...
 ```
 
-**Forge generated rotation (operator surface):**
+## Operator paths
+
+Janus keeps caller input intentionally small. Profiles own the sensitive
+bindings: secret reference, executor, destination, command, exact arguments,
+environment name, output path, and consumer metadata.
+
+### Managed command
+
+Preflight an executable and its exact argument vector without reading a
+secret or consuming a permit:
+
+```bash
+janusd run preflight --profile profile.deploy -- release apply
+```
+
+After reviewed approval, consume the permit once:
+
+```bash
+janusd run --profile profile.deploy --permit use_... -- release apply
+```
+
+### Service env file
+
+Preflight the reviewed destination:
+
+```bash
+janusd env-file preflight --profile profile.deploy-env
+```
+
+Render it with a single-use permit:
+
+```bash
+janusd env-file --profile profile.deploy-env --permit use_...
+```
+
+The output path and environment variable come from the profile. Janus writes
+the file atomically and privately, and reports only value-free outcome fields.
+See [`docs/env-file-handoff-runbook.md`](docs/env-file-handoff-runbook.md) for
+the complete checked flow.
+
+### Generated rotation
+
 ```bash
 janusd forge rotate-generated \
   --secret CANARY \
-  --reason JANUS-28-reviewed-rotation \
+  --reason JANUS-reviewed-rotation \
   --consumer-ref consumer.deploy \
   --validation deploy-smoke \
   --reload exec-hook:reload-deploy \
   --hook-manifest /etc/janus/forge-hooks.toml
 ```
 
-Hook manifests are reviewed local config. Programs must be absolute paths,
-arguments are arrays, hook stdio is discarded, and the hook environment is
-cleared before Janus adds value-free context variables.
+Hook programs and arguments come from reviewed local configuration. Hook stdio
+is discarded and the environment is cleared before Janus adds value-free
+context.
 
-```toml
-[validation."deploy-smoke"]
-program = "/usr/bin/true"
-timeout_seconds = 30
+### Lifecycle and retirement
 
-[reload.exec_hook."reload-deploy"]
-program = "/usr/local/libexec/janus/reload-deploy"
-args = ["--service", "deploy"]
-```
+Lifecycle commands update metadata and evidence; they do not silently delete
+provider values. The reviewed sequence is documented in
+[`docs/destroy-lifecycle-runbook.md`](docs/destroy-lifecycle-runbook.md).
 
-**Approved-use run handoff (JANUS-28):**
-Warden issues opaque permits; `janusd run` consumes them through a local
-single-use handoff directory. The directory is local to one host and is created
-private (`0700`), with permit records written private (`0600`).
-
-Both sides must agree on the identity and policy bindings:
+For a declared Pharos host retirement:
 
 ```bash
-export JANUS_PERMIT_DIR=/run/janus/permits
-export JANUS_WARDEN_EXECUTOR=janus-run@csb1
-export JANUS_RUN_EXECUTOR=janus-run@csb1
-export JANUS_WARDEN_SCOPE=janus/prod
-export JANUS_RUN_SCOPE=janus/prod
-export JANUS_WARDEN_DESTINATION=deploy-api
-export JANUS_WARDEN_METADATA_FILE=/etc/janus/metadata.toml
-export JANUS_AGE_METADATA_FILE=/etc/janus/metadata.toml
-export JANUS_RUN_PROFILE_MANIFEST=/etc/janus/managed-commands.toml
+janusd pharos-beacon retire \
+  --host ares \
+  --disposition destroyed \
+  --intent-file /etc/janus/pharos-retirement.toml \
+  --metadata-file /etc/janus/metadata.toml \
+  --profile-manifest /etc/janus/approved-use.toml \
+  --state-dir /var/lib/janus/pharos-retirements
 ```
 
-Owner/class metadata is a Janus overlay loaded beside the secretspec allowlist.
-Without it, list/describe stay value-free but normal approved-use paths fail
-closed until every manifest entry has owner and class metadata:
+Use `janusd pharos-beacon reconcile` with the same host, disposition, intent,
+metadata, profile-manifest, and state-directory controls to inspect interrupted
+or drifted retirements without reading secret material.
 
-```toml
-[defaults]
-owner = "platform"
-classification = "normal"
+## Contributing
 
-[[secrets]]
-name = "DEPLOY_TOKEN"
-owner = "release"
-classification = "high_value"
-```
+Janus is security-sensitive infrastructure. Small, reviewable changes beat
+clever shortcuts.
 
-The managed command profile owns executor, destination, secret ref, binary, and
-exact argv. Caller input supplies only the opaque permit id and candidate argv:
-
-```toml
-[[profiles]]
-id = "profile.deploy"
-secret_ref = "sec_deploy_token"
-executor = "janus-run@csb1"
-destination = "deploy-api"
-env = "DEPLOY_TOKEN"
-binary = "/usr/local/libexec/janus/deploy"
-allowed_args = ["release", "apply"]
-
-[profiles.consumer]
-consumer_ref = "consumer.deploy"
-owner = "janusd"
-environment = "prod"
-blast_radius = "deploy-api"
-```
-
-Validate the reviewed executable and exact argv before issuing approval or
-permit material. This path does not initialize a secret backend or consume a
-permit:
+Before opening a pull request:
 
 ```bash
-janusd run preflight --profile profile.deploy -- release apply
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --workspace --locked
 ```
 
-```bash
-janusd run --profile profile.deploy --permit use_... -- release apply
-```
+When a change touches an operator path, extend the corresponding smoke test and
+assert that fixture secret values cannot appear in captured output.
 
-For service/host handoff, an env-file profile owns the env var name and output
-path. The caller still supplies only the opaque permit id and reviewed profile:
+## License
 
-```toml
-[[env_files]]
-id = "profile.deploy-env"
-secret_ref = "sec_deploy_token"
-executor = "janus-run@csb1"
-destination = "deploy-api"
-env = "DEPLOY_TOKEN"
-output = "/run/janus/env/deploy-api.env"
+Janus is free and open-source software licensed under
+[`AGPL-3.0-only`](LICENSE).
 
-[env_files.consumer]
-consumer_ref = "consumer.deploy-api"
-kind = "service"
-owner = "janusd"
-environment = "prod"
-blast_radius = "deploy-api"
-```
-
-Profiles may also declare a reviewed SHA-256 sidecar when a consumer needs a
-value-free verification artifact. The sidecar is derived inside the approved-use
-executor, written atomically as a private file, and never returns the secret
-literal:
-
-```toml
-[env_files.hash_sidecar]
-format = "pharos-beacon-token-hashes-v1"
-subject = "deploy-api"
-output = "/run/janus/env/deploy-api-token-hash.json"
-```
-
-Before issuing a permit, preflight the reviewed profile and target path without
-reading secret material. Preflight also checks the sidecar target when one is
-declared:
-
-```bash
-janusd env-file preflight --profile profile.deploy-env
-```
-
-```bash
-janusd env-file --profile profile.deploy-env --permit use_...
-```
-
-`janusd env-file` writes a private env file and optional hash sidecar atomically
-(`0600` on Unix) and prints only value-free outcome fields; it rejects
-caller-supplied env names, output paths, raw values, executors, and
-destinations.
-
-For declared Pharos host retirement, `janusd pharos-beacon retire` consumes the
-reviewed retirement intent and matching env-file profile. It disables approved
-use before quarantining generated outputs, advances lifecycle metadata through
-`pending_delete` to `destroyed`, and records a durable tombstone. The encrypted
-provider value is retained; no command output contains the credential or its
-derived hash. A repeated invocation resumes from persisted evidence and is a
-no-op after completion. `janusd pharos-beacon reconcile` reports value-free
-`complete`, `needs_finalize`, `drift`, or `action_required` state without
-mutating lifecycle state.
-
-The permit id is power-bearing and should not be logged casually. A copied or
-stale permit still has to pass principal, executor, destination, profile, secret
-ref, manifest membership, expiry, and audit checks before a value is read.
-
-## Provenance
-
-This repo was extracted from `nixcfg/hosts/csb1/docker/janus` with full history
-(`git subtree split`, 2026-06-24). Public-repo hygiene applied:
-
-- **License:** AGPL-3.0-only (matching the PAIMOS/INSPR family).
-- **No infra inventory:** `agenix-catalog.json` (the deploy-time catalog of secret
-  *names/sources/classifications*) was **scrubbed from all history** — it is not
-  needed for the build (mounted at runtime from nixcfg) and is infra
-  reconnaissance data that does not belong in a public repo.
-- **No secret values, private keys, or `.age` files** are present — verified at
-  extraction time and after the scrub. `bootstrap-zitadel-env.sh` only references
-  env vars and *generates* secrets at runtime.
-
----
-
-*History: extracted 2026-06-24 from nixcfg. Sits alongside **PAIMOS** and
-**fleetcom** in the INSPR family.*
+You can run it, inspect it, modify it, and redistribute it under those terms.
+If you modify Janus and let users interact with that version over a network,
+AGPL section 13 requires an offer of corresponding source for that modified
+version.

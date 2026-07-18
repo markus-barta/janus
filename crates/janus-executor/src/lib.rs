@@ -1,7 +1,7 @@
-//! Approved-use execution skeleton.
+//! Approved-use execution layer.
 //!
-//! This crate is the first JANUS-28 execution-layer shape: it consumes an
-//! opaque [`janus_core::UsePermit`] through the broker, re-checks principal,
+//! This crate consumes an opaque [`janus_core::UsePermit`] through the broker,
+//! re-checks principal,
 //! executor, destination, expiry, manifest membership, and required audit, then
 //! hands the secret value only to managed-command internals. Public outcomes are
 //! value-free.
@@ -96,7 +96,7 @@ pub struct ManagedCommandProfileSpec {
     pub env_name: SafeLabel,
     /// Reviewed executable path. Must be absolute.
     pub binary: PathBuf,
-    /// Exact reviewed argv for this first skeleton.
+    /// Exact reviewed argv for this execution profile.
     pub allowed_args: Vec<String>,
     /// Reviewed process limits for timeout and model-facing output.
     pub runtime_limits: ManagedCommandRuntimeLimits,
@@ -425,7 +425,7 @@ impl ManagedCommandProfile {
         &self.binary
     }
 
-    /// Exact reviewed argv for this first skeleton.
+    /// Exact reviewed argv for this execution profile.
     pub fn allowed_args(&self) -> &[String] {
         &self.allowed_args
     }

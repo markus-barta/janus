@@ -9,7 +9,7 @@ are retained as the reproducible record / rollback reference.
 
 ## Prerequisites (one-time)
 
-1. ✅ **Done:** repo published at `github.com/markus-barta/janus` (public, AGPL-3.0).
+1. ✅ **Done:** repo published at `github.com/markus-barta/janus` (public, AGPL-3.0-only).
    The `agenix-catalog.json` infra inventory was scrubbed from history — it stays
    nixcfg-only deploy data, mounted at runtime.
 2. Push triggers `.github/workflows/go-envelope.yml` `build-test`. Confirm green.

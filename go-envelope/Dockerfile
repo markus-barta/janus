@@ -8,6 +8,9 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X 'main.buildCommit=${JANUS_BUILD_COMMIT}' -X 'main.buildTime=${JANUS_BUILD_TIME}'" -o /out/janus .
 
 FROM alpine:3.22
+LABEL org.opencontainers.image.title="Janus governance envelope"
+LABEL org.opencontainers.image.source="https://github.com/markus-barta/janus"
+LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
 RUN addgroup -S janus && adduser -S -G janus janus
 WORKDIR /app
 COPY --from=build /out/janus /app/janus

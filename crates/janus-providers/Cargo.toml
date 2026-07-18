@@ -1,6 +1,6 @@
 [package]
 name = "janus-providers"
-description = "Backend implementations of janus-core::SecretStore: age/agenix, secretspec, OpenBao, OS keyring."
+description = "Secretspec adapter for the Janus SecretStore contract."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,9 +1,8 @@
-//! # janusd — the Janus daemon
+//! # janusd - the Janus approved-use runtime and operator CLI
 //!
-//! Wires `janus-core` + `janus-warden` + `janus-forge` into the serving binary
-//! that will supersede the Go envelope's serving role at `vault.barta.cm`.
-//! The deployed service is still `../../go-envelope`; this binary is growing
-//! narrow engine execution surfaces behind value-free broker contracts.
+//! Wires `janus-core`, `janus-warden`, and `janus-forge` into narrow execution
+//! and lifecycle surfaces behind value-free broker contracts. The deployed web
+//! oversight service remains in `../../go-envelope`.
 
 #![forbid(unsafe_code)]
 

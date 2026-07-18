@@ -1,6 +1,6 @@
 [package]
 name = "janusd"
-description = "The Janus daemon — wires the engine crates into the serving binary that will supersede the Go envelope."
+description = "Janus approved-use runtime and operator CLI."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
