@@ -1965,7 +1965,13 @@ mod tests {
             &fixture.source.join(STATE_FILE),
             &serde_json::to_vec(&source).unwrap(),
         );
-        assert!(build_runner(&fixture).status().is_err());
+        assert!(matches!(
+            build_runner(&fixture).preflight(SystemTime::now()),
+            Err(JanusError::PolicyDenied {
+                reason_code: "scope_transfer_collision",
+                ..
+            })
+        ));
 
         let fixture = make_fixture(ScopeTransferMode::BoundaryChangingTransfer);
         assert!(matches!(
@@ -1998,6 +2004,60 @@ mod tests {
             .bundle
             .is_none());
         assert!(!runner.work_paths().unwrap().previous.exists());
+    }
+
+    #[test]
+    fn rollback_recovers_each_interrupted_mutating_phase() {
+        for phase in [
+            MigrationPhase::Applying,
+            MigrationPhase::Staged,
+            MigrationPhase::Swapping,
+            MigrationPhase::Applied,
+        ] {
+            let fixture = make_fixture(ScopeTransferMode::BoundaryChangingTransfer);
+            let runner = build_runner(&fixture);
+            let before = inspect_state_root(&fixture.target, None, false)
+                .unwrap()
+                .fingerprint;
+            runner.preflight(SystemTime::now()).unwrap();
+
+            if phase == MigrationPhase::Applied {
+                runner.apply(SystemTime::now()).unwrap();
+            } else {
+                let mut journal = runner.read_required_journal().unwrap();
+                if matches!(phase, MigrationPhase::Staged | MigrationPhase::Swapping) {
+                    let source =
+                        inspect_state_root(&fixture.source, Some(&fixture.source_scope), true)
+                            .unwrap()
+                            .bundle
+                            .unwrap();
+                    let output = transform_bundle(
+                        &source,
+                        runner.manifest.mode(),
+                        &fixture.destination_scope,
+                    )
+                    .unwrap();
+                    write_bundle_root(&runner.work_paths().unwrap().stage, &output).unwrap();
+                }
+                if phase == MigrationPhase::Swapping {
+                    fs::rename(&fixture.target, runner.work_paths().unwrap().previous).unwrap();
+                }
+                journal.phase = phase;
+                runner.write_journal(&journal).unwrap();
+            }
+
+            let restored = runner.rollback().unwrap();
+            assert_eq!(restored.phase, "rolled_back");
+            assert_eq!(restored.target_fingerprint, before);
+            assert!(inspect_state_root(&fixture.target, None, false)
+                .unwrap()
+                .bundle
+                .is_none());
+            let work = runner.work_paths().unwrap();
+            assert!(!work.stage.exists());
+            assert!(!work.previous.exists());
+            assert!(!work.failed.exists());
+        }
     }
 
     #[test]

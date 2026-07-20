@@ -285,7 +285,10 @@ proptest! {
                 &Destination::new(destination.clone()).unwrap(),
                 valid_at,
             ),
-            Err(JanusError::PermitInvalid { .. })
+            Err(JanusError::PermitInvalid {
+                reason_code: "denied_scope_mismatch",
+                ..
+            })
         ));
         assert!(matches!(
             copied.matches(
@@ -294,7 +297,10 @@ proptest! {
                 &Destination::new(destination.clone()).unwrap(),
                 valid_at,
             ),
-            Err(JanusError::PermitInvalid { .. })
+            Err(JanusError::PermitInvalid {
+                reason_code: "denied_wrong_executor",
+                ..
+            })
         ));
         assert!(matches!(
             copied.matches(
@@ -303,7 +309,10 @@ proptest! {
                 &Destination::new(wrong_destination).unwrap(),
                 valid_at,
             ),
-            Err(JanusError::PermitInvalid { .. })
+            Err(JanusError::PermitInvalid {
+                reason_code: "denied_unapproved_destination",
+                ..
+            })
         ));
         assert!(matches!(
             copied.matches(
@@ -312,7 +321,10 @@ proptest! {
                 &Destination::new(destination.clone()).unwrap(),
                 SystemTime::UNIX_EPOCH + Duration::from_secs(ttl),
             ),
-            Err(JanusError::PermitInvalid { .. })
+            Err(JanusError::PermitInvalid {
+                reason_code: "denied_expired_permit",
+                ..
+            })
         ));
 
         let mut tampered_snapshot = permit.snapshot();

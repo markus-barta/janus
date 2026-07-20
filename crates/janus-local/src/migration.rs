@@ -1591,13 +1591,31 @@ mod tests {
     #[test]
     fn malformed_mixed_risky_low_space_and_failed_postflight_are_denied() {
         let (_dir, manifest_path, approval_path) = fixture();
-        let mut malformed: Value =
+        fs::write(&approval_path, b"{").unwrap();
+        assert!(matches!(
+            build_runner(&manifest_path).preflight(SystemTime::now()),
+            Err(JanusError::PolicyDenied {
+                reason_code: "migration_record_invalid",
+                ..
+            })
+        ));
+
+        let (_dir, manifest_path, approval_path) = fixture();
+        let mut unknown_version: Value =
             serde_json::from_slice(&fs::read(&approval_path).unwrap()).unwrap();
-        malformed["version"] = Value::from(1);
-        fs::write(&approval_path, serde_json::to_vec(&malformed).unwrap()).unwrap();
-        assert!(build_runner(&manifest_path)
-            .preflight(SystemTime::now())
-            .is_err());
+        unknown_version["version"] = Value::from(2);
+        fs::write(
+            &approval_path,
+            serde_json::to_vec(&unknown_version).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            build_runner(&manifest_path).preflight(SystemTime::now()),
+            Err(JanusError::PolicyDenied {
+                reason_code: "migration_partial_state",
+                ..
+            })
+        ));
 
         let (_dir, manifest_path, _) = fixture();
         let mut manifest: Value =

@@ -269,6 +269,11 @@ mod tests {
             "\"schema_version\": 1, \"extra\": true,"
         ))
         .is_err());
+        assert!(MigrationManifest::parse_json(
+            &manifest_json().replace("\"schema_version\": 1", "\"schema_version\": 2")
+        )
+        .is_err());
+        assert!(MigrationManifest::parse_json("{\"schema_version\":1").is_err());
     }
 
     #[test]

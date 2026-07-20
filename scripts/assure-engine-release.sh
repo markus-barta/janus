@@ -15,6 +15,10 @@ echo "==> janus engine release assurance: bounded security properties"
 python3 scripts/run-security-properties.py --self-test
 python3 scripts/run-security-properties.py --release
 
+echo "==> janus engine release assurance: reviewed adversarial recovery corpus"
+python3 scripts/run-adversarial-scenarios.py --self-test
+python3 scripts/run-adversarial-scenarios.py
+
 echo "==> janus engine release assurance: cargo tests"
 cargo test --all --locked
 
