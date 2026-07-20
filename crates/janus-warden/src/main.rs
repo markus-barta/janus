@@ -25,7 +25,7 @@ use janus_local::{
 };
 use janus_provider_age::AgeSecretStore;
 use janus_providers::SecretspecStore;
-use janus_warden::{tool_definitions, WardenRuntime};
+use janus_warden::{call_tool_guarded, tool_definitions, WardenEndpointGuard, WardenRuntime};
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, Implementation, ListToolsResult,
@@ -126,6 +126,7 @@ impl SecretStore for WardenStore {
 /// `rmcp` server state.
 struct McpWarden {
     runtime: Arc<Mutex<Runtime>>,
+    guard: WardenEndpointGuard<AuditWrite>,
     principal: PrincipalChain,
 }
 
@@ -174,12 +175,15 @@ impl ServerHandler for McpWarden {
             .arguments
             .map(Value::Object)
             .unwrap_or_else(|| Value::Object(Default::default()));
-        let response = self
-            .runtime
-            .lock()
-            .await
-            .call_tool_json(req.name.as_ref(), args, &self.principal, SystemTime::now())
-            .await;
+        let response = call_tool_guarded(
+            self.runtime.as_ref(),
+            &self.guard,
+            req.name.as_ref(),
+            args,
+            &self.principal,
+            SystemTime::now(),
+        )
+        .await;
         let response_value =
             serde_json::to_value(&response).expect("Warden tool response should serialize");
         if response.ok {
@@ -202,6 +206,7 @@ async fn main() -> Result<()> {
     let runtime = build_runtime_from_env(release).await?;
     let server = McpWarden {
         runtime: Arc::new(Mutex::new(runtime)),
+        guard: WardenEndpointGuard::new(AuditWrite::accepting()),
         principal,
     };
 

@@ -8,12 +8,17 @@
 
 #![forbid(unsafe_code)]
 
-use std::time::SystemTime;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Mutex as StdMutex,
+};
+use std::time::{Duration, Instant, SystemTime};
 
 use janus_core::{
-    AuditAction, AuditSink, HealthStatus, JanusError, JanusResult, PrincipalChain, ProductMode,
-    ProfileId, Purpose, ReleaseAdmission, RuntimeAction, RuntimePlane, SecretBroker,
-    SecretDescriptor, SecretRef, SecretStore, Severity, TrustLevel, UsePermit,
+    runtime_endpoint_policy, AuditAction, AuditEvent, AuditOutcome, AuditSink, HealthStatus,
+    JanusError, JanusResult, PrincipalChain, ProductMode, ProfileId, Purpose, ReleaseAdmission,
+    RuntimeAbuseBudget, RuntimeAction, RuntimePlane, RuntimeTimeoutPolicy, RuntimeTransport,
+    SecretBroker, SecretDescriptor, SecretRef, SecretStore, Severity, TrustLevel, UsePermit,
 };
 use janus_local::{NoopPermitStore, PermitStore};
 use serde::Serialize;
@@ -226,6 +231,255 @@ pub struct ToolErrorView {
     pub reason_code: &'static str,
     /// Model-safe detail.
     pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WardenEndpointLimits {
+    max_argument_bytes: usize,
+    timeout: Duration,
+    rate_requests: u32,
+    rate_window: Duration,
+}
+
+impl WardenEndpointLimits {
+    fn reviewed() -> Self {
+        let policy = runtime_endpoint_policy(RuntimeAction::WardenHealth);
+        debug_assert_eq!(policy.transport, RuntimeTransport::McpStdio);
+        let RuntimeTimeoutPolicy::PerCallMillis(timeout_ms) = policy.timeout else {
+            unreachable!("Warden endpoint policy must declare a per-call timeout")
+        };
+        let RuntimeAbuseBudget::FixedWindow {
+            requests,
+            window_ms,
+        } = policy.abuse_budget
+        else {
+            unreachable!("Warden endpoint policy must declare a fixed-window abuse budget")
+        };
+        Self {
+            max_argument_bytes: policy.max_serialized_arguments_bytes,
+            timeout: Duration::from_millis(timeout_ms),
+            rate_requests: requests,
+            rate_window: Duration::from_millis(window_ms),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RateWindow {
+    started_at: Instant,
+    admitted: u32,
+}
+
+/// Transport-level admission guard for Warden MCP calls.
+///
+/// The guard is deliberately separate from the broker lock so overload,
+/// timeout, and payload denials can still write value-free audit evidence.
+pub struct WardenEndpointGuard<A> {
+    active_calls: AtomicUsize,
+    rate: StdMutex<RateWindow>,
+    audit: StdMutex<A>,
+    limits: WardenEndpointLimits,
+}
+
+struct WardenCallPermit<'a> {
+    active_calls: &'a AtomicUsize,
+}
+
+impl Drop for WardenCallPermit<'_> {
+    fn drop(&mut self) {
+        self.active_calls.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl<A> WardenEndpointGuard<A>
+where
+    A: AuditSink,
+{
+    /// Build a guard from the release-reviewed endpoint policy.
+    pub fn new(audit: A) -> Self {
+        Self::with_limits(audit, WardenEndpointLimits::reviewed())
+    }
+
+    fn with_limits(audit: A, limits: WardenEndpointLimits) -> Self {
+        Self {
+            active_calls: AtomicUsize::new(0),
+            rate: StdMutex::new(RateWindow {
+                started_at: Instant::now(),
+                admitted: 0,
+            }),
+            audit: StdMutex::new(audit),
+            limits,
+        }
+    }
+
+    fn admit<'a>(
+        &'a self,
+        name: &str,
+        args: &Value,
+        principal: &PrincipalChain,
+        arrived_at: Instant,
+    ) -> Result<WardenCallPermit<'a>, ToolCallResponse> {
+        let Some(action) = warden_runtime_action(name) else {
+            return Err(self.denial_response(
+                name,
+                args,
+                "denied_unknown_tool",
+                "unknown or unavailable Warden tool",
+                principal,
+            ));
+        };
+        let policy = runtime_endpoint_policy(action);
+        debug_assert_eq!(policy.transport, RuntimeTransport::McpStdio);
+        let argument_bytes = serde_json::to_vec(args)
+            .map(|encoded| encoded.len())
+            .unwrap_or(usize::MAX);
+        if argument_bytes > self.limits.max_argument_bytes {
+            return Err(self.denial_response(
+                name,
+                args,
+                "denied_arguments_too_large",
+                "tool arguments exceed the reviewed byte limit",
+                principal,
+            ));
+        }
+
+        let rate_limited = {
+            let Ok(mut rate) = self.rate.lock() else {
+                return Err(audit_unavailable_response());
+            };
+            if arrived_at.saturating_duration_since(rate.started_at) >= self.limits.rate_window {
+                rate.started_at = arrived_at;
+                rate.admitted = 0;
+            }
+            if rate.admitted >= self.limits.rate_requests {
+                true
+            } else {
+                rate.admitted += 1;
+                false
+            }
+        };
+        if rate_limited {
+            return Err(self.denial_response(
+                name,
+                args,
+                "denied_rate_limited",
+                "tool call exceeded the reviewed abuse budget",
+                principal,
+            ));
+        }
+
+        if self
+            .active_calls
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(self.denial_response(
+                name,
+                args,
+                "denied_busy",
+                "another Warden backend call is active",
+                principal,
+            ));
+        }
+        Ok(WardenCallPermit {
+            active_calls: &self.active_calls,
+        })
+    }
+
+    fn timeout(&self) -> Duration {
+        self.limits.timeout
+    }
+
+    fn denial_response(
+        &self,
+        name: &str,
+        args: &Value,
+        reason_code: &'static str,
+        detail: &'static str,
+        principal: &PrincipalChain,
+    ) -> ToolCallResponse {
+        let audit_result = self.audit.lock().map_err(|_| ()).and_then(|mut audit| {
+            audit
+                .record(AuditEvent::new(
+                    warden_denial_action(name),
+                    AuditOutcome::Denied,
+                    reason_code,
+                    Severity::Warning,
+                    optional_secret_ref(args),
+                    principal,
+                ))
+                .map_err(|_| ())
+        });
+        if audit_result.is_err() {
+            return audit_unavailable_response();
+        }
+        denial_response(reason_code, detail)
+    }
+}
+
+/// Apply the release-reviewed Warden admission, concurrency, and timeout
+/// policy around one SDK-agnostic tool dispatch.
+pub async fn call_tool_guarded<S, A, P, G>(
+    runtime: &tokio::sync::Mutex<WardenRuntime<S, A, P>>,
+    guard: &WardenEndpointGuard<G>,
+    name: &str,
+    args: Value,
+    principal: &PrincipalChain,
+    now: SystemTime,
+) -> ToolCallResponse
+where
+    S: SecretStore,
+    A: AuditSink,
+    P: PermitStore,
+    G: AuditSink,
+{
+    let _permit = match guard.admit(name, &args, principal, Instant::now()) {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
+    let Ok(mut runtime) = runtime.try_lock() else {
+        return guard.denial_response(
+            name,
+            &args,
+            "denied_busy",
+            "another Warden backend call is active",
+            principal,
+        );
+    };
+    match tokio::time::timeout(
+        guard.timeout(),
+        runtime.call_tool_json(name, args.clone(), principal, now),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => guard.denial_response(
+            name,
+            &args,
+            "denied_timeout",
+            "tool call exceeded the reviewed timeout",
+            principal,
+        ),
+    }
+}
+
+fn denial_response(reason_code: &'static str, detail: &'static str) -> ToolCallResponse {
+    ToolCallResponse {
+        ok: false,
+        result: None,
+        error: Some(ToolErrorView {
+            reason_code,
+            detail: detail.to_string(),
+        }),
+        value_returned: false,
+    }
+}
+
+fn audit_unavailable_response() -> ToolCallResponse {
+    denial_response(
+        "audit_sink_unavailable",
+        "required audit evidence could not be written",
+    )
 }
 
 /// SDK-agnostic Warden handler over the Janus broker.
@@ -684,14 +938,16 @@ fn tool_error_view(error: JanusError) -> ToolErrorView {
 mod tests {
     use std::fmt;
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, Instant, SystemTime};
 
     use janus_core::{
-        AuditAction, AuditOutcome, AuditWrite, Destination, EgressMode, ExecutorRef, JanusError,
-        ManifestCatalog, OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind,
-        ProfileId, ProfilePolicy, Purpose, ReleaseAdmissionDecision, ReleaseAdmissionReceipt,
-        ReleaseChannelPolicy, SafeLabel, ScopePathV1, ScopeRef, SecretBroker, SecretClass,
-        SecretLifecycle, SecretMeta, SecretName, SecretRef, Severity, TrustLevel, UseProfile,
+        AuditAction, AuditEvent, AuditOutcome, AuditWrite, Destination, EgressMode, ExecutorRef,
+        HealthStatus, JanusError, ManifestCatalog, OwnerRef, Principal, PrincipalChain,
+        PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReleaseAdmissionDecision,
+        ReleaseAdmissionReceipt, ReleaseChannelPolicy, RotationOutcome, RotationSpec, SafeLabel,
+        ScopePathV1, ScopeRef, SecretBroker, SecretClass, SecretDescriptor, SecretLifecycle,
+        SecretMeta, SecretName, SecretRef, SecretValue, Severity, StoreCapabilities, TrustLevel,
+        UseProfile,
     };
     use janus_mock::MockStore;
     use proptest::prelude::*;
@@ -898,6 +1154,86 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct SharedAudit {
+        events: Arc<Mutex<Vec<AuditEvent>>>,
+        fail: bool,
+    }
+
+    impl AuditSink for SharedAudit {
+        fn record(&mut self, event: AuditEvent) -> JanusResult<()> {
+            if self.fail {
+                return Err(JanusError::AuditUnavailable {
+                    detail: "configured transport audit failure".to_string(),
+                });
+            }
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    struct DelayedStore {
+        inner: MockStore,
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl SecretStore for DelayedStore {
+        fn capabilities(&self) -> StoreCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn health(&self) -> JanusResult<HealthStatus> {
+            tokio::time::sleep(self.delay).await;
+            self.inner.health().await
+        }
+
+        async fn list(&self) -> JanusResult<Vec<SecretDescriptor>> {
+            self.inner.list().await
+        }
+
+        async fn get(&self, name: &SecretName) -> JanusResult<SecretValue> {
+            self.inner.get(name).await
+        }
+
+        async fn set(&mut self, name: &SecretName, value: SecretValue) -> JanusResult<()> {
+            self.inner.set(name, value).await
+        }
+
+        async fn rotate(
+            &mut self,
+            name: &SecretName,
+            spec: &RotationSpec,
+        ) -> JanusResult<RotationOutcome> {
+            self.inner.rotate(name, spec).await
+        }
+
+        async fn delete(&mut self, name: &SecretName) -> JanusResult<()> {
+            self.inner.delete(name).await
+        }
+    }
+
+    fn delayed_runtime(delay: Duration) -> WardenRuntime<DelayedStore, AuditWrite> {
+        let (runtime, _) = runtime();
+        let (store, policy, audit) = runtime.into_broker().into_parts();
+        WardenRuntime::new(SecretBroker::new(
+            DelayedStore {
+                inner: store,
+                delay,
+            },
+            policy,
+            audit,
+        ))
+    }
+
+    fn response_reason(response: &ToolCallResponse) -> &'static str {
+        response
+            .error
+            .as_ref()
+            .expect("denial response should contain an error")
+            .reason_code
+    }
+
     fn assert_integrity_event(
         event: &janus_core::AuditEvent,
         action: AuditAction,
@@ -992,6 +1328,146 @@ mod tests {
             expected,
             "Warden MCP tool names, descriptions, or schemas changed; update the reviewed snapshot intentionally"
         );
+    }
+
+    #[tokio::test]
+    async fn endpoint_guard_enforces_size_busy_rate_and_audit_failure() {
+        let principal = principal();
+        let canary = format!(
+            "SENSITIVE_CANARY_REQUEST_BODY_{}",
+            "x".repeat(janus_core::WARDEN_MAX_ARGUMENT_BYTES)
+        );
+
+        let audit = SharedAudit::default();
+        let guard = WardenEndpointGuard::new(audit.clone());
+        let (runtime, _) = runtime();
+        let runtime = tokio::sync::Mutex::new(runtime);
+        let oversized = call_tool_guarded(
+            &runtime,
+            &guard,
+            "describe_secret",
+            json!({"secret_ref": canary}),
+            &principal,
+            SystemTime::UNIX_EPOCH,
+        )
+        .await;
+        assert_eq!(response_reason(&oversized), "denied_arguments_too_large");
+        let rendered = serde_json::to_string(&oversized).unwrap();
+        assert!(!rendered.contains("SENSITIVE_CANARY_REQUEST_BODY"));
+        assert_eq!(
+            audit.events.lock().unwrap().last().unwrap().reason_code,
+            "denied_arguments_too_large"
+        );
+
+        let busy_audit = SharedAudit::default();
+        let busy_guard = WardenEndpointGuard::new(busy_audit.clone());
+        let held = busy_guard
+            .admit("health", &json!({}), &principal, Instant::now())
+            .expect("first call should acquire the single active slot");
+        let busy = call_tool_guarded(
+            &runtime,
+            &busy_guard,
+            "health",
+            json!({}),
+            &principal,
+            SystemTime::UNIX_EPOCH,
+        )
+        .await;
+        assert_eq!(response_reason(&busy), "denied_busy");
+        assert_eq!(
+            busy_audit
+                .events
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .reason_code,
+            "denied_busy"
+        );
+        drop(held);
+
+        let rate_audit = SharedAudit::default();
+        let rate_guard = WardenEndpointGuard::with_limits(
+            rate_audit.clone(),
+            WardenEndpointLimits {
+                max_argument_bytes: janus_core::WARDEN_MAX_ARGUMENT_BYTES,
+                timeout: Duration::from_secs(1),
+                rate_requests: 1,
+                rate_window: Duration::from_secs(60),
+            },
+        );
+        let admitted = rate_guard
+            .admit("health", &json!({}), &principal, Instant::now())
+            .expect("first request should consume the abuse budget");
+        drop(admitted);
+        let rate_limited = call_tool_guarded(
+            &runtime,
+            &rate_guard,
+            "health",
+            json!({}),
+            &principal,
+            SystemTime::UNIX_EPOCH,
+        )
+        .await;
+        assert_eq!(response_reason(&rate_limited), "denied_rate_limited");
+        assert_eq!(
+            rate_audit
+                .events
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .reason_code,
+            "denied_rate_limited"
+        );
+
+        let failing_guard = WardenEndpointGuard::new(AuditWrite::failing());
+        let audit_failure = call_tool_guarded(
+            &runtime,
+            &failing_guard,
+            "describe_secret",
+            json!({"secret_ref": "x".repeat(janus_core::WARDEN_MAX_ARGUMENT_BYTES)}),
+            &principal,
+            SystemTime::UNIX_EPOCH,
+        )
+        .await;
+        assert_eq!(response_reason(&audit_failure), "audit_sink_unavailable");
+        assert!(!serde_json::to_string(&audit_failure)
+            .unwrap()
+            .contains("SENSITIVE_CANARY"));
+    }
+
+    #[tokio::test]
+    async fn endpoint_guard_cancels_timed_out_backend_call_and_audits_safely() {
+        let audit = SharedAudit::default();
+        let guard = WardenEndpointGuard::with_limits(
+            audit.clone(),
+            WardenEndpointLimits {
+                max_argument_bytes: janus_core::WARDEN_MAX_ARGUMENT_BYTES,
+                timeout: Duration::from_millis(5),
+                rate_requests: janus_core::WARDEN_RATE_REQUESTS,
+                rate_window: Duration::from_millis(janus_core::WARDEN_RATE_WINDOW_MS),
+            },
+        );
+        let runtime = tokio::sync::Mutex::new(delayed_runtime(Duration::from_millis(50)));
+        let response = call_tool_guarded(
+            &runtime,
+            &guard,
+            "health",
+            json!({}),
+            &principal(),
+            SystemTime::UNIX_EPOCH,
+        )
+        .await;
+
+        assert_eq!(response_reason(&response), "denied_timeout");
+        assert!(!response.value_returned);
+        let events = audit.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, AuditAction::BackendHealth);
+        assert_eq!(events[0].outcome, AuditOutcome::Denied);
+        assert_eq!(events[0].reason_code, "denied_timeout");
+        assert!(!events[0].value_returned);
     }
 
     #[tokio::test]

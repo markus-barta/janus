@@ -40,7 +40,13 @@ pub use error::{JanusError, JanusResult};
 pub use manifest::ManifestCatalog;
 pub use metadata::{SecretMetadataOverlay, SecretMetadataPatch};
 pub use migration::{MigrationCompatibility, MigrationManifest, MigrationPhase, MigrationRisk};
-pub use plane::{authorize_runtime_action, RuntimeAction, RuntimePlane};
+pub use plane::{
+    authorize_runtime_action, runtime_endpoint_matrix, runtime_endpoint_policy, RuntimeAbuseBudget,
+    RuntimeAction, RuntimeControlApplicability, RuntimeEndpointPolicy, RuntimeInputEncoding,
+    RuntimePlane, RuntimeTimeoutPolicy, RuntimeTransport, CLI_MAX_ARGUMENT_BYTES,
+    RUNTIME_ENDPOINT_POLICIES, WARDEN_CALL_TIMEOUT_MS, WARDEN_MAX_ARGUMENT_BYTES,
+    WARDEN_RATE_REQUESTS, WARDEN_RATE_WINDOW_MS,
+};
 pub use policy::{
     ApprovalGrant, ApprovalGrantScope, ApprovalGrantSnapshot, ApprovalId, ClassPermitPolicy,
     EgressMode, PermitId, PermitIssuer, PolicyDecision, ProfileId, ProfilePolicy, Purpose,

@@ -7,6 +7,10 @@ cd "${repo}"
 echo "==> janus engine release assurance: trusted release admission fixtures"
 scripts/test-release-admission.sh
 
+echo "==> janus engine release assurance: closed runtime endpoint policy matrix"
+cargo test --locked -p janus-core runtime_endpoint_policy
+cargo test --locked -p janus-warden endpoint_guard
+
 echo "==> janus engine release assurance: cargo tests"
 cargo test --all --locked
 

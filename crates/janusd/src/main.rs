@@ -30,11 +30,11 @@ use janus_core::{
     ConsumerRegistry, Destination, EgressMode, Environment, ExecutorRef, JanusError,
     LifecycleTransitionPolicy, NamespaceId, OwnerRef, Principal, PrincipalChain, PrincipalId,
     PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReloadMethod, RotationOutcome, RuntimeAction,
-    RuntimePlane, SafeLabel, ScopePathV1, ScopeRef, SecretAgeEvidence, SecretBroker,
-    SecretDescriptor, SecretLifecycle, SecretMeta, SecretMetadataOverlay, SecretName, SecretRef,
-    SecretStore, SecretTombstoneRequest, Severity, StaleSecretPolicy, StaleSecretReportRow,
-    StaleSecretReporter, TombstonePolicy, TrustLevel, UsePermit, UseProfile, UseRequest,
-    ValidationProbe, WorkloadId,
+    RuntimePlane, RuntimeTransport, SafeLabel, ScopePathV1, ScopeRef, SecretAgeEvidence,
+    SecretBroker, SecretDescriptor, SecretLifecycle, SecretMeta, SecretMetadataOverlay, SecretName,
+    SecretRef, SecretStore, SecretTombstoneRequest, Severity, StaleSecretPolicy,
+    StaleSecretReportRow, StaleSecretReporter, TombstonePolicy, TrustLevel, UsePermit, UseProfile,
+    UseRequest, ValidationProbe, WorkloadId,
 };
 use janus_executor::{
     ApprovedUseExecutor, EnvFileHashSidecarFormat, EnvFileHashSidecarSpec, EnvFilePlan,
@@ -92,6 +92,7 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
     let action = classify_runtime_action(&args)?;
     let principal = release_principal_from_env()?;
     enforce_process_plane(selected_plane, action, &principal)?;
+    enforce_cli_argument_budget(action, &args)?;
     if migration::is_migration_command(&args) {
         let release = enforce_release_admission_from_env(&principal)
             .context("release admission denied janusd-admin migration")?;
@@ -2520,6 +2521,31 @@ fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
     Ok(action)
 }
 
+fn enforce_cli_argument_budget(action: RuntimeAction, args: &[String]) -> Result<()> {
+    let policy = janus_core::runtime_endpoint_policy(action);
+    if policy.transport != RuntimeTransport::ProcessArgv {
+        anyhow::bail!(
+            "Janus runtime denied action={} reason_code=denied_transport_mismatch value_returned=false",
+            action.as_str()
+        );
+    }
+    let serialized_bytes = args.iter().try_fold(0_usize, |total, arg| {
+        total
+            .checked_add(arg.len())
+            .and_then(|value| value.checked_add(1))
+    });
+    if match serialized_bytes {
+        Some(bytes) => bytes > policy.max_serialized_arguments_bytes,
+        None => true,
+    } {
+        anyhow::bail!(
+            "Janus runtime denied action={} reason_code=denied_arguments_too_large value_returned=false",
+            action.as_str()
+        );
+    }
+    Ok(())
+}
+
 fn enforce_process_plane(
     selected_plane: Option<RuntimePlane>,
     action: RuntimeAction,
@@ -4008,6 +4034,39 @@ mod tests {
             assert!(rendered.contains("denied_wrong_plane"));
             assert!(rendered.contains("value_returned=false"));
             assert!(!rendered.contains("expected-canary"));
+        }
+    }
+
+    #[test]
+    fn cli_argument_budget_fails_closed_without_echoing_input() {
+        let canary = format!(
+            "SENSITIVE_CANARY_{}",
+            "x".repeat(janus_core::CLI_MAX_ARGUMENT_BYTES)
+        );
+        let args = vec!["run".to_string(), canary.clone()];
+        let error = enforce_cli_argument_budget(RuntimeAction::ManagedRun, &args)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("denied_arguments_too_large"));
+        assert!(error.contains("value_returned=false"));
+        assert!(!error.contains(&canary));
+    }
+
+    #[test]
+    fn split_cli_rejects_network_and_forwarded_identity_inputs() {
+        for forbidden in ["--bind", "--listen", "--proxy", "--forwarded-client"] {
+            let error = parse_args(
+                ["run", forbidden, "SENSITIVE_CANARY_REMOTE_IDENTITY"]
+                    .into_iter()
+                    .map(str::to_string),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("unsupported janusd run flag"));
+            assert!(!error.contains("SENSITIVE_CANARY_REMOTE_IDENTITY"));
+        }
+        for forbidden in ["--bind", "--listen", "--proxy", "forwarded-client"] {
+            assert!(!ADMIN_USAGE.contains(forbidden));
         }
     }
 

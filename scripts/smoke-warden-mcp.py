@@ -18,6 +18,7 @@ from typing import Any
 PROTOCOL_VERSION = "2024-11-05"
 REQUEST_TIMEOUT_SECONDS = 15
 CANARY_VALUE = "expected-canary"
+REQUEST_BODY_CANARY = "SENSITIVE_CANARY_REQUEST_BODY"
 CONTAINER_FIXTURE_DIR = "/tmp/janus-warden-smoke"
 
 
@@ -248,6 +249,49 @@ def run_smoke(smoke: McpSmoke) -> None:
         "tool catalog",
     )
 
+    unknown = structured_denial(
+        smoke.request("tools/call", {"name": "resolve_secret", "arguments": {}})
+    )
+    assert_equal(
+        unknown["error"]["reason_code"], "denied_unknown_tool", "unknown tool denial"
+    )
+    assert_false(unknown["value_returned"], "unknown tool value_returned")
+
+    malformed = structured_denial(
+        smoke.request(
+            "tools/call",
+            {
+                "name": "describe_secret",
+                "arguments": {
+                    "secret_ref": "sec_fixture",
+                    "request_body": REQUEST_BODY_CANARY,
+                },
+            },
+        )
+    )
+    assert_equal(
+        malformed["error"]["reason_code"], "denied_invalid_args", "invalid args denial"
+    )
+    assert_false(malformed["value_returned"], "invalid args value_returned")
+
+    oversized = structured_denial(
+        smoke.request(
+            "tools/call",
+            {
+                "name": "describe_secret",
+                "arguments": {
+                    "secret_ref": REQUEST_BODY_CANARY + ("x" * 8192),
+                },
+            },
+        )
+    )
+    assert_equal(
+        oversized["error"]["reason_code"],
+        "denied_arguments_too_large",
+        "oversized args denial",
+    )
+    assert_false(oversized["value_returned"], "oversized args value_returned")
+
     health = structured(smoke.request("tools/call", {"name": "health", "arguments": {}}))
     assert_false(health["value_returned"], "health top-level value_returned")
     assert_true(health["ok"], "health call ok")
@@ -310,8 +354,9 @@ def run_smoke(smoke: McpSmoke) -> None:
     assert_true(permit["result"]["permit_id"].startswith("use_"), "permit id shape")
 
     rendered = "\n".join(smoke.transcript)
-    if CANARY_VALUE in rendered:
-        raise AssertionError("MCP transcript leaked the fixture secret value")
+    for canary in [CANARY_VALUE, REQUEST_BODY_CANARY]:
+        if canary in rendered:
+            raise AssertionError(f"MCP transcript leaked canary material: {canary}")
 
     print(
         "janus-warden MCP smoke ok "
@@ -328,6 +373,17 @@ def structured(call_result: dict[str, Any]) -> dict[str, Any]:
     content = call_result.get("structuredContent")
     if not isinstance(content, dict):
         raise AssertionError(f"tool call did not include structuredContent: {call_result}")
+    return content
+
+
+def structured_denial(call_result: dict[str, Any]) -> dict[str, Any]:
+    if call_result.get("isError") is not True:
+        raise AssertionError(f"tool denial did not set isError=true: {call_result}")
+    content = call_result.get("structuredContent")
+    if not isinstance(content, dict):
+        raise AssertionError(f"tool denial did not include structuredContent: {call_result}")
+    if content.get("ok") is not False:
+        raise AssertionError(f"tool denial did not set ok=false: {content}")
     return content
 
 
