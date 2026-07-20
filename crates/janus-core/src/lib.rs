@@ -13,16 +13,23 @@ pub mod consumer;
 pub mod error;
 pub mod manifest;
 pub mod metadata;
+pub mod migration;
 pub mod policy;
 pub mod principal;
 pub mod refs;
+pub mod release;
 pub mod rotation;
+pub mod scope;
 pub mod stale;
 pub mod store;
 pub mod tombstone;
+pub mod transfer;
 pub mod value;
 
-pub use audit::{AuditAction, AuditEvent, AuditOutcome, AuditSink, AuditWrite, Severity};
+pub use audit::{
+    audit_integrity_hash, AuditAction, AuditEvent, AuditIntegrityInput, AuditOutcome, AuditSink,
+    AuditWrite, Severity,
+};
 pub use broker::SecretBroker;
 pub use consumer::{
     BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRegistry, Environment, OwnerRef,
@@ -31,18 +38,26 @@ pub use consumer::{
 pub use error::{JanusError, JanusResult};
 pub use manifest::ManifestCatalog;
 pub use metadata::{SecretMetadataOverlay, SecretMetadataPatch};
+pub use migration::{MigrationCompatibility, MigrationManifest, MigrationPhase, MigrationRisk};
 pub use policy::{
     ApprovalGrant, ApprovalGrantScope, ApprovalGrantSnapshot, ApprovalId, ClassPermitPolicy,
     EgressMode, PermitId, PermitIssuer, PolicyDecision, ProfileId, ProfilePolicy, Purpose,
     TrustLevel, UsePermit, UsePermitSnapshot, UseProfile, UseRequest,
 };
-pub use principal::{Principal, PrincipalChain, PrincipalId, PrincipalKind, ScopeRef};
+pub use principal::{Principal, PrincipalChain, PrincipalId, PrincipalKind};
 pub use refs::{
     ConsumerRef, Destination, ExecutorRef, ProjectId, SafeLabel, SecretName, SecretRef,
+};
+pub use release::{
+    ProductMode, ReleaseAdmission, ReleaseAdmissionDecision, ReleaseAdmissionReceipt,
+    ReleaseChannelPolicy,
 };
 pub use rotation::{
     RollbackPlan, RotationDecision, RotationOutcome, RotationPhase, RotationPlan, RotationPlanner,
     RotationSpec, RotationStrategy, ValidationProbe,
+};
+pub use scope::{
+    EnvironmentId, NamespaceId, OrganizationId, RepositoryId, ScopePathV1, ScopeRef, WorkloadId,
 };
 pub use stale::{
     SecretAgeEvidence, StaleSecretPolicy, StaleSecretReportRow, StaleSecretReporter,
@@ -53,4 +68,16 @@ pub use store::{
     SecretLifecycle, SecretMeta, SecretStore, StoreCapabilities,
 };
 pub use tombstone::{SecretTombstone, SecretTombstoneRequest, TombstonePolicy};
+pub use transfer::{ScopeTransferManifest, ScopeTransferMode};
 pub use value::SecretValue;
+
+#[cfg(test)]
+pub(crate) fn test_scope(environment: &str) -> ScopeRef {
+    ScopePathV1::new(
+        OrganizationId::new("fixture-org").expect("static organization"),
+        ProjectId::new("janus").expect("static project"),
+        RepositoryId::new("janus").expect("static repository"),
+        EnvironmentId::new(environment).expect("valid test environment"),
+    )
+    .scope_ref()
+}

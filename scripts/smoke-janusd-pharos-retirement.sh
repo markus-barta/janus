@@ -50,7 +50,20 @@ secret_ref="$(
 	SECRET_NAME="${secret_name}" python3 - <<'PY'
 import hashlib
 import os
-print("sec_" + hashlib.sha256(("janus\0" + os.environ["SECRET_NAME"]).encode()).digest()[:10].hex())
+import struct
+
+def field(value):
+    encoded = value.encode()
+    return struct.pack(">Q", len(encoded)) + encoded
+
+canonical = b"".join(field(value) for value in (
+    "janus-scope-v1", "fixture-org", "janus", "janus", "test"
+)) + b"\0\0"
+scope_ref = "scp_" + hashlib.sha256(canonical).digest()[:20].hex()
+secret = hashlib.sha256(
+    b"janus-secret-ref-v2\0" + scope_ref.encode() + b"\0" + os.environ["SECRET_NAME"].encode()
+).digest()[:10].hex()
+print("sec_" + secret)
 PY
 )"
 manifest="${runtime}/secretspec.toml"
@@ -152,7 +165,10 @@ export JANUS_RUN_PROFILE_MANIFEST="${profiles}"
 export JANUS_APPROVAL_DIR="${approval_dir}"
 export JANUS_LIFECYCLE_TOMBSTONE_DIR="${tombstone_dir}"
 export JANUS_LIFECYCLE_EXECUTOR="janusd-pharos-retirement-smoke"
-export JANUS_LIFECYCLE_SCOPE="janus/test"
+export JANUS_SCOPE_ORGANIZATION="fixture-org"
+export JANUS_SCOPE_PROJECT="janus"
+export JANUS_SCOPE_REPOSITORY="janus"
+export JANUS_SCOPE_ENVIRONMENT="test"
 
 retirement_args=(
 	--host "${host}"

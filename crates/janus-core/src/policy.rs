@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, Destination, ExecutorRef, JanusError,
-    JanusResult, PrincipalChain, SafeLabel, SecretClass, SecretRef, Severity,
+    JanusResult, PrincipalChain, SafeLabel, ScopeRef, SecretClass, SecretRef, Severity,
 };
 use sha2::{Digest, Sha256};
 
@@ -119,6 +119,8 @@ pub struct UseProfile {
     pub id: ProfileId,
     /// Secret this profile can use.
     pub secret_ref: SecretRef,
+    /// Exact authorization scope for this profile.
+    pub scope: ScopeRef,
     /// Executor allowed to consume the permit.
     pub executor: ExecutorRef,
     /// Destination allowed for this profile.
@@ -140,6 +142,8 @@ pub struct UseProfile {
 pub struct UseRequest {
     /// Secret requested.
     pub secret_ref: SecretRef,
+    /// Exact authorization scope requested.
+    pub scope: ScopeRef,
     /// Profile requested.
     pub profile_id: ProfileId,
     /// Destination requested.
@@ -158,6 +162,8 @@ impl ApprovalId {
         let mut hasher = Sha256::new();
         hasher.update(b"janus-approval-v1\0");
         hasher.update(scope.secret_ref.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(scope.scope.as_str().as_bytes());
         hasher.update(b"\0");
         hasher.update(scope.profile_id.as_str().as_bytes());
         hasher.update(b"\0");
@@ -214,6 +220,8 @@ impl fmt::Debug for ApprovalId {
 pub struct ApprovalGrantScope {
     /// Secret ref this grant is scoped to.
     pub secret_ref: SecretRef,
+    /// Exact authorization scope this grant is scoped to.
+    pub scope: ScopeRef,
     /// Profile id this grant is scoped to.
     pub profile_id: ProfileId,
     /// Executor this grant is scoped to.
@@ -233,6 +241,7 @@ impl ApprovalGrantScope {
     pub fn for_request(req: &UseRequest, profile: &UseProfile, class: SecretClass) -> Self {
         Self {
             secret_ref: req.secret_ref.clone(),
+            scope: req.scope.clone(),
             profile_id: req.profile_id.clone(),
             executor: profile.executor.clone(),
             destination: req.destination.clone(),
@@ -245,6 +254,7 @@ impl ApprovalGrantScope {
     fn for_permit(permit: &UsePermit, class: SecretClass) -> Self {
         Self {
             secret_ref: permit.secret_ref.clone(),
+            scope: permit.scope.clone(),
             profile_id: permit.profile_id.clone(),
             executor: permit.executor.clone(),
             destination: permit.destination.clone(),
@@ -271,6 +281,8 @@ pub struct ApprovalGrantSnapshot {
     pub approval_id: String,
     /// Secret ref this grant is scoped to.
     pub secret_ref: String,
+    /// Opaque exact scope ref this grant is bound to.
+    pub scope_ref: String,
     /// Profile id this grant is scoped to.
     pub profile_id: String,
     /// Executor this grant is scoped to.
@@ -384,6 +396,7 @@ impl ApprovalGrant {
         ApprovalGrantSnapshot {
             approval_id: self.id.as_str().to_string(),
             secret_ref: self.scope.secret_ref.as_str().to_string(),
+            scope_ref: self.scope.scope.as_str().to_string(),
             profile_id: self.scope.profile_id.as_str().to_string(),
             executor: self.scope.executor.as_str().to_string(),
             destination: self.scope.destination.as_str().to_string(),
@@ -407,6 +420,7 @@ impl ApprovalGrant {
             id: ApprovalId::from_opaque(snapshot.approval_id)?,
             scope: ApprovalGrantScope {
                 secret_ref: SecretRef::new(snapshot.secret_ref)?,
+                scope: ScopeRef::from_opaque(snapshot.scope_ref)?,
                 profile_id: ProfileId::new(snapshot.profile_id)?,
                 executor: ExecutorRef::new(snapshot.executor)?,
                 destination: Destination::new(snapshot.destination)?,
@@ -637,6 +651,8 @@ impl PermitId {
         hasher.update(b"\0");
         hasher.update(profile.secret_ref.as_str().as_bytes());
         hasher.update(b"\0");
+        hasher.update(profile.scope.as_str().as_bytes());
+        hasher.update(b"\0");
         hasher.update(purpose.as_str().as_bytes());
         hasher.update(b"\0");
         hasher.update(principal.binding_key().as_bytes());
@@ -680,6 +696,7 @@ impl fmt::Debug for PermitId {
 pub struct UsePermit {
     id: PermitId,
     secret_ref: SecretRef,
+    scope: ScopeRef,
     profile_id: ProfileId,
     destination: Destination,
     executor: ExecutorRef,
@@ -701,6 +718,8 @@ pub struct UsePermitSnapshot {
     pub permit_id: String,
     /// Secret ref this permit is bound to.
     pub secret_ref: String,
+    /// Opaque exact scope ref this permit is bound to.
+    pub scope_ref: String,
     /// Profile this permit is bound to.
     pub profile_id: String,
     /// Destination this permit is bound to.
@@ -732,6 +751,7 @@ impl UsePermit {
         Self {
             id: PermitId::derive(profile, principal, &req.purpose, now),
             secret_ref: profile.secret_ref.clone(),
+            scope: profile.scope.clone(),
             profile_id: profile.id.clone(),
             destination: profile.destination.clone(),
             executor: profile.executor.clone(),
@@ -751,6 +771,11 @@ impl UsePermit {
     /// Secret ref this permit is bound to.
     pub fn secret_ref(&self) -> &SecretRef {
         &self.secret_ref
+    }
+
+    /// Exact opaque scope ref this permit is bound to.
+    pub fn scope_ref(&self) -> &ScopeRef {
+        &self.scope
     }
 
     /// Profile this permit is bound to.
@@ -802,6 +827,7 @@ impl UsePermit {
         UsePermitSnapshot {
             permit_id: self.id.as_str().to_string(),
             secret_ref: self.secret_ref.as_str().to_string(),
+            scope_ref: self.scope.as_str().to_string(),
             profile_id: self.profile_id.as_str().to_string(),
             destination: self.destination.as_str().to_string(),
             executor: self.executor.as_str().to_string(),
@@ -831,6 +857,7 @@ impl UsePermit {
         Ok(Self {
             id: PermitId::from_opaque(snapshot.permit_id)?,
             secret_ref: SecretRef::new(snapshot.secret_ref)?,
+            scope: ScopeRef::from_opaque(snapshot.scope_ref)?,
             profile_id: ProfileId::new(snapshot.profile_id)?,
             destination: Destination::new(snapshot.destination)?,
             executor: ExecutorRef::new(snapshot.executor)?,
@@ -863,6 +890,12 @@ impl UsePermit {
                 "permit is expired",
             ));
         }
+        if self.scope != principal.scope {
+            return Err(JanusError::permit_invalid(
+                "denied_scope_mismatch",
+                "permit scope does not match caller scope",
+            ));
+        }
         if self.principal_binding != principal.binding_key() {
             return Err(JanusError::permit_invalid(
                 "denied_wrong_principal",
@@ -890,6 +923,7 @@ impl fmt::Debug for UsePermit {
         f.debug_struct("UsePermit")
             .field("id", &"<redacted>")
             .field("secret_ref", &self.secret_ref)
+            .field("scope", &self.scope)
             .field("profile_id", &self.profile_id)
             .field("destination", &self.destination)
             .field("executor", &self.executor)
@@ -907,6 +941,7 @@ impl fmt::Debug for UsePermitSnapshot {
         f.debug_struct("UsePermitSnapshot")
             .field("permit_id", &"<redacted>")
             .field("secret_ref", &self.secret_ref)
+            .field("scope_ref", &self.scope_ref)
             .field("profile_id", &self.profile_id)
             .field("destination", &self.destination)
             .field("executor", &self.executor)
@@ -948,6 +983,12 @@ impl ProfilePolicy {
             return PolicyDecision::Deny {
                 reason_code: "denied_profile_disabled",
                 detail: "profile is disabled".to_string(),
+            };
+        }
+        if req.scope != principal.scope || profile.scope != req.scope {
+            return PolicyDecision::Deny {
+                reason_code: "denied_scope_mismatch",
+                detail: "profile, request, and principal scope must match exactly".to_string(),
             };
         }
         if profile.executor.as_str() != principal.executor.id.as_str() {
@@ -1181,12 +1222,12 @@ impl AsRef<ProfilePolicy> for ProfilePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AuditWrite, Principal, PrincipalId, PrincipalKind, SafeLabel, ScopeRef};
+    use crate::{AuditWrite, Principal, PrincipalId, PrincipalKind, SafeLabel};
 
     fn principal(executor: &str) -> PrincipalChain {
         PrincipalChain::new(
             Principal::new(PrincipalKind::Executor, PrincipalId::new(executor).unwrap()),
-            ScopeRef::new("proj/dev").unwrap(),
+            crate::test_scope("dev"),
         )
     }
 
@@ -1194,6 +1235,7 @@ mod tests {
         UseProfile {
             id: ProfileId::new("profile.deploy").unwrap(),
             secret_ref: SecretRef::new("sec_api").unwrap(),
+            scope: crate::test_scope("dev"),
             executor: ExecutorRef::new("runner-a").unwrap(),
             destination: Destination::new("deploy-api").unwrap(),
             egress: EgressMode::Connector,
@@ -1207,6 +1249,7 @@ mod tests {
     fn request(destination: &str) -> UseRequest {
         UseRequest {
             secret_ref: SecretRef::new("sec_api").unwrap(),
+            scope: crate::test_scope("dev"),
             profile_id: ProfileId::new("profile.deploy").unwrap(),
             destination: Destination::new(destination).unwrap(),
             purpose: Purpose::new("deploy release").unwrap(),
@@ -1457,6 +1500,22 @@ mod tests {
         wrong_purpose.purpose = Purpose::new("different purpose").unwrap();
         let mismatch = grant.validate_request(
             &wrong_purpose,
+            &profile,
+            SecretClass::BreakGlass,
+            SystemTime::UNIX_EPOCH,
+        );
+        assert!(matches!(
+            mismatch,
+            PolicyDecision::Deny {
+                reason_code: "approval_scope_mismatch",
+                ..
+            }
+        ));
+
+        let mut wrong_scope = req.clone();
+        wrong_scope.scope = crate::test_scope("prod");
+        let mismatch = grant.validate_request(
+            &wrong_scope,
             &profile,
             SecretClass::BreakGlass,
             SystemTime::UNIX_EPOCH,

@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use janus_core::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, ConsumerDescriptor, ConsumerRef,
     ConsumerRegistry, JanusError, JanusResult, PrincipalChain, ReloadMethod, RotationDecision,
-    RotationOutcome, RotationPhase, RotationPlanner, SafeLabel, SecretName, SecretRef, SecretStore,
-    SecretValue, Severity, ValidationProbe,
+    RotationOutcome, RotationPhase, RotationPlanner, SafeLabel, SecretDescriptor, SecretName,
+    SecretRef, SecretStore, SecretValue, Severity, ValidationProbe,
 };
 use janus_provider_age::{AgeRollbackMaterial, AgeSecretStore};
 use rand::rngs::OsRng;
@@ -249,7 +249,22 @@ where
         approval: &RotationApproval,
         principal: &PrincipalChain,
     ) -> JanusResult<RotationOutcome> {
-        let secret_ref = self.secret_ref_for_name(name).await?;
+        let descriptor = self.descriptor_for_name(name).await?;
+        if descriptor.scope != principal.scope {
+            self.audit.record(AuditEvent::new(
+                AuditAction::RotationApprove,
+                AuditOutcome::Denied,
+                "denied_scope_mismatch",
+                Severity::Warning,
+                Some(descriptor.secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::policy_denied(
+                "denied_scope_mismatch",
+                "descriptor scope does not match caller scope",
+            ));
+        }
+        let secret_ref = descriptor.secret_ref;
         self.record_approval(&secret_ref, approval, principal)?;
         let decision = RotationPlanner::new(self.consumers.clone()).plan_generated_with_audit(
             &secret_ref,
@@ -345,13 +360,12 @@ where
         })
     }
 
-    async fn secret_ref_for_name(&self, name: &SecretName) -> JanusResult<SecretRef> {
+    async fn descriptor_for_name(&self, name: &SecretName) -> JanusResult<SecretDescriptor> {
         self.store
             .list()
             .await?
             .into_iter()
             .find(|descriptor| &descriptor.name == name)
-            .map(|descriptor| descriptor.secret_ref)
             .ok_or_else(|| JanusError::NotInManifest {
                 name: name.as_str().to_string(),
             })
@@ -556,9 +570,15 @@ mod tests {
     use super::*;
     use janus_core::{
         AuditWrite, BlastRadius, ConsumerKind, Environment, HealthStatus, OwnerRef, ProfileId,
-        ProjectId, RotationSpec, SafeLabel, ScopeRef, SecretClass, SecretDescriptor,
+        RotationSpec, SafeLabel, ScopePathV1, ScopeRef, SecretClass, SecretDescriptor,
         SecretLifecycle, SecretMeta, StoreCapabilities, TrustLevel,
     };
+
+    fn scope() -> ScopeRef {
+        ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
+            .unwrap()
+            .scope_ref()
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct TestRollback;
@@ -575,14 +595,13 @@ mod tests {
 
     impl TestStore {
         fn new() -> (Self, SecretName, SecretRef) {
-            let project = ProjectId::new("janus").unwrap();
             let name = SecretName::new("CANARY").unwrap();
-            let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+            let secret_ref = SecretRef::for_manifest_entry(&scope(), &name);
             let meta = SecretMeta {
                 name: name.clone(),
                 secret_ref: secret_ref.clone(),
                 label: SafeLabel::new("Canary token").unwrap(),
-                scope: ScopeRef::new("janus/dev").unwrap(),
+                scope: scope(),
                 owner: Some(OwnerRef::new("infra").unwrap()),
                 classification: Some(SecretClass::Normal),
                 lifecycle: SecretLifecycle::Active,
@@ -772,7 +791,7 @@ mod tests {
                 janus_core::PrincipalKind::Executor,
                 janus_core::PrincipalId::new("forge-admin").unwrap(),
             ),
-            ScopeRef::new("janus/dev").unwrap(),
+            scope(),
         )
     }
 
@@ -785,6 +804,7 @@ mod tests {
 
     fn consumer(secret_ref: SecretRef, validation: Vec<ValidationProbe>) -> ConsumerDescriptor {
         ConsumerDescriptor {
+            scope: scope(),
             consumer_ref: ConsumerRef::new("consumer.deploy").unwrap(),
             secret_ref,
             kind: ConsumerKind::ManagedCommand,

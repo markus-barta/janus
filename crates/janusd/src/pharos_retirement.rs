@@ -959,12 +959,19 @@ mod tests {
     use async_trait::async_trait;
     use janus_core::{
         BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef, Destination, Environment,
-        ExecutorRef, OwnerRef, ProfileId, ReloadMethod, SafeLabel, SecretLifecycle, SecretRef,
+        ExecutorRef, OwnerRef, ProfileId, ReloadMethod, SafeLabel, ScopePathV1, ScopeRef,
+        SecretLifecycle, SecretRef,
     };
     use janus_executor::{EnvFileHashSidecarSpec, EnvFileProfileSpec};
     use tempfile::TempDir;
 
     use super::*;
+
+    fn scope() -> ScopeRef {
+        ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
+            .unwrap()
+            .scope_ref()
+    }
 
     struct Fixture {
         _temp: TempDir,
@@ -1002,6 +1009,7 @@ mod tests {
                     output_path: hash_file,
                 }),
                 consumer: ConsumerDescriptor {
+                    scope: scope(),
                     consumer_ref: ConsumerRef::new("consumer.pharos_beacon_ares").unwrap(),
                     secret_ref,
                     kind: ConsumerKind::Service,
@@ -1478,6 +1486,7 @@ mod tests {
                 output_path: fixture.binding.outputs().hash_file.clone(),
             }),
             consumer: ConsumerDescriptor {
+                scope: scope(),
                 consumer_ref: ConsumerRef::new("consumer.pharos_beacon_ares").unwrap(),
                 secret_ref,
                 kind: ConsumerKind::Service,

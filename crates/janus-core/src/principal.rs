@@ -1,6 +1,6 @@
 //! Principal-chain identity model.
 
-use crate::{JanusError, JanusResult};
+use crate::{JanusError, JanusResult, ScopeRef};
 
 fn non_empty(kind: &'static str, value: impl Into<String>) -> JanusResult<String> {
     let value = value.into();
@@ -55,22 +55,6 @@ impl Principal {
     /// Construct a principal.
     pub fn new(kind: PrincipalKind, id: PrincipalId) -> Self {
         Self { kind, id }
-    }
-}
-
-/// Scope boundary carried by refs, permits, policies, and audit.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ScopeRef(String);
-
-impl ScopeRef {
-    /// Construct a non-empty scope reference.
-    pub fn new(value: impl Into<String>) -> JanusResult<Self> {
-        Ok(Self(non_empty("scope_ref", value)?))
-    }
-
-    /// Safe string form.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -129,6 +113,7 @@ impl PrincipalChain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{EnvironmentId, OrganizationId, ProjectId, RepositoryId, ScopePathV1};
 
     #[test]
     fn binding_key_is_value_free_and_stable() {
@@ -137,8 +122,16 @@ mod tests {
                 PrincipalKind::Executor,
                 PrincipalId::new("runner-a").unwrap(),
             ),
-            ScopeRef::new("proj/dev").unwrap(),
+            ScopePathV1::new(
+                OrganizationId::new("fixture-org").unwrap(),
+                ProjectId::new("fixture-project").unwrap(),
+                RepositoryId::new("fixture-repo").unwrap(),
+                EnvironmentId::new("dev").unwrap(),
+            )
+            .scope_ref(),
         );
-        assert_eq!(chain.binding_key(), "executor:runner-a|scope:proj/dev");
+        assert!(chain
+            .binding_key()
+            .starts_with("executor:runner-a|scope:scp_"));
     }
 }

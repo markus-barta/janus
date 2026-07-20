@@ -11,6 +11,10 @@ on:
       - 'flake.nix'
       - 'flake.lock'
       - 'examples/**'
+      - 'config/release-channels/**'
+      - 'config/migrations/**'
+      - 'fixtures/release-admission/**'
+      - 'fixtures/migrations/**'
       - 'scripts/**'
       - 'Dockerfile.engine'
       - 'Dockerfile.engine.dockerignore'
@@ -25,6 +29,10 @@ on:
       - 'flake.nix'
       - 'flake.lock'
       - 'examples/**'
+      - 'config/release-channels/**'
+      - 'config/migrations/**'
+      - 'fixtures/release-admission/**'
+      - 'fixtures/migrations/**'
       - 'scripts/**'
       - 'Dockerfile.engine'
       - 'Dockerfile.engine.dockerignore'
@@ -117,18 +125,33 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ github.event.release.tag_name }}" rust-engine-sbom.spdx.json --clobber
       - name: build provenance attestation
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest@v4
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+          create-storage-record: false
+      - name: SPDX SBOM attestation
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: rust-engine-sbom.spdx.json
+          push-to-registry: true
+          create-storage-record: false
       - name: verify published engine digest
         env:
           GH_TOKEN: ${{ github.token }}
           JANUS_PUBLISHED_ENGINE_IMAGE: ${{ env.IMAGE }}
           JANUS_PUBLISHED_ENGINE_TAG: ${{ github.event.release.tag_name }}
           JANUS_PUBLISHED_ENGINE_DIGEST: ${{ steps.build.outputs.digest }}
-          JANUS_PUBLISHED_ENGINE_REPO: ${{ github.repository }}
-          JANUS_PUBLISHED_ENGINE_SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/rust.yml
-          JANUS_PUBLISHED_ENGINE_REQUIRE_COSIGN: "1"
+          JANUS_RELEASE_CHANNEL_POLICY: config/release-channels/v1.json
+          JANUS_RELEASE_CHANNEL: stable
+          JANUS_PRODUCT_MODE: enterprise
+          JANUS_PREVIOUS_PRODUCT_MODE: enterprise
+          JANUS_PUBLISHED_ENGINE_ADMISSION_RECEIPT: rust-engine-admission.json
         run: scripts/smoke-published-engine.sh
+      - name: upload admission receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" rust-engine-admission.json --clobber

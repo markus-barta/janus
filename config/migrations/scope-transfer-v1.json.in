@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "operation_id": "@OPERATION_ID@",
+  "mode": "@MODE@",
+  "source_scope_ref": "@SOURCE_SCOPE_REF@",
+  "destination_scope": {
+    "schema_version": 1,
+    "organization": "@DESTINATION_ORGANIZATION@",
+    "project": "@DESTINATION_PROJECT@",
+    "repository": "@DESTINATION_REPOSITORY@",
+    "environment": "@DESTINATION_ENVIRONMENT@"
+  },
+  "expected_destination_scope_ref": "@DESTINATION_SCOPE_REF@",
+  "source_inventory_fingerprint": "@SOURCE_INVENTORY_FINGERPRINT@",
+  "expected_target_fingerprint": "@EXPECTED_TARGET_FINGERPRINT@",
+  "source_root": "@SOURCE_ROOT@",
+  "target_root": "@TARGET_ROOT@",
+  "state_root": "@STATE_ROOT@",
+  "audit_path": "@AUDIT_PATH@",
+  "minimum_free_bytes": 1048576,
+  "preflight_max_age_seconds": 900
+}

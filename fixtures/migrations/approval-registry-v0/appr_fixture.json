@@ -1,0 +1,13 @@
+{
+  "approval_id": "appr_fixture",
+  "secret_ref": "sec_fixture",
+  "profile_id": "profile.fixture",
+  "executor": "janusd",
+  "destination": "fixture-service",
+  "class": "normal",
+  "egress": "connector",
+  "purpose": "migration fixture",
+  "expires_at_unix_secs": 4102444800,
+  "expires_at_subsec_nanos": 0,
+  "reason": "janus-migration-smoke-canary"
+}

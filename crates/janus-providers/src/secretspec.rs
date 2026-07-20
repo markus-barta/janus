@@ -30,8 +30,9 @@ impl SecretspecStore {
         config_path: impl AsRef<Path>,
         profile: impl Into<String>,
         provider_uri: impl Into<String>,
+        scope: ScopeRef,
     ) -> JanusResult<Self> {
-        Self::load_from_with_metadata(config_path, profile, provider_uri, None)
+        Self::load_from_with_metadata(config_path, profile, provider_uri, scope, None)
     }
 
     /// Load `secretspec.toml` with an optional Janus metadata overlay.
@@ -39,6 +40,7 @@ impl SecretspecStore {
         config_path: impl AsRef<Path>,
         profile: impl Into<String>,
         provider_uri: impl Into<String>,
+        scope: ScopeRef,
         metadata: Option<&SecretMetadataOverlay>,
     ) -> JanusResult<Self> {
         let profile = profile.into();
@@ -74,7 +76,7 @@ impl SecretspecStore {
                 })
                 .unwrap_or(true);
             entries.push(SecretMeta {
-                secret_ref: SecretRef::for_manifest_entry(&project, &name),
+                secret_ref: SecretRef::for_manifest_entry(&scope, &name),
                 name: name.clone(),
                 label: SafeLabel::new(
                     secret
@@ -82,7 +84,7 @@ impl SecretspecStore {
                         .clone()
                         .unwrap_or_else(|| "Manifest-declared secret".to_string()),
                 )?,
-                scope: ScopeRef::new(format!("{}/{}", project.as_str(), profile))?,
+                scope: scope.clone(),
                 owner: None,
                 classification: None,
                 lifecycle: janus_core::SecretLifecycle::Active,
@@ -224,14 +226,22 @@ mod tests {
     use super::*;
     use janus_core::{
         AuditAction, AuditOutcome, AuditWrite, Destination, EgressMode, ExecutorRef, Principal,
-        PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose,
+        PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose, ScopePathV1,
         SecretBroker, UseProfile, UseRequest,
     };
+    use proptest::prelude::*;
+    use std::fmt;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    fn scope() -> ScopeRef {
+        ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
+            .unwrap()
+            .scope_ref()
+    }
 
     struct DotenvFixture {
         dir: std::path::PathBuf,
@@ -246,6 +256,10 @@ mod tests {
     }
 
     fn dotenv_fixture() -> DotenvFixture {
+        dotenv_fixture_with_value("expected-canary")
+    }
+
+    fn dotenv_fixture_with_value(canary: &str) -> DotenvFixture {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -267,12 +281,25 @@ CANARY = { description = "Canary token", required = true }
 "#,
         )
         .unwrap();
-        fs::write(&env_file, "CANARY=expected-canary\n").unwrap();
+        fs::write(&env_file, format!("CANARY={canary}\n")).unwrap();
         DotenvFixture {
             dir,
             manifest,
             env_file,
         }
+    }
+
+    #[derive(Clone)]
+    struct RedactedCanary(String);
+
+    impl fmt::Debug for RedactedCanary {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("<redacted-generated-canary>")
+        }
+    }
+
+    fn generated_canary() -> impl Strategy<Value = RedactedCanary> {
+        "[A-Za-z0-9]{24,48}".prop_map(|suffix| RedactedCanary(format!("SENSITIVE_CANARY_{suffix}")))
     }
 
     fn metadata_overlay() -> SecretMetadataOverlay {
@@ -294,6 +321,7 @@ CANARY = { description = "Canary token", required = true }
             &fixture.manifest,
             "default",
             format!("dotenv:{}", fixture.env_file.display()),
+            scope(),
             Some(&metadata),
         )
         .unwrap();
@@ -329,6 +357,44 @@ CANARY = { description = "Canary token", required = true }
         .unwrap();
     }
 
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        #[test]
+        fn dotenv_store_property_enforces_manifest_allowlist_without_value_leakage(
+            undeclared in "[A-Z][A-Z0-9_]{3,31}"
+                .prop_filter("generated name must remain undeclared", |name| name != "CANARY"),
+            canary in generated_canary(),
+        ) {
+            let fixture = dotenv_fixture_with_value(&canary.0);
+            let metadata = metadata_overlay();
+            let mut store = SecretspecStore::load_from_with_metadata(
+                &fixture.manifest,
+                "default",
+                format!("dotenv:{}", fixture.env_file.display()),
+                scope(),
+                Some(&metadata),
+            )
+            .unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            runtime.block_on(async {
+                janus_conformance::run_manifest_allowlist_contract(
+                    &mut store,
+                    &SecretName::new(undeclared).unwrap(),
+                    canary.0.as_bytes(),
+                )
+                .await
+                .unwrap();
+
+                let descriptors = store.list().await.unwrap();
+                assert!(
+                    !format!("{descriptors:?}").contains(&canary.0),
+                    "generated secret literal crossed the SecretspecStore descriptor boundary"
+                );
+            });
+        }
+    }
+
     #[tokio::test]
     async fn secretspec_store_without_metadata_lists_incomplete_descriptors() {
         let fixture = dotenv_fixture();
@@ -336,6 +402,7 @@ CANARY = { description = "Canary token", required = true }
             &fixture.manifest,
             "default",
             format!("dotenv:{}", fixture.env_file.display()),
+            scope(),
         )
         .unwrap();
         let listed = store.list().await.unwrap();
@@ -354,6 +421,7 @@ CANARY = { description = "Canary token", required = true }
             &fixture.manifest,
             "default",
             format!("dotenv:{}", fixture.env_file.display()),
+            scope(),
             Some(&metadata),
         )
         .unwrap();
@@ -361,6 +429,7 @@ CANARY = { description = "Canary token", required = true }
         let profile_id = ProfileId::new("profile.CANARY").unwrap();
         let profile = UseProfile {
             id: profile_id.clone(),
+            scope: scope(),
             secret_ref: descriptor.secret_ref.clone(),
             executor: ExecutorRef::new("runner-a").unwrap(),
             destination: Destination::new("deploy-api").unwrap(),
@@ -375,7 +444,7 @@ CANARY = { description = "Canary token", required = true }
                 PrincipalKind::Executor,
                 PrincipalId::new("runner-a").unwrap(),
             ),
-            ScopeRef::new("janus/default").unwrap(),
+            scope(),
         );
         let mut broker = SecretBroker::new(
             store,
@@ -404,6 +473,7 @@ CANARY = { description = "Canary token", required = true }
         ));
 
         let request = UseRequest {
+            scope: scope(),
             secret_ref: listed[0].secret_ref.clone(),
             profile_id,
             destination: Destination::new("deploy-api").unwrap(),

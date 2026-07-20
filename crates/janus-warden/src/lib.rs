@@ -11,9 +11,9 @@
 use std::time::SystemTime;
 
 use janus_core::{
-    AuditAction, AuditSink, HealthStatus, JanusError, JanusResult, PrincipalChain, ProfileId,
-    Purpose, SecretBroker, SecretDescriptor, SecretRef, SecretStore, Severity, TrustLevel,
-    UsePermit,
+    AuditAction, AuditSink, HealthStatus, JanusError, JanusResult, PrincipalChain, ProductMode,
+    ProfileId, Purpose, ReleaseAdmission, SecretBroker, SecretDescriptor, SecretRef, SecretStore,
+    Severity, TrustLevel, UsePermit,
 };
 use janus_local::{NoopPermitStore, PermitStore};
 use serde::Serialize;
@@ -159,6 +159,22 @@ pub struct HealthResponse {
     pub backend: &'static str,
     /// Value-free health detail.
     pub detail: String,
+    /// Runtime product mode evaluated by release admission.
+    pub release_mode: &'static str,
+    /// Whether trusted release evidence is mandatory in this mode.
+    pub release_required: bool,
+    /// Stable release-admission decision.
+    pub release_admission: &'static str,
+    /// Stable value-free admission reason.
+    pub release_reason_code: &'static str,
+    /// Reviewable release policy id, when available.
+    pub release_policy_id: Option<String>,
+    /// Reviewable release policy version, when available.
+    pub release_policy_version: Option<u64>,
+    /// Admitted release channel, when available.
+    pub release_channel: Option<String>,
+    /// Digest-pinned artifact id, when available.
+    pub release_artifact_id: Option<String>,
     /// Invariant marker.
     pub value_returned: bool,
 }
@@ -202,6 +218,7 @@ pub struct ToolErrorView {
 pub struct WardenRuntime<S, A, P = NoopPermitStore> {
     broker: SecretBroker<S, A>,
     permits: P,
+    release: ReleaseAdmission,
 }
 
 impl<S, A> WardenRuntime<S, A, NoopPermitStore>
@@ -223,7 +240,17 @@ where
 {
     /// Construct a Warden runtime from the core broker and permit handoff store.
     pub fn with_permit_store(broker: SecretBroker<S, A>, permits: P) -> Self {
-        Self { broker, permits }
+        Self {
+            broker,
+            permits,
+            release: ReleaseAdmission::not_required(ProductMode::SelfHosted),
+        }
+    }
+
+    /// Attach the release posture established during runtime startup.
+    pub fn with_release_admission(mut self, release: ReleaseAdmission) -> Self {
+        self.release = release;
+        self
     }
 
     /// List model-safe descriptors only.
@@ -281,7 +308,10 @@ where
 
     /// Check backend health through the broker.
     pub async fn health(&mut self, principal: &PrincipalChain) -> JanusResult<HealthResponse> {
-        Ok(health_view(self.broker.health(principal).await?))
+        Ok(health_view(
+            self.broker.health(principal).await?,
+            &self.release,
+        ))
     }
 
     /// Dispatch a Warden tool call from JSON arguments.
@@ -437,11 +467,19 @@ fn permit_view(permit: &UsePermit) -> RequestUseResponse {
     }
 }
 
-fn health_view(health: HealthStatus) -> HealthResponse {
+fn health_view(health: HealthStatus, release: &ReleaseAdmission) -> HealthResponse {
     HealthResponse {
-        ok: health.ok,
+        ok: health.ok && release.allows_secret_use(),
         backend: health.backend,
         detail: health.detail,
+        release_mode: release.mode().as_str(),
+        release_required: release.mode().requires_trusted_release(),
+        release_admission: release.decision().as_str(),
+        release_reason_code: release.reason_code(),
+        release_policy_id: release.policy_id().map(ToOwned::to_owned),
+        release_policy_version: release.policy_version(),
+        release_channel: release.channel().map(ToOwned::to_owned),
+        release_artifact_id: release.artifact_id().map(ToOwned::to_owned),
         value_returned: false,
     }
 }
@@ -627,20 +665,28 @@ fn tool_error_view(error: JanusError) -> ToolErrorView {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime};
 
     use janus_core::{
         AuditAction, AuditOutcome, AuditWrite, Destination, EgressMode, ExecutorRef, JanusError,
         ManifestCatalog, OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind,
-        ProfileId, ProfilePolicy, ProjectId, Purpose, SafeLabel, ScopeRef, SecretBroker,
-        SecretClass, SecretLifecycle, SecretMeta, SecretName, SecretRef, Severity, TrustLevel,
-        UseProfile,
+        ProfileId, ProfilePolicy, Purpose, ReleaseAdmissionDecision, ReleaseAdmissionReceipt,
+        ReleaseChannelPolicy, SafeLabel, ScopePathV1, ScopeRef, SecretBroker, SecretClass,
+        SecretLifecycle, SecretMeta, SecretName, SecretRef, Severity, TrustLevel, UseProfile,
     };
     use janus_mock::MockStore;
+    use proptest::prelude::*;
     use serde_json::json;
 
     use super::*;
+
+    fn scope() -> ScopeRef {
+        ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
+            .unwrap()
+            .scope_ref()
+    }
 
     fn principal() -> PrincipalChain {
         PrincipalChain::new(
@@ -648,7 +694,7 @@ mod tests {
                 PrincipalKind::Executor,
                 PrincipalId::new("warden-stdio").unwrap(),
             ),
-            ScopeRef::new("janus/dev").unwrap(),
+            scope(),
         )
     }
 
@@ -658,8 +704,7 @@ mod tests {
                 PrincipalKind::Executor,
                 PrincipalId::new("warden-stdio").unwrap(),
             ),
-            ScopeRef::new("project:JANUS,repo:github.com/markus-barta/janus,task:JANUS-22,host:mbp0,session:mcp-session-1")
-                .unwrap(),
+            scope(),
         );
         principal.agent = Some(Principal::new(
             PrincipalKind::AgentSession,
@@ -727,14 +772,45 @@ mod tests {
     where
         P: PermitStore,
     {
-        let project = ProjectId::new("janus").unwrap();
+        runtime_with_metadata_permits_and_value(
+            profile_enabled,
+            owner,
+            classification,
+            lifecycle,
+            permits,
+            b"expected-canary".to_vec(),
+        )
+    }
+
+    fn runtime_with_value(value: &[u8]) -> (WardenRuntime<MockStore, AuditWrite>, SecretRef) {
+        runtime_with_metadata_permits_and_value(
+            true,
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::Normal),
+            SecretLifecycle::Active,
+            NoopPermitStore,
+            value.to_vec(),
+        )
+    }
+
+    fn runtime_with_metadata_permits_and_value<P>(
+        profile_enabled: bool,
+        owner: Option<OwnerRef>,
+        classification: Option<SecretClass>,
+        lifecycle: SecretLifecycle,
+        permits: P,
+        value: Vec<u8>,
+    ) -> (WardenRuntime<MockStore, AuditWrite, P>, SecretRef)
+    where
+        P: PermitStore,
+    {
         let name = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let secret_ref = SecretRef::for_manifest_entry(&scope(), &name);
         let catalog = ManifestCatalog::new(vec![SecretMeta {
             secret_ref: secret_ref.clone(),
             name: name.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope: scope(),
             owner,
             classification,
             lifecycle,
@@ -743,11 +819,10 @@ mod tests {
             allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
         }])
         .unwrap();
-        let store = MockStore::new(catalog)
-            .with_value(name, b"expected-canary".to_vec())
-            .unwrap();
+        let store = MockStore::new(catalog).with_value(name, value).unwrap();
         let profile = UseProfile {
             id: ProfileId::new("profile.canary").unwrap(),
+            scope: scope(),
             secret_ref: secret_ref.clone(),
             executor: ExecutorRef::new("warden-stdio").unwrap(),
             destination: Destination::new("deploy-api").unwrap(),
@@ -766,6 +841,19 @@ mod tests {
             WardenRuntime::with_permit_store(broker, permits),
             secret_ref,
         )
+    }
+
+    #[derive(Clone)]
+    struct RedactedCanary(String);
+
+    impl fmt::Debug for RedactedCanary {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("<redacted-generated-canary>")
+        }
+    }
+
+    fn generated_canary() -> impl Strategy<Value = RedactedCanary> {
+        "[A-Za-z0-9]{24,48}".prop_map(|suffix| RedactedCanary(format!("SENSITIVE_CANARY_{suffix}")))
     }
 
     #[derive(Clone, Default)]
@@ -911,6 +999,10 @@ mod tests {
 
         let health = runtime.health(&principal).await.unwrap();
         assert!(health.ok);
+        assert_eq!(health.release_mode, "self_hosted");
+        assert!(!health.release_required);
+        assert_eq!(health.release_admission, "not_required");
+        assert_eq!(health.release_reason_code, "release_trust_not_required");
         assert!(!health.value_returned);
 
         let rendered = format!("{listed:?}{described:?}{health:?}");
@@ -921,6 +1013,121 @@ mod tests {
         assert!(!rendered_json.contains("owner"));
         assert!(!rendered_json.contains("classification"));
         assert!(!rendered_json.contains("normal\""));
+    }
+
+    #[tokio::test]
+    async fn health_reports_policy_bound_trusted_release_without_values() {
+        const DIGEST: &str =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let policy = ReleaseChannelPolicy::parse_json(include_str!(
+            "../../../config/release-channels/v1.json"
+        ))
+        .unwrap();
+        let receipt = ReleaseAdmissionReceipt::parse_json(include_str!(
+            "../../../fixtures/release-admission/trusted.json"
+        ))
+        .unwrap();
+        let admission =
+            ReleaseAdmission::evaluate(&policy, &receipt, ProductMode::Enterprise, Some(DIGEST));
+        assert_eq!(admission.decision(), ReleaseAdmissionDecision::Trusted);
+        let (runtime, _) = runtime();
+        let mut runtime = runtime.with_release_admission(admission);
+
+        let health = runtime.health(&principal()).await.unwrap();
+
+        assert!(health.ok);
+        assert_eq!(health.release_mode, "enterprise");
+        assert!(health.release_required);
+        assert_eq!(health.release_admission, "trusted");
+        assert_eq!(health.release_reason_code, "release_trust_ok");
+        assert_eq!(
+            health.release_policy_id.as_deref(),
+            Some("janus-engine-release-v1")
+        );
+        assert_eq!(health.release_policy_version, Some(1));
+        assert_eq!(health.release_channel.as_deref(), Some("stable"));
+        assert!(health
+            .release_artifact_id
+            .as_deref()
+            .is_some_and(|artifact| artifact.ends_with(DIGEST)));
+        assert!(!health.value_returned);
+        enforce_value_free_json(&serde_json::to_value(&health).unwrap()).unwrap();
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn generated_secret_literals_never_cross_serialized_warden_responses(
+            canary in generated_canary(),
+            unknown_suffix in "[a-z0-9]{8,40}",
+        ) {
+            let (mut runtime, secret_ref) = runtime_with_value(canary.0.as_bytes());
+            let caller = principal();
+            let executor = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            executor.block_on(async {
+                let outputs = vec![
+                    runtime
+                        .call_tool_json(
+                            "list_secrets",
+                            json!({}),
+                            &caller,
+                            SystemTime::UNIX_EPOCH,
+                        )
+                        .await,
+                    runtime
+                        .call_tool_json(
+                            "describe_secret",
+                            json!({ "secret_ref": secret_ref.as_str() }),
+                            &caller,
+                            SystemTime::UNIX_EPOCH,
+                        )
+                        .await,
+                    runtime
+                        .call_tool_json(
+                            "request_use",
+                            json!({
+                                "secret_ref": secret_ref.as_str(),
+                                "profile_id": "profile.canary",
+                                "purpose": "property conformance"
+                            }),
+                            &caller,
+                            SystemTime::UNIX_EPOCH,
+                        )
+                        .await,
+                    runtime
+                        .call_tool_json(
+                            "describe_secret",
+                            json!({ "secret_ref": format!("sec_unknown_{unknown_suffix}") }),
+                            &caller,
+                            SystemTime::UNIX_EPOCH,
+                        )
+                        .await,
+                    runtime
+                        .call_tool_json(
+                            "health",
+                            json!({}),
+                            &caller,
+                            SystemTime::UNIX_EPOCH,
+                        )
+                        .await,
+                ];
+
+                assert!(outputs.iter().all(|output| !output.value_returned));
+                let serialized = serde_json::to_string(&outputs).unwrap();
+                assert!(
+                    !serialized.contains(&canary.0),
+                    "generated secret literal crossed the serialized Warden boundary"
+                );
+
+                let (_store, _policy, audit) = runtime.into_broker().into_parts();
+                assert!(audit.events().iter().all(|event| !event.value_returned));
+                assert!(
+                    !format!("{:?}", audit.events()).contains(&canary.0),
+                    "generated secret literal crossed the Warden audit boundary"
+                );
+            });
+        }
     }
 
     #[tokio::test]

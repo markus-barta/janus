@@ -139,6 +139,7 @@ impl AgeSecretStore {
         root_dir: impl Into<PathBuf>,
         identity_files: Vec<PathBuf>,
         recipients: Vec<String>,
+        scope: ScopeRef,
     ) -> JanusResult<Self> {
         Self::load_from_secretspec_manifest_with_metadata(
             config_path,
@@ -146,6 +147,7 @@ impl AgeSecretStore {
             root_dir,
             identity_files,
             recipients,
+            scope,
             None,
         )
     }
@@ -157,6 +159,7 @@ impl AgeSecretStore {
         root_dir: impl Into<PathBuf>,
         identity_files: Vec<PathBuf>,
         recipients: Vec<String>,
+        scope: ScopeRef,
         metadata: Option<&SecretMetadataOverlay>,
     ) -> JanusResult<Self> {
         let profile = profile.into();
@@ -192,7 +195,7 @@ impl AgeSecretStore {
                 })
                 .unwrap_or(true);
             entries.push(SecretMeta {
-                secret_ref: janus_core::SecretRef::for_manifest_entry(&project, &name),
+                secret_ref: janus_core::SecretRef::for_manifest_entry(&scope, &name),
                 name: name.clone(),
                 label: SafeLabel::new(
                     secret
@@ -200,7 +203,7 @@ impl AgeSecretStore {
                         .clone()
                         .unwrap_or_else(|| "Manifest-declared secret".to_string()),
                 )?,
-                scope: ScopeRef::new(format!("{}/{}", project.as_str(), profile))?,
+                scope: scope.clone(),
                 owner: None,
                 classification: None,
                 lifecycle: janus_core::SecretLifecycle::Active,
@@ -1153,12 +1156,18 @@ mod tests {
     use super::*;
     use age::secrecy::ExposeSecret;
     use janus_core::{
-        AuditWrite, ManifestCatalog, OwnerRef, Principal, PrincipalId, PrincipalKind, SecretClass,
-        SecretLifecycle, SecretRef,
+        AuditWrite, ManifestCatalog, OwnerRef, Principal, PrincipalId, PrincipalKind, ScopePathV1,
+        SecretClass, SecretLifecycle, SecretRef,
     };
     use tempfile::TempDir;
 
     const TEST_SSH_ED25519_PK: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHsKLqeplhpW+uObz5dvMgjz1OxfM/XXUB+VHtZ6isGN alice@rust";
+
+    fn scope() -> ScopeRef {
+        ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
+            .unwrap()
+            .scope_ref()
+    }
     const TEST_SSH_ED25519_SK: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
 QyNTUxOQAAACB7Ci6nqZYaVvrjm8+XbzII89TsXzP111AflR7WeorBjQAAAJCfEwtqnxML
@@ -1179,12 +1188,12 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
         canary: SecretName,
     }
 
-    fn catalog(project: &ProjectId, canary: &SecretName) -> ManifestCatalog {
+    fn catalog(_project: &ProjectId, canary: &SecretName) -> ManifestCatalog {
         ManifestCatalog::new(vec![SecretMeta {
-            secret_ref: SecretRef::for_manifest_entry(project, canary),
+            secret_ref: SecretRef::for_manifest_entry(&scope(), canary),
             name: canary.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/default").unwrap(),
+            scope: scope(),
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(SecretClass::Normal),
             lifecycle: SecretLifecycle::Active,
@@ -1259,7 +1268,7 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
                 PrincipalKind::Executor,
                 PrincipalId::new("age-admin").unwrap(),
             ),
-            ScopeRef::new("janus/default").unwrap(),
+            scope(),
         )
     }
 
@@ -1855,6 +1864,7 @@ CANARY = { description = "Canary token", required = true }
             fixture.store_dir.clone(),
             vec![fixture.identity_file.clone()],
             fixture.recipients.clone(),
+            scope(),
         )
         .unwrap();
         let incomplete_listed = incomplete.list().await.unwrap();
@@ -1868,6 +1878,7 @@ CANARY = { description = "Canary token", required = true }
             fixture.store_dir.clone(),
             vec![fixture.identity_file.clone()],
             fixture.recipients.clone(),
+            scope(),
             Some(&metadata),
         )
         .unwrap();

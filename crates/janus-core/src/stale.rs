@@ -167,6 +167,9 @@ impl StaleSecretReporter {
     {
         let mut rows = Vec::with_capacity(descriptors.len());
         for descriptor in descriptors {
+            if descriptor.scope != principal.scope {
+                continue;
+            }
             let row = self.classify(descriptor, evidence.get(&descriptor.secret_ref), now);
             audit.record(
                 AuditEvent::new(
@@ -310,8 +313,8 @@ fn age_seconds(now: SystemTime, then: SystemTime) -> u64 {
 mod tests {
     use super::*;
     use crate::{
-        AuditWrite, Principal, PrincipalId, PrincipalKind, ProfileId, ProjectId, SafeLabel,
-        ScopeRef, SecretClass, SecretName, SecretRef, TrustLevel,
+        AuditWrite, Principal, PrincipalId, PrincipalKind, ProfileId, SafeLabel, SecretClass,
+        SecretName, SecretRef, TrustLevel,
     };
 
     fn principal() -> PrincipalChain {
@@ -320,7 +323,7 @@ mod tests {
                 PrincipalKind::Executor,
                 PrincipalId::new("admin-reporter").unwrap(),
             ),
-            ScopeRef::new("janus/dev").unwrap(),
+            crate::test_scope("dev"),
         )
     }
 
@@ -330,13 +333,13 @@ mod tests {
         owner: Option<OwnerRef>,
         class: Option<SecretClass>,
     ) -> SecretDescriptor {
-        let project = ProjectId::new("janus").unwrap();
+        let scope = crate::test_scope("dev");
         let name = SecretName::new(name).unwrap();
         SecretDescriptor {
-            secret_ref: SecretRef::for_manifest_entry(&project, &name),
+            secret_ref: SecretRef::for_manifest_entry(&scope, &name),
             name,
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope,
             owner,
             classification: class,
             lifecycle,

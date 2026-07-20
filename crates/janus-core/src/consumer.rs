@@ -2,7 +2,7 @@
 
 use crate::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, ConsumerRef, JanusError, JanusResult,
-    PrincipalChain, SafeLabel, SecretRef, Severity,
+    PrincipalChain, SafeLabel, ScopeRef, SecretRef, Severity,
 };
 
 /// Kind of consumer that may use a secret.
@@ -115,6 +115,8 @@ pub struct ConsumerDescriptor {
     pub consumer_ref: ConsumerRef,
     /// Secret this consumer uses.
     pub secret_ref: SecretRef,
+    /// Exact authorization scope of this consumer.
+    pub scope: ScopeRef,
     /// Consumer kind.
     pub kind: ConsumerKind,
     /// Owning team/service.
@@ -169,6 +171,20 @@ impl ConsumerRegistry {
     where
         A: AuditSink,
     {
+        if consumer.scope != principal.scope {
+            audit.record(AuditEvent::new(
+                AuditAction::ConsumerObserve,
+                AuditOutcome::Denied,
+                "denied_scope_mismatch",
+                Severity::Warning,
+                Some(consumer.secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::policy_denied(
+                "denied_scope_mismatch",
+                "consumer scope does not match caller scope",
+            ));
+        }
         audit.record(consumer_observe_event(&consumer, principal)?)?;
         self.record_observed(consumer);
         Ok(())

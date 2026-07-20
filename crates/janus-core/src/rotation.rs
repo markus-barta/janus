@@ -231,7 +231,19 @@ impl RotationPlanner {
     where
         A: AuditSink,
     {
-        let decision = self.plan_generated(secret_ref, capabilities);
+        let decision = if self
+            .consumers
+            .consumers_for(secret_ref)
+            .iter()
+            .any(|consumer| consumer.scope != principal.scope)
+        {
+            RotationDecision::Unsafe {
+                reason_code: "denied_scope_mismatch",
+                detail: "consumer scope does not match caller scope".to_string(),
+            }
+        } else {
+            self.plan_generated(secret_ref, capabilities)
+        };
         let (outcome, reason_code, severity) = match &decision {
             RotationDecision::Safe(_) => (AuditOutcome::Allowed, "ok", Severity::Notice),
             RotationDecision::Unsafe { reason_code, .. } => {
@@ -275,6 +287,7 @@ mod tests {
         ConsumerDescriptor {
             consumer_ref: ConsumerRef::new("consumer.deploy").unwrap(),
             secret_ref,
+            scope: crate::test_scope("prod"),
             kind: ConsumerKind::ManagedCommand,
             owner: OwnerRef::new("infra").unwrap(),
             environment: Environment::new("prod").unwrap(),

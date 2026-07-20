@@ -96,8 +96,19 @@ export JANUS_AGE_IDENTITY_FILE=/run/janus/age/identity
 export JANUS_AGE_RECIPIENT=age1...
 export JANUS_AGE_METADATA_FILE=/etc/janus/metadata.toml
 export JANUS_RUN_EXECUTOR=janus-run@HOST
-export JANUS_RUN_SCOPE=janus/nonprod
+export JANUS_SCOPE_ORGANIZATION=acme
+export JANUS_SCOPE_PROJECT=payments
+export JANUS_SCOPE_REPOSITORY=payments-api
+export JANUS_SCOPE_ENVIRONMENT=nonprod
+# Optional leaf refinement; workload requires namespace.
+export JANUS_SCOPE_NAMESPACE=platform
+export JANUS_SCOPE_WORKLOAD=deploy
 ```
+
+The four base scope components are required and validated strictly. Janus
+derives an opaque `scp_...` reference from this exact path; permits and
+approvals do not inherit across environments, repositories, namespaces, or
+workloads.
 
 Preflight the reviewed profile before issuing approval or permit material:
 

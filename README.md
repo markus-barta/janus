@@ -175,12 +175,19 @@ It exercises:
 - the locked Rust workspace test suite;
 - a real reference-only Warden MCP session;
 - the approval-to-env-file operator flow;
+- the versioned approval-registry migration and rollback flow;
+- the exact-scope recovery and explicit boundary-transfer flow;
 - the Pharos beacon retirement flow; and
 - the engine container with the same value-free MCP assertions.
 
 Rust engine releases publish a GHCR image, SPDX SBOM, build provenance, and a
 keyless cosign signature. Release CI verifies and smokes the exact digest it
-publishes.
+publishes. Production and enterprise deployment admission is documented in
+[Trusted release admission](docs/release-admission.md).
+The reviewed offline schema upgrade is documented in the
+[approval registry migration runbook](docs/migration-runbook.md).
+That runbook also covers value-free scope-state recovery and transfer; encrypted
+provider payload and key-custody disaster recovery remain separate concerns.
 
 The transitional envelope remains independently testable:
 
@@ -196,6 +203,20 @@ Janus keeps caller input intentionally small. Profiles own the sensitive
 bindings: secret reference, executor, destination, command, exact arguments,
 environment name, output path, and consumer metadata.
 
+Secret-bearing runtimes also require one canonical exact scope:
+
+```bash
+export JANUS_SCOPE_ORGANIZATION=acme
+export JANUS_SCOPE_PROJECT=payments
+export JANUS_SCOPE_REPOSITORY=payments-api
+export JANUS_SCOPE_ENVIRONMENT=prod
+```
+
+Optional `JANUS_SCOPE_NAMESPACE` and `JANUS_SCOPE_WORKLOAD` refine the leaf
+(workload requires namespace). Janus exposes only the derived opaque
+`scp_...` reference, and never treats a parent or neighboring path as
+authorized.
+
 ### Managed command
 
 Preflight an executable and its exact argument vector without reading a
@@ -210,6 +231,11 @@ After reviewed approval, consume the permit once:
 ```bash
 janusd run --profile profile.deploy --permit use_... -- release apply
 ```
+
+Claude Code can route this exact permit-bound shape while blocking raw secret
+references in arbitrary tools. See
+[`docs/claude-code-hooks.md`](docs/claude-code-hooks.md) for installation,
+verification, and rollback.
 
 ### Service env file
 

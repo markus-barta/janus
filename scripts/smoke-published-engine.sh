@@ -5,11 +5,14 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${JANUS_PUBLISHED_ENGINE_IMAGE:-ghcr.io/markus-barta/janus/janus-engine}"
 tag="${JANUS_PUBLISHED_ENGINE_TAG:-rust-engine-v0.1.6}"
 platform="${JANUS_PUBLISHED_ENGINE_PLATFORM:-}"
-repo_slug="${JANUS_PUBLISHED_ENGINE_REPO:-markus-barta/janus}"
-signer_workflow="${JANUS_PUBLISHED_ENGINE_SIGNER_WORKFLOW:-${repo_slug}/.github/workflows/rust.yml}"
-require_cosign="${JANUS_PUBLISHED_ENGINE_REQUIRE_COSIGN:-1}"
 digest="${JANUS_PUBLISHED_ENGINE_DIGEST:-}"
 digest_source="provided"
+policy="${JANUS_RELEASE_CHANNEL_POLICY:-${repo}/config/release-channels/v1.json}"
+channel="${JANUS_RELEASE_CHANNEL:-stable}"
+mode="${JANUS_PRODUCT_MODE:-enterprise}"
+previous_mode="${JANUS_PREVIOUS_PRODUCT_MODE:-${mode}}"
+receipt="${JANUS_PUBLISHED_ENGINE_ADMISSION_RECEIPT:-}"
+temporary_dir=""
 
 if [[ -z "${digest}" ]]; then
   digest_source="resolved"
@@ -27,23 +30,26 @@ fi
 ref="${image}@${digest}"
 echo "${digest_source} ${image}:${tag} -> ${ref}"
 
-gh attestation verify "oci://${ref}" \
-  --repo "${repo_slug}" \
-  --signer-workflow "${signer_workflow}" \
-  --source-ref "refs/tags/${tag}" >/dev/null
-echo "github provenance verified for ${ref}"
-
-if command -v cosign >/dev/null 2>&1; then
-  cosign verify "${ref}" \
-    --certificate-identity-regexp "https://github.com/${repo_slug}/.github/workflows/rust.yml@refs/tags/${tag}" \
-    --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
-  echo "cosign signature verified for ${ref}"
-elif [[ "${require_cosign}" == "1" || "${require_cosign}" == "true" ]]; then
-  echo "cosign not found; keyless signature verification is required" >&2
-  exit 1
-else
-  echo "cosign not found; skipped keyless signature verification" >&2
+if [[ -z "${receipt}" ]]; then
+  temporary_dir="$(mktemp -d)"
+  receipt="${temporary_dir}/release-admission.json"
 fi
+cleanup() {
+  if [[ -n "${temporary_dir}" && -d "${temporary_dir}" ]]; then
+    rm -rf -- "${temporary_dir}"
+  fi
+}
+trap cleanup EXIT
+
+"${repo}/scripts/admit-engine-release.sh" \
+  --policy "${policy}" \
+  --channel "${channel}" \
+  --mode "${mode}" \
+  --previous-mode "${previous_mode}" \
+  --image "${image}" \
+  --tag "${tag}" \
+  --digest "${digest}" \
+  --output "${receipt}"
 
 smoke_args=("--image" "${ref}")
 if [[ -n "${platform}" ]]; then

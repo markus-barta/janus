@@ -68,19 +68,16 @@ impl ManifestCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        OwnerRef, ProfileId, ProjectId, SafeLabel, ScopeRef, SecretClass, SecretLifecycle,
-        TrustLevel,
-    };
+    use crate::{OwnerRef, ProfileId, SafeLabel, SecretClass, SecretLifecycle, TrustLevel};
 
     fn meta(name: &str) -> SecretMeta {
-        let project = ProjectId::new("janus").unwrap();
+        let scope = crate::test_scope("dev");
         let name = SecretName::new(name).unwrap();
         SecretMeta {
-            secret_ref: SecretRef::for_manifest_entry(&project, &name),
+            secret_ref: SecretRef::for_manifest_entry(&scope, &name),
             name,
             label: SafeLabel::new("Canary").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope,
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(SecretClass::Normal),
             lifecycle: SecretLifecycle::Active,

@@ -135,6 +135,23 @@ impl TombstonePolicy {
     where
         A: AuditSink,
     {
+        if descriptor.scope != principal.scope {
+            audit.record(
+                AuditEvent::new(
+                    AuditAction::SecretLifecycle,
+                    AuditOutcome::Denied,
+                    "denied_scope_mismatch",
+                    Severity::Warning,
+                    Some(descriptor.secret_ref.clone()),
+                    principal,
+                )
+                .with_evidence(request.reason.clone()),
+            )?;
+            return Err(JanusError::policy_denied(
+                "denied_scope_mismatch",
+                "descriptor scope does not match caller scope",
+            ));
+        }
         let decision = decide_tombstone(descriptor, &request);
         audit.record(
             AuditEvent::new(
@@ -224,7 +241,7 @@ mod tests {
 
     use crate::{
         AuditOutcome, AuditWrite, OwnerRef, Principal, PrincipalId, PrincipalKind, ProfileId,
-        ScopeRef, SecretClass, SecretName, TrustLevel,
+        SecretClass, SecretName, TrustLevel,
     };
 
     use super::*;
@@ -235,7 +252,7 @@ mod tests {
                 PrincipalKind::Executor,
                 PrincipalId::new("admin-cli").unwrap(),
             ),
-            ScopeRef::new("janus/dev").unwrap(),
+            crate::test_scope("dev"),
         )
     }
 
@@ -244,7 +261,7 @@ mod tests {
             name: SecretName::new("CANARY").unwrap(),
             secret_ref: SecretRef::new("sec_tombstone").unwrap(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope: crate::test_scope("dev"),
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(SecretClass::Normal),
             lifecycle,

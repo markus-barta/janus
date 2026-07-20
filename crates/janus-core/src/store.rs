@@ -242,6 +242,23 @@ impl LifecycleTransitionPolicy {
     where
         A: AuditSink,
     {
+        if descriptor.scope != principal.scope {
+            audit.record(
+                AuditEvent::new(
+                    AuditAction::SecretLifecycle,
+                    AuditOutcome::Denied,
+                    "denied_scope_mismatch",
+                    Severity::Warning,
+                    Some(descriptor.secret_ref.clone()),
+                    principal,
+                )
+                .with_evidence(reason),
+            )?;
+            return Err(JanusError::policy_denied(
+                "denied_scope_mismatch",
+                "descriptor scope does not match caller scope",
+            ));
+        }
         let from = descriptor.lifecycle;
         let decision = decide_lifecycle_transition(descriptor, to);
         audit.record(
@@ -517,7 +534,7 @@ mod tests {
                 PrincipalKind::Executor,
                 PrincipalId::new("admin-cli").unwrap(),
             ),
-            ScopeRef::new("janus/dev").unwrap(),
+            crate::test_scope("dev"),
         )
     }
 
@@ -530,7 +547,7 @@ mod tests {
             name: SecretName::new("CANARY").unwrap(),
             secret_ref: SecretRef::new("sec_lifecycle").unwrap(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope: crate::test_scope("dev"),
             owner,
             classification,
             lifecycle,

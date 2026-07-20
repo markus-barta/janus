@@ -1,0 +1,45 @@
+{
+  "env": {
+    "JANUS_HOOK_JANUSD": "/absolute/path/to/janusd",
+    "JANUS_HOOK_AUDIT_FILE": "/private/path/to/janus/claude-hook-audit.jsonl"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/janus-claude-hook pre-tool-use",
+            "timeout": 10,
+            "statusMessage": "Checking Janus approved-use policy"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/janus-claude-hook post-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/janus-claude-hook post-tool-use-failure",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

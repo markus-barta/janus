@@ -5,9 +5,15 @@ use std::time::{Duration, SystemTime};
 use janus_core::{
     AuditOutcome, AuditWrite, Destination, EgressMode, ExecutorRef, JanusError, JanusResult,
     PermitIssuer, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy,
-    Purpose, RotationSpec, SecretName, SecretStore, SecretValue, TrustLevel, UseProfile,
-    UseRequest,
+    Purpose, RotationSpec, ScopePathV1, ScopeRef, SecretName, SecretStore, SecretValue, TrustLevel,
+    UseProfile, UseRequest,
 };
+
+fn fixture_scope(environment: &str) -> ScopeRef {
+    ScopePathV1::for_repository("fixture-org", "janus", "janus", environment)
+        .expect("fixture scope is valid")
+        .scope_ref()
+}
 
 /// Store conformance fixture.
 #[derive(Clone, Debug)]
@@ -60,6 +66,55 @@ where
     Ok(())
 }
 
+/// Prove that every mutating and secret-bearing store operation enforces the
+/// manifest as a hard allowlist.
+///
+/// Property suites can feed generated undeclared names through this helper for
+/// any backend. The replacement bytes are intentionally accepted as an opaque
+/// slice so test failures never need to format or log them.
+pub async fn run_manifest_allowlist_contract<S>(
+    store: &mut S,
+    undeclared: &SecretName,
+    replacement: &[u8],
+) -> JanusResult<()>
+where
+    S: SecretStore,
+{
+    fn assert_denied<T>(result: JanusResult<T>, operation: &str, generated_literal: &[u8]) {
+        let error = match result {
+            Err(error @ JanusError::NotInManifest { .. }) => error,
+            Err(_) => panic!("non-manifest {operation} returned the wrong error class"),
+            Ok(_) => panic!("non-manifest {operation} did not fail closed"),
+        };
+        if let Ok(generated_literal) = std::str::from_utf8(generated_literal) {
+            let rendered = format!("{error:?} {error}");
+            assert!(
+                !rendered.contains(generated_literal),
+                "generated secret literal crossed the {operation} error boundary"
+            );
+        }
+    }
+
+    assert_denied(store.get(undeclared).await, "get", replacement);
+
+    let set = store
+        .set(undeclared, SecretValue::new(replacement.to_vec()))
+        .await;
+    assert_denied(set, "set", replacement);
+
+    let rotate = store
+        .rotate(
+            undeclared,
+            &RotationSpec::generated(SecretValue::new(replacement.to_vec())),
+        )
+        .await;
+    assert_denied(rotate, "rotate", replacement);
+
+    assert_denied(store.delete(undeclared).await, "delete", replacement);
+
+    Ok(())
+}
+
 /// Permit/policy/audit fixture built from a listed descriptor.
 pub fn run_permit_contract(
     descriptor_secret_ref: janus_core::SecretRef,
@@ -72,10 +127,11 @@ pub fn run_permit_contract(
             PrincipalKind::Executor,
             PrincipalId::new(executor.to_string())?,
         ),
-        janus_core::ScopeRef::new("janus/dev")?,
+        fixture_scope("dev"),
     );
     let profile = UseProfile {
         id: profile_id.clone(),
+        scope: principal.scope.clone(),
         secret_ref: descriptor_secret_ref.clone(),
         executor: ExecutorRef::new(executor.to_string())?,
         destination: Destination::new(destination.to_string())?,
@@ -86,6 +142,7 @@ pub fn run_permit_contract(
         enabled: true,
     };
     let request = UseRequest {
+        scope: principal.scope.clone(),
         secret_ref: descriptor_secret_ref,
         profile_id,
         destination: Destination::new(destination.to_string())?,
@@ -104,7 +161,7 @@ pub fn run_permit_contract(
     let wrong = permit.matches(
         &PrincipalChain::new(
             Principal::new(PrincipalKind::Executor, PrincipalId::new("other-runner")?),
-            janus_core::ScopeRef::new("janus/dev")?,
+            fixture_scope("dev"),
         ),
         &ExecutorRef::new("other-runner")?,
         &Destination::new(destination.to_string())?,
@@ -133,10 +190,9 @@ mod tests {
     use super::*;
     use janus_core::{
         ApprovalGrant, AuditAction, BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRef,
-        ConsumerRegistry, Environment, ManifestCatalog, OwnerRef, ProjectId, ReloadMethod,
-        RotationDecision, RotationPlanner, SafeLabel, ScopeRef, SecretBroker, SecretClass,
-        SecretLifecycle, SecretMeta, SecretRef, Severity, StoreCapabilities, TrustLevel,
-        ValidationProbe,
+        ConsumerRegistry, Environment, ManifestCatalog, OwnerRef, ReloadMethod, RotationDecision,
+        RotationPlanner, SafeLabel, ScopeRef, SecretBroker, SecretClass, SecretLifecycle,
+        SecretMeta, SecretRef, Severity, StoreCapabilities, TrustLevel, ValidationProbe,
     };
     use janus_mock::MockStore;
 
@@ -159,14 +215,14 @@ mod tests {
         classification: Option<SecretClass>,
         lifecycle: SecretLifecycle,
     ) -> (MockStore, StoreFixture) {
-        let project = ProjectId::new("janus").unwrap();
+        let scope = fixture_scope("dev");
         let canary = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &canary);
+        let secret_ref = SecretRef::for_manifest_entry(&scope, &canary);
         let catalog = ManifestCatalog::new(vec![SecretMeta {
             secret_ref,
             name: canary.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope: scope.clone(),
             owner,
             classification,
             lifecycle,
@@ -186,10 +242,10 @@ mod tests {
         (store, fixture)
     }
 
-    fn principal(executor: &str, scope: &str) -> PrincipalChain {
+    fn principal(executor: &str, _scope: &str) -> PrincipalChain {
         PrincipalChain::new(
             Principal::new(PrincipalKind::Executor, PrincipalId::new(executor).unwrap()),
-            ScopeRef::new(scope).unwrap(),
+            fixture_scope("dev"),
         )
     }
 
@@ -201,6 +257,7 @@ mod tests {
     ) -> UseProfile {
         UseProfile {
             id: ProfileId::new("profile.canary").unwrap(),
+            scope: fixture_scope("dev"),
             secret_ref,
             executor: ExecutorRef::new(executor).unwrap(),
             destination: Destination::new(destination).unwrap(),
@@ -214,6 +271,7 @@ mod tests {
 
     fn use_request(secret_ref: SecretRef, destination: &str) -> UseRequest {
         UseRequest {
+            scope: fixture_scope("dev"),
             secret_ref,
             profile_id: ProfileId::new("profile.canary").unwrap(),
             destination: Destination::new(destination).unwrap(),
@@ -244,6 +302,7 @@ mod tests {
         declared: bool,
     ) -> ConsumerDescriptor {
         ConsumerDescriptor {
+            scope: fixture_scope("dev"),
             consumer_ref: ConsumerRef::new(consumer_ref).unwrap(),
             secret_ref,
             kind: ConsumerKind::ManagedCommand,
@@ -274,6 +333,123 @@ mod tests {
     async fn mock_store_passes_store_contract() {
         let (mut store, fixture) = mock_store();
         run_store_contract(&mut store, &fixture).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn broker_isolates_list_describe_get_and_permits_by_exact_scope() {
+        let dev_scope = fixture_scope("dev");
+        let prod_scope = fixture_scope("prod");
+        let dev_name = SecretName::new("DEV_CANARY").unwrap();
+        let prod_name = SecretName::new("PROD_CANARY").unwrap();
+        let dev_ref = SecretRef::for_manifest_entry(&dev_scope, &dev_name);
+        let prod_ref = SecretRef::for_manifest_entry(&prod_scope, &prod_name);
+        let meta = |name: SecretName, secret_ref: SecretRef, scope: ScopeRef| SecretMeta {
+            secret_ref,
+            name,
+            label: SafeLabel::new("Scoped canary").unwrap(),
+            scope,
+            owner: Some(OwnerRef::new("security").unwrap()),
+            classification: Some(SecretClass::Normal),
+            lifecycle: SecretLifecycle::Active,
+            required: true,
+            trust_level: TrustLevel::L1,
+            allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
+        };
+        let catalog = ManifestCatalog::new(vec![
+            meta(dev_name.clone(), dev_ref.clone(), dev_scope.clone()),
+            meta(prod_name.clone(), prod_ref.clone(), prod_scope.clone()),
+        ])
+        .unwrap();
+        let store = MockStore::new(catalog)
+            .with_value(dev_name.clone(), b"dev-canary".to_vec())
+            .unwrap()
+            .with_value(prod_name.clone(), b"prod-canary".to_vec())
+            .unwrap();
+        let profile = |secret_ref: SecretRef, scope: ScopeRef| UseProfile {
+            id: ProfileId::new("profile.canary").unwrap(),
+            scope,
+            secret_ref,
+            executor: ExecutorRef::new("runner-a").unwrap(),
+            destination: Destination::new("deploy-api").unwrap(),
+            egress: EgressMode::Connector,
+            trust_level: TrustLevel::L2,
+            ttl: Duration::from_secs(60),
+            single_use: true,
+            enabled: true,
+        };
+        let mut broker = SecretBroker::new(
+            store,
+            ProfilePolicy::new(vec![
+                profile(dev_ref.clone(), dev_scope.clone()),
+                profile(prod_ref.clone(), prod_scope.clone()),
+            ]),
+            AuditWrite::accepting(),
+        );
+        let principal = |scope: ScopeRef| {
+            PrincipalChain::new(
+                Principal::new(
+                    PrincipalKind::Executor,
+                    PrincipalId::new("runner-a").unwrap(),
+                ),
+                scope,
+            )
+        };
+        let dev_principal = principal(dev_scope.clone());
+        let prod_principal = principal(prod_scope.clone());
+
+        let listed = broker.list(&dev_principal).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].secret_ref, dev_ref);
+        assert!(matches!(
+            broker.describe(&prod_ref, &dev_principal).await,
+            Err(JanusError::PolicyDenied {
+                reason_code: "denied_scope_mismatch",
+                ..
+            })
+        ));
+        assert!(matches!(
+            broker.get(&prod_name, &dev_principal).await,
+            Err(JanusError::PolicyDenied {
+                reason_code: "denied_scope_mismatch",
+                ..
+            })
+        ));
+
+        let prod_request = UseRequest {
+            scope: prod_scope,
+            secret_ref: prod_ref,
+            profile_id: ProfileId::new("profile.canary").unwrap(),
+            destination: Destination::new("deploy-api").unwrap(),
+            purpose: Purpose::new("deploy prod canary").unwrap(),
+        };
+        assert!(matches!(
+            broker
+                .request_use(&prod_request, &dev_principal, SystemTime::UNIX_EPOCH)
+                .await,
+            Err(JanusError::PolicyDenied {
+                reason_code: "denied_scope_mismatch",
+                ..
+            })
+        ));
+        let permit = broker
+            .request_use(&prod_request, &prod_principal, SystemTime::UNIX_EPOCH)
+            .await
+            .unwrap();
+        assert!(matches!(
+            broker
+                .use_permit(
+                    &permit,
+                    &dev_principal,
+                    &ExecutorRef::new("runner-a").unwrap(),
+                    &Destination::new("deploy-api").unwrap(),
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                )
+                .await,
+            Err(JanusError::PermitInvalid {
+                reason_code: "denied_scope_mismatch",
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -918,6 +1094,7 @@ mod tests {
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let profile = UseProfile {
             id: profile_id.clone(),
+            scope: fixture_scope("dev"),
             secret_ref: descriptor.secret_ref.clone(),
             executor: ExecutorRef::new("runner-a").unwrap(),
             destination: Destination::new("deploy-api").unwrap(),
@@ -932,7 +1109,7 @@ mod tests {
                 PrincipalKind::Executor,
                 PrincipalId::new("runner-a").unwrap(),
             ),
-            ScopeRef::new("janus/dev").unwrap(),
+            fixture_scope("dev"),
         );
         let mut broker = SecretBroker::new(
             store,
@@ -954,6 +1131,7 @@ mod tests {
         assert!(matches!(denied, Err(JanusError::NotInManifest { .. })));
 
         let request = UseRequest {
+            scope: fixture_scope("dev"),
             secret_ref: listed[0].secret_ref.clone(),
             profile_id,
             destination: Destination::new("deploy-api").unwrap(),
@@ -978,7 +1156,7 @@ mod tests {
                         PrincipalKind::Executor,
                         PrincipalId::new("runner-b").unwrap(),
                     ),
-                    ScopeRef::new("janus/dev").unwrap(),
+                    fixture_scope("dev"),
                 ),
                 &ExecutorRef::new("runner-b").unwrap(),
                 &Destination::new("deploy-api").unwrap(),

@@ -232,16 +232,16 @@ struct SecretMetadataEntryTomlOut {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ProfileId, ProjectId, SafeLabel, ScopeRef, SecretRef, TrustLevel};
+    use crate::{ProfileId, SafeLabel, SecretRef, TrustLevel};
 
     fn meta(name: &str) -> SecretMeta {
-        let project = ProjectId::new("janus").unwrap();
+        let scope = crate::test_scope("dev");
         let name = SecretName::new(name).unwrap();
         SecretMeta {
-            secret_ref: SecretRef::for_manifest_entry(&project, &name),
+            secret_ref: SecretRef::for_manifest_entry(&scope, &name),
             name,
             label: SafeLabel::new("Canary").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope,
             owner: None,
             classification: None,
             lifecycle: SecretLifecycle::Active,

@@ -6,7 +6,9 @@
 
 #![forbid(unsafe_code)]
 
+mod migration;
 mod pharos_retirement;
+mod scope_transfer;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -23,12 +25,12 @@ use janus_core::{
     ApprovalGrant, AuditAction, AuditEvent, AuditOutcome, AuditSink, AuditWrite, BlastRadius,
     ClassPermitPolicy, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry,
     Destination, EgressMode, Environment, ExecutorRef, JanusError, LifecycleTransitionPolicy,
-    OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy,
-    Purpose, ReloadMethod, RotationOutcome, SafeLabel, ScopeRef, SecretAgeEvidence, SecretBroker,
-    SecretDescriptor, SecretLifecycle, SecretMeta, SecretMetadataOverlay, SecretName, SecretRef,
-    SecretStore, SecretTombstoneRequest, Severity, StaleSecretPolicy, StaleSecretReportRow,
-    StaleSecretReporter, TombstonePolicy, TrustLevel, UsePermit, UseProfile, UseRequest,
-    ValidationProbe,
+    NamespaceId, OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId,
+    ProfilePolicy, Purpose, ReloadMethod, RotationOutcome, SafeLabel, ScopePathV1, ScopeRef,
+    SecretAgeEvidence, SecretBroker, SecretDescriptor, SecretLifecycle, SecretMeta,
+    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretTombstoneRequest, Severity,
+    StaleSecretPolicy, StaleSecretReportRow, StaleSecretReporter, TombstonePolicy, TrustLevel,
+    UsePermit, UseProfile, UseRequest, ValidationProbe, WorkloadId,
 };
 use janus_executor::{
     ApprovedUseExecutor, EnvFileHashSidecarFormat, EnvFileHashSidecarSpec, EnvFilePlan,
@@ -40,6 +42,8 @@ use janus_forge::{
     RotationApproval,
 };
 use janus_local::{
+    enforce_migration_ready_from_env, enforce_release_admission_from_env,
+    enforce_scope_transfer_ready_from_env, ApprovalListEntry,
     ApprovalRegistry as SharedApprovalRegistry, FileApprovalRegistry,
     FileLifecycleEvidenceRegistry, FilePermitRegistry, FileTombstoneRegistry,
     LifecycleEvidenceRegistry as SharedLifecycleEvidenceRegistry,
@@ -70,7 +74,26 @@ const METADATA_ENV_KEYS: &[&str] = &[
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    match parse_args(env::args().skip(1))? {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    if migration::is_migration_command(&args) {
+        let release = enforce_release_admission_from_env(&release_principal_from_env()?)
+            .context("release admission denied janusd migration")?;
+        return migration::run(&args, release);
+    }
+    if scope_transfer::is_scope_transfer_command(&args) {
+        let release = enforce_release_admission_from_env(&release_principal_from_env()?)
+            .context("release admission denied janusd scope transfer")?;
+        return scope_transfer::run(&args, release);
+    }
+    let command = parse_args(args)?;
+    if !matches!(&command, Command::Help) {
+        enforce_release_admission_from_env(&release_principal_from_env()?)
+            .context("release admission denied janusd startup")?;
+        enforce_migration_ready_from_env().context("migration state denied janusd startup")?;
+        enforce_scope_transfer_ready_from_env()
+            .context("scope transfer state denied janusd startup")?;
+    }
+    match command {
         Command::Help => {
             print_usage();
             Ok(())
@@ -357,6 +380,7 @@ async fn run_forge_rotate_generated(config: ForgeRotateGeneratedConfig) -> Resul
         })?;
     let secret_ref = descriptor.secret_ref.clone();
     let registry = ConsumerRegistry::new(vec![ConsumerDescriptor {
+        scope: descriptor.scope.clone(),
         consumer_ref: config.consumer_ref.clone(),
         secret_ref: secret_ref.clone(),
         kind: ConsumerKind::ManagedCommand,
@@ -1398,6 +1422,7 @@ fn use_profile_for_approval(approval: &ApprovalGrant, ttl: Duration) -> UseProfi
     let scope = approval.scope();
     UseProfile {
         id: scope.profile_id.clone(),
+        scope: scope.scope.clone(),
         secret_ref: scope.secret_ref.clone(),
         executor: scope.executor.clone(),
         destination: scope.destination.clone(),
@@ -1412,6 +1437,7 @@ fn use_profile_for_approval(approval: &ApprovalGrant, ttl: Duration) -> UseProfi
 fn use_request_for_approval(approval: &ApprovalGrant) -> UseRequest {
     let scope = approval.scope();
     UseRequest {
+        scope: scope.scope.clone(),
         secret_ref: scope.secret_ref.clone(),
         profile_id: scope.profile_id.clone(),
         destination: scope.destination.clone(),
@@ -1452,6 +1478,7 @@ fn build_approval_grant(
         .expect("normal_use_denial guarantees classification is present");
     let use_profile = UseProfile {
         id: config.profile_id.clone(),
+        scope: descriptor.scope.clone(),
         secret_ref: profile.secret_ref.clone(),
         executor: profile.executor.clone(),
         destination: profile.destination.clone(),
@@ -1462,6 +1489,7 @@ fn build_approval_grant(
         enabled: true,
     };
     let request = UseRequest {
+        scope: descriptor.scope.clone(),
         secret_ref: config.secret_ref.clone(),
         profile_id: config.profile_id.clone(),
         destination: profile.destination.clone(),
@@ -1503,21 +1531,21 @@ fn emit_approve_permit_outcome(outcome: &ApprovedPermitIssueOutcome) {
     );
 }
 
-fn emit_approve_list_outcome(approvals: &[ApprovalGrant]) {
+fn emit_approve_list_outcome(approvals: &[ApprovalListEntry]) {
     println!(
         "janusd approve list count={} value_returned=false",
         approvals.len()
     );
     for approval in approvals {
-        let snapshot = approval.snapshot();
         println!(
-            "approval_id={} secret_ref={} profile_id={} class={} egress={} expires_at_unix_secs={} value_returned=false",
-            snapshot.approval_id,
-            snapshot.secret_ref,
-            snapshot.profile_id,
-            snapshot.class,
-            snapshot.egress,
-            snapshot.expires_at_unix_secs
+            "approval_id={} secret_ref={} profile_id={} class={} egress={} expires_at_unix_secs={} scope_status={} value_returned=false",
+            approval.approval_id.as_str(),
+            approval.secret_ref.as_str(),
+            approval.profile_id.as_str(),
+            approval.class.as_str(),
+            approval.egress.as_str(),
+            unix_seconds(approval.expires_at),
+            approval.scope_status(),
         );
     }
 }
@@ -1883,16 +1911,21 @@ impl ManagedCommandProfileCatalog {
                 path.display()
             )
         })?;
-        Self::parse(&contents)
+        Self::parse_with_scope(&contents, &runtime_scope_from_env()?)
     }
 
+    #[cfg(test)]
     fn parse(contents: &str) -> Result<Self> {
+        Self::parse_with_scope(contents, &test_scope())
+    }
+
+    fn parse_with_scope(contents: &str, scope: &ScopeRef) -> Result<Self> {
         let parsed = toml::from_str::<ManagedCommandProfileCatalogToml>(contents)
             .context("failed to parse managed command profile manifest")?;
         let mut ids = BTreeSet::new();
         let mut profiles = Vec::new();
         for profile in parsed.profiles {
-            let profile = profile.into_profile()?;
+            let profile = profile.into_profile(scope)?;
             if !ids.insert(profile.profile_id().as_str().to_string()) {
                 anyhow::bail!("duplicate approved-use profile id");
             }
@@ -1900,7 +1933,7 @@ impl ManagedCommandProfileCatalog {
         }
         let mut env_file_profiles = Vec::new();
         for profile in parsed.env_files {
-            let profile = profile.into_profile()?;
+            let profile = profile.into_profile(scope)?;
             if !ids.insert(profile.profile_id().as_str().to_string()) {
                 anyhow::bail!("duplicate approved-use profile id");
             }
@@ -2035,12 +2068,13 @@ struct EnvFileConsumerToml {
 }
 
 impl ManagedCommandProfileToml {
-    fn into_profile(self) -> Result<ManagedCommandProfile> {
+    fn into_profile(self, scope: &ScopeRef) -> Result<ManagedCommandProfile> {
         if self.consumer.kind != "managed_command" {
             anyhow::bail!("managed command profile consumer kind must be managed_command");
         }
         let secret_ref = SecretRef::new(self.secret_ref)?;
         let consumer = ConsumerDescriptor {
+            scope: scope.clone(),
             consumer_ref: ConsumerRef::new(self.consumer.consumer_ref)?,
             secret_ref: secret_ref.clone(),
             kind: ConsumerKind::ManagedCommand,
@@ -2076,9 +2110,10 @@ impl ManagedCommandProfileToml {
 }
 
 impl EnvFileProfileToml {
-    fn into_profile(self) -> Result<EnvFileProfile> {
+    fn into_profile(self, scope: &ScopeRef) -> Result<EnvFileProfile> {
         let secret_ref = SecretRef::new(self.secret_ref)?;
         let consumer = ConsumerDescriptor {
+            scope: scope.clone(),
             consumer_ref: ConsumerRef::new(self.consumer.consumer_ref)?,
             secret_ref: secret_ref.clone(),
             kind: parse_env_file_consumer_kind(&self.consumer.kind)?,
@@ -3324,11 +3359,9 @@ fn lifecycle_tombstone_registry_dir() -> PathBuf {
 fn run_principal_from_env() -> Result<PrincipalChain> {
     let executor = env_first(&["JANUS_RUN_EXECUTOR", "JANUS_WARDEN_EXECUTOR"])
         .unwrap_or_else(|| "warden-stdio".to_string());
-    let scope = env_first(&["JANUS_RUN_SCOPE", "JANUS_WARDEN_SCOPE"])
-        .unwrap_or_else(|| "janus/default".to_string());
     Ok(PrincipalChain::new(
         Principal::new(PrincipalKind::Executor, PrincipalId::new(executor)?),
-        ScopeRef::new(scope)?,
+        runtime_scope_from_env()?,
     ))
 }
 
@@ -3365,6 +3398,7 @@ fn load_age_store_from_env_with_metadata_path(
         store_dir,
         identity_files,
         recipients,
+        runtime_scope_from_env()?,
         metadata.as_ref(),
     )
     .context("failed to load age backend for janusd")
@@ -3596,21 +3630,71 @@ fn read_recipient_file(path: &Path) -> Result<Vec<String>> {
 
 fn forge_principal_from_env() -> Result<PrincipalChain> {
     let executor = env::var("JANUS_FORGE_EXECUTOR").unwrap_or_else(|_| "forge-cli".to_string());
-    let scope = env::var("JANUS_FORGE_SCOPE").unwrap_or_else(|_| "janus/default".to_string());
     Ok(PrincipalChain::new(
         Principal::new(PrincipalKind::Executor, PrincipalId::new(executor)?),
-        ScopeRef::new(scope)?,
+        runtime_scope_from_env()?,
     ))
 }
 
 fn lifecycle_principal_from_env() -> Result<PrincipalChain> {
     let executor =
         env::var("JANUS_LIFECYCLE_EXECUTOR").unwrap_or_else(|_| "janusd-lifecycle".to_string());
-    let scope = env::var("JANUS_LIFECYCLE_SCOPE").unwrap_or_else(|_| "janus/default".to_string());
     Ok(PrincipalChain::new(
         Principal::new(PrincipalKind::Executor, PrincipalId::new(executor)?),
-        ScopeRef::new(scope)?,
+        runtime_scope_from_env()?,
     ))
+}
+
+fn release_principal_from_env() -> Result<PrincipalChain> {
+    let executor = env::var("JANUS_RELEASE_EXECUTOR").unwrap_or_else(|_| "janusd".to_string());
+    Ok(PrincipalChain::new(
+        Principal::new(PrincipalKind::Executor, PrincipalId::new(executor)?),
+        runtime_scope_from_env()?,
+    ))
+}
+
+fn runtime_scope_from_env() -> Result<ScopeRef> {
+    #[cfg(test)]
+    if env::var("JANUS_SCOPE_ORGANIZATION").is_err()
+        && env::var("JANUS_SCOPE_PROJECT").is_err()
+        && env::var("JANUS_SCOPE_REPOSITORY").is_err()
+        && env::var("JANUS_SCOPE_ENVIRONMENT").is_err()
+    {
+        return Ok(test_scope());
+    }
+    let mut scope = ScopePathV1::for_repository(
+        required_scope_env("JANUS_SCOPE_ORGANIZATION")?,
+        required_scope_env("JANUS_SCOPE_PROJECT")?,
+        required_scope_env("JANUS_SCOPE_REPOSITORY")?,
+        required_scope_env("JANUS_SCOPE_ENVIRONMENT")?,
+    )?;
+    if let Some(namespace) = optional_scope_env("JANUS_SCOPE_NAMESPACE")? {
+        scope = scope.with_namespace(NamespaceId::new(namespace)?);
+    }
+    if let Some(workload) = optional_scope_env("JANUS_SCOPE_WORKLOAD")? {
+        scope = scope.with_workload(WorkloadId::new(workload)?)?;
+    }
+    Ok(scope.scope_ref())
+}
+
+fn required_scope_env(key: &'static str) -> Result<String> {
+    optional_scope_env(key)?.with_context(|| format!("{key} is required"))
+}
+
+fn optional_scope_env(key: &'static str) -> Result<Option<String>> {
+    match env::var(key) {
+        Ok(value) if !value.is_empty() && value.trim().len() == value.len() => Ok(Some(value)),
+        Ok(_) => anyhow::bail!("{key} must be non-empty without surrounding whitespace"),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to read {key}")),
+    }
+}
+
+#[cfg(test)]
+fn test_scope() -> ScopeRef {
+    ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
+        .unwrap()
+        .scope_ref()
 }
 
 fn env_first(keys: &[&str]) -> Option<String> {
@@ -3618,8 +3702,10 @@ fn env_first(keys: &[&str]) -> Option<String> {
 }
 
 fn print_usage() {
+    eprintln!("Migration:\n  migrate preflight|apply|postflight|rollback|status --manifest PATH\n");
+    eprintln!("Scope transfer:\n  scope-transfer preflight|apply|postflight|rollback|status --manifest PATH\n");
     eprintln!(
-        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE --permit use_...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  lifecycle destroy-finalize --secret-ref REF [--metadata-file PATH]\n  lifecycle destroy-reconcile [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd env-file preflight checks the reviewed env-file profile and target path without a permit, backend, or secret read.\njanusd env-file writes a reviewed private env file from JANUS_RUN_PROFILE_MANIFEST; callers cannot choose env name, output path, executor, destination, or value.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\njanusd lifecycle destroy-finalize requires a tombstone and writes destroyed metadata only; it never deletes provider values.\njanusd lifecycle destroy-reconcile reads metadata and tombstones only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists."
+        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE --permit use_...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  lifecycle destroy-finalize --secret-ref REF [--metadata-file PATH]\n  lifecycle destroy-reconcile [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd env-file preflight checks the reviewed env-file profile and target path without a permit, backend, or secret read.\njanusd env-file writes a reviewed private env file from JANUS_RUN_PROFILE_MANIFEST; callers cannot choose env name, output path, executor, destination, or value.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\njanusd lifecycle destroy-finalize requires a tombstone and writes destroyed metadata only; it never deletes provider values.\njanusd lifecycle destroy-reconcile reads metadata and tombstones only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists.\nAll non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."
     );
     eprintln!(
         "\nPharos beacon retirement:\n  pharos-beacon retire --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH [--retain-for-days N]\n  pharos-beacon reconcile --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH\n\nThese commands consume reviewed host-retirement intent and profile bindings, return no value, retain provider material, and fail closed on drift."
@@ -3639,7 +3725,7 @@ mod tests {
     #[cfg(unix)]
     use janus_core::{
         AuditAction, AuditOutcome, AuditWrite, Destination, EgressMode, ExecutorRef,
-        ManifestCatalog, ProjectId, Purpose, SecretClass, SecretLifecycle, SecretMeta, SecretRef,
+        ManifestCatalog, Purpose, SecretClass, SecretLifecycle, SecretMeta, SecretRef,
         StaleSecretStatus, TrustLevel, UseProfile, UseRequest,
     };
     #[cfg(unix)]
@@ -4861,7 +4947,7 @@ mod tests {
             name: SecretName::new("CANARY").unwrap(),
             secret_ref: secret_ref.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope: test_scope(),
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(SecretClass::BreakGlass),
             lifecycle: SecretLifecycle::Active,
@@ -4909,7 +4995,7 @@ mod tests {
             name: SecretName::new("CANARY").unwrap(),
             secret_ref: secret_ref.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope: test_scope(),
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(SecretClass::Normal),
             lifecycle: SecretLifecycle::Active,
@@ -5118,9 +5204,8 @@ mod tests {
             "#,
         )
         .unwrap();
-        let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let config = LifecycleTransitionConfig {
             secret_ref: secret_ref.clone(),
@@ -5157,7 +5242,7 @@ mod tests {
             secret_ref: secret_ref.clone(),
             name: name.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope: test_scope(),
             owner: None,
             classification: None,
             lifecycle: SecretLifecycle::Active,
@@ -5213,9 +5298,8 @@ mod tests {
             )
             .unwrap();
             let before = std::fs::read_to_string(&metadata_file).unwrap();
-            let project = ProjectId::new("janus").unwrap();
             let name = SecretName::new("CANARY").unwrap();
-            let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+            let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
             let profile_id = ProfileId::new("profile.canary").unwrap();
             let config = LifecycleTransitionConfig {
                 secret_ref: secret_ref.clone(),
@@ -5261,9 +5345,8 @@ mod tests {
     async fn lifecycle_destroy_record_writes_tombstone_without_provider_delete() {
         let dir = tempfile::tempdir().unwrap();
         let registry = FileTombstoneRegistry::new(dir.path());
-        let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
         let config = LifecycleDestroyRecordConfig {
@@ -5311,7 +5394,7 @@ mod tests {
         );
         assert_eq!(
             records[0].principal_binding,
-            "executor:janus-run@fixture|scope:janus/dev"
+            format!("executor:janus-run@fixture|scope:{}", test_scope().as_str())
         );
         assert_eq!(audit.events().len(), 1);
         let event = &audit.events()[0];
@@ -5327,9 +5410,8 @@ mod tests {
     async fn lifecycle_destroy_record_requires_pending_delete() {
         let dir = tempfile::tempdir().unwrap();
         let registry = FileTombstoneRegistry::new(dir.path());
-        let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let config = LifecycleDestroyRecordConfig {
             secret_ref: secret_ref.clone(),
@@ -5401,9 +5483,8 @@ mod tests {
             "#,
         )
         .unwrap();
-        let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let record_config = LifecycleDestroyRecordConfig {
             secret_ref: secret_ref.clone(),
@@ -5465,7 +5546,7 @@ mod tests {
             secret_ref: secret_ref.clone(),
             name: name.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope: test_scope(),
             owner: None,
             classification: None,
             lifecycle: SecretLifecycle::Active,
@@ -5508,9 +5589,8 @@ mod tests {
         )
         .unwrap();
         let before = std::fs::read_to_string(&metadata_file).unwrap();
-        let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let record_config = LifecycleDestroyRecordConfig {
             secret_ref: secret_ref.clone(),
@@ -5594,9 +5674,8 @@ mod tests {
         )
         .unwrap();
         let before = std::fs::read_to_string(&metadata_file).unwrap();
-        let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let config = LifecycleDestroyFinalizeConfig {
             secret_ref: secret_ref.clone(),
@@ -5647,9 +5726,8 @@ mod tests {
         )
         .unwrap();
         let before = std::fs::read_to_string(&metadata_file).unwrap();
-        let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let record_config = LifecycleDestroyRecordConfig {
             secret_ref: secret_ref.clone(),
@@ -5720,21 +5798,20 @@ mod tests {
     async fn lifecycle_destroy_reconcile_reports_tombstone_metadata_drift() {
         let dir = tempfile::tempdir().unwrap();
         let registry = FileTombstoneRegistry::new(dir.path().join("tombstones"));
-        let project = ProjectId::new("janus").unwrap();
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let pending_name = SecretName::new("PENDING").unwrap();
-        let pending_ref = SecretRef::for_manifest_entry(&project, &pending_name);
+        let pending_ref = SecretRef::for_manifest_entry(&test_scope(), &pending_name);
         let destroyed_missing_name = SecretName::new("DESTROYED_MISSING").unwrap();
         let destroyed_missing_ref =
-            SecretRef::for_manifest_entry(&project, &destroyed_missing_name);
+            SecretRef::for_manifest_entry(&test_scope(), &destroyed_missing_name);
         let active_name = SecretName::new("ACTIVE_WITH_TOMBSTONE").unwrap();
-        let active_ref = SecretRef::for_manifest_entry(&project, &active_name);
+        let active_ref = SecretRef::for_manifest_entry(&test_scope(), &active_name);
         let ok_name = SecretName::new("DESTROYED_OK").unwrap();
-        let ok_ref = SecretRef::for_manifest_entry(&project, &ok_name);
+        let ok_ref = SecretRef::for_manifest_entry(&test_scope(), &ok_name);
         let healthy_name = SecretName::new("ACTIVE_OK").unwrap();
-        let healthy_ref = SecretRef::for_manifest_entry(&project, &healthy_name);
+        let healthy_ref = SecretRef::for_manifest_entry(&test_scope(), &healthy_name);
         let orphan_name = SecretName::new("ORPHAN").unwrap();
-        let orphan_ref = SecretRef::for_manifest_entry(&project, &orphan_name);
+        let orphan_ref = SecretRef::for_manifest_entry(&test_scope(), &orphan_name);
 
         for (name, secret_ref) in [
             (&pending_name, &pending_ref),
@@ -5883,9 +5960,8 @@ mod tests {
             "#,
         )
         .unwrap();
-        let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let principal = fixture_principal();
 
@@ -6089,9 +6165,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn lifecycle_stale_report_reports_value_free_rows_and_audit() {
-        let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let config = LifecycleStaleReportConfig {
             evidence_file: None,
@@ -6321,7 +6396,7 @@ mod tests {
                 PrincipalKind::Executor,
                 PrincipalId::new("janus-run@fixture").unwrap(),
             ),
-            ScopeRef::new("janus/dev").unwrap(),
+            test_scope(),
         )
     }
 
@@ -6397,9 +6472,8 @@ mod tests {
     #[cfg(unix)]
     impl FixtureManagedCommandHarness {
         async fn new(allowed_args: Vec<String>) -> Self {
-            let project = ProjectId::new("janus").unwrap();
             let name = SecretName::new("CANARY").unwrap();
-            let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+            let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
             let profile_id = ProfileId::new("profile.canary").unwrap();
             let executor_ref = ExecutorRef::new("janus-run@fixture").unwrap();
             let destination = Destination::new("fixture-destination").unwrap();
@@ -6407,7 +6481,7 @@ mod tests {
                 secret_ref: secret_ref.clone(),
                 name: name.clone(),
                 label: SafeLabel::new("Canary token").unwrap(),
-                scope: ScopeRef::new("janus/dev").unwrap(),
+                scope: test_scope(),
                 owner: Some(OwnerRef::new("infra").unwrap()),
                 classification: Some(SecretClass::Normal),
                 lifecycle: SecretLifecycle::Active,
@@ -6421,6 +6495,7 @@ mod tests {
                 .unwrap();
             let use_profile = UseProfile {
                 id: profile_id.clone(),
+                scope: test_scope(),
                 secret_ref: secret_ref.clone(),
                 executor: executor_ref.clone(),
                 destination: destination.clone(),
@@ -6439,6 +6514,7 @@ mod tests {
             let permit = broker
                 .request_use(
                     &UseRequest {
+                        scope: test_scope(),
                         secret_ref: secret_ref.clone(),
                         profile_id: profile_id.clone(),
                         destination: destination.clone(),
@@ -6518,15 +6594,15 @@ mod tests {
             output_dir: &Path,
             include_hash_sidecar: bool,
         ) -> Self {
-            let project = ProjectId::new("janus").unwrap();
             let name = SecretName::new("CANARY").unwrap();
-            let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+            let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
             let profile_id = ProfileId::new("profile.service_env").unwrap();
             let executor_ref = ExecutorRef::new("janus-run@fixture").unwrap();
             let destination = Destination::new("fixture-service").unwrap();
             let store = fixture_store(&secret_ref, &name, &profile_id);
             let use_profile = UseProfile {
                 id: profile_id.clone(),
+                scope: test_scope(),
                 secret_ref: secret_ref.clone(),
                 executor: executor_ref,
                 destination: destination.clone(),
@@ -6545,6 +6621,7 @@ mod tests {
             let permit = broker
                 .request_use(
                     &UseRequest {
+                        scope: test_scope(),
                         secret_ref: secret_ref.clone(),
                         profile_id: profile_id.clone(),
                         destination,
@@ -6624,15 +6701,15 @@ mod tests {
     #[tokio::test]
     async fn warden_file_registry_handoff_smoke_runs_janusd_command() {
         let permit_dir = tempfile::tempdir().unwrap();
-        let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let executor_ref = ExecutorRef::new("janus-run@fixture").unwrap();
         let destination = Destination::new("fixture-destination").unwrap();
         let principal = fixture_principal();
         let use_profile = UseProfile {
             id: profile_id.clone(),
+            scope: test_scope(),
             secret_ref: secret_ref.clone(),
             executor: executor_ref,
             destination: destination.clone(),
@@ -6912,7 +6989,7 @@ mod tests {
             secret_ref: secret_ref.clone(),
             name: name.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope: test_scope(),
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(class),
             lifecycle,
@@ -6970,7 +7047,7 @@ mod tests {
             secret_ref: secret_ref.clone(),
             name: name.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope: test_scope(),
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(class),
             lifecycle: SecretLifecycle::Active,
@@ -6997,7 +7074,7 @@ mod tests {
                     secret_ref: secret_ref.clone(),
                     name: name.clone(),
                     label: SafeLabel::new("Canary token").unwrap(),
-                    scope: ScopeRef::new("janus/dev").unwrap(),
+                    scope: test_scope(),
                     owner: Some(OwnerRef::new("infra").unwrap()),
                     classification: Some(SecretClass::Normal),
                     lifecycle: *lifecycle,
@@ -7021,6 +7098,7 @@ mod tests {
     ) -> ApprovalGrant {
         let profile = UseProfile {
             id: profile_id.clone(),
+            scope: test_scope(),
             secret_ref: secret_ref.clone(),
             executor: ExecutorRef::new("janus-run@fixture").unwrap(),
             destination: Destination::new("fixture-destination").unwrap(),
@@ -7031,6 +7109,7 @@ mod tests {
             enabled: true,
         };
         let request = UseRequest {
+            scope: test_scope(),
             secret_ref: secret_ref.clone(),
             profile_id: profile_id.clone(),
             destination: Destination::new("fixture-destination").unwrap(),

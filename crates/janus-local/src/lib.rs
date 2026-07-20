@@ -1,11 +1,26 @@
 //! Local filesystem integrations for Janus runtimes.
 //!
-//! This crate intentionally stores only value-free permit and approval
-//! metadata. Permit ids, approval ids, and principal bindings remain
-//! operationally sensitive, so files are created under private directories and
-//! permit files are consumed with a rename-before-read single-use claim.
+//! This crate intentionally stores only value-free audit, permit, approval,
+//! lifecycle, and tombstone metadata. Audit evidence, permit ids, approval ids,
+//! and principal bindings remain operationally sensitive, so files are created
+//! under private directories and permit files are consumed with a
+//! rename-before-read single-use claim.
 
 #![forbid(unsafe_code)]
+
+mod audit;
+mod migration;
+mod release;
+mod transfer;
+
+pub use audit::{AuditRecovery, JsonlAuditSink};
+pub use migration::{enforce_migration_ready_from_env, ApprovalMigrationRunner, MigrationStatus};
+pub use release::{
+    audit_release_admission, enforce_release_admission_from_env, load_release_admission,
+};
+pub use transfer::{
+    enforce_scope_transfer_ready_from_env, ScopeTransferRunner, ScopeTransferStatus,
+};
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Write};
@@ -13,8 +28,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use janus_core::{
-    ApprovalGrant, ApprovalGrantSnapshot, JanusError, JanusResult, PrincipalChain, SafeLabel,
-    SecretAgeEvidence, SecretRef, SecretTombstone, UsePermit, UsePermitSnapshot,
+    ApprovalGrant, ApprovalGrantSnapshot, ApprovalId, Destination, EgressMode, ExecutorRef,
+    JanusError, JanusResult, PrincipalChain, ProfileId, Purpose, SafeLabel, ScopeRef,
+    SecretAgeEvidence, SecretClass, SecretRef, SecretTombstone, UsePermit, UsePermitSnapshot,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,11 +54,41 @@ pub trait ApprovalRegistry {
     /// Read one approval grant by opaque approval id.
     fn get(&self, approval_id: &str) -> JanusResult<ApprovalGrant>;
 
-    /// List all locally stored approval grants.
-    fn list(&self) -> JanusResult<Vec<ApprovalGrant>>;
+    /// List value-free summaries, including stale pre-scope records.
+    fn list(&self) -> JanusResult<Vec<ApprovalListEntry>>;
 
     /// Revoke one locally stored approval grant.
     fn revoke(&self, approval_id: &str) -> JanusResult<()>;
+}
+
+/// Value-free inventory entry for a current or stale approval record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalListEntry {
+    /// Opaque approval id.
+    pub approval_id: ApprovalId,
+    /// Opaque secret ref from the stored record.
+    pub secret_ref: SecretRef,
+    /// Reviewed use profile.
+    pub profile_id: ProfileId,
+    /// Stored secret class.
+    pub class: SecretClass,
+    /// Stored egress mode.
+    pub egress: EgressMode,
+    /// Stored expiry.
+    pub expires_at: SystemTime,
+    /// Exact scope when the record was issued after the cutover.
+    pub scope_ref: Option<ScopeRef>,
+}
+
+impl ApprovalListEntry {
+    /// Stable safe scope-binding state for operator output.
+    pub fn scope_status(&self) -> &'static str {
+        if self.scope_ref.is_some() {
+            "exact"
+        } else {
+            "stale_unbound"
+        }
+    }
 }
 
 /// Local registry for value-free lifecycle age evidence.
@@ -353,7 +399,10 @@ impl ApprovalRegistry for FileApprovalRegistry {
         self.ensure_dir()?;
         let snapshot = approval.snapshot();
         let path = self.path_for(&snapshot.approval_id)?;
-        let record = ApprovalGrantFileRecord::from(snapshot);
+        let mut record = ApprovalGrantFileRecord::from(snapshot);
+        if migration::approval_schema_version(&self.dir)? == 0 {
+            record.version = None;
+        }
         let file = create_secure_new_approval_file(&path)?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer(&mut writer, &record)
@@ -373,7 +422,7 @@ impl ApprovalRegistry for FileApprovalRegistry {
         read_approval(&path, approval_id)
     }
 
-    fn list(&self) -> JanusResult<Vec<ApprovalGrant>> {
+    fn list(&self) -> JanusResult<Vec<ApprovalListEntry>> {
         self.ensure_dir()?;
         let mut approvals = Vec::new();
         let entries = fs::read_dir(&self.dir)
@@ -392,9 +441,9 @@ impl ApprovalRegistry for FileApprovalRegistry {
                 continue;
             };
             validate_approval_file_token(approval_id)?;
-            approvals.push(read_approval(&path, approval_id)?);
+            approvals.push(read_approval_list_entry(&path, approval_id)?);
         }
-        approvals.sort_by(|left, right| left.id().as_str().cmp(right.id().as_str()));
+        approvals.sort_by(|left, right| left.approval_id.as_str().cmp(right.approval_id.as_str()));
         Ok(approvals)
     }
 
@@ -537,6 +586,8 @@ impl TombstoneRegistry for FileTombstoneRegistry {
 struct PermitFileRecord {
     version: u8,
     permit_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope_ref: Option<String>,
     secret_ref: String,
     profile_id: String,
     destination: String,
@@ -552,7 +603,11 @@ struct PermitFileRecord {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ApprovalGrantFileRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<u8>,
     approval_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope_ref: Option<String>,
     secret_ref: String,
     profile_id: String,
     executor: String,
@@ -589,8 +644,9 @@ struct SecretTombstoneFileRecord {
 impl From<UsePermitSnapshot> for PermitFileRecord {
     fn from(snapshot: UsePermitSnapshot) -> Self {
         Self {
-            version: 3,
+            version: 4,
             permit_id: snapshot.permit_id,
+            scope_ref: Some(snapshot.scope_ref),
             secret_ref: snapshot.secret_ref,
             profile_id: snapshot.profile_id,
             destination: snapshot.destination,
@@ -607,7 +663,7 @@ impl From<UsePermitSnapshot> for PermitFileRecord {
 
 impl PermitFileRecord {
     fn into_snapshot(self) -> JanusResult<UsePermitSnapshot> {
-        if !matches!(self.version, 1..=3) {
+        if !matches!(self.version, 1..=4) {
             return Err(JanusError::permit_invalid(
                 "denied_unsupported_permit_record",
                 "permit registry entry version is unsupported",
@@ -615,13 +671,22 @@ impl PermitFileRecord {
         }
         Ok(UsePermitSnapshot {
             permit_id: self.permit_id,
+            scope_ref: self.scope_ref.ok_or_else(|| {
+                JanusError::permit_invalid(
+                    "denied_stale_scope_binding",
+                    "permit predates exact scope binding",
+                )
+            })?,
             secret_ref: self.secret_ref,
             profile_id: self.profile_id,
             destination: self.destination,
             executor: self.executor,
             egress: self.egress.unwrap_or_else(|| "declared_only".to_string()),
             purpose: self.purpose.unwrap_or_else(|| "legacy permit".to_string()),
-            approval: self.approval.map(ApprovalGrantFileRecord::into_snapshot),
+            approval: self
+                .approval
+                .map(ApprovalGrantFileRecord::into_snapshot)
+                .transpose()?,
             principal_binding: self.principal_binding,
             expires_at_unix_secs: self.expires_at_unix_secs,
             expires_at_subsec_nanos: self.expires_at_subsec_nanos,
@@ -632,7 +697,9 @@ impl PermitFileRecord {
 impl From<ApprovalGrantSnapshot> for ApprovalGrantFileRecord {
     fn from(snapshot: ApprovalGrantSnapshot) -> Self {
         Self {
+            version: Some(1),
             approval_id: snapshot.approval_id,
+            scope_ref: Some(snapshot.scope_ref),
             secret_ref: snapshot.secret_ref,
             profile_id: snapshot.profile_id,
             executor: snapshot.executor,
@@ -648,9 +715,21 @@ impl From<ApprovalGrantSnapshot> for ApprovalGrantFileRecord {
 }
 
 impl ApprovalGrantFileRecord {
-    fn into_snapshot(self) -> ApprovalGrantSnapshot {
-        ApprovalGrantSnapshot {
+    fn into_snapshot(self) -> JanusResult<ApprovalGrantSnapshot> {
+        if !matches!(self.version, None | Some(1)) {
+            return Err(JanusError::approval_invalid(
+                "denied_unsupported_approval_record",
+                "approval registry entry version is unsupported",
+            ));
+        }
+        Ok(ApprovalGrantSnapshot {
             approval_id: self.approval_id,
+            scope_ref: self.scope_ref.ok_or_else(|| {
+                JanusError::approval_invalid(
+                    "denied_stale_scope_binding",
+                    "approval predates exact scope binding",
+                )
+            })?,
             secret_ref: self.secret_ref,
             profile_id: self.profile_id,
             executor: self.executor,
@@ -661,7 +740,56 @@ impl ApprovalGrantFileRecord {
             expires_at_unix_secs: self.expires_at_unix_secs,
             expires_at_subsec_nanos: self.expires_at_subsec_nanos,
             reason: self.reason,
+        })
+    }
+
+    fn to_list_entry(&self) -> JanusResult<ApprovalListEntry> {
+        if !matches!(self.version, None | Some(1)) {
+            return Err(JanusError::approval_invalid(
+                "denied_unsupported_approval_record",
+                "approval registry entry version is unsupported",
+            ));
         }
+        let approval_id = ApprovalId::from_opaque(self.approval_id.clone())?;
+        let secret_ref = SecretRef::new(self.secret_ref.clone())?;
+        let profile_id = ProfileId::new(self.profile_id.clone())?;
+        ExecutorRef::new(self.executor.clone())?;
+        Destination::new(self.destination.clone())?;
+        let class = SecretClass::parse(&self.class)?;
+        let egress = EgressMode::parse(&self.egress)?;
+        Purpose::new(self.purpose.clone())?;
+        SafeLabel::new(self.reason.clone())?;
+        let scope_ref = self
+            .scope_ref
+            .as_ref()
+            .map(|scope| ScopeRef::from_opaque(scope.clone()))
+            .transpose()?;
+        if self.expires_at_subsec_nanos >= 1_000_000_000 {
+            return Err(JanusError::approval_invalid(
+                "denied_malformed_approval",
+                "approval expiry is malformed",
+            ));
+        }
+        let expires_at = UNIX_EPOCH
+            .checked_add(std::time::Duration::new(
+                self.expires_at_unix_secs,
+                self.expires_at_subsec_nanos,
+            ))
+            .ok_or_else(|| {
+                JanusError::approval_invalid(
+                    "denied_malformed_approval",
+                    "approval expiry is malformed",
+                )
+            })?;
+        Ok(ApprovalListEntry {
+            approval_id,
+            secret_ref,
+            profile_id,
+            class,
+            egress,
+            expires_at,
+            scope_ref,
+        })
     }
 }
 
@@ -742,6 +870,26 @@ fn read_claimed_permit(path: &Path, requested_permit_id: &str) -> JanusResult<Us
 }
 
 fn read_approval(path: &Path, requested_approval_id: &str) -> JanusResult<ApprovalGrant> {
+    let record = read_approval_record(path, requested_approval_id)?;
+    ApprovalGrant::from_snapshot(record.into_snapshot()?).map_err(|_| {
+        JanusError::approval_invalid(
+            "denied_malformed_approval",
+            "approval registry entry is malformed",
+        )
+    })
+}
+
+fn read_approval_list_entry(
+    path: &Path,
+    requested_approval_id: &str,
+) -> JanusResult<ApprovalListEntry> {
+    read_approval_record(path, requested_approval_id)?.to_list_entry()
+}
+
+fn read_approval_record(
+    path: &Path,
+    requested_approval_id: &str,
+) -> JanusResult<ApprovalGrantFileRecord> {
     check_secure_approval_file(path)?;
     let file = match File::open(path) {
         Ok(file) => file,
@@ -766,12 +914,7 @@ fn read_approval(path: &Path, requested_approval_id: &str) -> JanusResult<Approv
             "approval registry entry does not match the requested approval",
         ));
     }
-    ApprovalGrant::from_snapshot(record.into_snapshot()).map_err(|_| {
-        JanusError::approval_invalid(
-            "denied_malformed_approval",
-            "approval registry entry is malformed",
-        )
-    })
+    Ok(record)
 }
 
 fn read_optional_lifecycle_evidence(
@@ -1162,11 +1305,17 @@ mod tests {
     use janus_core::{
         ApprovalGrant, AuditWrite, Destination, EgressMode, ExecutorRef, OwnerRef, PermitIssuer,
         Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose,
-        SafeLabel, ScopeRef, SecretClass, SecretDescriptor, SecretLifecycle, SecretName, SecretRef,
-        TombstonePolicy, TrustLevel, UseProfile, UseRequest,
+        SafeLabel, ScopePathV1, ScopeRef, SecretClass, SecretDescriptor, SecretLifecycle,
+        SecretName, SecretRef, TombstonePolicy, TrustLevel, UseProfile, UseRequest,
     };
 
     use super::*;
+
+    fn scope() -> ScopeRef {
+        ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
+            .unwrap()
+            .scope_ref()
+    }
 
     fn fixture_permit(now: SystemTime) -> UsePermit {
         let secret_ref = SecretRef::new("sec_fixture").unwrap();
@@ -1178,10 +1327,11 @@ mod tests {
                 PrincipalKind::Executor,
                 PrincipalId::new(executor.as_str()).unwrap(),
             ),
-            ScopeRef::new("janus/dev").unwrap(),
+            scope(),
         );
         let profile = UseProfile {
             id: profile_id.clone(),
+            scope: scope(),
             secret_ref: secret_ref.clone(),
             executor,
             destination: destination.clone(),
@@ -1192,6 +1342,7 @@ mod tests {
             enabled: true,
         };
         let request = UseRequest {
+            scope: scope(),
             secret_ref,
             profile_id,
             destination,
@@ -1209,6 +1360,7 @@ mod tests {
         let destination = Destination::new("deploy-api").unwrap();
         let profile = UseProfile {
             id: profile_id.clone(),
+            scope: scope(),
             secret_ref: secret_ref.clone(),
             executor,
             destination: destination.clone(),
@@ -1219,6 +1371,7 @@ mod tests {
             enabled: true,
         };
         let request = UseRequest {
+            scope: scope(),
             secret_ref,
             profile_id,
             destination,
@@ -1242,7 +1395,7 @@ mod tests {
             name: SecretName::new("CANARY").unwrap(),
             secret_ref: secret_ref.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope: scope(),
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(SecretClass::Normal),
             lifecycle: SecretLifecycle::PendingDelete,
@@ -1256,7 +1409,7 @@ mod tests {
                 PrincipalKind::Executor,
                 PrincipalId::new("admin-cli").unwrap(),
             ),
-            ScopeRef::new("janus/dev").unwrap(),
+            scope(),
         );
         let request = janus_core::SecretTombstoneRequest::new(
             secret_ref.clone(),
@@ -1305,6 +1458,77 @@ mod tests {
     }
 
     #[test]
+    fn pre_scope_permits_and_approvals_fail_closed_but_remain_revocable() {
+        fn write_private(path: &Path, value: serde_json::Value) {
+            fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+
+        let permit_dir = tempfile::tempdir().unwrap();
+        let permits = FilePermitRegistry::new(permit_dir.path());
+        write_private(
+            &permit_dir.path().join("use_legacy.json"),
+            serde_json::json!({
+                "version": 3,
+                "permit_id": "use_legacy",
+                "secret_ref": "sec_fixture",
+                "profile_id": "profile.fixture",
+                "destination": "deploy-api",
+                "executor": "janus-run@fixture",
+                "egress": "connector",
+                "purpose": "legacy fixture",
+                "approval": null,
+                "principal_binding": "executor:janus-run@fixture|scope:legacy",
+                "expires_at_unix_secs": 4102444800_u64,
+                "expires_at_subsec_nanos": 0
+            }),
+        );
+        assert!(matches!(
+            permits.take("use_legacy"),
+            Err(JanusError::PermitInvalid {
+                reason_code: "denied_stale_scope_binding",
+                ..
+            })
+        ));
+
+        let approval_dir = tempfile::tempdir().unwrap();
+        let approvals = FileApprovalRegistry::new(approval_dir.path());
+        write_private(
+            &approval_dir.path().join("appr_legacy.json"),
+            serde_json::json!({
+                "version": 1,
+                "approval_id": "appr_legacy",
+                "secret_ref": "sec_fixture",
+                "profile_id": "profile.fixture",
+                "executor": "janus-run@fixture",
+                "destination": "deploy-api",
+                "class": "high_value",
+                "egress": "connector",
+                "purpose": "legacy fixture",
+                "expires_at_unix_secs": 4102444800_u64,
+                "expires_at_subsec_nanos": 0,
+                "reason": "reviewed legacy fixture"
+            }),
+        );
+        assert!(matches!(
+            approvals.get("appr_legacy"),
+            Err(JanusError::ApprovalInvalid {
+                reason_code: "denied_stale_scope_binding",
+                ..
+            })
+        ));
+        let listed = approvals.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].approval_id.as_str(), "appr_legacy");
+        assert_eq!(listed[0].scope_status(), "stale_unbound");
+        approvals.revoke("appr_legacy").unwrap();
+    }
+
+    #[test]
     fn approval_registry_round_trips_lists_and_revokes_grants() {
         let dir = tempfile::tempdir().unwrap();
         let registry = FileApprovalRegistry::new(dir.path());
@@ -1316,7 +1540,10 @@ mod tests {
         let listed = registry.list().unwrap();
 
         assert_eq!(rehydrated, approval);
-        assert_eq!(listed, vec![approval]);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].approval_id.as_str(), approval_id);
+        assert_eq!(listed[0].scope_ref.as_ref(), Some(&approval.scope().scope));
+        assert_eq!(listed[0].scope_status(), "exact");
 
         registry.revoke(&approval_id).unwrap();
         assert!(matches!(
@@ -1417,7 +1644,7 @@ mod tests {
                 PrincipalKind::Executor,
                 PrincipalId::new("admin-cli").unwrap(),
             ),
-            ScopeRef::new("janus/dev").unwrap(),
+            scope(),
         );
         let secret_ref = SecretRef::new("sec_fixture").unwrap();
         let other_ref = SecretRef::new("sec_other").unwrap();
@@ -1440,7 +1667,7 @@ mod tests {
         assert_eq!(rehydrated.retain_until, retain_until);
         assert_eq!(
             rehydrated.principal_binding,
-            "executor:admin-cli|scope:janus/dev"
+            format!("executor:admin-cli|scope:{}", scope().as_str())
         );
         assert!(!format!("{rehydrated:?}").contains("expected-canary"));
 
@@ -1465,7 +1692,7 @@ mod tests {
                 PrincipalKind::Executor,
                 PrincipalId::new("admin-cli").unwrap(),
             ),
-            ScopeRef::new("janus/dev").unwrap(),
+            scope(),
         );
         let secret_ref = SecretRef::new("sec_../escape").unwrap();
         let tombstone = fixture_tombstone(

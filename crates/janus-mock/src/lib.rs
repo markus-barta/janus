@@ -122,18 +122,20 @@ impl SecretStore for MockStore {
 mod tests {
     use super::*;
     use janus_core::{
-        OwnerRef, ProfileId, ProjectId, SafeLabel, ScopeRef, SecretClass, SecretLifecycle,
-        SecretMeta, SecretRef, TrustLevel,
+        OwnerRef, ProfileId, SafeLabel, ScopePathV1, SecretClass, SecretLifecycle, SecretMeta,
+        SecretRef, TrustLevel,
     };
 
     fn catalog() -> (ManifestCatalog, SecretName) {
-        let project = ProjectId::new("janus").unwrap();
+        let scope = ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
+            .unwrap()
+            .scope_ref();
         let name = SecretName::new("CANARY").unwrap();
         let catalog = ManifestCatalog::new(vec![SecretMeta {
-            secret_ref: SecretRef::for_manifest_entry(&project, &name),
+            secret_ref: SecretRef::for_manifest_entry(&scope, &name),
             name: name.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope,
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(SecretClass::Normal),
             lifecycle: SecretLifecycle::Active,

@@ -33,8 +33,11 @@ context used by normal janusd operations:
   `JANUS_WARDEN_AGE_METADATA_FILE`, or `JANUS_METADATA_FILE`.
 - A durable tombstone registry via `JANUS_LIFECYCLE_TOMBSTONE_DIR` or
   `JANUS_TOMBSTONE_DIR`; default is `/var/lib/janus/tombstones`.
-- Optional audit identity via `JANUS_LIFECYCLE_EXECUTOR` and
-  `JANUS_LIFECYCLE_SCOPE`.
+- Optional audit identity via `JANUS_LIFECYCLE_EXECUTOR`.
+- Required exact authorization scope via `JANUS_SCOPE_ORGANIZATION`,
+  `JANUS_SCOPE_PROJECT`, `JANUS_SCOPE_REPOSITORY`, and
+  `JANUS_SCOPE_ENVIRONMENT`; optional leaf components are
+  `JANUS_SCOPE_NAMESPACE` and `JANUS_SCOPE_WORKLOAD`.
 
 Record the operator reason in the tracking ticket before running commands. Use
 the stable `SecretRef` from the manifest, not the secret name or value.

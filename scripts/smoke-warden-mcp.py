@@ -111,7 +111,10 @@ def smoke_env(fixture: Path, *, container: bool = False) -> dict[str, str]:
         "JANUS_WARDEN_SECRETSPEC_METADATA_FILE": str(root / "metadata.toml"),
         "JANUS_WARDEN_DESTINATION": "dev-smoke",
         "JANUS_WARDEN_EXECUTOR": "warden-stdio",
-        "JANUS_WARDEN_SCOPE": "janus/dev",
+        "JANUS_WARDEN_SCOPE_ORGANIZATION": "fixture-org",
+        "JANUS_WARDEN_SCOPE_PROJECT": "janus",
+        "JANUS_WARDEN_SCOPE_REPOSITORY": "janus",
+        "JANUS_WARDEN_SCOPE_ENVIRONMENT": "dev",
     }
     if not container:
         env["JANUS_WARDEN_PERMIT_DIR"] = str(root / "permits")

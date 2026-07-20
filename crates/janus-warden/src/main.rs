@@ -14,11 +14,15 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use janus_core::{
-    AuditWrite, Destination, EgressMode, ExecutorRef, Principal, PrincipalChain, PrincipalId,
-    PrincipalKind, ProfilePolicy, ScopeRef, SecretBroker, SecretDescriptor, SecretMetadataOverlay,
-    SecretStore, TrustLevel, UseProfile,
+    AuditWrite, Destination, EgressMode, ExecutorRef, NamespaceId, Principal, PrincipalChain,
+    PrincipalId, PrincipalKind, ProfilePolicy, ReleaseAdmission, ScopePathV1, ScopeRef,
+    SecretBroker, SecretDescriptor, SecretMetadataOverlay, SecretStore, TrustLevel, UseProfile,
+    WorkloadId,
 };
-use janus_local::{FilePermitRegistry, NoopPermitStore, PermitStore};
+use janus_local::{
+    enforce_migration_ready_from_env, enforce_release_admission_from_env,
+    enforce_scope_transfer_ready_from_env, FilePermitRegistry, NoopPermitStore, PermitStore,
+};
 use janus_provider_age::AgeSecretStore;
 use janus_providers::SecretspecStore;
 use janus_warden::{tool_definitions, WardenRuntime};
@@ -189,8 +193,13 @@ impl ServerHandler for McpWarden {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
-    let runtime = build_runtime_from_env().await?;
     let principal = principal_from_env()?;
+    let release = enforce_release_admission_from_env(&principal)
+        .context("release admission denied Warden startup")?;
+    enforce_migration_ready_from_env().context("migration state denied Warden startup")?;
+    enforce_scope_transfer_ready_from_env()
+        .context("scope transfer state denied Warden startup")?;
+    let runtime = build_runtime_from_env(release).await?;
     let server = McpWarden {
         runtime: Arc::new(Mutex::new(runtime)),
         principal,
@@ -202,7 +211,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn build_runtime_from_env() -> Result<Runtime> {
+async fn build_runtime_from_env(release: ReleaseAdmission) -> Result<Runtime> {
     let store = load_store_from_env()?;
     let descriptors = store
         .list()
@@ -213,7 +222,8 @@ async fn build_runtime_from_env() -> Result<Runtime> {
     Ok(WardenRuntime::with_permit_store(
         SecretBroker::new(store, policy, AuditWrite::accepting()),
         permits,
-    ))
+    )
+    .with_release_admission(release))
 }
 
 fn load_store_from_env() -> Result<WardenStore> {
@@ -236,8 +246,14 @@ fn load_secretspec_store() -> Result<SecretspecStore> {
         "JANUS_WARDEN_METADATA_FILE",
         "JANUS_METADATA_FILE",
     ])?;
-    SecretspecStore::load_from_with_metadata(manifest, profile, provider_uri, metadata.as_ref())
-        .context("failed to load JANUS_WARDEN_SECRETSPEC_* backend")
+    SecretspecStore::load_from_with_metadata(
+        manifest,
+        profile,
+        provider_uri,
+        scope_from_env()?,
+        metadata.as_ref(),
+    )
+    .context("failed to load JANUS_WARDEN_SECRETSPEC_* backend")
 }
 
 fn load_age_store() -> Result<AgeSecretStore> {
@@ -262,6 +278,7 @@ fn load_age_store() -> Result<AgeSecretStore> {
         store_dir,
         identity_files,
         recipients,
+        scope_from_env()?,
         metadata.as_ref(),
     )
     .context("failed to load JANUS_WARDEN_BACKEND=age backend")
@@ -297,6 +314,7 @@ fn policy_from_env(descriptors: &[SecretDescriptor]) -> Result<ProfilePolicy> {
         for profile_id in &descriptor.allowed_uses {
             profiles.push(UseProfile {
                 id: profile_id.clone(),
+                scope: descriptor.scope.clone(),
                 secret_ref: descriptor.secret_ref.clone(),
                 executor: executor.clone(),
                 destination: destination.clone(),
@@ -339,38 +357,26 @@ fn executor_id_from_env() -> Result<String> {
 }
 
 fn scope_from_env() -> Result<ScopeRef> {
-    if let Some(scope) = optional_env("JANUS_WARDEN_SCOPE")? {
-        return Ok(ScopeRef::new(scope)?);
-    }
-
-    let project = optional_env("JANUS_WARDEN_PROJECT")?;
-    let repo = optional_env("JANUS_WARDEN_REPO")?;
-    let task = optional_env("JANUS_WARDEN_TASK")?;
-    let host = optional_env("JANUS_WARDEN_HOST")?;
-    let session = optional_env("JANUS_WARDEN_SESSION")?;
-
-    if project.is_none() && repo.is_none() && task.is_none() && host.is_none() && session.is_none()
+    let mut scope = ScopePathV1::for_repository(
+        required_env_first(&[
+            "JANUS_WARDEN_SCOPE_ORGANIZATION",
+            "JANUS_SCOPE_ORGANIZATION",
+        ])?,
+        required_env_first(&["JANUS_WARDEN_SCOPE_PROJECT", "JANUS_SCOPE_PROJECT"])?,
+        required_env_first(&["JANUS_WARDEN_SCOPE_REPOSITORY", "JANUS_SCOPE_REPOSITORY"])?,
+        required_env_first(&["JANUS_WARDEN_SCOPE_ENVIRONMENT", "JANUS_SCOPE_ENVIRONMENT"])?,
+    )?;
+    if let Some(namespace) =
+        optional_env_first(&["JANUS_WARDEN_SCOPE_NAMESPACE", "JANUS_SCOPE_NAMESPACE"])?
     {
-        return Ok(ScopeRef::new("janus/default")?);
+        scope = scope.with_namespace(NamespaceId::new(namespace)?);
     }
-
-    let mut parts = vec![format!(
-        "project:{}",
-        project.unwrap_or_else(|| "janus".to_string())
-    )];
-    if let Some(repo) = repo {
-        parts.push(format!("repo:{repo}"));
+    if let Some(workload) =
+        optional_env_first(&["JANUS_WARDEN_SCOPE_WORKLOAD", "JANUS_SCOPE_WORKLOAD"])?
+    {
+        scope = scope.with_workload(WorkloadId::new(workload)?)?;
     }
-    if let Some(task) = task {
-        parts.push(format!("task:{task}"));
-    }
-    if let Some(host) = host {
-        parts.push(format!("host:{host}"));
-    }
-    if let Some(session) = session {
-        parts.push(format!("session:{session}"));
-    }
-    Ok(ScopeRef::new(parts.join(","))?)
+    Ok(scope.scope_ref())
 }
 
 fn agent_principal_from_env() -> Result<Option<Principal>> {
@@ -423,6 +429,10 @@ fn optional_env_first(keys: &[&'static str]) -> Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+fn required_env_first(keys: &[&'static str]) -> Result<String> {
+    optional_env_first(keys)?.with_context(|| format!("{} is required", keys.join(" or ")))
 }
 
 fn age_identity_files_from_env() -> Result<Vec<PathBuf>> {
@@ -496,12 +506,18 @@ mod tests {
 
     const PRINCIPAL_ENV_KEYS: &[&str] = &[
         "JANUS_WARDEN_EXECUTOR",
-        "JANUS_WARDEN_SCOPE",
-        "JANUS_WARDEN_PROJECT",
-        "JANUS_WARDEN_REPO",
-        "JANUS_WARDEN_TASK",
-        "JANUS_WARDEN_HOST",
-        "JANUS_WARDEN_SESSION",
+        "JANUS_WARDEN_SCOPE_ORGANIZATION",
+        "JANUS_WARDEN_SCOPE_PROJECT",
+        "JANUS_WARDEN_SCOPE_REPOSITORY",
+        "JANUS_WARDEN_SCOPE_ENVIRONMENT",
+        "JANUS_WARDEN_SCOPE_NAMESPACE",
+        "JANUS_WARDEN_SCOPE_WORKLOAD",
+        "JANUS_SCOPE_ORGANIZATION",
+        "JANUS_SCOPE_PROJECT",
+        "JANUS_SCOPE_REPOSITORY",
+        "JANUS_SCOPE_ENVIRONMENT",
+        "JANUS_SCOPE_NAMESPACE",
+        "JANUS_SCOPE_WORKLOAD",
         "JANUS_WARDEN_AGENT_SESSION",
         "JANUS_WARDEN_AGENT_MODEL",
         "JANUS_WARDEN_HUMAN",
@@ -511,6 +527,16 @@ mod tests {
 
     struct EnvGuard {
         saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    fn set_required_scope() -> ScopeRef {
+        env::set_var("JANUS_WARDEN_SCOPE_ORGANIZATION", "fixture-org");
+        env::set_var("JANUS_WARDEN_SCOPE_PROJECT", "janus");
+        env::set_var("JANUS_WARDEN_SCOPE_REPOSITORY", "janus");
+        env::set_var("JANUS_WARDEN_SCOPE_ENVIRONMENT", "dev");
+        ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
+            .unwrap()
+            .scope_ref()
     }
 
     impl EnvGuard {
@@ -538,32 +564,20 @@ mod tests {
     }
 
     #[test]
-    fn principal_env_defaults_to_existing_executor_and_scope() {
+    fn principal_env_requires_explicit_scope() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _guard = EnvGuard::clear_principal_env();
 
-        let principal = principal_from_env().unwrap();
-
-        assert_eq!(
-            principal.binding_key(),
-            "executor:warden-stdio|scope:janus/default"
-        );
-        assert!(principal.agent.is_none());
-        assert!(principal.human.is_none());
-        assert!(principal.workload.is_none());
-        assert!(principal.admin.is_none());
+        let error = principal_from_env().unwrap_err().to_string();
+        assert!(error.contains("JANUS_WARDEN_SCOPE_ORGANIZATION"));
     }
 
     #[test]
     fn principal_env_builds_full_local_identity_chain() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _guard = EnvGuard::clear_principal_env();
+        let scope = set_required_scope();
         env::set_var("JANUS_WARDEN_EXECUTOR", "warden-stdio");
-        env::set_var("JANUS_WARDEN_PROJECT", "JANUS");
-        env::set_var("JANUS_WARDEN_REPO", "github.com/markus-barta/janus");
-        env::set_var("JANUS_WARDEN_TASK", "JANUS-22");
-        env::set_var("JANUS_WARDEN_HOST", "mbp0");
-        env::set_var("JANUS_WARDEN_SESSION", "mcp-session-1");
         env::set_var("JANUS_WARDEN_AGENT_SESSION", "agent-session-1");
         env::set_var("JANUS_WARDEN_AGENT_MODEL", "codex");
         env::set_var("JANUS_WARDEN_HUMAN", "human-markus");
@@ -574,33 +588,34 @@ mod tests {
 
         assert_eq!(
             principal.binding_key(),
-            "executor:warden-stdio|scope:project:JANUS,repo:github.com/markus-barta/janus,task:JANUS-22,host:mbp0,session:mcp-session-1|human:human-markus|agent:session:agent-session-1,model:codex|workload:stdio-mcp-client|admin:admin-break-glass"
+            format!("executor:warden-stdio|scope:{}|human:human-markus|agent:session:agent-session-1,model:codex|workload:stdio-mcp-client|admin:admin-break-glass", scope.as_str())
         );
     }
 
     #[test]
-    fn explicit_scope_overrides_scope_components() {
+    fn namespace_and_workload_refine_the_exact_scope() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _guard = EnvGuard::clear_principal_env();
-        env::set_var(
-            "JANUS_WARDEN_SCOPE",
-            "project:JANUS,host:csb1,session:explicit",
-        );
-        env::set_var("JANUS_WARDEN_PROJECT", "ignored");
-        env::set_var("JANUS_WARDEN_HOST", "ignored");
+        set_required_scope();
+        env::set_var("JANUS_WARDEN_SCOPE_NAMESPACE", "runtime");
+        env::set_var("JANUS_WARDEN_SCOPE_WORKLOAD", "warden");
 
         let principal = principal_from_env().unwrap();
 
-        assert_eq!(
-            principal.binding_key(),
-            "executor:warden-stdio|scope:project:JANUS,host:csb1,session:explicit"
-        );
+        let expected = ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
+            .unwrap()
+            .with_namespace(NamespaceId::new("runtime").unwrap())
+            .with_workload(WorkloadId::new("warden").unwrap())
+            .unwrap()
+            .scope_ref();
+        assert_eq!(principal.scope, expected);
     }
 
     #[test]
     fn principal_env_rejects_trimmed_identity_values() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _guard = EnvGuard::clear_principal_env();
+        set_required_scope();
         env::set_var("JANUS_WARDEN_AGENT_SESSION", " agent-session-1 ");
 
         let err = principal_from_env().unwrap_err().to_string();

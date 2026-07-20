@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "migration_id": "approval-registry-v0-v1",
+  "schema_id": "approval_registry",
+  "from_version": 0,
+  "to_version": 1,
+  "compatibility": "offline",
+  "reversible": true,
+  "risk_flags": [],
+  "target_root": "@TARGET_ROOT@",
+  "state_root": "@STATE_ROOT@",
+  "audit_path": "@AUDIT_PATH@",
+  "minimum_free_bytes": 1048576,
+  "backup_max_age_seconds": 900
+}

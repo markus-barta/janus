@@ -5,6 +5,7 @@ ARG BUILDARCH
 ARG TARGETARCH
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
+COPY config/release-channels/v1.json ./config/release-channels/v1.json
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) rust_target="x86_64-unknown-linux-gnu" ;; \
@@ -48,6 +49,7 @@ RUN apt-get update \
 
 COPY --from=build /out/janusd /usr/local/bin/janusd
 COPY --from=build /out/janus-warden /usr/local/bin/janus-warden
+COPY --from=build /src/config/release-channels/v1.json /etc/janus/release-channels-v1.json
 
 USER janus
 ENTRYPOINT ["janusd"]

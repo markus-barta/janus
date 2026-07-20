@@ -100,7 +100,20 @@ cp "${bundle}/metadata.toml" "${metadata}"
 secret_ref="$(
   python3 - <<'PY'
 import hashlib
-print("sec_" + hashlib.sha256(b"janus\0CANARY").digest()[:10].hex())
+import struct
+
+def field(value):
+    encoded = value.encode()
+    return struct.pack(">Q", len(encoded)) + encoded
+
+canonical = b"".join(field(value) for value in (
+    "janus-scope-v1", "fixture-org", "janus", "janus", "dev"
+)) + b"\0\0"
+scope_ref = "scp_" + hashlib.sha256(canonical).digest()[:20].hex()
+secret = hashlib.sha256(
+    b"janus-secret-ref-v2\0" + scope_ref.encode() + b"\0CANARY"
+).digest()[:10].hex()
+print("sec_" + secret)
 PY
 )"
 
@@ -169,7 +182,10 @@ export JANUS_AGE_IDENTITY_FILE="${janus_identity_file}"
 export JANUS_AGE_RECIPIENT="${recipient}"
 export JANUS_AGE_METADATA_FILE="${metadata}"
 export JANUS_RUN_EXECUTOR="${executor}"
-export JANUS_RUN_SCOPE="janus/default"
+export JANUS_SCOPE_ORGANIZATION="fixture-org"
+export JANUS_SCOPE_PROJECT="janus"
+export JANUS_SCOPE_REPOSITORY="janus"
+export JANUS_SCOPE_ENVIRONMENT="dev"
 
 preflight_output="$(
   run_janusd "env-file preflight" env-file preflight \

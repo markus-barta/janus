@@ -32,6 +32,13 @@ where
 
     /// Value-free list operation with audit evidence.
     pub async fn list(&mut self, principal: &PrincipalChain) -> JanusResult<Vec<SecretDescriptor>> {
+        let descriptors = self
+            .store
+            .list()
+            .await?
+            .into_iter()
+            .filter(|descriptor| descriptor.scope == principal.scope)
+            .collect();
         self.audit.record(AuditEvent::new(
             AuditAction::SecretList,
             AuditOutcome::Allowed,
@@ -40,7 +47,7 @@ where
             None,
             principal,
         ))?;
-        self.store.list().await
+        Ok(descriptors)
     }
 
     /// Value-free describe operation by opaque ref.
@@ -69,6 +76,21 @@ where
                 name: secret_ref.as_str().to_string(),
             });
         };
+
+        if descriptor.scope != principal.scope {
+            self.audit.record(AuditEvent::new(
+                AuditAction::SecretDescribe,
+                AuditOutcome::Denied,
+                "denied_scope_mismatch",
+                Severity::Warning,
+                Some(descriptor.secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::policy_denied(
+                "denied_scope_mismatch",
+                "descriptor scope does not match caller scope",
+            ));
+        }
 
         self.audit.record(AuditEvent::new(
             AuditAction::SecretDescribe,
@@ -120,6 +142,20 @@ where
         consumer: &ConsumerDescriptor,
         principal: &PrincipalChain,
     ) -> JanusResult<()> {
+        if consumer.scope != principal.scope {
+            self.audit.record(AuditEvent::new(
+                AuditAction::ConsumerObserve,
+                AuditOutcome::Denied,
+                "denied_scope_mismatch",
+                Severity::Warning,
+                Some(consumer.secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::policy_denied(
+                "denied_scope_mismatch",
+                "consumer scope does not match caller scope",
+            ));
+        }
         self.audit
             .record(consumer_observe_event(consumer, principal)?)
     }
@@ -151,6 +187,21 @@ where
                 name: name.as_str().to_string(),
             });
         };
+
+        if descriptor.scope != principal.scope {
+            self.audit.record(AuditEvent::new(
+                AuditAction::SecretUse,
+                AuditOutcome::Denied,
+                "denied_scope_mismatch",
+                Severity::Warning,
+                Some(descriptor.secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::policy_denied(
+                "denied_scope_mismatch",
+                "descriptor scope does not match caller scope",
+            ));
+        }
 
         if let Some((reason_code, detail)) = descriptor.normal_use_denial() {
             self.audit.record(AuditEvent::new(
@@ -221,6 +272,21 @@ where
             });
         };
 
+        if descriptor.scope != principal.scope || descriptor.scope != req.scope {
+            self.audit.record(AuditEvent::new(
+                AuditAction::PermitDeny,
+                AuditOutcome::Denied,
+                "denied_scope_mismatch",
+                Severity::Warning,
+                Some(req.secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::policy_denied(
+                "denied_scope_mismatch",
+                "descriptor, request, and caller scope must match exactly",
+            ));
+        }
+
         if let Some((reason_code, detail)) = descriptor.normal_use_denial() {
             self.audit.record(AuditEvent::new(
                 AuditAction::PermitDeny,
@@ -263,6 +329,7 @@ where
             });
         let req = UseRequest {
             secret_ref: secret_ref.clone(),
+            scope: principal.scope.clone(),
             profile_id: profile_id.clone(),
             destination,
             purpose,
@@ -320,6 +387,21 @@ where
                 name: permit.secret_ref().as_str().to_string(),
             });
         };
+
+        if descriptor.scope != principal.scope || &descriptor.scope != permit.scope_ref() {
+            self.audit.record(AuditEvent::new(
+                AuditAction::SecretUse,
+                AuditOutcome::Denied,
+                "denied_scope_mismatch",
+                Severity::Warning,
+                Some(descriptor.secret_ref.clone()),
+                principal,
+            ))?;
+            return Err(JanusError::policy_denied(
+                "denied_scope_mismatch",
+                "descriptor, permit, and caller scope must match exactly",
+            ));
+        }
 
         if let Some((reason_code, detail)) = descriptor.normal_use_denial() {
             self.audit.record(AuditEvent::new(

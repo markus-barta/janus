@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::{JanusError, JanusResult};
+use crate::{scope::validate_scope_component, JanusError, JanusResult, ScopeRef};
 use sha2::{Digest, Sha256};
 
 fn non_empty(kind: &'static str, value: impl Into<String>) -> JanusResult<String> {
@@ -44,11 +44,27 @@ macro_rules! id_type {
     };
 }
 
-id_type!(
-    /// Project/scope identifier used by manifests and stores.
-    ProjectId,
-    "project_id"
-);
+/// Strict project component used by manifests, stores, and scope paths.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProjectId(String);
+
+impl ProjectId {
+    /// Construct a strict project identifier.
+    pub fn new(value: impl Into<String>) -> JanusResult<Self> {
+        Ok(Self(validate_scope_component("project_id", value)?))
+    }
+
+    /// Internal project text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ProjectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ProjectId").field(&self.0).finish()
+    }
+}
 
 /// Manifest-declared secret name.
 ///
@@ -89,11 +105,12 @@ impl SecretRef {
 
     /// Generate a deterministic opaque ref for a manifest entry.
     ///
-    /// The ref is stable for a project/name pair but does not expose the raw
-    /// name in its text form.
-    pub fn for_manifest_entry(project: &ProjectId, name: &SecretName) -> Self {
+    /// The ref is stable for an exact scope/name pair but does not expose raw
+    /// scope components or the secret name in its text form.
+    pub fn for_manifest_entry(scope: &ScopeRef, name: &SecretName) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(project.as_str().as_bytes());
+        hasher.update(b"janus-secret-ref-v2\0");
+        hasher.update(scope.as_str().as_bytes());
         hasher.update(b"\0");
         hasher.update(name.as_str().as_bytes());
         let digest = hasher.finalize();
@@ -139,6 +156,7 @@ id_type!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{EnvironmentId, OrganizationId, RepositoryId, ScopePathV1};
 
     #[test]
     fn refs_reject_empty_or_trimmed_values() {
@@ -149,11 +167,25 @@ mod tests {
 
     #[test]
     fn generated_secret_refs_are_stable_and_opaque() {
-        let project = ProjectId::new("janus").unwrap();
+        let scope = ScopePathV1::new(
+            OrganizationId::new("markus-barta").unwrap(),
+            ProjectId::new("janus").unwrap(),
+            RepositoryId::new("janus").unwrap(),
+            EnvironmentId::new("prod").unwrap(),
+        )
+        .scope_ref();
         let name = SecretName::new("prod/api/token").unwrap();
-        let first = SecretRef::for_manifest_entry(&project, &name);
-        let second = SecretRef::for_manifest_entry(&project, &name);
+        let first = SecretRef::for_manifest_entry(&scope, &name);
+        let second = SecretRef::for_manifest_entry(&scope, &name);
         assert_eq!(first, second);
+        let other_scope = ScopePathV1::new(
+            OrganizationId::new("markus-barta").unwrap(),
+            ProjectId::new("janus").unwrap(),
+            RepositoryId::new("janus").unwrap(),
+            EnvironmentId::new("dev").unwrap(),
+        )
+        .scope_ref();
+        assert_ne!(first, SecretRef::for_manifest_entry(&other_scope, &name));
         assert!(first.as_str().starts_with("sec_"));
         assert!(!first.as_str().contains("prod"));
         assert!(!first.as_str().contains("token"));

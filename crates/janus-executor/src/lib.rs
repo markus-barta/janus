@@ -1306,7 +1306,7 @@ mod tests {
     use janus_core::{
         AuditAction, AuditOutcome, AuditWrite, BlastRadius, ConsumerDescriptor, ConsumerKind,
         ConsumerRef, EgressMode, Environment, JanusError, ManifestCatalog, OwnerRef, Principal,
-        PrincipalId, PrincipalKind, ProfilePolicy, ProjectId, Purpose, ReloadMethod, SafeLabel,
+        PrincipalId, PrincipalKind, ProfilePolicy, Purpose, ReloadMethod, SafeLabel, ScopePathV1,
         ScopeRef, SecretClass, SecretLifecycle, SecretMeta, SecretName, TrustLevel, UseProfile,
         UseRequest, ValidationProbe,
     };
@@ -1316,14 +1316,24 @@ mod tests {
 
     const START: SystemTime = SystemTime::UNIX_EPOCH;
 
+    fn scope() -> ScopeRef {
+        ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
+            .unwrap()
+            .scope_ref()
+    }
+
     fn run_at() -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1)
     }
 
-    fn principal(executor: &str, scope: &str) -> PrincipalChain {
+    fn principal(executor: &str, scope_label: &str) -> PrincipalChain {
+        let environment = scope_label.rsplit('/').next().unwrap_or("dev");
+        let scope = ScopePathV1::for_repository("fixture-org", "janus", "janus", environment)
+            .unwrap()
+            .scope_ref();
         PrincipalChain::new(
             Principal::new(PrincipalKind::Executor, PrincipalId::new(executor).unwrap()),
-            ScopeRef::new(scope).unwrap(),
+            scope,
         )
     }
 
@@ -1335,15 +1345,14 @@ mod tests {
         Destination,
         ManagedCommandProfile,
     ) {
-        let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let secret_ref = SecretRef::for_manifest_entry(&scope(), &name);
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let catalog = ManifestCatalog::new(vec![SecretMeta {
             secret_ref: secret_ref.clone(),
             name: name.clone(),
             label: SafeLabel::new("Canary token").unwrap(),
-            scope: ScopeRef::new("janus/dev").unwrap(),
+            scope: scope(),
             owner: Some(OwnerRef::new("infra").unwrap()),
             classification: Some(SecretClass::Normal),
             lifecycle: SecretLifecycle::Active,
@@ -1365,6 +1374,7 @@ mod tests {
         );
         let profile = UseProfile {
             id: profile_id.clone(),
+            scope: scope(),
             secret_ref: secret_ref.clone(),
             executor: executor.clone(),
             destination: destination.clone(),
@@ -1383,6 +1393,7 @@ mod tests {
         let permit = broker
             .request_use(
                 &UseRequest {
+                    scope: scope(),
                     secret_ref,
                     profile_id,
                     destination: destination.clone(),
@@ -1457,6 +1468,7 @@ mod tests {
             allowed_args,
             runtime_limits,
             consumer: ConsumerDescriptor {
+                scope: scope(),
                 consumer_ref: ConsumerRef::new("consumer.github_release_publish").unwrap(),
                 secret_ref,
                 kind: ConsumerKind::ManagedCommand,
@@ -1489,6 +1501,7 @@ mod tests {
             output_path,
             hash_sidecar: None,
             consumer: ConsumerDescriptor {
+                scope: scope(),
                 consumer_ref: ConsumerRef::new("consumer.fixture_service").unwrap(),
                 secret_ref,
                 kind: ConsumerKind::Service,
@@ -1525,6 +1538,7 @@ mod tests {
                 output_path: hash_output_path,
             }),
             consumer: ConsumerDescriptor {
+                scope: scope(),
                 consumer_ref: ConsumerRef::new("consumer.fixture_service").unwrap(),
                 secret_ref,
                 kind: ConsumerKind::Service,
@@ -1701,7 +1715,7 @@ mod tests {
         assert!(matches!(
             err,
             JanusError::PermitInvalid {
-                reason_code: "denied_wrong_principal",
+                reason_code: "denied_scope_mismatch",
                 ..
             }
         ));
@@ -1709,7 +1723,7 @@ mod tests {
         assert!(audit.events().iter().any(|event| {
             event.action == AuditAction::SecretUse
                 && event.outcome == AuditOutcome::Denied
-                && event.reason_code == "denied_wrong_principal"
+                && event.reason_code == "denied_scope_mismatch"
                 && !event.value_returned
         }));
     }
@@ -2393,14 +2407,14 @@ mod tests {
 
     #[test]
     fn managed_command_profile_requires_absolute_binary_and_matching_consumer() {
-        let project = ProjectId::new("janus").unwrap();
         let name = SecretName::new("CANARY").unwrap();
-        let secret_ref = SecretRef::for_manifest_entry(&project, &name);
+        let secret_ref = SecretRef::for_manifest_entry(&scope(), &name);
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let executor = ExecutorRef::new("janus-run@m5").unwrap();
         let destination = Destination::new("deploy-api").unwrap();
         let wrong_consumer_secret = SecretRef::new("sec_other").unwrap();
         let consumer = ConsumerDescriptor {
+            scope: scope(),
             consumer_ref: ConsumerRef::new("consumer.github_release_publish").unwrap(),
             secret_ref: secret_ref.clone(),
             kind: ConsumerKind::ManagedCommand,
