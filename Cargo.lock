@@ -1259,6 +1259,7 @@ version = "0.1.6"
 dependencies = [
  "async-trait",
  "hex",
+ "proptest",
  "serde",
  "serde_json",
  "sha2",
@@ -1296,6 +1297,7 @@ dependencies = [
  "hex",
  "janus-core",
  "janus-mock",
+ "proptest",
  "serde",
  "serde_json",
  "sha2",
@@ -1375,6 +1377,7 @@ dependencies = [
  "janus-mock",
  "janus-provider-age",
  "janus-warden",
+ "proptest",
  "serde",
  "serde_json",
  "sha2",

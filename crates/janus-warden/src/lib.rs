@@ -1129,6 +1129,64 @@ mod tests {
         "[A-Za-z0-9]{24,48}".prop_map(|suffix| RedactedCanary(format!("SENSITIVE_CANARY_{suffix}")))
     }
 
+    fn property_config(local_cases: u32) -> ProptestConfig {
+        let cases = std::env::var("JANUS_PROPERTY_CASES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(local_cases);
+        let max_shrink_iters = std::env::var("JANUS_PROPERTY_MAX_SHRINK_ITERATIONS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(4096);
+        ProptestConfig {
+            cases,
+            max_shrink_iters,
+            ..ProptestConfig::default()
+        }
+    }
+
+    fn bounded_json() -> impl Strategy<Value = Value> {
+        let max_depth = std::env::var("JANUS_PROPERTY_MAX_DEPTH")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(8);
+        let reviewed_max_items = std::env::var("JANUS_PROPERTY_MAX_COLLECTION_ITEMS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(64);
+        // Recursive JSON grows multiplicatively. Eight children per node still
+        // exercises the reviewed 64-item ceiling without creating pathological
+        // multi-megabyte values before Warden gets a chance to reject them.
+        let generated_items = reviewed_max_items.min(8);
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|value| Value::Number(value.into())),
+            "[A-Za-z0-9_./:-]{0,96}".prop_map(Value::String),
+        ];
+        leaf.prop_recursive(
+            max_depth as u32,
+            reviewed_max_items as u32,
+            4,
+            move |inner| {
+                prop_oneof![
+                    proptest::collection::vec(inner.clone(), 0..=generated_items)
+                        .prop_map(Value::Array),
+                    proptest::collection::btree_map(
+                        "[a-z][a-z0-9_]{0,20}",
+                        inner,
+                        0..=generated_items,
+                    )
+                    .prop_map(|entries| Value::Object(entries.into_iter().collect())),
+                ]
+            },
+        )
+    }
+
     #[derive(Clone, Default)]
     struct RecordingPermitStore {
         permit_ids: Arc<Mutex<Vec<String>>>,
@@ -1554,18 +1612,19 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
+        #![proptest_config(property_config(64))]
 
         #[test]
-        fn generated_secret_literals_never_cross_serialized_warden_responses(
+        fn security_property_warden_tools_reject_arbitrary_json_without_value_leakage(
             canary in generated_canary(),
             unknown_suffix in "[a-z0-9]{8,40}",
+            generated_args in bounded_json(),
         ) {
             let (mut runtime, secret_ref) = runtime_with_value(canary.0.as_bytes());
             let caller = principal();
             let executor = tokio::runtime::Builder::new_current_thread().build().unwrap();
             executor.block_on(async {
-                let outputs = vec![
+                let mut outputs = vec![
                     runtime
                         .call_tool_json(
                             "list_secrets",
@@ -1611,6 +1670,38 @@ mod tests {
                         )
                         .await,
                 ];
+
+                let attack_args = json!({
+                    "generated": generated_args.clone(),
+                    "sensitive": canary.0.clone(),
+                });
+                for tool in TOOL_DEFINITIONS {
+                    for args in [generated_args.clone(), attack_args.clone()] {
+                        let first = runtime
+                            .call_tool_json(
+                                tool.name,
+                                args.clone(),
+                                &caller,
+                                SystemTime::UNIX_EPOCH,
+                            )
+                            .await;
+                        let second = runtime
+                            .call_tool_json(
+                                tool.name,
+                                args,
+                                &caller,
+                                SystemTime::UNIX_EPOCH,
+                            )
+                            .await;
+                        assert_eq!(
+                            first.error.as_ref().map(|error| error.reason_code),
+                            second.error.as_ref().map(|error| error.reason_code),
+                        );
+                        enforce_value_free_json(&serde_json::to_value(&first).unwrap()).unwrap();
+                        outputs.push(first);
+                        outputs.push(second);
+                    }
+                }
 
                 assert!(outputs.iter().all(|output| !output.value_returned));
                 let serialized = serde_json::to_string(&outputs).unwrap();

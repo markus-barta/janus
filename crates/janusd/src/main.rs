@@ -3941,8 +3941,97 @@ mod tests {
     };
     #[cfg(unix)]
     use janus_mock::MockStore;
+    use proptest::prelude::*;
 
     use super::*;
+
+    #[derive(Clone)]
+    struct RedactedCliArg(String);
+
+    impl fmt::Debug for RedactedCliArg {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("<redacted-generated-cli-argument>")
+        }
+    }
+
+    fn property_env_usize(name: &str, fallback: usize) -> usize {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(fallback)
+    }
+
+    fn property_config(local_cases: u32) -> ProptestConfig {
+        ProptestConfig {
+            cases: property_env_usize("JANUS_PROPERTY_CASES", local_cases as usize)
+                .try_into()
+                .unwrap_or(u32::MAX),
+            max_shrink_iters: property_env_usize("JANUS_PROPERTY_MAX_SHRINK_ITERATIONS", 4096)
+                .try_into()
+                .unwrap_or(u32::MAX),
+            ..ProptestConfig::default()
+        }
+    }
+
+    fn generated_cli_args() -> impl Strategy<Value = Vec<RedactedCliArg>> {
+        let max_items = property_env_usize("JANUS_PROPERTY_MAX_COLLECTION_ITEMS", 64);
+        let prefixes = prop_oneof![
+            Just(Vec::<RedactedCliArg>::new()),
+            Just(vec![RedactedCliArg("run".to_string())]),
+            Just(vec![
+                RedactedCliArg("run".to_string()),
+                RedactedCliArg("preflight".to_string()),
+            ]),
+            Just(vec![RedactedCliArg("env-file".to_string())]),
+            Just(vec![
+                RedactedCliArg("approve".to_string()),
+                RedactedCliArg("permit".to_string()),
+            ]),
+            Just(vec![
+                RedactedCliArg("lifecycle".to_string()),
+                RedactedCliArg("transition".to_string()),
+            ]),
+            Just(vec![
+                RedactedCliArg("forge".to_string()),
+                RedactedCliArg("rotate-generated".to_string()),
+            ]),
+            Just(vec![RedactedCliArg("migrate".to_string())]),
+            Just(vec![RedactedCliArg("scope-transfer".to_string())]),
+        ];
+        let suffixes = proptest::collection::vec(
+            "[A-Za-z0-9_./:=+-]{0,96}"
+                .prop_map(|value| RedactedCliArg(format!("SENSITIVE_CLI_CANARY_{value}"))),
+            0..=max_items,
+        );
+        (prefixes, suffixes).prop_map(|(mut prefix, suffix)| {
+            prefix.extend(suffix);
+            prefix
+        })
+    }
+
+    proptest! {
+        #![proptest_config(property_config(64))]
+
+        #[test]
+        fn security_property_cli_argv_and_managed_profiles_fail_safely(
+            args in generated_cli_args(),
+        ) {
+            let raw = args.iter().map(|arg| arg.0.clone()).collect::<Vec<_>>();
+            if let Err(error) = parse_args(raw.clone()) {
+                let rendered = format!("{error:?} {error}");
+                for arg in raw
+                    .iter()
+                    .filter(|arg| arg.starts_with("SENSITIVE_CLI_CANARY_"))
+                {
+                    prop_assert!(!rendered.contains(arg));
+                }
+            }
+
+            let generated_manifest = raw.join("\n");
+            let _ = ManagedCommandProfileCatalog::parse(&generated_manifest);
+        }
+    }
 
     #[test]
     fn runtime_command_prefixes_are_closed_and_plane_classified() {

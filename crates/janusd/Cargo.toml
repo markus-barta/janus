@@ -47,4 +47,5 @@ toml = "0.8"
 
 [dev-dependencies]
 janus-mock = { path = "../janus-mock" }
+proptest = "=1.5.0"
 tempfile = "3"

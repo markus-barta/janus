@@ -21,4 +21,5 @@ toml = "0.8"
 zeroize = "1"
 
 [dev-dependencies]
+proptest = "=1.5.0"
 tokio = { version = "1", features = ["macros", "rt"] }

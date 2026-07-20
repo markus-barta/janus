@@ -403,6 +403,7 @@ fn audit_unavailable(detail: &'static str) -> JanusError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt;
     use std::io;
     use std::time::{Duration, SystemTime};
 
@@ -413,8 +414,77 @@ mod tests {
         TrustLevel, UseProfile, UseRequest,
     };
     use janus_mock::MockStore;
+    use proptest::prelude::*;
     use serde_json::Value;
     use tempfile::tempdir;
+
+    #[derive(Clone)]
+    struct RedactedAuditInput(Vec<u8>);
+
+    impl fmt::Debug for RedactedAuditInput {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("<redacted-generated-audit-input>")
+        }
+    }
+
+    fn property_env_usize(name: &str, fallback: usize) -> usize {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(fallback)
+    }
+
+    fn property_config(local_cases: u32) -> ProptestConfig {
+        ProptestConfig {
+            cases: property_env_usize("JANUS_PROPERTY_CASES", local_cases as usize)
+                .try_into()
+                .unwrap_or(u32::MAX),
+            max_shrink_iters: property_env_usize("JANUS_PROPERTY_MAX_SHRINK_ITERATIONS", 4096)
+                .try_into()
+                .unwrap_or(u32::MAX),
+            ..ProptestConfig::default()
+        }
+    }
+
+    fn arbitrary_audit_input() -> impl Strategy<Value = RedactedAuditInput> {
+        let max_bytes = property_env_usize("JANUS_PROPERTY_MAX_INPUT_BYTES", 8192);
+        proptest::collection::vec(any::<u8>(), 0..=max_bytes).prop_map(RedactedAuditInput)
+    }
+
+    proptest! {
+        #![proptest_config(property_config(64))]
+
+        #[test]
+        fn security_property_audit_jsonl_rejects_arbitrary_complete_records_without_echo(
+            input in arbitrary_audit_input(),
+        ) {
+            let canary = b"SENSITIVE_AUDIT_CANARY_MUST_NOT_ESCAPE";
+            let mut line = canary.to_vec();
+            line.extend_from_slice(&input.0);
+            line.push(b'\n');
+            let error = verify_complete_records(&line).unwrap_err();
+            let rendered = format!("{error:?} {error}");
+            prop_assert!(!rendered.contains("SENSITIVE_AUDIT_CANARY_MUST_NOT_ESCAPE"));
+        }
+
+        #[test]
+        fn security_property_audit_jsonl_recovers_only_unterminated_tail(
+            tail in proptest::collection::vec(1_u8..=255, 1..=256)
+                .prop_filter("tail must not contain a record delimiter", |tail| !tail.contains(&b'\n')),
+        ) {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("audit/events.jsonl");
+            {
+                let mut sink = JsonlAuditSink::open(&path).unwrap();
+                sink.record(event("property-prefix")).unwrap();
+            }
+            OpenOptions::new().append(true).open(&path).unwrap().write_all(&tail).unwrap();
+            let recovered = JsonlAuditSink::open(&path).unwrap();
+            prop_assert_eq!(recovered.recovery().last_sequence, 1);
+            prop_assert_eq!(recovered.recovery().truncated_tail_bytes, tail.len() as u64);
+        }
+    }
 
     fn scope() -> ScopeRef {
         ScopePathV1::for_repository("fixture-org", "janus", "janus", "audit-test")

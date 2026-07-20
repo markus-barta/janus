@@ -10,6 +10,8 @@ use crate::{
     JanusError, JanusResult, OwnerRef, SecretClass, SecretLifecycle, SecretMeta, SecretName,
 };
 
+const MAX_METADATA_OVERLAY_BYTES: usize = 8 * 1024;
+
 /// Optional owner/class metadata patch.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SecretMetadataPatch {
@@ -62,6 +64,11 @@ impl SecretMetadataOverlay {
 
     /// Parse a TOML metadata overlay.
     pub fn parse_toml(contents: &str) -> JanusResult<Self> {
+        if contents.len() > MAX_METADATA_OVERLAY_BYTES {
+            return Err(JanusError::InvalidManifest {
+                detail: "metadata overlay exceeds the reviewed size limit".to_string(),
+            });
+        }
         let parsed: SecretMetadataOverlayToml =
             toml::from_str(contents).map_err(|err| JanusError::InvalidManifest {
                 detail: format!("metadata overlay parse failed: {err}"),

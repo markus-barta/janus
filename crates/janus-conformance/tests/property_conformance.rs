@@ -1,3 +1,4 @@
+use std::env;
 use std::fmt;
 use std::time::{Duration, SystemTime};
 
@@ -11,10 +12,11 @@ use janus_core::{
 };
 use janus_mock::MockStore;
 use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
 
-// Keep proptest's source-parallel failure persistence enabled. Any minimized
-// failing seed is written below the crate's `proptest-regressions` directory
-// and is a source artifact that must be committed with the fix.
+// Keep explicit source-file failure persistence enabled. Any minimized seed is
+// written below the crate's `proptest-regressions` directory and is a source
+// artifact that must be committed with the fix.
 
 #[derive(Clone)]
 struct RedactedCanary(String);
@@ -37,6 +39,28 @@ impl fmt::Debug for RedactedCanary {
 
 fn generated_canary() -> impl Strategy<Value = RedactedCanary> {
     "[A-Za-z0-9]{24,48}".prop_map(|suffix| RedactedCanary(format!("SENSITIVE_CANARY_{suffix}")))
+}
+
+fn property_config(local_cases: u32) -> ProptestConfig {
+    let cases = env::var("JANUS_PROPERTY_CASES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(local_cases);
+    let max_shrink_iters = env::var("JANUS_PROPERTY_MAX_SHRINK_ITERATIONS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(4096);
+    ProptestConfig {
+        cases,
+        max_shrink_iters,
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/proptest-regressions/property_conformance.txt"
+        )))),
+        ..ProptestConfig::default()
+    }
 }
 
 fn identifier(prefix: &'static str) -> impl Strategy<Value = String> {
@@ -133,7 +157,7 @@ fn assert_literal_absent(literal: &RedactedCanary, rendered: &str, surface: &str
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(128))]
+    #![proptest_config(property_config(128))]
 
     #[test]
     fn generated_refs_are_stable_opaque_and_non_authorizing(

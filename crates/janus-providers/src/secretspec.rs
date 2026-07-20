@@ -302,6 +302,24 @@ CANARY = { description = "Canary token", required = true }
         "[A-Za-z0-9]{24,48}".prop_map(|suffix| RedactedCanary(format!("SENSITIVE_CANARY_{suffix}")))
     }
 
+    fn property_config(local_cases: u32) -> ProptestConfig {
+        let cases = std::env::var("JANUS_PROPERTY_CASES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(local_cases);
+        let max_shrink_iters = std::env::var("JANUS_PROPERTY_MAX_SHRINK_ITERATIONS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(4096);
+        ProptestConfig {
+            cases,
+            max_shrink_iters,
+            ..ProptestConfig::default()
+        }
+    }
+
     fn metadata_overlay() -> SecretMetadataOverlay {
         SecretMetadataOverlay::parse_toml(
             r#"
@@ -358,10 +376,10 @@ CANARY = { description = "Canary token", required = true }
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(48))]
+        #![proptest_config(property_config(48))]
 
         #[test]
-        fn dotenv_store_property_enforces_manifest_allowlist_without_value_leakage(
+        fn security_property_provider_allowlist_enforces_manifest_without_value_leakage(
             undeclared in "[A-Z][A-Z0-9_]{3,31}"
                 .prop_filter("generated name must remain undeclared", |name| name != "CANARY"),
             canary in generated_canary(),
