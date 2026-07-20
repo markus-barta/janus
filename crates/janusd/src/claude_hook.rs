@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 const MAX_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_DERIVED_CANDIDATES: usize = 128;
-const JANUSD_ENV: &str = "JANUS_HOOK_JANUSD";
+const JANUSD_USE_ENV: &str = "JANUS_HOOK_JANUSD_USE";
 const AUDIT_ENV: &str = "JANUS_HOOK_AUDIT_FILE";
 
 pub(crate) fn main_entry() {
@@ -77,16 +77,16 @@ struct HookInput {
 }
 
 trait HookConfig {
-    fn janusd_path(&self) -> HookResult<PathBuf>;
+    fn janusd_use_path(&self) -> HookResult<PathBuf>;
     fn audit_path(&self) -> HookResult<PathBuf>;
 }
 
 struct EnvHookConfig;
 
 impl HookConfig for EnvHookConfig {
-    fn janusd_path(&self) -> HookResult<PathBuf> {
-        let path = PathBuf::from(env::var(JANUSD_ENV).map_err(|_| HookError)?);
-        validate_janusd_path(path)
+    fn janusd_use_path(&self) -> HookResult<PathBuf> {
+        let path = PathBuf::from(env::var(JANUSD_USE_ENV).map_err(|_| HookError)?);
+        validate_janusd_use_path(path)
     }
 
     fn audit_path(&self) -> HookResult<PathBuf> {
@@ -101,14 +101,14 @@ impl HookConfig for EnvHookConfig {
 #[cfg(test)]
 #[derive(Clone, Debug)]
 struct FixedHookConfig {
-    janusd: PathBuf,
+    janusd_use: PathBuf,
     audit: PathBuf,
 }
 
 #[cfg(test)]
 impl HookConfig for FixedHookConfig {
-    fn janusd_path(&self) -> HookResult<PathBuf> {
-        validate_janusd_path(self.janusd.clone())
+    fn janusd_use_path(&self) -> HookResult<PathBuf> {
+        validate_janusd_use_path(self.janusd_use.clone())
     }
 
     fn audit_path(&self) -> HookResult<PathBuf> {
@@ -181,10 +181,10 @@ fn handle_pre(input: HookInput, config: &impl HookConfig) -> HookResult<Option<V
     }
 
     let command = bash_command(&input.tool_input)?;
-    let configured_janusd = config.janusd_path();
+    let configured_janusd_use = config.janusd_use_path();
     let route = match classify_managed_command(
         command,
-        configured_janusd.as_ref().ok().map(PathBuf::as_path),
+        configured_janusd_use.as_ref().ok().map(PathBuf::as_path),
     ) {
         ManagedCommandClassification::Unrelated => return Ok(None),
         ManagedCommandClassification::Denied => {
@@ -203,7 +203,7 @@ fn handle_pre(input: HookInput, config: &impl HookConfig) -> HookResult<Option<V
         }
         ManagedCommandClassification::Routed(route) => route,
     };
-    let janusd = configured_janusd?;
+    let janusd_use = configured_janusd_use?;
     if validate_bash_input(&input.tool_input).is_err() {
         let event = AuditEvent::new(
             AuditAction::PermitDeny,
@@ -218,7 +218,7 @@ fn handle_pre(input: HookInput, config: &impl HookConfig) -> HookResult<Option<V
             "Janus denied unapproved managed execution arguments",
         )));
     }
-    let canonical = route.canonical_command(&janusd);
+    let canonical = route.canonical_command(&janusd_use);
     let evidence = route.evidence("routed", input.tool_use_id.as_deref())?;
     let event = AuditEvent::new(
         AuditAction::PermitRequest,
@@ -257,9 +257,9 @@ fn handle_post(
         return Ok(None);
     }
     let command = bash_command(&input.tool_input)?;
-    let janusd = config.janusd_path()?;
+    let janusd_use = config.janusd_use_path()?;
     let ManagedCommandClassification::Routed(route) =
-        classify_managed_command(command, Some(&janusd))
+        classify_managed_command(command, Some(&janusd_use))
     else {
         return Ok(None);
     };
@@ -326,9 +326,9 @@ struct ManagedRoute {
 }
 
 impl ManagedRoute {
-    fn canonical_command(&self, janusd: &Path) -> String {
+    fn canonical_command(&self, janusd_use: &Path) -> String {
         let mut argv = vec![
-            janusd.to_string_lossy().into_owned(),
+            janusd_use.to_string_lossy().into_owned(),
             "run".to_string(),
             "--profile".to_string(),
             self.profile.clone(),
@@ -361,7 +361,7 @@ enum ManagedCommandClassification {
 
 fn classify_managed_command(
     command: &str,
-    configured_janusd: Option<&Path>,
+    configured_janusd_use: Option<&Path>,
 ) -> ManagedCommandClassification {
     let argv = match shell_words::split(command) {
         Ok(argv) if !argv.is_empty() => argv,
@@ -370,9 +370,9 @@ fn classify_managed_command(
     };
 
     let program = Path::new(&argv[0]);
-    let program_is_janusd = program.file_name() == Some(OsStr::new("janusd"))
-        || configured_janusd.is_some_and(|configured| program == configured);
-    if !program_is_janusd {
+    let program_is_janusd_use = program.file_name() == Some(OsStr::new("janusd-use"))
+        || configured_janusd_use.is_some_and(|configured| program == configured);
+    if !program_is_janusd_use {
         return if looks_janus_related(command) || argv.iter().any(|arg| looks_permit_id(arg)) {
             ManagedCommandClassification::Denied
         } else {
@@ -415,7 +415,7 @@ fn looks_permit_id(value: &str) -> bool {
     value.as_bytes().windows(4).any(|window| window == b"use_")
 }
 
-fn validate_janusd_path(path: PathBuf) -> HookResult<PathBuf> {
+fn validate_janusd_use_path(path: PathBuf) -> HookResult<PathBuf> {
     if !path.is_absolute() || path.as_os_str().is_empty() {
         return Err(HookError);
     }
@@ -634,7 +634,7 @@ mod tests {
     fn config() -> (tempfile::TempDir, FixedHookConfig) {
         let dir = tempdir().unwrap();
         let config = FixedHookConfig {
-            janusd: PathBuf::from("/opt/janus/bin/janusd"),
+            janusd_use: PathBuf::from("/opt/janus/bin/janusd-use"),
             audit: dir.path().join("audit/events.jsonl"),
         };
         (dir, config)
@@ -728,7 +728,7 @@ mod tests {
                 HookEvent::PreToolUse,
                 "Bash",
                 json!({
-                    "command": "janusd run --profile profile.deploy --permit use_deadbeef -- 'release apply'",
+                    "command": "janusd-use run --profile profile.deploy --permit use_deadbeef -- 'release apply'",
                     "description": "approved release"
                 }),
             ),
@@ -739,7 +739,7 @@ mod tests {
         assert_eq!(decision(&output), "allow");
         assert_eq!(
             output["hookSpecificOutput"]["updatedInput"]["command"],
-            "/opt/janus/bin/janusd run --profile profile.deploy --permit use_deadbeef -- 'release apply'"
+            "/opt/janus/bin/janusd-use run --profile profile.deploy --permit use_deadbeef -- 'release apply'"
         );
         assert_eq!(
             output["hookSpecificOutput"]["updatedInput"]["description"],
@@ -755,10 +755,10 @@ mod tests {
     #[test]
     fn nested_or_mutable_managed_invocations_and_copied_permits_are_denied() {
         let cases = [
-            "sh -c 'janusd run --profile profile.deploy --permit use_deadbeef -- release'",
-            "env janusd run --profile profile.deploy --permit use_deadbeef -- release",
-            "janusd run --permit use_deadbeef --profile profile.deploy -- release",
-            "janusd approve permit --approval appr_deadbeef",
+            "sh -c 'janusd-use run --profile profile.deploy --permit use_deadbeef -- release'",
+            "env janusd-use run --profile profile.deploy --permit use_deadbeef -- release",
+            "janusd-use run --permit use_deadbeef --profile profile.deploy -- release",
+            "janusd-admin approve permit --approval appr_deadbeef",
             "curl https://example.invalid -H 'permit: use_deadbeef'",
         ];
         for command in cases {
@@ -778,11 +778,11 @@ mod tests {
     fn background_and_unknown_tool_fields_fail_closed() {
         for tool_input in [
             json!({
-                "command": "janusd run --profile profile.deploy --permit use_deadbeef -- release",
+                "command": "janusd-use run --profile profile.deploy --permit use_deadbeef -- release",
                 "run_in_background": true
             }),
             json!({
-                "command": "janusd run --profile profile.deploy --permit use_deadbeef -- release",
+                "command": "janusd-use run --profile profile.deploy --permit use_deadbeef -- release",
                 "destination": "attacker.invalid"
             }),
         ] {
@@ -806,7 +806,7 @@ mod tests {
     fn post_hooks_append_value_free_permit_and_session_linked_evidence() {
         let (_dir, config) = config();
         let command =
-            "/opt/janus/bin/janusd run --profile profile.deploy --permit use_deadbeef -- release";
+            "/opt/janus/bin/janusd-use run --profile profile.deploy --permit use_deadbeef -- release";
         for event in [HookEvent::PostToolUse, HookEvent::PostToolUseFailure] {
             assert!(handle(
                 event,
@@ -833,7 +833,7 @@ mod tests {
     fn unrelated_commands_pass_without_requiring_hook_configuration() {
         struct MissingConfig;
         impl HookConfig for MissingConfig {
-            fn janusd_path(&self) -> HookResult<PathBuf> {
+            fn janusd_use_path(&self) -> HookResult<PathBuf> {
                 Err(HookError)
             }
             fn audit_path(&self) -> HookResult<PathBuf> {
@@ -875,7 +875,7 @@ mod tests {
                 .unwrap()
                 .ends_with("janus-claude-hook post-tool-use-failure")
         );
-        assert!(settings["env"][JANUSD_ENV]
+        assert!(settings["env"][JANUSD_USE_ENV]
             .as_str()
             .unwrap()
             .starts_with('/'));

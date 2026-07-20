@@ -13,20 +13,25 @@ cargo test --all --locked
 echo "==> janus engine release assurance: build smoke binaries"
 cargo build --locked -p janus-warden -p janusd
 
+echo "==> janus engine release assurance: runtime process-plane boundary smoke"
+scripts/smoke-janusd-planes.sh
+
 echo "==> janus engine release assurance: local Warden MCP smoke"
 python3 scripts/smoke-warden-mcp.py --bin target/debug/janus-warden
 
-echo "==> janus engine release assurance: local janusd env-file smoke"
-JANUSD_BIN="${repo}/target/debug/janusd" scripts/smoke-janusd-env-file.sh
+echo "==> janus engine release assurance: split-plane env-file smoke"
+JANUSD_USE_BIN="${repo}/target/debug/janusd-use" \
+  JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" \
+  scripts/smoke-janusd-env-file.sh
 
-echo "==> janus engine release assurance: local janusd migration smoke"
-JANUSD_BIN="${repo}/target/debug/janusd" scripts/smoke-janusd-migration.sh
+echo "==> janus engine release assurance: local janusd-admin migration smoke"
+JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-migration.sh
 
-echo "==> janus engine release assurance: local janusd scope-transfer smoke"
-JANUSD_BIN="${repo}/target/debug/janusd" scripts/smoke-janusd-scope-transfer.sh
+echo "==> janus engine release assurance: local janusd-admin scope-transfer smoke"
+JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-scope-transfer.sh
 
 echo "==> janus engine release assurance: local Pharos retirement smoke"
-JANUSD_BIN="${repo}/target/debug/janusd" scripts/smoke-janusd-pharos-retirement.sh
+JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-pharos-retirement.sh
 
 echo "==> janus engine release assurance: engine container Warden MCP smoke"
 scripts/smoke-engine-container.sh

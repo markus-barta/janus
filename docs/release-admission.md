@@ -36,7 +36,7 @@ receipt cannot authorize a different configured digest.
 
 ## Runtime configuration
 
-Set these variables for both `janus-warden` and `janusd`:
+Set these variables for `janus-warden`, `janusd-use`, and `janusd-admin`:
 
 | Variable | Meaning |
 | --- | --- |
@@ -52,6 +52,11 @@ Set these variables for both `janus-warden` and `janusd`:
 | `JANUS_SCOPE_ENVIRONMENT` | Required environment scope component |
 | `JANUS_SCOPE_NAMESPACE` | Optional namespace scope component |
 | `JANUS_SCOPE_WORKLOAD` | Optional workload component; requires namespace |
+
+Set `JANUS_RUNTIME_AUDIT_FILE` to a private durable JSONL path for process-plane
+denials. If the configured sink cannot be opened or persisted, a cross-plane
+request remains denied with `audit_sink_unavailable`; Janus never falls through
+to the requested command.
 
 `self_hosted` is the default and reports `not_required` when no release
 evidence is configured. `production` and `enterprise` fail closed before

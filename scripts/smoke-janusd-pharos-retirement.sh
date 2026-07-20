@@ -149,11 +149,11 @@ chmod 600 "${provider_file}"
 cp "${provider_file}" "${provider_before}"
 chmod 600 "${provider_before}"
 
-if [ -z "${JANUSD_BIN:-}" ]; then
+if [ -z "${JANUSD_ADMIN_BIN:-}" ]; then
 	cargo build --quiet --locked -p janusd
 fi
-janusd_bin="${JANUSD_BIN:-${repo}/target/debug/janusd}"
-[ -x "${janusd_bin}" ] || fail "janusd binary is not executable"
+janusd_admin_bin="${JANUSD_ADMIN_BIN:-${repo}/target/debug/janusd-admin}"
+[ -x "${janusd_admin_bin}" ] || fail "janusd-admin binary is not executable"
 
 export JANUS_AGE_MANIFEST_FILE="${manifest}"
 export JANUS_AGE_PROFILE="default"
@@ -180,12 +180,12 @@ retirement_args=(
 	--retain-for-days 365
 )
 
-before="$(${janusd_bin} pharos-beacon reconcile "${retirement_args[@]}" 2>&1)" ||
+before="$(${janusd_admin_bin} pharos-beacon reconcile "${retirement_args[@]}" 2>&1)" ||
 	fail "initial reconcile failed"
 printf '%s\n' "${before}" | grep -F 'state=action_required' >/dev/null ||
 	fail "initial reconcile did not require retirement"
 
-retired="$(${janusd_bin} pharos-beacon retire "${retirement_args[@]}" 2>&1)" ||
+retired="$(${janusd_admin_bin} pharos-beacon retire "${retirement_args[@]}" 2>&1)" ||
 	fail "retirement failed"
 printf '%s\n' "${retired}" | grep -F 'state=complete' >/dev/null ||
 	fail "retirement did not complete"
@@ -203,17 +203,17 @@ cmp -s "${provider_before}" "${provider_file}" || fail "encrypted provider mater
 grep -F 'lifecycle = "destroyed"' "${metadata}" >/dev/null ||
 	fail "metadata lifecycle was not finalized"
 
-replayed="$(${janusd_bin} pharos-beacon retire "${retirement_args[@]}" 2>&1)" ||
+replayed="$(${janusd_admin_bin} pharos-beacon retire "${retirement_args[@]}" 2>&1)" ||
 	fail "idempotent retirement replay failed"
 printf '%s\n' "${replayed}" | grep -F 'state=complete' >/dev/null ||
 	fail "retirement replay did not remain complete"
 
-after="$(${janusd_bin} pharos-beacon reconcile "${retirement_args[@]}" 2>&1)" ||
+after="$(${janusd_admin_bin} pharos-beacon reconcile "${retirement_args[@]}" 2>&1)" ||
 	fail "completed reconcile failed"
 printf '%s\n' "${after}" | grep -F 'state=complete' >/dev/null ||
 	fail "completed reconcile did not report complete"
 
-if denied="$(${janusd_bin} approve issue \
+if denied="$(${janusd_admin_bin} approve issue \
 	--secret-ref "${secret_ref}" \
 	--profile "${profile_id}" \
 	--purpose "retired fixture use" \
@@ -231,4 +231,4 @@ for output in "${before}" "${retired}" "${replayed}" "${after}" "${denied}"; do
 	esac
 done
 
-printf 'ok: janusd Pharos retirement smoke passed value_returned=false provider_deleted=false\n'
+printf 'ok: janusd-admin Pharos retirement smoke passed value_returned=false provider_deleted=false\n'

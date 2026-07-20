@@ -14,6 +14,7 @@ pub mod error;
 pub mod manifest;
 pub mod metadata;
 pub mod migration;
+pub mod plane;
 pub mod policy;
 pub mod principal;
 pub mod refs;
@@ -39,6 +40,7 @@ pub use error::{JanusError, JanusResult};
 pub use manifest::ManifestCatalog;
 pub use metadata::{SecretMetadataOverlay, SecretMetadataPatch};
 pub use migration::{MigrationCompatibility, MigrationManifest, MigrationPhase, MigrationRisk};
+pub use plane::{authorize_runtime_action, RuntimeAction, RuntimePlane};
 pub use policy::{
     ApprovalGrant, ApprovalGrantScope, ApprovalGrantSnapshot, ApprovalId, ClassPermitPolicy,
     EgressMode, PermitId, PermitIssuer, PolicyDecision, ProfileId, ProfilePolicy, Purpose,

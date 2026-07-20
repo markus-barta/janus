@@ -25,9 +25,9 @@ logs, or application code.
 - **Policy-gated use** - approvals and short-lived, single-use `UsePermit`
   handles bind a secret to a reviewed purpose, executor, destination, and
   profile.
-- **Managed execution** - `janusd run` launches exact reviewed commands and
+- **Managed execution** - `janusd-use run` launches exact reviewed commands and
   arguments without handing the credential back to the caller.
-- **Private service handoff** - `janusd env-file` renders reviewed `0600` env
+- **Private service handoff** - `janusd-use env-file` renders reviewed `0600` env
   files and optional value-free hash sidecars atomically.
 - **Generated rotation** - Forge creates replacement values internally and can
   run reviewed validation and reload hooks. There is deliberately no
@@ -38,6 +38,9 @@ logs, or application code.
   use, quarantines generated outputs, and records durable evidence.
 - **Backend portability** - the core contract is provider-neutral; the current
   self-hosted path uses native age encryption and secretspec allowlists.
+- **Split process planes** - `janusd-use` can consume permits but cannot
+  administer Janus; `janusd-admin` can administer Janus but cannot consume a
+  permit or render a secret-bearing output.
 
 ## The boundary that matters
 
@@ -89,7 +92,7 @@ consumer / operator / AI agent
        opaque UsePermit
               |
               v
-  janusd approved-use executor
+ janusd-use approved-use executor
               |
        reviewed profile
               |
@@ -110,7 +113,7 @@ crates/
   janus-warden/        reference-only MCP server
   janus-forge/         generated rotation and reviewed hooks
   janus-mock/          in-memory test provider
-  janusd/              approved-use runtime and operator CLI
+  janusd/              hard-separated use and administration runtimes
 go-envelope/           shipped transitional Go envelope
 docs/                  focused operator and cutover runbooks
 examples/              checked non-production handoff fixtures
@@ -123,6 +126,7 @@ entries include:
 
 - `guideline/architecture-v1`
 - `guideline/backend-decision`
+- `guideline/rust-engine-assurance-scope-recovery`
 - `guideline/repo-topology-adr`
 - `guideline/where-janus-lives`
 
@@ -156,8 +160,9 @@ On a supported Linux system, build the native Nix package:
 nix build .#janus-engine
 ```
 
-The package installs both `janusd` and `janus-warden` for supported Linux
-systems.
+The package installs `janusd-use`, `janusd-admin`, `janus-warden`, and the
+non-operational `janusd` migration helper for supported Linux systems. The
+legacy helper cannot run either plane's commands.
 
 ### Release assurance
 
@@ -174,6 +179,7 @@ It exercises:
 
 - the locked Rust workspace test suite;
 - a real reference-only Warden MCP session;
+- the hard use/admin process boundary and retired mixed entry point;
 - the approval-to-env-file operator flow;
 - the versioned approval-registry migration and rollback flow;
 - the exact-scope recovery and explicit boundary-transfer flow;
@@ -223,13 +229,13 @@ Preflight an executable and its exact argument vector without reading a
 secret or consuming a permit:
 
 ```bash
-janusd run preflight --profile profile.deploy -- release apply
+janusd-use run preflight --profile profile.deploy -- release apply
 ```
 
 After reviewed approval, consume the permit once:
 
 ```bash
-janusd run --profile profile.deploy --permit use_... -- release apply
+janusd-use run --profile profile.deploy --permit use_... -- release apply
 ```
 
 Claude Code can route this exact permit-bound shape while blocking raw secret
@@ -242,13 +248,13 @@ verification, and rollback.
 Preflight the reviewed destination:
 
 ```bash
-janusd env-file preflight --profile profile.deploy-env
+janusd-use env-file preflight --profile profile.deploy-env
 ```
 
 Render it with a single-use permit:
 
 ```bash
-janusd env-file --profile profile.deploy-env --permit use_...
+janusd-use env-file --profile profile.deploy-env --permit use_...
 ```
 
 The output path and environment variable come from the profile. Janus writes
@@ -259,7 +265,7 @@ the complete checked flow.
 ### Generated rotation
 
 ```bash
-janusd forge rotate-generated \
+janusd-admin forge rotate-generated \
   --secret CANARY \
   --reason JANUS-reviewed-rotation \
   --consumer-ref consumer.deploy \
@@ -281,7 +287,7 @@ provider values. The reviewed sequence is documented in
 For a declared Pharos host retirement:
 
 ```bash
-janusd pharos-beacon retire \
+janusd-admin pharos-beacon retire \
   --host ares \
   --disposition destroyed \
   --intent-file /etc/janus/pharos-retirement.toml \
@@ -290,7 +296,7 @@ janusd pharos-beacon retire \
   --state-dir /var/lib/janus/pharos-retirements
 ```
 
-Use `janusd pharos-beacon reconcile` with the same host, disposition, intent,
+Use `janusd-admin pharos-beacon reconcile` with the same host, disposition, intent,
 metadata, profile-manifest, and state-directory controls to inspect interrupted
 or drifted retirements without reading secret material.
 

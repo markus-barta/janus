@@ -25,6 +25,7 @@
 
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [
+              "--bins"
               "-p"
               "janusd"
               "-p"
@@ -36,16 +37,18 @@
               runHook preInstall
               release_dir="target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release"
               install -Dm755 "$release_dir/janusd" "$out/bin/janusd"
+              install -Dm755 "$release_dir/janusd-use" "$out/bin/janusd-use"
+              install -Dm755 "$release_dir/janusd-admin" "$out/bin/janusd-admin"
               install -Dm755 "$release_dir/janus-warden" "$out/bin/janus-warden"
               runHook postInstall
             '';
 
             meta = {
-              description = "Janus permit broker and reference-only Warden";
+              description = "Janus split-plane permit broker, administration runtime, and reference-only Warden";
               homepage = "https://github.com/markus-barta/janus";
               license = pkgs.lib.licenses.agpl3Only;
               platforms = supportedSystems;
-              mainProgram = "janusd";
+              mainProgram = "janusd-use";
             };
           };
         in

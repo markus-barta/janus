@@ -48,12 +48,12 @@ pub(super) fn run(args: &[String], release: ReleaseAdmission) -> Result<()> {
 fn parse(args: &[String]) -> Result<ScopeTransferCommand> {
     let [command, operation, manifest_flag, manifest] = args else {
         anyhow::bail!(
-            "usage: janusd scope-transfer preflight|apply|postflight|rollback|status --manifest PATH"
+            "usage: janusd-admin scope-transfer preflight|apply|postflight|rollback|status --manifest PATH"
         );
     };
     if command != "scope-transfer" || manifest_flag != "--manifest" || manifest.is_empty() {
         anyhow::bail!(
-            "usage: janusd scope-transfer preflight|apply|postflight|rollback|status --manifest PATH"
+            "usage: janusd-admin scope-transfer preflight|apply|postflight|rollback|status --manifest PATH"
         );
     }
     let operation = match operation.as_str() {
@@ -88,7 +88,7 @@ fn emit_status(operation: ScopeTransferOperation, status: &ScopeTransferStatus) 
         ScopeTransferOperation::Status => "status",
     };
     println!(
-        "janusd scope-transfer {operation} ok operation_id={} mode={} phase={} source_scope_ref={} destination_scope_ref={} record_count={} approval_count={} excluded_approval_count={} excluded_permit_count={} source_inventory_fingerprint={} target_fingerprint={} planned_target_fingerprint={} manifest_fingerprint={} mapping_fingerprint={} reason_code={} value_returned={}",
+        "janusd-admin scope-transfer {operation} ok operation_id={} mode={} phase={} source_scope_ref={} destination_scope_ref={} record_count={} approval_count={} excluded_approval_count={} excluded_permit_count={} source_inventory_fingerprint={} target_fingerprint={} planned_target_fingerprint={} manifest_fingerprint={} mapping_fingerprint={} reason_code={} value_returned={}",
         status.operation_id,
         status.mode,
         status.phase,

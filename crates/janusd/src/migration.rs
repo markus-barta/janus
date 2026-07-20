@@ -45,12 +45,12 @@ pub(super) fn run(args: &[String], release: ReleaseAdmission) -> Result<()> {
 fn parse(args: &[String]) -> Result<MigrationCommand> {
     let [migrate, operation, manifest_flag, manifest] = args else {
         anyhow::bail!(
-            "usage: janusd migrate preflight|apply|postflight|rollback|status --manifest PATH"
+            "usage: janusd-admin migrate preflight|apply|postflight|rollback|status --manifest PATH"
         );
     };
     if migrate != "migrate" || manifest_flag != "--manifest" || manifest.is_empty() {
         anyhow::bail!(
-            "usage: janusd migrate preflight|apply|postflight|rollback|status --manifest PATH"
+            "usage: janusd-admin migrate preflight|apply|postflight|rollback|status --manifest PATH"
         );
     }
     let operation = match operation.as_str() {
@@ -85,7 +85,7 @@ fn emit_status(operation: MigrationOperation, status: &MigrationStatus) {
         MigrationOperation::Status => "status",
     };
     println!(
-        "janusd migrate {operation} ok migration_id={} schema_id={} phase={} current_version={} target_version={} record_count={} target_fingerprint={} reason_code={} value_returned={}",
+        "janusd-admin migrate {operation} ok migration_id={} schema_id={} phase={} current_version={} target_version={} record_count={} target_fingerprint={} reason_code={} value_returned={}",
         status.migration_id,
         status.schema_id,
         status.phase,

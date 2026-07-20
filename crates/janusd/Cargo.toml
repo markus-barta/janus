@@ -15,6 +15,17 @@ workspace = true
 [[bin]]
 name = "janusd"
 path = "src/main.rs"
+test = false
+
+[[bin]]
+name = "janusd-use"
+path = "src/bin/janusd-use.rs"
+test = false
+
+[[bin]]
+name = "janusd-admin"
+path = "src/bin/janusd-admin.rs"
+test = false
 
 [dependencies]
 anyhow = "1"

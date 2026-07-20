@@ -1,6 +1,6 @@
 # Janus env-file handoff example
 
-This bundle is the checked nonprod fixture for `janusd env-file` service
+This bundle is the checked nonprod fixture for `janusd-use env-file` service
 handoff. It is intentionally small and local: no host deploy, no network
 service, no production path.
 

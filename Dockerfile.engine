@@ -27,15 +27,17 @@ RUN set -eux; \
         ;; \
     esac; \
     rustup target add "${rust_target}"; \
-    cargo build --locked --release --target "${rust_target}" -p janusd -p janus-warden; \
+    cargo build --locked --release --target "${rust_target}" -p janusd -p janus-warden --bins; \
     mkdir -p /out; \
     cp "target/${rust_target}/release/janusd" /out/janusd; \
+    cp "target/${rust_target}/release/janusd-use" /out/janusd-use; \
+    cp "target/${rust_target}/release/janusd-admin" /out/janusd-admin; \
     cp "target/${rust_target}/release/janus-warden" /out/janus-warden
 
 FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.title="Janus Rust engine"
-LABEL org.opencontainers.image.description="Janus secret-handling engine binaries: janusd and janus-warden"
+LABEL org.opencontainers.image.description="Janus secret-handling engine binaries with split use and administration planes"
 LABEL org.opencontainers.image.source="https://github.com/markus-barta/janus"
 LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
 
@@ -48,9 +50,11 @@ RUN apt-get update \
     && chown -R janus:janus /run/janus /var/lib/janus
 
 COPY --from=build /out/janusd /usr/local/bin/janusd
+COPY --from=build /out/janusd-use /usr/local/bin/janusd-use
+COPY --from=build /out/janusd-admin /usr/local/bin/janusd-admin
 COPY --from=build /out/janus-warden /usr/local/bin/janus-warden
 COPY --from=build /src/config/release-channels/v1.json /etc/janus/release-channels-v1.json
 
 USER janus
-ENTRYPOINT ["janusd"]
+ENTRYPOINT ["janusd-use"]
 CMD ["--help"]

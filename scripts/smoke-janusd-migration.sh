@@ -53,11 +53,11 @@ pathlib.Path(sys.argv[2]).write_text(contents, encoding="utf-8")
 PY
 chmod 600 "${manifest}"
 
-if [ -z "${JANUSD_BIN:-}" ]; then
+if [ -z "${JANUSD_ADMIN_BIN:-}" ]; then
   cargo build --quiet --locked -p janusd
 fi
-janusd_bin="${JANUSD_BIN:-${repo}/target/debug/janusd}"
-[ -x "${janusd_bin}" ] || fail "janusd binary is not executable"
+janusd_admin_bin="${JANUSD_ADMIN_BIN:-${repo}/target/debug/janusd-admin}"
+[ -x "${janusd_admin_bin}" ] || fail "janusd-admin binary is not executable"
 
 export JANUS_SCOPE_ORGANIZATION="fixture-org"
 export JANUS_SCOPE_PROJECT="janus"
@@ -68,7 +68,7 @@ run_migration() {
   local operation="$1"
   local expected_phase="$2"
   local output
-  if ! output="$("${janusd_bin}" migrate "${operation}" --manifest "${manifest}" 2>&1)"; then
+  if ! output="$("${janusd_admin_bin}" migrate "${operation}" --manifest "${manifest}" 2>&1)"; then
     printf '%s\n' "${output}" >>"${log}"
     fail "migration ${operation} failed"
   fi
@@ -111,4 +111,4 @@ if grep -F "${canary}" "${log}" "${audit}" >/dev/null 2>&1; then
   fail "record metadata leaked into value-free output or audit"
 fi
 
-printf 'ok: janusd migration smoke passed forward, postflight, and rollback value_returned=false\n'
+printf 'ok: janusd-admin migration smoke passed forward, postflight, and rollback value_returned=false\n'

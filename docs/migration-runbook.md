@@ -10,7 +10,7 @@ databases, or disaster-recovery material.
 
 ## Safety contract
 
-- Stop every `janusd` and `janus-warden` instance that uses the approval
+- Stop every `janusd-use`, `janusd-admin`, and `janus-warden` instance that uses the approval
   registry. Preflight takes a local maintenance lock but cannot stop remote
   writers.
 - Render the reviewed
@@ -29,11 +29,11 @@ databases, or disaster-recovery material.
 ## Operator sequence
 
 ```bash
-janusd migrate preflight --manifest /etc/janus/migration.json
-janusd migrate status --manifest /etc/janus/migration.json
-janusd migrate apply --manifest /etc/janus/migration.json
-janusd migrate postflight --manifest /etc/janus/migration.json
-janusd migrate status --manifest /etc/janus/migration.json
+janusd-admin migrate preflight --manifest /etc/janus/migration.json
+janusd-admin migrate status --manifest /etc/janus/migration.json
+janusd-admin migrate apply --manifest /etc/janus/migration.json
+janusd-admin migrate postflight --manifest /etc/janus/migration.json
+janusd-admin migrate status --manifest /etc/janus/migration.json
 ```
 
 Preflight is target-read-only: it validates every record, checks free space,
@@ -54,14 +54,14 @@ directories. First repair the reported environmental cause (for example audit
 availability or disk space), then inspect status:
 
 ```bash
-janusd migrate status --manifest /etc/janus/migration.json
+janusd-admin migrate status --manifest /etc/janus/migration.json
 ```
 
 To restore the verified v0 snapshot from any interrupted mutating phase:
 
 ```bash
-janusd migrate rollback --manifest /etc/janus/migration.json
-janusd migrate status --manifest /etc/janus/migration.json
+janusd-admin migrate rollback --manifest /etc/janus/migration.json
+janusd-admin migrate status --manifest /etc/janus/migration.json
 ```
 
 Resume runtimes only after status reports `completed` or `rolled_back` and the
@@ -71,7 +71,7 @@ authority fingerprint does not verify.
 
 ## Scope-bound recovery and transfer
 
-`janusd scope-transfer` is a separate offline workflow for a private,
+`janusd-admin scope-transfer` is a separate offline workflow for a private,
 value-free `scope-state.json` bundle. The bundle may contain secret names for
 ref derivation, classifications, owners, lifecycle timestamps, tombstones,
 consumer relationships, approval records, and a permit count. It contains no
@@ -106,11 +106,11 @@ secret value. Copy the reported `source_inventory_fingerprint` and
 read-only to untrusted writers.
 
 ```bash
-janusd scope-transfer status --manifest /etc/janus/scope-transfer.json
-janusd scope-transfer preflight --manifest /etc/janus/scope-transfer.json
-janusd scope-transfer apply --manifest /etc/janus/scope-transfer.json
-janusd scope-transfer postflight --manifest /etc/janus/scope-transfer.json
-janusd scope-transfer status --manifest /etc/janus/scope-transfer.json
+janusd-admin scope-transfer status --manifest /etc/janus/scope-transfer.json
+janusd-admin scope-transfer preflight --manifest /etc/janus/scope-transfer.json
+janusd-admin scope-transfer apply --manifest /etc/janus/scope-transfer.json
+janusd-admin scope-transfer postflight --manifest /etc/janus/scope-transfer.json
+janusd-admin scope-transfer status --manifest /etc/janus/scope-transfer.json
 ```
 
 Preflight verifies source and target fingerprints, exact operation class,
@@ -124,8 +124,8 @@ Postflight must pass before runtime resumes. Audit actions are
 To recover the exact preflight target from any interrupted or applied phase:
 
 ```bash
-janusd scope-transfer rollback --manifest /etc/janus/scope-transfer.json
-janusd scope-transfer status --manifest /etc/janus/scope-transfer.json
+janusd-admin scope-transfer rollback --manifest /etc/janus/scope-transfer.json
+janusd-admin scope-transfer status --manifest /etc/janus/scope-transfer.json
 ```
 
 Do not edit the journal, snapshot, or hidden work directories. A completed or

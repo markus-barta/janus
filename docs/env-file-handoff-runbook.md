@@ -1,12 +1,12 @@
 # Env-file handoff operator runbook
 
-This runbook covers the repo-local `janusd env-file` service handoff path. It
+This runbook covers the repo-local `janusd-use env-file` service handoff path. It
 is the bridge between the working smoke and a future real host/service wiring.
 Do not use it as a host deployment recipe by itself.
 
 ## What It Proves
 
-`janusd env-file` lets an operator provide one approved secret to one reviewed
+`janusd-use env-file` lets an operator provide one approved secret to one reviewed
 non-LLM service consumer as a private env file.
 
 The model/operator supplies only:
@@ -42,10 +42,10 @@ The smoke creates an isolated temp runtime, seeds an age-backed store, renders
 the profile template, and exercises:
 
 ```bash
-janusd env-file preflight ...
-janusd approve issue ...
-janusd approve permit ...
-janusd env-file ...
+janusd-use env-file preflight ...
+janusd-admin approve issue ...
+janusd-admin approve permit ...
+janusd-use env-file ...
 ```
 
 It verifies:
@@ -113,19 +113,19 @@ workloads.
 Preflight the reviewed profile before issuing approval or permit material:
 
 ```bash
-janusd env-file preflight --profile profile.SERVICE
+janusd-use env-file preflight --profile profile.SERVICE
 ```
 
 Expected output is value-free and shaped like:
 
 ```text
-janusd env-file preflight ok secret_ref=sec_... profile_id=profile.SERVICE output_path=/run/... hash_output_path=none hash_format=none consumer_ref=consumer... reason_code=ok value_returned=false
+janusd-use env-file preflight ok secret_ref=sec_... profile_id=profile.SERVICE output_path=/run/... hash_output_path=none hash_format=none consumer_ref=consumer... reason_code=ok value_returned=false
 ```
 
 Issue an approval when policy requires it:
 
 ```bash
-janusd approve issue \
+janusd-admin approve issue \
   --secret-ref sec_... \
   --profile profile.SERVICE \
   --purpose "service env file handoff" \
@@ -137,7 +137,7 @@ janusd approve issue \
 Issue a single-use permit:
 
 ```bash
-janusd approve permit \
+janusd-admin approve permit \
   --approval appr_... \
   --permit-ttl-seconds 60 \
   --revoke-approval
@@ -146,13 +146,13 @@ janusd approve permit \
 Render the env file:
 
 ```bash
-janusd env-file --profile profile.SERVICE --permit use_...
+janusd-use env-file --profile profile.SERVICE --permit use_...
 ```
 
 Expected output is value-free and shaped like:
 
 ```text
-janusd env-file ok secret_ref=sec_... profile_id=profile.SERVICE output_path=/run/... hash_output_path=none hash_format=none consumer_ref=consumer... reason_code=ok value_returned=false
+janusd-use env-file ok secret_ref=sec_... profile_id=profile.SERVICE output_path=/run/... hash_output_path=none hash_format=none consumer_ref=consumer... reason_code=ok value_returned=false
 ```
 
 ## Rollback And Cleanup
@@ -175,10 +175,10 @@ as spent.
 
 Keep value-free evidence only:
 - commit that introduced/changed the reviewed profile
-- `janusd env-file preflight` value-free outcome
-- `janusd approve issue` output
-- `janusd approve permit` output
-- `janusd env-file` value-free outcome
+- `janusd-use env-file preflight` value-free outcome
+- `janusd-admin approve issue` output
+- `janusd-admin approve permit` output
+- `janusd-use env-file` value-free outcome
 - file mode/path check
 - consumer validation result
 - lifecycle evidence record

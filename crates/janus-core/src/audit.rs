@@ -62,6 +62,8 @@ pub enum AuditAction {
     ScopeTransferPostflight,
     /// A scope-transfer rollback restored its reviewed target snapshot.
     ScopeTransferRollback,
+    /// A runtime action was admitted to or denied from a process plane.
+    RuntimePlane,
 }
 
 impl AuditAction {
@@ -96,6 +98,7 @@ impl AuditAction {
             Self::ScopeTransferApply => "scope_transfer.apply",
             Self::ScopeTransferPostflight => "scope_transfer.postflight",
             Self::ScopeTransferRollback => "scope_transfer.rollback",
+            Self::RuntimePlane => "runtime.plane",
         }
     }
 
@@ -130,6 +133,7 @@ impl AuditAction {
             "scope_transfer.apply" => Self::ScopeTransferApply,
             "scope_transfer.postflight" => Self::ScopeTransferPostflight,
             "scope_transfer.rollback" => Self::ScopeTransferRollback,
+            "runtime.plane" => Self::RuntimePlane,
             _ => return None,
         })
     }

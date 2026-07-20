@@ -51,11 +51,12 @@ extract_field() {
   sed -n "s/.*${field}=\\([^ ]*\\).*/\\1/p"
 }
 
-run_janusd() {
+run_janus() {
   local label="$1"
-  shift
+  local binary="$2"
+  shift 2
   local output
-  if ! output="$("${janusd_bin}" "$@" 2>&1)"; then
+  if ! output="$("${binary}" "$@" 2>&1)"; then
     printf '%s\n' "${output}" >>"${log_file}"
     fail "${label} failed"
   fi
@@ -165,11 +166,13 @@ printf '%s' "${canary_value}" | age -r "${recipient}" -o "${store_dir}/janus/def
   >>"${log_file}" 2>&1
 chmod 600 "${store_dir}/janus/default/CANARY.age"
 
-if [ -z "${JANUSD_BIN:-}" ]; then
+if [ -z "${JANUSD_USE_BIN:-}" ] || [ -z "${JANUSD_ADMIN_BIN:-}" ]; then
   cargo build --quiet --locked -p janusd
 fi
-janusd_bin="${JANUSD_BIN:-${repo}/target/debug/janusd}"
-[ -x "${janusd_bin}" ] || fail "janusd binary is not executable"
+janusd_use_bin="${JANUSD_USE_BIN:-${repo}/target/debug/janusd-use}"
+janusd_admin_bin="${JANUSD_ADMIN_BIN:-${repo}/target/debug/janusd-admin}"
+[ -x "${janusd_use_bin}" ] || fail "janusd-use binary is not executable"
+[ -x "${janusd_admin_bin}" ] || fail "janusd-admin binary is not executable"
 
 export JANUS_RUN_PROFILE_MANIFEST="${profiles}"
 export JANUS_RUN_PERMIT_DIR="${permit_dir}"
@@ -188,7 +191,7 @@ export JANUS_SCOPE_REPOSITORY="janus"
 export JANUS_SCOPE_ENVIRONMENT="dev"
 
 preflight_output="$(
-  run_janusd "env-file preflight" env-file preflight \
+  run_janus "env-file preflight" "${janusd_use_bin}" env-file preflight \
     --profile "${profile_id}"
 )"
 printf '%s\n' "${preflight_output}" | grep -F "value_returned=false" >/dev/null \
@@ -198,7 +201,7 @@ printf '%s\n' "${preflight_output}" | grep -F "consumer_ref=${consumer_ref}" >/d
 [ ! -e "${env_file}" ] || fail "env-file preflight created the env file"
 
 approval_output="$(
-  run_janusd "approve issue" approve issue \
+  run_janus "approve issue" "${janusd_admin_bin}" approve issue \
     --secret-ref "${secret_ref}" \
     --profile "${profile_id}" \
     --purpose "fixture env file handoff" \
@@ -210,7 +213,7 @@ approval_id="$(printf '%s\n' "${approval_output}" | extract_field "approval_id")
 [ -n "${approval_id}" ] || fail "approval id missing from approve issue output"
 
 permit_output="$(
-  run_janusd "approve permit" approve permit \
+  run_janus "approve permit" "${janusd_admin_bin}" approve permit \
     --approval "${approval_id}" \
     --permit-ttl-seconds 60 \
     --revoke-approval
@@ -219,7 +222,7 @@ permit_id="$(printf '%s\n' "${permit_output}" | extract_field "permit_id")"
 [ -n "${permit_id}" ] || fail "permit id missing from approve permit output"
 
 env_output="$(
-  run_janusd "env-file" env-file \
+  run_janus "env-file" "${janusd_use_bin}" env-file \
     --profile "${profile_id}" \
     --permit "${permit_id}"
 )"
@@ -260,7 +263,7 @@ marker_path.write_text("ok\n", encoding="utf-8")
 PY
 [ "$(cat "${fixture_marker}")" = "ok" ] || fail "fixture service marker missing"
 
-if "${janusd_bin}" env-file --profile "${profile_id}" --permit "${permit_id}" \
+if "${janusd_use_bin}" env-file --profile "${profile_id}" --permit "${permit_id}" \
   >>"${log_file}" 2>&1; then
   fail "consumed permit was reusable"
 fi
@@ -274,5 +277,5 @@ grep -F '"last_used_at_unix_secs"' "${evidence_file}" >/dev/null \
 
 assert_no_canary_in_file "${log_file}"
 
-printf 'ok: janusd env-file smoke passed secret_ref=%s profile_id=%s output_mode=%s value_returned=false\n' \
+printf 'ok: split-plane env-file smoke passed secret_ref=%s profile_id=%s output_mode=%s value_returned=false\n' \
   "${secret_ref}" "${profile_id}" "$(file_mode "${env_file}")"

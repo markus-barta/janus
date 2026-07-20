@@ -151,18 +151,18 @@ path.write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
 path.chmod(0o600)
 PY
 
-if [ -z "${JANUSD_BIN:-}" ]; then
+if [ -z "${JANUSD_ADMIN_BIN:-}" ]; then
   cargo build --quiet --locked -p janusd
 fi
-janusd_bin="${JANUSD_BIN:-${repo}/target/debug/janusd}"
-[ -x "${janusd_bin}" ] || fail "janusd binary is not executable"
+janusd_admin_bin="${JANUSD_ADMIN_BIN:-${repo}/target/debug/janusd-admin}"
+[ -x "${janusd_admin_bin}" ] || fail "janusd-admin binary is not executable"
 
 export JANUS_SCOPE_ORGANIZATION="fixture-org"
 export JANUS_SCOPE_PROJECT="janus"
 export JANUS_SCOPE_REPOSITORY="janus"
 export JANUS_SCOPE_ENVIRONMENT="prod"
 
-discovery="$(${janusd_bin} scope-transfer status --manifest "${manifest}" 2>&1)" || {
+discovery="$(${janusd_admin_bin} scope-transfer status --manifest "${manifest}" 2>&1)" || {
   printf '%s\n' "${discovery}" >>"${log}"
   fail "scope-transfer fingerprint discovery failed"
 }
@@ -191,7 +191,7 @@ run_transfer() {
   local operation="$1"
   local expected_phase="$2"
   local output
-  if ! output="$(${janusd_bin} scope-transfer "${operation}" --manifest "${manifest}" 2>&1)"; then
+  if ! output="$(${janusd_admin_bin} scope-transfer "${operation}" --manifest "${manifest}" 2>&1)"; then
     printf '%s\n' "${output}" >>"${log}"
     fail "scope-transfer ${operation} failed"
   fi
@@ -243,4 +243,4 @@ run_transfer status rolled_back
 grep -F '"action":"scope_transfer.rollback"' "${audit_path}" >/dev/null ||
   fail "audit evidence missing scope_transfer.rollback"
 
-printf 'ok: janusd scope-transfer smoke passed dev-to-prod rewrite, authority exclusion, postflight, and rollback value_returned=false\n'
+printf 'ok: janusd-admin scope-transfer smoke passed dev-to-prod rewrite, authority exclusion, postflight, and rollback value_returned=false\n'

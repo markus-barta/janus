@@ -20,7 +20,7 @@ keeps this path value-free and non-destructive at the provider layer:
 ## Required context
 
 Run commands from a reviewed Janus operator environment with the same backend
-context used by normal janusd operations:
+context used by normal `janusd-admin` operations:
 
 - `JANUS_AGE_MANIFEST_FILE`, `JANUS_WARDEN_AGE_MANIFEST_FILE`, or
   `JANUS_WARDEN_SECRETSPEC_FILE`.
@@ -55,7 +55,7 @@ Confirm these points before changing lifecycle metadata:
 Optional stale context:
 
 ```bash
-janusd lifecycle stale-report \
+janusd-admin lifecycle stale-report \
   --stale-after-days 90 \
   --missing-evidence-after-days 30
 ```
@@ -77,7 +77,7 @@ RETAIN_DAYS=365
 1. Disable normal approved use.
 
 ```bash
-janusd lifecycle transition \
+janusd-admin lifecycle transition \
   --secret-ref "$SECRET_REF" \
   --to disabled \
   --reason "$REASON" \
@@ -87,13 +87,13 @@ janusd lifecycle transition \
 Expected shape:
 
 ```text
-janusd lifecycle transition ok secret_ref=sec_example from=active to=disabled reason_code=lifecycle_transition_ok value_returned=false
+janusd-admin lifecycle transition ok secret_ref=sec_example from=active to=disabled reason_code=lifecycle_transition_ok value_returned=false
 ```
 
 2. Move from disabled to pending delete.
 
 ```bash
-janusd lifecycle transition \
+janusd-admin lifecycle transition \
   --secret-ref "$SECRET_REF" \
   --to pending_delete \
   --reason "$REASON" \
@@ -103,13 +103,13 @@ janusd lifecycle transition \
 Expected shape:
 
 ```text
-janusd lifecycle transition ok secret_ref=sec_example from=disabled to=pending_delete reason_code=lifecycle_transition_ok value_returned=false
+janusd-admin lifecycle transition ok secret_ref=sec_example from=disabled to=pending_delete reason_code=lifecycle_transition_ok value_returned=false
 ```
 
 3. Record the value-free destroy tombstone.
 
 ```bash
-janusd lifecycle destroy-record \
+janusd-admin lifecycle destroy-record \
   --secret-ref "$SECRET_REF" \
   --reason "$REASON" \
   --retain-for-days "$RETAIN_DAYS" \
@@ -119,7 +119,7 @@ janusd lifecycle destroy-record \
 Expected shape:
 
 ```text
-janusd lifecycle destroy-record ok secret_ref=sec_example from=pending_delete to=destroyed reason_code=tombstone_recorded retain_until_unix_secs=1790000000 value_returned=false provider_deleted=false
+janusd-admin lifecycle destroy-record ok secret_ref=sec_example from=pending_delete to=destroyed reason_code=tombstone_recorded retain_until_unix_secs=1790000000 value_returned=false provider_deleted=false
 ```
 
 This step writes tombstone evidence only. Metadata remains `pending_delete` until
@@ -128,7 +128,7 @@ the finalize step succeeds.
 4. Finalize metadata as destroyed.
 
 ```bash
-janusd lifecycle destroy-finalize \
+janusd-admin lifecycle destroy-finalize \
   --secret-ref "$SECRET_REF" \
   --metadata-file "$METADATA_FILE"
 ```
@@ -136,7 +136,7 @@ janusd lifecycle destroy-finalize \
 Expected shape:
 
 ```text
-janusd lifecycle destroy-finalize ok secret_ref=sec_example from=pending_delete to=destroyed reason_code=destroy_metadata_finalized metadata_finalized=true value_returned=false provider_deleted=false
+janusd-admin lifecycle destroy-finalize ok secret_ref=sec_example from=pending_delete to=destroyed reason_code=destroy_metadata_finalized metadata_finalized=true value_returned=false provider_deleted=false
 ```
 
 If metadata is already `destroyed` and a tombstone exists, the command reports
@@ -145,14 +145,14 @@ If metadata is already `destroyed` and a tombstone exists, the command reports
 5. Reconcile metadata and tombstones.
 
 ```bash
-janusd lifecycle destroy-reconcile \
+janusd-admin lifecycle destroy-reconcile \
   --metadata-file "$METADATA_FILE"
 ```
 
 Expected final row:
 
 ```text
-janusd lifecycle destroy-reconcile secret_ref=sec_example status=ok reason_code=destroy_tombstone_reconcile_ok action_required=false action=none metadata_lifecycle=destroyed tombstone=present value_returned=false provider_deleted=false
+janusd-admin lifecycle destroy-reconcile secret_ref=sec_example status=ok reason_code=destroy_tombstone_reconcile_ok action_required=false action=none metadata_lifecycle=destroyed tombstone=present value_returned=false provider_deleted=false
 ```
 
 ## Reconcile results

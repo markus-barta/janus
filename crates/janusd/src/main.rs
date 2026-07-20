@@ -1,4 +1,4 @@
-//! # janusd - the Janus approved-use runtime and operator CLI
+//! # janusd - shared implementation for split Janus process planes
 //!
 //! Wires `janus-core`, `janus-warden`, and `janus-forge` into narrow execution
 //! and lifecycle surfaces behind value-free broker contracts. The deployed web
@@ -6,8 +6,11 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "migration.rs"]
 mod migration;
+#[path = "pharos_retirement.rs"]
 mod pharos_retirement;
+#[path = "scope_transfer.rs"]
 mod scope_transfer;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,15 +25,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use janus_core::{
-    ApprovalGrant, AuditAction, AuditEvent, AuditOutcome, AuditSink, AuditWrite, BlastRadius,
-    ClassPermitPolicy, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry,
-    Destination, EgressMode, Environment, ExecutorRef, JanusError, LifecycleTransitionPolicy,
-    NamespaceId, OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId,
-    ProfilePolicy, Purpose, ReloadMethod, RotationOutcome, SafeLabel, ScopePathV1, ScopeRef,
-    SecretAgeEvidence, SecretBroker, SecretDescriptor, SecretLifecycle, SecretMeta,
-    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretTombstoneRequest, Severity,
-    StaleSecretPolicy, StaleSecretReportRow, StaleSecretReporter, TombstonePolicy, TrustLevel,
-    UsePermit, UseProfile, UseRequest, ValidationProbe, WorkloadId,
+    authorize_runtime_action, ApprovalGrant, AuditAction, AuditEvent, AuditOutcome, AuditSink,
+    AuditWrite, BlastRadius, ClassPermitPolicy, ConsumerDescriptor, ConsumerKind, ConsumerRef,
+    ConsumerRegistry, Destination, EgressMode, Environment, ExecutorRef, JanusError,
+    LifecycleTransitionPolicy, NamespaceId, OwnerRef, Principal, PrincipalChain, PrincipalId,
+    PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReloadMethod, RotationOutcome, RuntimeAction,
+    RuntimePlane, SafeLabel, ScopePathV1, ScopeRef, SecretAgeEvidence, SecretBroker,
+    SecretDescriptor, SecretLifecycle, SecretMeta, SecretMetadataOverlay, SecretName, SecretRef,
+    SecretStore, SecretTombstoneRequest, Severity, StaleSecretPolicy, StaleSecretReportRow,
+    StaleSecretReporter, TombstonePolicy, TrustLevel, UsePermit, UseProfile, UseRequest,
+    ValidationProbe, WorkloadId,
 };
 use janus_executor::{
     ApprovedUseExecutor, EnvFileHashSidecarFormat, EnvFileHashSidecarSpec, EnvFilePlan,
@@ -45,7 +49,7 @@ use janus_local::{
     enforce_migration_ready_from_env, enforce_release_admission_from_env,
     enforce_scope_transfer_ready_from_env, ApprovalListEntry,
     ApprovalRegistry as SharedApprovalRegistry, FileApprovalRegistry,
-    FileLifecycleEvidenceRegistry, FilePermitRegistry, FileTombstoneRegistry,
+    FileLifecycleEvidenceRegistry, FilePermitRegistry, FileTombstoneRegistry, JsonlAuditSink,
     LifecycleEvidenceRegistry as SharedLifecycleEvidenceRegistry,
     PermitRegistry as SharedPermitRegistry, PermitStore as SharedPermitStore,
     TombstoneRegistry as SharedTombstoneRegistry,
@@ -72,30 +76,44 @@ const METADATA_ENV_KEYS: &[&str] = &[
     "JANUS_METADATA_FILE",
 ];
 
+#[allow(dead_code)] // this file is also compiled as the shared library module
 #[tokio::main]
 async fn main() -> Result<()> {
+    run_for_plane(None).await
+}
+
+/// Run one hard-coded process plane. `None` is the retired mixed entry point.
+pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.is_empty() || args == ["--help"] || args == ["help"] {
+        print_usage(selected_plane);
+        return Ok(());
+    }
+    let action = classify_runtime_action(&args)?;
+    let principal = release_principal_from_env()?;
+    enforce_process_plane(selected_plane, action, &principal)?;
     if migration::is_migration_command(&args) {
-        let release = enforce_release_admission_from_env(&release_principal_from_env()?)
-            .context("release admission denied janusd migration")?;
+        let release = enforce_release_admission_from_env(&principal)
+            .context("release admission denied janusd-admin migration")?;
         return migration::run(&args, release);
     }
     if scope_transfer::is_scope_transfer_command(&args) {
-        let release = enforce_release_admission_from_env(&release_principal_from_env()?)
-            .context("release admission denied janusd scope transfer")?;
+        let release = enforce_release_admission_from_env(&principal)
+            .context("release admission denied janusd-admin scope transfer")?;
         return scope_transfer::run(&args, release);
     }
     let command = parse_args(args)?;
+    debug_assert_eq!(command.runtime_action(), action);
     if !matches!(&command, Command::Help) {
-        enforce_release_admission_from_env(&release_principal_from_env()?)
-            .context("release admission denied janusd startup")?;
-        enforce_migration_ready_from_env().context("migration state denied janusd startup")?;
+        enforce_release_admission_from_env(&principal)
+            .context("release admission denied split runtime startup")?;
+        enforce_migration_ready_from_env().context("migration state denied runtime startup")?;
         enforce_scope_transfer_ready_from_env()
-            .context("scope transfer state denied janusd startup")?;
+            .context("scope transfer state denied runtime startup")?;
     }
     match command {
         Command::Help => {
-            print_usage();
+            print_usage(selected_plane);
             Ok(())
         }
         Command::ForgeRotateGenerated(config) => run_forge_rotate_generated(config).await,
@@ -128,6 +146,30 @@ enum Command {
     LifecycleDestroyFinalize(LifecycleDestroyFinalizeConfig),
     LifecycleDestroyReconcile(LifecycleDestroyReconcileConfig),
     PharosBeacon(PharosBeaconCommand),
+}
+
+impl Command {
+    fn runtime_action(&self) -> RuntimeAction {
+        match self {
+            Self::Help => unreachable!("help is handled before command classification"),
+            Self::ForgeRotateGenerated(_) => RuntimeAction::ForgeRotateGenerated,
+            Self::RunManagedPreflight(_) => RuntimeAction::ManagedRunPreflight,
+            Self::RunManaged(_) => RuntimeAction::ManagedRun,
+            Self::EnvFilePreflight(_) => RuntimeAction::EnvFilePreflight,
+            Self::EnvFile(_) => RuntimeAction::EnvFile,
+            Self::Approve(ApproveCommand::Issue(_)) => RuntimeAction::ApprovalIssue,
+            Self::Approve(ApproveCommand::Permit(_)) => RuntimeAction::ApprovalPermit,
+            Self::Approve(ApproveCommand::List) => RuntimeAction::ApprovalList,
+            Self::Approve(ApproveCommand::Revoke(_)) => RuntimeAction::ApprovalRevoke,
+            Self::LifecycleTransition(_) => RuntimeAction::LifecycleTransition,
+            Self::LifecycleStaleReport(_) => RuntimeAction::LifecycleStaleReport,
+            Self::LifecycleDestroyRecord(_) => RuntimeAction::LifecycleDestroyRecord,
+            Self::LifecycleDestroyFinalize(_) => RuntimeAction::LifecycleDestroyFinalize,
+            Self::LifecycleDestroyReconcile(_) => RuntimeAction::LifecycleDestroyReconcile,
+            Self::PharosBeacon(PharosBeaconCommand::Retire(_)) => RuntimeAction::PharosRetire,
+            Self::PharosBeacon(PharosBeaconCommand::Reconcile(_)) => RuntimeAction::PharosReconcile,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -404,7 +446,7 @@ async fn run_forge_rotate_generated(config: ForgeRotateGeneratedConfig) -> Resul
     record_rotation_evidence(&outcome, &lifecycle_evidence, SystemTime::now())?;
 
     println!(
-        "janusd forge rotate-generated ok secret_ref={} phase={:?} reason_code={} value_returned={}",
+        "janusd-admin forge rotate-generated ok secret_ref={} phase={:?} reason_code={} value_returned={}",
         outcome.secret_ref.as_str(),
         outcome.phase,
         outcome.reason_code,
@@ -823,7 +865,7 @@ impl PharosRetirementLifecycle for JanusPharosRetirementBackend {
 
 fn emit_pharos_beacon_outcome(action: &str, outcome: &PharosReconcileOutcome) {
     println!(
-        "janusd pharos-beacon {action} host={} state={} reason_code={} value_returned={} provider_deleted={}",
+        "janusd-admin pharos-beacon {action} host={} state={} reason_code={} value_returned={} provider_deleted={}",
         outcome.host,
         outcome.state.as_str(),
         outcome.reason_code,
@@ -834,7 +876,7 @@ fn emit_pharos_beacon_outcome(action: &str, outcome: &PharosReconcileOutcome) {
 
 fn emit_pharos_beacon_failure(failure: PharosRetirementFailure) {
     eprintln!(
-        "janusd pharos-beacon failed state=action_required reason_code={} value_returned=false provider_deleted=false",
+        "janusd-admin pharos-beacon failed state=action_required reason_code={} value_returned=false provider_deleted=false",
         failure.reason_code()
     );
 }
@@ -1211,7 +1253,7 @@ fn secret_meta_from_descriptor(descriptor: &SecretDescriptor) -> SecretMeta {
 
 fn emit_lifecycle_transition_outcome(outcome: &LifecycleTransitionCliOutcome) {
     println!(
-        "janusd lifecycle transition ok secret_ref={} from={} to={} reason_code={} value_returned={}",
+        "janusd-admin lifecycle transition ok secret_ref={} from={} to={} reason_code={} value_returned={}",
         outcome.secret_ref,
         outcome.from,
         outcome.to,
@@ -1232,7 +1274,7 @@ fn emit_lifecycle_stale_report(rows: &[StaleSecretReportRow]) {
             .map(|age| age.to_string())
             .unwrap_or_else(|| "unknown".to_string());
         println!(
-            "janusd lifecycle stale-report secret_ref={} status={} reason_code={} action_required={} action={} owner={} lifecycle={} age_seconds={} value_returned={}",
+            "janusd-admin lifecycle stale-report secret_ref={} status={} reason_code={} action_required={} action={} owner={} lifecycle={} age_seconds={} value_returned={}",
             row.secret_ref.as_str(),
             row.status.as_str(),
             row.reason_code,
@@ -1248,7 +1290,7 @@ fn emit_lifecycle_stale_report(rows: &[StaleSecretReportRow]) {
 
 fn emit_lifecycle_destroy_record_outcome(outcome: &LifecycleDestroyRecordCliOutcome) {
     println!(
-        "janusd lifecycle destroy-record ok secret_ref={} from={} to={} reason_code={} retain_until_unix_secs={} value_returned={} provider_deleted={}",
+        "janusd-admin lifecycle destroy-record ok secret_ref={} from={} to={} reason_code={} retain_until_unix_secs={} value_returned={} provider_deleted={}",
         outcome.secret_ref,
         outcome.from,
         outcome.to,
@@ -1261,7 +1303,7 @@ fn emit_lifecycle_destroy_record_outcome(outcome: &LifecycleDestroyRecordCliOutc
 
 fn emit_lifecycle_destroy_finalize_outcome(outcome: &LifecycleDestroyFinalizeCliOutcome) {
     println!(
-        "janusd lifecycle destroy-finalize ok secret_ref={} from={} to={} reason_code={} metadata_finalized={} value_returned={} provider_deleted={}",
+        "janusd-admin lifecycle destroy-finalize ok secret_ref={} from={} to={} reason_code={} metadata_finalized={} value_returned={} provider_deleted={}",
         outcome.secret_ref,
         outcome.from,
         outcome.to,
@@ -1275,7 +1317,7 @@ fn emit_lifecycle_destroy_finalize_outcome(outcome: &LifecycleDestroyFinalizeCli
 fn emit_lifecycle_destroy_reconcile_report(rows: &[LifecycleDestroyReconcileRow]) {
     for row in rows {
         println!(
-            "janusd lifecycle destroy-reconcile secret_ref={} status={} reason_code={} action_required={} action={} metadata_lifecycle={} tombstone={} value_returned={} provider_deleted={}",
+            "janusd-admin lifecycle destroy-reconcile secret_ref={} status={} reason_code={} action_required={} action={} metadata_lifecycle={} tombstone={} value_returned={} provider_deleted={}",
             row.secret_ref.as_str(),
             row.status,
             row.reason_code,
@@ -1507,7 +1549,7 @@ fn build_approval_grant(
 fn emit_approve_issue_outcome(approval: &ApprovalGrant) {
     let snapshot = approval.snapshot();
     println!(
-        "janusd approve issue ok approval_id={} secret_ref={} profile_id={} class={} egress={} expires_at_unix_secs={} value_returned=false",
+        "janusd-admin approve issue ok approval_id={} secret_ref={} profile_id={} class={} egress={} expires_at_unix_secs={} value_returned=false",
         snapshot.approval_id,
         snapshot.secret_ref,
         snapshot.profile_id,
@@ -1519,7 +1561,7 @@ fn emit_approve_issue_outcome(approval: &ApprovalGrant) {
 
 fn emit_approve_permit_outcome(outcome: &ApprovedPermitIssueOutcome) {
     println!(
-        "janusd approve permit ok permit_id={} approval_id={} secret_ref={} profile_id={} executor={} destination={} approval_revoked={} value_returned={}",
+        "janusd-admin approve permit ok permit_id={} approval_id={} secret_ref={} profile_id={} executor={} destination={} approval_revoked={} value_returned={}",
         outcome.permit_id,
         outcome.approval_id,
         outcome.secret_ref,
@@ -1533,7 +1575,7 @@ fn emit_approve_permit_outcome(outcome: &ApprovedPermitIssueOutcome) {
 
 fn emit_approve_list_outcome(approvals: &[ApprovalListEntry]) {
     println!(
-        "janusd approve list count={} value_returned=false",
+        "janusd-admin approve list count={} value_returned=false",
         approvals.len()
     );
     for approval in approvals {
@@ -1552,7 +1594,7 @@ fn emit_approve_list_outcome(approvals: &[ApprovalListEntry]) {
 
 fn emit_approve_revoke_outcome(approval: &ApprovalToken) {
     println!(
-        "janusd approve revoke ok approval_id={} value_returned=false",
+        "janusd-admin approve revoke ok approval_id={} value_returned=false",
         approval.as_str()
     );
 }
@@ -1665,7 +1707,7 @@ where
             .profile(&config.profile_id)
             .context("managed command profile not found")?;
         if profile.allowed_args() != config.requested_args.as_slice() {
-            anyhow::bail!("janusd run command arguments do not match the reviewed profile");
+            anyhow::bail!("janusd-use run command arguments do not match the reviewed profile");
         }
         let permit = self.permits.resolve(&config.permit)?;
         self.executor
@@ -1842,14 +1884,14 @@ fn emit_run_managed_outcome(outcome: &ManagedCommandCliOutcome) {
     print!("{}", outcome.stdout);
     eprint!("{}", outcome.stderr);
     eprintln!(
-        "janusd run completed exit_success={} exit_code={:?} reason_code={} value_returned={}",
+        "janusd-use run completed exit_success={} exit_code={:?} reason_code={} value_returned={}",
         outcome.exit_success, outcome.exit_code, outcome.reason_code, outcome.value_returned
     );
 }
 
 fn emit_run_managed_preflight_outcome(outcome: &ManagedCommandPlan) {
     println!(
-        "janusd run preflight ok secret_ref={} profile_id={} executor={} destination={} binary={} args_count={} timeout_seconds={} max_stdout_bytes={} max_stderr_bytes={} consumer_ref={} reason_code=ok value_returned={}",
+        "janusd-use run preflight ok secret_ref={} profile_id={} executor={} destination={} binary={} args_count={} timeout_seconds={} max_stdout_bytes={} max_stderr_bytes={} consumer_ref={} reason_code=ok value_returned={}",
         outcome.secret_ref.as_str(),
         outcome.profile_id.as_str(),
         outcome.executor.as_str(),
@@ -1866,7 +1908,7 @@ fn emit_run_managed_preflight_outcome(outcome: &ManagedCommandPlan) {
 
 fn emit_env_file_outcome(outcome: &EnvFileCliOutcome) {
     println!(
-        "janusd env-file ok secret_ref={} profile_id={} output_path={} hash_output_path={} hash_format={} consumer_ref={} reason_code={} value_returned={}",
+        "janusd-use env-file ok secret_ref={} profile_id={} output_path={} hash_output_path={} hash_format={} consumer_ref={} reason_code={} value_returned={}",
         outcome.secret_ref.as_str(),
         outcome.profile_id.as_str(),
         outcome.output_path.display(),
@@ -1880,7 +1922,7 @@ fn emit_env_file_outcome(outcome: &EnvFileCliOutcome) {
 
 fn emit_env_file_preflight_outcome(outcome: &EnvFileCliOutcome) {
     println!(
-        "janusd env-file preflight ok secret_ref={} profile_id={} output_path={} hash_output_path={} hash_format={} consumer_ref={} reason_code={} value_returned={}",
+        "janusd-use env-file preflight ok secret_ref={} profile_id={} output_path={} hash_output_path={} hash_format={} consumer_ref={} reason_code={} value_returned={}",
         outcome.secret_ref.as_str(),
         outcome.profile_id.as_str(),
         outcome.output_path.display(),
@@ -2415,6 +2457,120 @@ async fn run_hook_command(run: HookRun<'_>) -> janus_core::JanusResult<()> {
     }
 }
 
+fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
+    let action = match args {
+        [migrate, ..] if migrate == "migrate" => RuntimeAction::Migration,
+        [scope_transfer, ..] if scope_transfer == "scope-transfer" => RuntimeAction::ScopeTransfer,
+        [forge, rotate, ..] if forge == "forge" && rotate == "rotate-generated" => {
+            RuntimeAction::ForgeRotateGenerated
+        }
+        [run, preflight, ..] if run == "run" && preflight == "preflight" => {
+            RuntimeAction::ManagedRunPreflight
+        }
+        [run, ..] if run == "run" => RuntimeAction::ManagedRun,
+        [env_file, preflight, ..] if env_file == "env-file" && preflight == "preflight" => {
+            RuntimeAction::EnvFilePreflight
+        }
+        [env_file, ..] if env_file == "env-file" => RuntimeAction::EnvFile,
+        [approve, issue, ..] if approve == "approve" && issue == "issue" => {
+            RuntimeAction::ApprovalIssue
+        }
+        [approve, permit, ..] if approve == "approve" && permit == "permit" => {
+            RuntimeAction::ApprovalPermit
+        }
+        [approve, list, ..] if approve == "approve" && list == "list" => {
+            RuntimeAction::ApprovalList
+        }
+        [approve, revoke, ..] if approve == "approve" && revoke == "revoke" => {
+            RuntimeAction::ApprovalRevoke
+        }
+        [lifecycle, transition, ..] if lifecycle == "lifecycle" && transition == "transition" => {
+            RuntimeAction::LifecycleTransition
+        }
+        [lifecycle, stale_report, ..]
+            if lifecycle == "lifecycle" && stale_report == "stale-report" =>
+        {
+            RuntimeAction::LifecycleStaleReport
+        }
+        [lifecycle, destroy_record, ..]
+            if lifecycle == "lifecycle" && destroy_record == "destroy-record" =>
+        {
+            RuntimeAction::LifecycleDestroyRecord
+        }
+        [lifecycle, destroy_finalize, ..]
+            if lifecycle == "lifecycle" && destroy_finalize == "destroy-finalize" =>
+        {
+            RuntimeAction::LifecycleDestroyFinalize
+        }
+        [lifecycle, destroy_reconcile, ..]
+            if lifecycle == "lifecycle" && destroy_reconcile == "destroy-reconcile" =>
+        {
+            RuntimeAction::LifecycleDestroyReconcile
+        }
+        [pharos, retire, ..] if pharos == "pharos-beacon" && retire == "retire" => {
+            RuntimeAction::PharosRetire
+        }
+        [pharos, reconcile, ..] if pharos == "pharos-beacon" && reconcile == "reconcile" => {
+            RuntimeAction::PharosReconcile
+        }
+        _ => anyhow::bail!(
+            "unsupported Janus runtime command; run `janusd-use --help` or `janusd-admin --help`"
+        ),
+    };
+    Ok(action)
+}
+
+fn enforce_process_plane(
+    selected_plane: Option<RuntimePlane>,
+    action: RuntimeAction,
+    principal: &PrincipalChain,
+) -> Result<()> {
+    if selected_plane == Some(action.required_plane()) {
+        return Ok(());
+    }
+
+    if let Some(audit_path) =
+        env::var_os("JANUS_RUNTIME_AUDIT_FILE").filter(|path| !path.is_empty())
+    {
+        let mut audit = match JsonlAuditSink::open(PathBuf::from(audit_path)) {
+            Ok(audit) => audit,
+            Err(_) => return plane_denial_error(selected_plane, action, "audit_sink_unavailable"),
+        };
+        return match authorize_runtime_action(selected_plane, action, principal, &mut audit) {
+            Ok(()) => Ok(()),
+            Err(JanusError::PolicyDenied { reason_code, .. }) => {
+                plane_denial_error(selected_plane, action, reason_code)
+            }
+            Err(_) => plane_denial_error(selected_plane, action, "audit_sink_unavailable"),
+        };
+    }
+
+    let mut audit = AuditWrite::accepting();
+    if let Err(error) = authorize_runtime_action(selected_plane, action, principal, &mut audit) {
+        let reason_code = match error {
+            JanusError::AuditUnavailable { .. } => "audit_sink_unavailable",
+            JanusError::PolicyDenied { reason_code, .. } => reason_code,
+            _ => "denied_wrong_plane",
+        };
+        return plane_denial_error(selected_plane, action, reason_code);
+    }
+    Ok(())
+}
+
+fn plane_denial_error(
+    selected_plane: Option<RuntimePlane>,
+    action: RuntimeAction,
+    reason_code: &'static str,
+) -> Result<()> {
+    anyhow::bail!(
+        "Janus runtime denied selected_plane={} required_plane={} action={} reason_code={} value_returned=false",
+        selected_plane.map_or("legacy", RuntimePlane::as_str),
+        action.required_plane().as_str(),
+        action.as_str(),
+        reason_code
+    );
+}
+
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
     let args = args.into_iter().collect::<Vec<_>>();
     if args.is_empty() || args == ["--help"] || args == ["help"] {
@@ -2492,7 +2648,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
                 .map(PharosBeaconCommand::Reconcile)
                 .map(Command::PharosBeacon)
         }
-        _ => anyhow::bail!("unsupported janusd command; run `janusd --help`"),
+        _ => anyhow::bail!(
+            "unsupported Janus runtime command; run `janusd-use --help` or `janusd-admin --help`"
+        ),
     }
 }
 
@@ -3401,7 +3559,7 @@ fn load_age_store_from_env_with_metadata_path(
         runtime_scope_from_env()?,
         metadata.as_ref(),
     )
-    .context("failed to load age backend for janusd")
+    .context("failed to load age backend for the selected Janus runtime")
 }
 
 fn lifecycle_metadata_file_path(
@@ -3646,7 +3804,8 @@ fn lifecycle_principal_from_env() -> Result<PrincipalChain> {
 }
 
 fn release_principal_from_env() -> Result<PrincipalChain> {
-    let executor = env::var("JANUS_RELEASE_EXECUTOR").unwrap_or_else(|_| "janusd".to_string());
+    let executor =
+        env::var("JANUS_RELEASE_EXECUTOR").unwrap_or_else(|_| "janus-split-runtime".to_string());
     Ok(PrincipalChain::new(
         Principal::new(PrincipalKind::Executor, PrincipalId::new(executor)?),
         runtime_scope_from_env()?,
@@ -3701,18 +3860,44 @@ fn env_first(keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| env::var(key).ok())
 }
 
-fn print_usage() {
-    eprintln!("Migration:\n  migrate preflight|apply|postflight|rollback|status --manifest PATH\n");
-    eprintln!("Scope transfer:\n  scope-transfer preflight|apply|postflight|rollback|status --manifest PATH\n");
-    eprintln!(
-        "janusd\n\nCommands:\n  run --profile PROFILE --permit use_... -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE --permit use_...\n  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \\\n    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \\\n    --expires-in-seconds SECONDS\n  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]\n  approve list\n  approve revoke --approval appr_...\n  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]\n  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]\n  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]\n  lifecycle destroy-finalize --secret-ref REF [--metadata-file PATH]\n  lifecycle destroy-reconcile [--metadata-file PATH]\n  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \\\n    --validation PROBE --hook-manifest PATH [--reload METHOD] \\\n    [--alphabet url-safe|alphanumeric|hex] [--length N]\n\njanusd run loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST and permits from JANUS_RUN_PERMIT_DIR.\njanusd env-file preflight checks the reviewed env-file profile and target path without a permit, backend, or secret read.\njanusd env-file writes a reviewed private env file from JANUS_RUN_PROFILE_MANIFEST; callers cannot choose env name, output path, executor, destination, or value.\njanusd approve loads reviewed profiles from JANUS_RUN_PROFILE_MANIFEST, backend metadata from JANUS_AGE_* / JANUS_WARDEN_AGE_*, approvals from JANUS_APPROVAL_DIR, and permits from JANUS_RUN_PERMIT_DIR.\njanusd lifecycle transition updates the configured metadata overlay only; it never deletes provider values.\njanusd lifecycle stale-report emits value-free admin rows and never reads secret values.\njanusd lifecycle destroy-record writes a value-free tombstone only; it never deletes provider values.\njanusd lifecycle destroy-finalize requires a tombstone and writes destroyed metadata only; it never deletes provider values.\njanusd lifecycle destroy-reconcile reads metadata and tombstones only; it never deletes provider values.\nReload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.\nForge generates replacement values internally; no --value argument exists.\nAll non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."
-    );
-    eprintln!(
-        "\nPharos beacon retirement:\n  pharos-beacon retire --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH [--retain-for-days N]\n  pharos-beacon reconcile --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH\n\nThese commands consume reviewed host-retirement intent and profile bindings, return no value, retain provider material, and fail closed on drift."
-    );
-    eprintln!(
-        "\nManaged command preflight:\n  run preflight --profile PROFILE -- ARG...\n\nThis validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read."
-    );
+const ADMIN_USAGE: &str = r#"janusd-admin
+
+Administration commands:
+  approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \
+    --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \
+    --expires-in-seconds SECONDS
+  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]
+  approve list
+  approve revoke --approval appr_...
+  lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]
+  lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]
+  lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]
+  lifecycle destroy-finalize --secret-ref REF [--metadata-file PATH]
+  lifecycle destroy-reconcile [--metadata-file PATH]
+  forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \
+    --validation PROBE --hook-manifest PATH [--reload METHOD] \
+    [--alphabet url-safe|alphanumeric|hex] [--length N]
+  migrate preflight|apply|postflight|rollback|status --manifest PATH
+  scope-transfer preflight|apply|postflight|rollback|status --manifest PATH
+  pharos-beacon retire --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH [--retain-for-days N]
+  pharos-beacon reconcile --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH
+
+This process cannot execute managed commands, render env files, consume UsePermits, or expose Warden tools.
+Lifecycle and retirement operations remain value-free; provider deletion is not implied.
+Reload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.
+Forge generates replacement values internally; no --value argument exists.
+All non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."#;
+
+fn print_usage(selected_plane: Option<RuntimePlane>) {
+    match selected_plane {
+        None => eprintln!(
+            "janusd\n\nThe mixed Janus runtime entry point is retired and performs no operational command.\nUse 'janusd-use --help' for permit-bound use or 'janusd-admin --help' for administration.\nreason_code=legacy_mixed_entrypoint_retired value_returned=false"
+        ),
+        Some(RuntimePlane::Use) => eprintln!(
+            "janusd-use\n\nPermit-bound use commands:\n  run preflight --profile PROFILE -- ARG...\n  run --profile PROFILE --permit use_... -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE --permit use_...\n\nThis process cannot issue approvals, change lifecycle state, rotate, migrate, transfer scope, or retire hosts.\nManaged-command preflight validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read.\nEnv-file preflight checks the reviewed profile and target path without a permit, backend, or secret read.\nAll non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."
+        ),
+        Some(RuntimePlane::Admin) => eprintln!("{ADMIN_USAGE}"),
+    }
 }
 
 #[cfg(test)]
@@ -3732,6 +3917,99 @@ mod tests {
     use janus_mock::MockStore;
 
     use super::*;
+
+    #[test]
+    fn runtime_command_prefixes_are_closed_and_plane_classified() {
+        let cases = [
+            (
+                &["run", "preflight"][..],
+                RuntimeAction::ManagedRunPreflight,
+            ),
+            (&["run"][..], RuntimeAction::ManagedRun),
+            (
+                &["env-file", "preflight"][..],
+                RuntimeAction::EnvFilePreflight,
+            ),
+            (&["env-file"][..], RuntimeAction::EnvFile),
+            (&["approve", "issue"][..], RuntimeAction::ApprovalIssue),
+            (&["approve", "permit"][..], RuntimeAction::ApprovalPermit),
+            (&["approve", "list"][..], RuntimeAction::ApprovalList),
+            (&["approve", "revoke"][..], RuntimeAction::ApprovalRevoke),
+            (
+                &["lifecycle", "transition"][..],
+                RuntimeAction::LifecycleTransition,
+            ),
+            (
+                &["lifecycle", "stale-report"][..],
+                RuntimeAction::LifecycleStaleReport,
+            ),
+            (
+                &["lifecycle", "destroy-record"][..],
+                RuntimeAction::LifecycleDestroyRecord,
+            ),
+            (
+                &["lifecycle", "destroy-finalize"][..],
+                RuntimeAction::LifecycleDestroyFinalize,
+            ),
+            (
+                &["lifecycle", "destroy-reconcile"][..],
+                RuntimeAction::LifecycleDestroyReconcile,
+            ),
+            (
+                &["forge", "rotate-generated"][..],
+                RuntimeAction::ForgeRotateGenerated,
+            ),
+            (&["migrate"][..], RuntimeAction::Migration),
+            (&["scope-transfer"][..], RuntimeAction::ScopeTransfer),
+            (
+                &["pharos-beacon", "retire"][..],
+                RuntimeAction::PharosRetire,
+            ),
+            (
+                &["pharos-beacon", "reconcile"][..],
+                RuntimeAction::PharosReconcile,
+            ),
+        ];
+        assert_eq!(cases.len(), RuntimeAction::ALL.len() - 4);
+        for (args, expected) in cases {
+            let args = args
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(classify_runtime_action(&args).unwrap(), expected);
+        }
+        assert!(classify_runtime_action(&["resolve".to_string()]).is_err());
+    }
+
+    #[test]
+    fn dedicated_and_legacy_entrypoints_enforce_the_plane_before_dispatch() {
+        let principal = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("plane-test").unwrap(),
+            ),
+            test_scope(),
+        );
+        assert!(enforce_process_plane(
+            Some(RuntimePlane::Use),
+            RuntimeAction::ManagedRun,
+            &principal
+        )
+        .is_ok());
+
+        for (selected, action) in [
+            (Some(RuntimePlane::Use), RuntimeAction::ApprovalIssue),
+            (Some(RuntimePlane::Admin), RuntimeAction::ManagedRun),
+            (None, RuntimeAction::ManagedRun),
+        ] {
+            let rendered = enforce_process_plane(selected, action, &principal)
+                .unwrap_err()
+                .to_string();
+            assert!(rendered.contains("denied_wrong_plane"));
+            assert!(rendered.contains("value_returned=false"));
+            assert!(!rendered.contains("expected-canary"));
+        }
+    }
 
     fn parse_ok(args: &[&str]) -> ForgeRotateGeneratedConfig {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {

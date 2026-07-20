@@ -12,8 +12,8 @@ use std::time::SystemTime;
 
 use janus_core::{
     AuditAction, AuditSink, HealthStatus, JanusError, JanusResult, PrincipalChain, ProductMode,
-    ProfileId, Purpose, ReleaseAdmission, SecretBroker, SecretDescriptor, SecretRef, SecretStore,
-    Severity, TrustLevel, UsePermit,
+    ProfileId, Purpose, ReleaseAdmission, RuntimeAction, RuntimePlane, SecretBroker,
+    SecretDescriptor, SecretRef, SecretStore, Severity, TrustLevel, UsePermit,
 };
 use janus_local::{NoopPermitStore, PermitStore};
 use serde::Serialize;
@@ -53,6 +53,20 @@ pub const TOOL_DEFINITIONS: [ToolDefinition; 4] = [
         input_schema: r#"{"type":"object","properties":{},"additionalProperties":false}"#,
     },
 ];
+
+/// Warden is permanently a use-plane process.
+pub const WARDEN_RUNTIME_PLANE: RuntimePlane = RuntimePlane::Use;
+
+/// Map the static Warden catalog into the closed runtime action matrix.
+pub fn warden_runtime_action(name: &str) -> Option<RuntimeAction> {
+    Some(match name {
+        "list_secrets" => RuntimeAction::WardenListSecrets,
+        "describe_secret" => RuntimeAction::WardenDescribeSecret,
+        "request_use" => RuntimeAction::WardenRequestUse,
+        "health" => RuntimeAction::WardenHealth,
+        _ => return None,
+    })
+}
 
 /// Return the static tool catalog.
 pub fn tool_definitions() -> &'static [ToolDefinition; 4] {
@@ -355,6 +369,9 @@ where
         principal: &PrincipalChain,
         now: SystemTime,
     ) -> Result<Value, ToolErrorView> {
+        if let Some(runtime_action) = warden_runtime_action(name) {
+            debug_assert_eq!(runtime_action.required_plane(), WARDEN_RUNTIME_PLANE);
+        }
         let result = match name {
             "list_secrets" => match require_exact_keys(&args, &[]) {
                 Ok(()) => to_tool_value(self.list_secrets(principal).await),
@@ -943,6 +960,12 @@ mod tests {
             names,
             ["list_secrets", "describe_secret", "request_use", "health"]
         );
+        assert_eq!(WARDEN_RUNTIME_PLANE, RuntimePlane::Use);
+        assert!(tools.iter().all(|tool| {
+            warden_runtime_action(tool.name)
+                .is_some_and(|action| action.required_plane() == RuntimePlane::Use)
+        }));
+        assert!(warden_runtime_action("approve").is_none());
 
         let rendered = format!("{tools:?}");
         for forbidden in [

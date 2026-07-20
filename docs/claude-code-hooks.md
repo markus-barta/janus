@@ -1,7 +1,7 @@
 # Claude Code approved-use hooks
 
 The `janus-claude-hook` binary connects Claude Code tool events to the existing
-permit-bound `janusd run` path. It never resolves or receives a secret value.
+permit-bound `janusd-use run` path. It never resolves or receives a secret value.
 
 The guard applies to every `PreToolUse` event. It denies raw `sec_...`
 references and `{{janus:...}}` handles in Bash and other tool arguments,
@@ -10,12 +10,12 @@ encodings. A copied `UsePermit` is also denied outside one exact foreground
 command shape:
 
 ```text
-janusd run --profile PROFILE --permit use_... -- REVIEWED_ARG...
+janusd-use run --profile PROFILE --permit use_... -- REVIEWED_ARG...
 ```
 
 The hook parses that command without running a shell expansion, validates its
 fixed fields, and replaces it with a safely quoted command using the configured
-absolute `janusd` path. `janusd` then rechecks the reviewed profile, permit
+absolute `janusd-use` path. `janusd-use` then rechecks the reviewed profile, permit
 expiry, single-use claim, principal, executor, destination, and exact arguments
 before any value exists. The hook cannot turn a stale or mismatched permit into
 a valid one.
@@ -30,8 +30,8 @@ transcript content, or a secret value.
 1. Build and install both binaries from the same reviewed Janus release:
 
    ```bash
-   cargo build --release --locked --bin janusd --bin janus-claude-hook
-   install -m 0755 target/release/janusd /opt/janus/bin/janusd
+   cargo build --release --locked --bin janusd-use --bin janus-claude-hook
+   install -m 0755 target/release/janusd-use /opt/janus/bin/janusd-use
    install -m 0755 target/release/janus-claude-hook /opt/janus/bin/janus-claude-hook
    ```
 

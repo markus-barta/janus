@@ -1,6 +1,6 @@
 {
   "env": {
-    "JANUS_HOOK_JANUSD": "/absolute/path/to/janusd",
+    "JANUS_HOOK_JANUSD_USE": "/absolute/path/to/janusd-use",
     "JANUS_HOOK_AUDIT_FILE": "/private/path/to/janus/claude-hook-audit.jsonl"
   },
   "hooks": {
