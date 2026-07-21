@@ -18,8 +18,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     audit::{lock_verified_audit_for_snapshot, VerifiedAuditLock},
-    ApprovalRegistry, DelegationRegistry, FileApprovalRegistry, FileDelegationRegistry,
-    FileLifecycleEvidenceRegistry, FileTombstoneRegistry, JsonlAuditSink,
+    ApprovalRegistry, BreakGlassRegistry, DelegationRegistry, FileApprovalRegistry,
+    FileBreakGlassRegistry, FileDelegationRegistry, FileLifecycleEvidenceRegistry,
+    FileRoleBindingRegistry, FileTombstoneRegistry, JsonlAuditSink, RoleBindingRegistry,
 };
 
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
@@ -788,6 +789,26 @@ impl RecoveryDrillRunner {
                 )
             })?;
         }
+        let role_bindings = FileRoleBindingRegistry::new(target_component_path(
+            self.manifest.target_root(),
+            RecoveryComponentKind::RoleBindings,
+        ));
+        RoleBindingRegistry::bindings(&role_bindings).map_err(|_| {
+            recovery_denied(
+                "recovery_role_binding_state_invalid",
+                "restored role binding state is invalid",
+            )
+        })?;
+        let break_glass = FileBreakGlassRegistry::new(target_component_path(
+            self.manifest.target_root(),
+            RecoveryComponentKind::BreakGlassState,
+        ));
+        BreakGlassRegistry::list(&break_glass, SystemTime::now()).map_err(|_| {
+            recovery_denied(
+                "recovery_break_glass_state_invalid",
+                "restored break-glass state is invalid",
+            )
+        })?;
         FileLifecycleEvidenceRegistry::new(target_component_path(
             self.manifest.target_root(),
             RecoveryComponentKind::LifecycleEvidence,
@@ -2155,11 +2176,12 @@ mod tests {
     use super::*;
     use crate::{LifecycleEvidenceRegistry, TombstoneRegistry};
     use janus_core::{
-        ApprovalGrant, AuditWrite, DelegationPolicy, DelegationStatus, Destination, EgressMode,
-        ExecutorRef, OwnerRef, Principal, PrincipalId, PrincipalKind, ProductMode, ProfileId,
-        ProfilePolicy, Purpose, ScopePathV1, SecretClass, SecretDescriptor, SecretLifecycle,
-        SecretName, SecretRef, SecretTombstoneRequest, TombstonePolicy, TrustLevel, UseProfile,
-        UseRequest,
+        ApprovalGrant, AuditWrite, BreakGlassActivation, BreakGlassRequest, BreakGlassRevocation,
+        DelegationPolicy, DelegationStatus, Destination, EgressMode, ExecutorRef, OwnerRef,
+        Permission, Principal, PrincipalId, PrincipalKind, ProductMode, ProfileId, ProfilePolicy,
+        Purpose, Role, RoleBinding, RoleBindingSource, RoleBindingSourceKind, ScopePathV1,
+        SecretClass, SecretDescriptor, SecretLifecycle, SecretName, SecretRef,
+        SecretTombstoneRequest, TombstonePolicy, TrustLevel, UseProfile, UseRequest,
     };
     use std::time::Duration;
     use tempfile::tempdir;
@@ -2444,6 +2466,91 @@ mod tests {
             .store(&approval)
             .unwrap();
 
+        let role_binding = RoleBinding::issue(
+            grantor.binding_key(),
+            fixture.scope.clone(),
+            Role::Operator,
+            None,
+            now,
+            now + Duration::from_secs(900),
+            RoleBindingSource::new(RoleBindingSourceKind::LocalReviewed, "recovery-review")
+                .unwrap(),
+        )
+        .unwrap();
+        FileRoleBindingRegistry::new(&fixture.sources[&RecoveryComponentKind::RoleBindings])
+            .store(&role_binding)
+            .unwrap();
+
+        let beneficiary = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("recovery-emergency-beneficiary").unwrap(),
+            ),
+            fixture.scope.clone(),
+        );
+        let eligibility = RoleBinding::issue(
+            beneficiary.binding_key(),
+            fixture.scope.clone(),
+            Role::BreakGlassAdmin,
+            None,
+            now,
+            now + Duration::from_secs(900),
+            RoleBindingSource::new(
+                RoleBindingSourceKind::LocalReviewed,
+                "recovery-break-glass-review",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        FileRoleBindingRegistry::new(&fixture.sources[&RecoveryComponentKind::RoleBindings])
+            .store(&eligibility)
+            .unwrap();
+        let activator = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("recovery-emergency-activator").unwrap(),
+            ),
+            fixture.scope.clone(),
+        );
+        let approver = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("recovery-emergency-approver").unwrap(),
+            ),
+            fixture.scope.clone(),
+        );
+        let request = BreakGlassRequest::request(
+            &eligibility,
+            &activator,
+            Permission::ManagedRun,
+            secret_ref.clone(),
+            SafeLabel::new("recovery emergency fixture").unwrap(),
+            now,
+            Duration::from_secs(300),
+            &mut AuditWrite::accepting(),
+        )
+        .unwrap();
+        let activation = BreakGlassActivation::approve(
+            request.clone(),
+            &approver,
+            now + Duration::from_secs(1),
+            &mut AuditWrite::accepting(),
+        )
+        .unwrap();
+        let revocation = BreakGlassRevocation::revoke(
+            &activation,
+            &activator,
+            SafeLabel::new("incident resolved before use").unwrap(),
+            now + Duration::from_secs(2),
+            &mut AuditWrite::accepting(),
+        )
+        .unwrap();
+        let break_glass =
+            FileBreakGlassRegistry::new(&fixture.sources[&RecoveryComponentKind::BreakGlassState]);
+        break_glass.store_request(&request).unwrap();
+        break_glass.store_activation(&activation).unwrap();
+        break_glass.record_revocation(&revocation).unwrap();
+
         let lifecycle = FileLifecycleEvidenceRegistry::new(
             &fixture.sources[&RecoveryComponentKind::LifecycleEvidence],
         );
@@ -2516,6 +2623,15 @@ lifecycle = "destroyed"
         let restored_approvals = FileApprovalRegistry::new(fixture.target.join("approvals"));
         assert_eq!(restored_approvals.list().unwrap().len(), 1);
         let restored_delegations = FileDelegationRegistry::new(fixture.target.join("delegations"));
+        let restored_roles = FileRoleBindingRegistry::new(fixture.target.join("role_bindings"));
+        assert_eq!(restored_roles.bindings().unwrap().len(), 2);
+        let restored_break_glass =
+            FileBreakGlassRegistry::new(fixture.target.join("break_glass_state"));
+        let break_glass_rows = restored_break_glass
+            .list(now + Duration::from_secs(30))
+            .unwrap();
+        assert_eq!(break_glass_rows.len(), 1);
+        assert_eq!(break_glass_rows[0].status, crate::BreakGlassStatus::Revoked);
         assert_eq!(
             restored_delegations
                 .get(&delegation_ids[0])

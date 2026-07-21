@@ -7,20 +7,36 @@ import (
 )
 
 const (
-	RoleAdmin    = "admin"
-	RoleAuditor  = "auditor"
-	RoleOperator = "operator"
-	RoleViewer   = "viewer"
+	RoleViewer          = "viewer"
+	RoleOperator        = "operator"
+	RoleOwner           = "owner"
+	RoleApprover        = "approver"
+	RoleAuditor         = "auditor"
+	RoleSecurityAdmin   = "security_admin"
+	RoleBreakGlassAdmin = "break_glass_admin"
+	RoleServiceAdmin    = "service_admin"
+	RoleWorkloadAdmin   = "workload_admin"
 )
 
 type RolePolicy struct {
-	AdminSubjects    map[string]bool
-	AuditorSubjects  map[string]bool
-	OperatorSubjects map[string]bool
-	AdminGroups      map[string]bool
-	AuditorGroups    map[string]bool
-	OperatorGroups   map[string]bool
-	BootstrapOwner   bool
+	OwnerSubjects           map[string]bool
+	ApproverSubjects        map[string]bool
+	AuditorSubjects         map[string]bool
+	OperatorSubjects        map[string]bool
+	SecurityAdminSubjects   map[string]bool
+	BreakGlassAdminSubjects map[string]bool
+	ServiceAdminSubjects    map[string]bool
+	WorkloadAdminSubjects   map[string]bool
+	OwnerGroups             map[string]bool
+	ApproverGroups          map[string]bool
+	AuditorGroups           map[string]bool
+	OperatorGroups          map[string]bool
+	SecurityAdminGroups     map[string]bool
+	BreakGlassAdminGroups   map[string]bool
+	ServiceAdminGroups      map[string]bool
+	WorkloadAdminGroups     map[string]bool
+
+	BootstrapOwner bool
 }
 
 type AccessGate struct {
@@ -244,59 +260,83 @@ type SessionRoleGateSignal struct {
 
 func LoadRolePolicyFromEnv() RolePolicy {
 	return RolePolicy{
-		AdminSubjects:    splitSet(envDefault("JANUS_ADMIN_SUBJECTS", "")),
-		AuditorSubjects:  splitSet(envDefault("JANUS_AUDITOR_SUBJECTS", "")),
-		OperatorSubjects: splitSet(envDefault("JANUS_OPERATOR_SUBJECTS", "")),
-		AdminGroups:      splitSet(envDefault("JANUS_ADMIN_GROUPS", "")),
-		AuditorGroups:    splitSet(envDefault("JANUS_AUDITOR_GROUPS", "")),
-		OperatorGroups:   splitSet(envDefault("JANUS_OPERATOR_GROUPS", "")),
-		BootstrapOwner:   envBoolDefault("JANUS_BOOTSTRAP_OWNER", true),
+		OwnerSubjects:           splitSet(envDefault("JANUS_OWNER_SUBJECTS", "")),
+		ApproverSubjects:        splitSet(envDefault("JANUS_APPROVER_SUBJECTS", "")),
+		AuditorSubjects:         splitSet(envDefault("JANUS_AUDITOR_SUBJECTS", "")),
+		OperatorSubjects:        splitSet(envDefault("JANUS_OPERATOR_SUBJECTS", "")),
+		SecurityAdminSubjects:   splitSet(envDefault("JANUS_SECURITY_ADMIN_SUBJECTS", "")),
+		BreakGlassAdminSubjects: splitSet(envDefault("JANUS_BREAK_GLASS_ADMIN_SUBJECTS", "")),
+		ServiceAdminSubjects:    splitSet(envDefault("JANUS_SERVICE_ADMIN_SUBJECTS", "")),
+		WorkloadAdminSubjects:   splitSet(envDefault("JANUS_WORKLOAD_ADMIN_SUBJECTS", "")),
+		OwnerGroups:             splitSet(envDefault("JANUS_OWNER_GROUPS", "")),
+		ApproverGroups:          splitSet(envDefault("JANUS_APPROVER_GROUPS", "")),
+		AuditorGroups:           splitSet(envDefault("JANUS_AUDITOR_GROUPS", "")),
+		OperatorGroups:          splitSet(envDefault("JANUS_OPERATOR_GROUPS", "")),
+		SecurityAdminGroups:     splitSet(envDefault("JANUS_SECURITY_ADMIN_GROUPS", "")),
+		BreakGlassAdminGroups:   splitSet(envDefault("JANUS_BREAK_GLASS_ADMIN_GROUPS", "")),
+		ServiceAdminGroups:      splitSet(envDefault("JANUS_SERVICE_ADMIN_GROUPS", "")),
+		WorkloadAdminGroups:     splitSet(envDefault("JANUS_WORKLOAD_ADMIN_GROUPS", "")),
+		BootstrapOwner:          envBoolDefault("JANUS_UNSAFE_BOOTSTRAP_OWNER", false),
 	}
 }
 
 func (p RolePolicy) Configured() bool {
-	return len(p.AdminSubjects)+len(p.AuditorSubjects)+len(p.OperatorSubjects)+
-		len(p.AdminGroups)+len(p.AuditorGroups)+len(p.OperatorGroups) > 0
+	return roleSubjectBindingCount(p)+roleGroupBindingCount(p) > 0
 }
 
 func DeriveRoles(subject, email string, claimValues []string, policy RolePolicy) []string {
+	roles, err := DeriveRolesChecked(subject, email, claimValues, policy)
+	if err != nil {
+		if strings.TrimSpace(subject) == "" {
+			return nil
+		}
+		return []string{RoleViewer}
+	}
+	return roles
+}
+
+// DeriveRolesChecked projects only exact reviewed subject/email and group
+// bindings. Duplicate claims and a single identity value mapped to multiple
+// elevated roles are ambiguous and fail closed without returning the value.
+func DeriveRolesChecked(subject, email string, claimValues []string, policy RolePolicy) ([]string, error) {
 	if strings.TrimSpace(subject) == "" {
-		return nil
+		return nil, nil
 	}
 
 	roles := map[string]bool{RoleViewer: true}
-	subjectKey := normalizeRoleToken(subject)
-	emailKey := normalizeRoleToken(email)
-
-	if policy.AdminSubjects[subjectKey] || policy.AdminSubjects[emailKey] {
-		roles[RoleAdmin] = true
+	identityKeys := []string{normalizeRoleToken(subject)}
+	if emailKey := normalizeRoleToken(email); emailKey != "" && emailKey != identityKeys[0] {
+		identityKeys = append(identityKeys, emailKey)
 	}
-	if policy.AuditorSubjects[subjectKey] || policy.AuditorSubjects[emailKey] {
-		roles[RoleAuditor] = true
-	}
-	if policy.OperatorSubjects[subjectKey] || policy.OperatorSubjects[emailKey] {
-		roles[RoleOperator] = true
-	}
-
-	for _, value := range claimValues {
-		key := normalizeRoleToken(value)
-		switch {
-		case policy.AdminGroups[key]:
-			roles[RoleAdmin] = true
-		case policy.AuditorGroups[key]:
-			roles[RoleAuditor] = true
-		case policy.OperatorGroups[key]:
-			roles[RoleOperator] = true
+	for _, key := range identityKeys {
+		matches := matchingRoles(key, policy, false)
+		if len(matches) > 1 {
+			return []string{RoleViewer}, fmt.Errorf("ambiguous exact subject role binding")
+		}
+		for _, role := range matches {
+			roles[role] = true
 		}
 	}
 
-	if !policy.Configured() && policy.BootstrapOwner {
-		roles[RoleAdmin] = true
-		roles[RoleAuditor] = true
-		roles[RoleOperator] = true
+	seenClaims := map[string]bool{}
+	for _, value := range claimValues {
+		key := normalizeRoleToken(value)
+		if key == "" {
+			continue
+		}
+		if seenClaims[key] {
+			return []string{RoleViewer}, fmt.Errorf("duplicate role claim")
+		}
+		seenClaims[key] = true
+		matches := matchingRoles(key, policy, true)
+		if len(matches) > 1 {
+			return []string{RoleViewer}, fmt.Errorf("ambiguous exact group role binding")
+		}
+		for _, role := range matches {
+			roles[role] = true
+		}
 	}
-
-	return sortedRoles(roles)
+	return sortedRoles(roles), nil
 }
 
 func HasRole(session Session, role string) bool {
@@ -309,7 +349,77 @@ func HasRole(session Session, role string) bool {
 }
 
 func AllRoles() []string {
-	return []string{RoleAdmin, RoleAuditor, RoleOperator, RoleViewer}
+	return []string{
+		RoleViewer,
+		RoleOperator,
+		RoleOwner,
+		RoleApprover,
+		RoleAuditor,
+		RoleSecurityAdmin,
+		RoleBreakGlassAdmin,
+		RoleServiceAdmin,
+		RoleWorkloadAdmin,
+	}
+}
+
+func matchingRoles(key string, policy RolePolicy, groups bool) []string {
+	matches := []string{}
+	for _, role := range AllRoles()[1:] {
+		bindings := roleSubjects(policy, role)
+		if groups {
+			bindings = roleGroups(policy, role)
+		}
+		if bindings[key] {
+			matches = append(matches, role)
+		}
+	}
+	return matches
+}
+
+func roleSubjects(policy RolePolicy, role string) map[string]bool {
+	switch role {
+	case RoleOwner:
+		return policy.OwnerSubjects
+	case RoleApprover:
+		return policy.ApproverSubjects
+	case RoleAuditor:
+		return policy.AuditorSubjects
+	case RoleOperator:
+		return policy.OperatorSubjects
+	case RoleSecurityAdmin:
+		return policy.SecurityAdminSubjects
+	case RoleBreakGlassAdmin:
+		return policy.BreakGlassAdminSubjects
+	case RoleServiceAdmin:
+		return policy.ServiceAdminSubjects
+	case RoleWorkloadAdmin:
+		return policy.WorkloadAdminSubjects
+	default:
+		return nil
+	}
+}
+
+func roleGroups(policy RolePolicy, role string) map[string]bool {
+	switch role {
+	case RoleOwner:
+		return policy.OwnerGroups
+	case RoleApprover:
+		return policy.ApproverGroups
+	case RoleAuditor:
+		return policy.AuditorGroups
+	case RoleOperator:
+		return policy.OperatorGroups
+	case RoleSecurityAdmin:
+		return policy.SecurityAdminGroups
+	case RoleBreakGlassAdmin:
+		return policy.BreakGlassAdminGroups
+	case RoleServiceAdmin:
+		return policy.ServiceAdminGroups
+	case RoleWorkloadAdmin:
+		return policy.WorkloadAdminGroups
+	default:
+		return nil
+	}
 }
 
 func AccessPostureFor(policy RolePolicy) AccessPosture {
@@ -320,7 +430,7 @@ func AccessPostureFor(policy RolePolicy) AccessPosture {
 	if !explicit {
 		message := "Explicit Janus role bindings are not configured; sensitive APIs deny without matching roles."
 		if policy.BootstrapOwner {
-			message = "Explicit Janus role bindings are not configured; self-hosted bootstrap grants authenticated users all V1 roles."
+			message = "Legacy bootstrap owner is configured but grants no role; exact bindings are required."
 		}
 		gates = append(gates, AccessGate{
 			Severity: "medium",
@@ -336,7 +446,7 @@ func AccessPostureFor(policy RolePolicy) AccessPosture {
 
 	return AccessPosture{
 		ExplicitBindings:       explicit,
-		BootstrapOwner:         !explicit && policy.BootstrapOwner,
+		BootstrapOwner:         policy.BootstrapOwner,
 		KnownRoles:             AllRoles(),
 		ClaimPolicy:            "explicit_only",
 		ImplicitElevatedClaims: false,
@@ -346,7 +456,7 @@ func AccessPostureFor(policy RolePolicy) AccessPosture {
 		BindingSources:         RoleBindingSourcesFor(policy),
 		RequiredRoles:          requiredRoles,
 		RoleDutyMatrix:         true,
-		DutyModel:              "separated_admin_auditor_operator_viewer",
+		DutyModel:              "shared_v1_roles_with_hard_separation",
 		Gates:                  gates,
 		GateCount:              len(gates),
 		ValueReturned:          false,
@@ -354,7 +464,6 @@ func AccessPostureFor(policy RolePolicy) AccessPosture {
 }
 
 func RoleBindingSourcesFor(policy RolePolicy) []RoleBindingSource {
-	explicit := policy.Configured()
 	subjectCount := roleSubjectBindingCount(policy)
 	groupCount := roleGroupBindingCount(policy)
 	sources := []RoleBindingSource{
@@ -396,23 +505,23 @@ func RoleBindingSourcesFor(policy RolePolicy) []RoleBindingSource {
 		ValueReturned: false,
 	}
 	if policy.BootstrapOwner {
-		bootstrap.State = "inactive"
-		bootstrap.Detail = "Bootstrap owner is ignored because explicit role policy is configured."
-		if !explicit {
-			bootstrap.State = "active"
-			bootstrap.Count = 1
-			bootstrap.Detail = "Bootstrap owner grants all V1 roles until explicit role policy is configured."
-			bootstrap.Tone = "warn"
-		}
+		bootstrap.State = "blocked_legacy"
+		bootstrap.Detail = "Legacy bootstrap owner is ignored; exact subject or group bindings are mandatory."
+		bootstrap.Tone = "warn"
 	}
 	return append(sources, bootstrap)
 }
 
 func RolePolicyReadinessFor(policy RolePolicy, access AccessPosture) RolePolicyReadiness {
 	lanes := []RolePolicyLane{
-		rolePolicyLane(RoleAdmin, "Admin lane", policy.AdminSubjects, policy.AdminGroups),
-		rolePolicyLane(RoleAuditor, "Auditor lane", policy.AuditorSubjects, policy.AuditorGroups),
-		rolePolicyLane(RoleOperator, "Operator lane", policy.OperatorSubjects, policy.OperatorGroups),
+		rolePolicyLane(RoleOperator, "Operator lane", roleSubjects(policy, RoleOperator), roleGroups(policy, RoleOperator)),
+		rolePolicyLane(RoleOwner, "Owner lane", roleSubjects(policy, RoleOwner), roleGroups(policy, RoleOwner)),
+		rolePolicyLane(RoleApprover, "Approver lane", roleSubjects(policy, RoleApprover), roleGroups(policy, RoleApprover)),
+		rolePolicyLane(RoleAuditor, "Auditor lane", roleSubjects(policy, RoleAuditor), roleGroups(policy, RoleAuditor)),
+		rolePolicyLane(RoleSecurityAdmin, "Security admin lane", roleSubjects(policy, RoleSecurityAdmin), roleGroups(policy, RoleSecurityAdmin)),
+		rolePolicyLane(RoleBreakGlassAdmin, "Break-glass eligibility lane", roleSubjects(policy, RoleBreakGlassAdmin), roleGroups(policy, RoleBreakGlassAdmin)),
+		rolePolicyLane(RoleServiceAdmin, "Service admin lane", roleSubjects(policy, RoleServiceAdmin), roleGroups(policy, RoleServiceAdmin)),
+		rolePolicyLane(RoleWorkloadAdmin, "Workload admin lane", roleSubjects(policy, RoleWorkloadAdmin), roleGroups(policy, RoleWorkloadAdmin)),
 	}
 	readyLanes := 0
 	for _, lane := range lanes {
@@ -428,30 +537,24 @@ func RolePolicyReadinessFor(policy RolePolicy, access AccessPosture) RolePolicyR
 	bootstrapNext := "Keep bootstrap owner off and maintain explicit role owner review."
 	bootstrapTone := "ok"
 	if policy.BootstrapOwner {
-		bootstrapState = "inactive"
-		bootstrapDetail = "Bootstrap owner is ignored because explicit role policy exists."
-		bootstrapNext = "Turn bootstrap owner off after explicit role lanes are reviewed."
-		bootstrapTone = "info"
-		if access.BootstrapOwner {
-			bootstrapState = "active"
-			bootstrapBlocked = true
-			bootstrapDetail = "Bootstrap owner is granting all V1 elevated roles because explicit policy is not ready."
-			bootstrapNext = "Add explicit Zitadel subject or group bindings for every elevated role lane."
-			bootstrapTone = "warn"
-		}
+		bootstrapState = "blocked_legacy"
+		bootstrapBlocked = true
+		bootstrapDetail = "Legacy bootstrap owner is ignored and must be removed."
+		bootstrapNext = "Remove JANUS_UNSAFE_BOOTSTRAP_OWNER and keep exact role bindings."
+		bootstrapTone = "warn"
 	}
 
 	ready := missingLanes == 0 && !bootstrapBlocked && !access.ValueReturned
 	status := "ready"
-	summary := "Role policy has explicit Zitadel admin, auditor, and operator lanes; bootstrap owner is not active."
+	summary := "Role policy has exact bindings for every shared elevated role; bootstrap owner is off."
 	next := "Keep owner review current and leave evidence value-free."
 	if !ready {
 		status = "blocked"
-		summary = "Role policy is not ready for enterprise release because bootstrap is active or a role lane is missing."
+		summary = "Role policy is not ready because a shared role lane is missing or legacy bootstrap is configured."
 		next = "Bind each missing elevated role lane to a Zitadel subject or group, then close bootstrap."
 	} else if policy.BootstrapOwner {
-		summary = "Role policy lanes are explicit; bootstrap owner is inactive and should be turned off after review."
-		next = "Turn bootstrap owner off to make the explicit policy visible in configuration too."
+		summary = "Role policy lanes are explicit, but legacy bootstrap configuration is still forbidden."
+		next = "Remove legacy bootstrap configuration."
 	}
 
 	readiness := RolePolicyReadiness{
@@ -481,7 +584,7 @@ func RolePolicyReadinessFor(policy RolePolicy, access AccessPosture) RolePolicyR
 			Key:           "bootstrap_owner",
 			Label:         "Bootstrap owner",
 			State:         bootstrapState,
-			OwnerRole:     RoleAdmin,
+			OwnerRole:     RoleSecurityAdmin,
 			Detail:        bootstrapDetail,
 			Next:          bootstrapNext,
 			Tone:          bootstrapTone,
@@ -491,8 +594,8 @@ func RolePolicyReadinessFor(policy RolePolicy, access AccessPosture) RolePolicyR
 			Key:           "zitadel_lanes",
 			Label:         "Zitadel role lanes",
 			State:         laneSetupState(missingLanes),
-			OwnerRole:     RoleAdmin,
-			Detail:        "Admin, auditor, and operator each need at least one configured subject or group binding.",
+			OwnerRole:     RoleSecurityAdmin,
+			Detail:        "Every shared elevated role needs at least one exact subject or group binding.",
 			Next:          laneSetupNext(missingLanes),
 			Tone:          laneSetupTone(missingLanes),
 			ValueReturned: false,
@@ -565,7 +668,7 @@ func SessionRoleEvidenceFor(session Session, requireAuth, oidcConfigured, ready 
 		sessionRoleGate(session, ready, "posture_view", "Posture view", RoleViewer, false, "Safe posture and descriptor metadata are visible to signed-in viewers.", "Use posture before any sensitive action."),
 		sessionRoleGate(session, ready, "evidence_export", "Evidence export", RoleAuditor, true, "Evidence JSON is available only to auditor sessions while readiness is healthy.", "Use an auditor session to download evidence JSON."),
 		sessionRoleGate(session, ready, "use_actions", "Use actions", RoleOperator, true, "Handle and permit controls are available only to operator sessions while readiness is healthy.", "Use an operator session for metadata handles and permits."),
-		sessionRoleGate(session, true, "admin_policy", "Admin policy", RoleAdmin, false, "Admin policy review is available only to admin sessions.", "Use an admin session to review ownership and role policy."),
+		sessionRoleGate(session, true, "security_policy", "Security policy", RoleSecurityAdmin, false, "Authorization policy review is available only to security-admin sessions.", "Use a security-admin session to review role policy."),
 		{
 			Key:           "identity_boundary",
 			Label:         "Identity boundary",
@@ -627,8 +730,18 @@ func sessionRoleGate(session Session, ready bool, key, label, role string, readi
 
 func roleTitle(role string) string {
 	switch role {
-	case RoleAdmin:
-		return "Admin"
+	case RoleOwner:
+		return "Owner"
+	case RoleApprover:
+		return "Approver"
+	case RoleSecurityAdmin:
+		return "Security admin"
+	case RoleBreakGlassAdmin:
+		return "Break-glass admin"
+	case RoleServiceAdmin:
+		return "Service admin"
+	case RoleWorkloadAdmin:
+		return "Workload admin"
 	case RoleAuditor:
 		return "Auditor"
 	case RoleOperator:
@@ -699,11 +812,19 @@ func laneSetupTone(missing int) string {
 }
 
 func roleSubjectBindingCount(policy RolePolicy) int {
-	return len(policy.AdminSubjects) + len(policy.AuditorSubjects) + len(policy.OperatorSubjects)
+	count := 0
+	for _, role := range AllRoles()[1:] {
+		count += len(roleSubjects(policy, role))
+	}
+	return count
 }
 
 func roleGroupBindingCount(policy RolePolicy) int {
-	return len(policy.AdminGroups) + len(policy.AuditorGroups) + len(policy.OperatorGroups)
+	count := 0
+	for _, role := range AllRoles()[1:] {
+		count += len(roleGroups(policy, role))
+	}
+	return count
 }
 
 func configuredState(count int) string {
@@ -723,11 +844,32 @@ func configuredTone(count int) string {
 func RoleBoundariesFor(session Session) []RoleBoundary {
 	return []RoleBoundary{
 		{
-			Role:    RoleAdmin,
-			Duty:    "Policy and ownership",
-			Allowed: "Review role policy and future admin approvals.",
-			Blocked: "Does not bypass audit, approval, or value-return rules.",
-			Active:  HasRole(session, RoleAdmin),
+			Role:    RoleViewer,
+			Duty:    "Posture only",
+			Allowed: "Read safe posture and descriptor metadata.",
+			Blocked: "No secret use or mutation.",
+			Active:  HasRole(session, RoleViewer),
+		},
+		{
+			Role:    RoleOperator,
+			Duty:    "Approved use",
+			Allowed: "Request metadata handles and permit safety checks.",
+			Blocked: "No approval, evidence export, or policy changes.",
+			Active:  HasRole(session, RoleOperator),
+		},
+		{
+			Role:    RoleOwner,
+			Duty:    "Lifecycle ownership",
+			Allowed: "Review lifecycle, recovery, and retention posture.",
+			Blocked: "No normal secret use or self-approval.",
+			Active:  HasRole(session, RoleOwner),
+		},
+		{
+			Role:    RoleApprover,
+			Duty:    "Exact approvals",
+			Allowed: "Review approval posture.",
+			Blocked: "No execution or policy administration.",
+			Active:  HasRole(session, RoleApprover),
 		},
 		{
 			Role:    RoleAuditor,
@@ -737,25 +879,39 @@ func RoleBoundariesFor(session Session) []RoleBoundary {
 			Active:  HasRole(session, RoleAuditor),
 		},
 		{
-			Role:    RoleOperator,
-			Duty:    "Approved use",
-			Allowed: "Request metadata handles and permit safety checks.",
-			Blocked: "No evidence export or role-policy changes.",
-			Active:  HasRole(session, RoleOperator),
+			Role:    RoleSecurityAdmin,
+			Duty:    "Authorization policy",
+			Allowed: "Review authorization and exact binding posture.",
+			Blocked: "No secret use, self-grant, or backend custody.",
+			Active:  HasRole(session, RoleSecurityAdmin),
 		},
 		{
-			Role:    RoleViewer,
-			Duty:    "Posture only",
-			Allowed: "Read safe posture and descriptor metadata.",
-			Blocked: "No secret-use, audit export, or admin controls.",
-			Active:  HasRole(session, RoleViewer),
+			Role:    RoleBreakGlassAdmin,
+			Duty:    "Emergency eligibility",
+			Allowed: "Show eligibility metadata only.",
+			Blocked: "Inert without a separate exact activation.",
+			Active:  HasRole(session, RoleBreakGlassAdmin),
+		},
+		{
+			Role:    RoleServiceAdmin,
+			Duty:    "Exact service administration",
+			Allowed: "Show service-admin posture.",
+			Blocked: "No untargeted or cross-service authority.",
+			Active:  HasRole(session, RoleServiceAdmin),
+		},
+		{
+			Role:    RoleWorkloadAdmin,
+			Duty:    "Exact workload administration",
+			Allowed: "Show workload-admin posture.",
+			Blocked: "No untargeted or cross-workload authority.",
+			Active:  HasRole(session, RoleWorkloadAdmin),
 		},
 	}
 }
 
 func SessionRoleBadge(session Session) string {
-	elevated := make([]string, 0, 3)
-	for _, role := range []string{RoleOperator, RoleAuditor, RoleAdmin} {
+	elevated := make([]string, 0, len(AllRoles())-1)
+	for _, role := range AllRoles()[1:] {
 		if HasRole(session, role) {
 			elevated = append(elevated, role)
 		}
@@ -806,13 +962,13 @@ func AccessRoleLaneViewsFor(session Session, readiness RolePolicyReadiness, glob
 		policyLanes[lane.Role] = lane
 	}
 
-	views := make([]AccessRoleLaneView, 0, 4)
-	for _, role := range []string{RoleViewer, RoleOperator, RoleAuditor, RoleAdmin} {
+	views := make([]AccessRoleLaneView, 0, len(AllRoles()))
+	for _, role := range AllRoles() {
 		active := HasRole(session, role)
 		lane := policyLanes[role]
 		bindingReady := role == RoleViewer || lane.Ready
-		hasSurface := role != RoleAdmin
-		checks := []bool{session.Subject != "", active, bindingReady, hasSurface, globallyReady || role == RoleViewer || role == RoleAdmin}
+		hasSurface := role != RoleBreakGlassAdmin
+		checks := []bool{session.Subject != "", active, bindingReady, hasSurface, globallyReady || role == RoleViewer || role == RoleSecurityAdmin}
 		score := 0
 		for _, check := range checks {
 			if check {
@@ -868,8 +1024,18 @@ func accessRoleScope(role string) string {
 		return "Operate"
 	case RoleAuditor:
 		return "Audit & export"
-	case RoleAdmin:
+	case RoleOwner:
+		return "Lifecycle"
+	case RoleApprover:
+		return "Approve"
+	case RoleSecurityAdmin:
 		return "Policy"
+	case RoleBreakGlassAdmin:
+		return "Eligibility only"
+	case RoleServiceAdmin:
+		return "Exact service"
+	case RoleWorkloadAdmin:
+		return "Exact workload"
 	default:
 		return "—"
 	}
@@ -921,7 +1087,7 @@ func RouteGateViewsFor(session Session, access AccessPosture, ready bool) []Rout
 func RoleAvailabilityFor(session Session) []RoleAvailability {
 	operator := HasRole(session, RoleOperator)
 	auditor := HasRole(session, RoleAuditor)
-	admin := HasRole(session, RoleAdmin)
+	securityAdmin := HasRole(session, RoleSecurityAdmin)
 	return []RoleAvailability{
 		{
 			Label:  "Posture",
@@ -942,10 +1108,10 @@ func RoleAvailabilityFor(session Session) []RoleAvailability {
 			Tone:   availabilityTone(auditor),
 		},
 		{
-			Label:  "Admin policy",
-			State:  availabilityState(admin),
-			Detail: availabilityDetail(admin, "Admin policy review is available.", "Admin role required."),
-			Tone:   availabilityTone(admin),
+			Label:  "Security policy",
+			State:  availabilityState(securityAdmin),
+			Detail: availabilityDetail(securityAdmin, "Authorization policy review is available.", "Security-admin role required."),
+			Tone:   availabilityTone(securityAdmin),
 		},
 	}
 }
@@ -976,17 +1142,17 @@ func RoleWorkbenchFor(session Session, ready bool) RoleWorkbench {
 		workbench.addHidden("operator_use", "Handle and permit", "Operator mutation controls are not rendered for this session.", "Use an operator session for metadata handles or permits.")
 	}
 
-	if HasRole(session, RoleAdmin) {
+	if HasRole(session, RoleSecurityAdmin) {
 		workbench.Available = append(workbench.Available, RoleWorkbenchItem{
-			Key:    "admin_policy",
-			Label:  "Admin policy",
+			Key:    "security_policy",
+			Label:  "Security policy",
 			State:  "rendered",
 			Detail: "Role policy, ownership, and enterprise control review are visible.",
 			Next:   "Review role bindings and external evidence status.",
 			Tone:   "ok",
 		})
 	} else {
-		workbench.addHidden("admin_policy", "Admin policy", "Admin policy controls are not rendered for this session.", "Use an admin session to review role and ownership policy.")
+		workbench.addHidden("security_policy", "Security policy", "Authorization policy controls are not rendered for this session.", "Use a security-admin session to review role policy.")
 	}
 
 	return workbench

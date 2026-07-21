@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "policy_id": "janus-role-matrix-v1",
+  "roles": [
+    {
+      "role": "viewer",
+      "permissions": [
+        "descriptor.list",
+        "descriptor.read",
+        "health.read",
+        "lifecycle.read"
+      ]
+    },
+    {
+      "role": "operator",
+      "permissions": [
+        "descriptor.list",
+        "descriptor.read",
+        "health.read",
+        "secret.use",
+        "managed_run.use",
+        "env_file.use",
+        "approval.read",
+        "lifecycle.read"
+      ]
+    },
+    {
+      "role": "owner",
+      "permissions": [
+        "descriptor.list",
+        "descriptor.read",
+        "health.read",
+        "approval.read",
+        "delegation.issue",
+        "delegation.read",
+        "delegation.revoke",
+        "lifecycle.transition",
+        "lifecycle.read",
+        "destroy.record",
+        "destroy.finalize",
+        "destroy.reconcile",
+        "rotation.manage",
+        "lifecycle.entry",
+        "migration.manage",
+        "scope_transfer.manage",
+        "recovery.drill",
+        "retention.manage",
+        "pharos.retire",
+        "pharos.reconcile",
+        "authorization_policy.read"
+      ]
+    },
+    {
+      "role": "approver",
+      "permissions": [
+        "descriptor.list",
+        "descriptor.read",
+        "health.read",
+        "approval.issue",
+        "approval.permit",
+        "approval.read",
+        "approval.revoke",
+        "delegation.read",
+        "lifecycle.read"
+      ]
+    },
+    {
+      "role": "auditor",
+      "permissions": [
+        "descriptor.list",
+        "descriptor.read",
+        "health.read",
+        "approval.read",
+        "delegation.read",
+        "lifecycle.read",
+        "role_binding.read",
+        "role_binding.status",
+        "authorization_policy.read",
+        "break_glass.read",
+        "break_glass.review"
+      ]
+    },
+    {
+      "role": "security_admin",
+      "permissions": [
+        "health.read",
+        "role_binding.issue",
+        "role_binding.read",
+        "role_binding.revoke",
+        "role_binding.status",
+        "authorization_policy.read",
+        "authorization_policy.manage",
+        "break_glass.activate",
+        "break_glass.read",
+        "break_glass.revoke",
+        "break_glass.review"
+      ]
+    },
+    {
+      "role": "break_glass_admin",
+      "permissions": []
+    },
+    {
+      "role": "service_admin",
+      "permissions": [
+        "descriptor.list",
+        "descriptor.read",
+        "health.read",
+        "lifecycle.transition",
+        "lifecycle.read",
+        "rotation.manage",
+        "lifecycle.entry"
+      ]
+    },
+    {
+      "role": "workload_admin",
+      "permissions": [
+        "descriptor.list",
+        "descriptor.read",
+        "health.read",
+        "lifecycle.transition",
+        "lifecycle.read"
+      ]
+    }
+  ]
+}

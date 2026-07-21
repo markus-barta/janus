@@ -28,6 +28,8 @@ ALLOWED_FAMILIES = (
     "rotation-failure",
     "sealed-recovery",
     "retention",
+    "role-authorization",
+    "break-glass",
 )
 ALLOWED_TERMINAL_STATES = frozenset(
     {"blocked", "completed", "denied", "rolled-back"}

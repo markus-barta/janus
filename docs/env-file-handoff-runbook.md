@@ -140,8 +140,14 @@ Issue a single-use permit:
 janusd-admin approve permit \
   --approval appr_... \
   --permit-ttl-seconds 60 \
+  --recipient-human operator@example.test \
   --revoke-approval
 ```
+
+The reviewed profile fixes the recipient executor. Optional
+`--recipient-human`, `--recipient-agent`, and `--recipient-workload` flags bind
+the permit to the exact remaining principal chain. The approving actor cannot
+also be that recipient.
 
 Render the env file:
 

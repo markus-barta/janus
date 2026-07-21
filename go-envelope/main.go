@@ -545,54 +545,60 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 }
 
 type routeSpec struct {
-	pattern string
-	handler http.HandlerFunc
+	pattern       string
+	permission    string
+	authenticated bool
+	handler       http.HandlerFunc
 }
 
 func (app *App) routeSpecs() []routeSpec {
 	return []routeSpec{
-		{pattern: "GET /healthz", handler: app.handleHealth},
-		{pattern: "GET /readyz", handler: app.handleReady},
-		{pattern: "GET /buildz", handler: app.handleBuildReceipt},
-		{pattern: "GET /favicon.ico", handler: app.handleFavicon},
-		{pattern: "GET /login", handler: app.handleLogin},
-		{pattern: "GET /auth/reset", handler: app.handleAuthReset},
-		{pattern: "GET /oidc/callback", handler: app.handleCallback},
-		{pattern: "POST /logout", handler: app.withAuth(app.handleLogout)},
-		{pattern: "GET /auth/smoke", handler: app.withAuth(app.handleAuthSmokePage)},
-		{pattern: "GET /session-witness", handler: app.withAuth(app.handleSessionWitnessPage)},
-		{pattern: "GET /session-witness.txt", handler: app.withAuth(app.handleSessionWitnessText)},
-		{pattern: "GET /session-witness/verify", handler: app.withAuth(app.handleSessionWitnessVerifyPage)},
-		{pattern: "POST /session-witness/verify", handler: app.withAuth(app.handleSessionWitnessVerifyPost)},
-		{pattern: "POST /session-witness/verify-current", handler: app.withAuth(app.handleSessionWitnessVerifyCurrent)},
-		{pattern: "GET /api/warden/descriptors", handler: app.withAuth(app.handleDescriptors)},
-		{pattern: "POST /api/warden/resolve", handler: app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle))},
-		{pattern: "GET /api/audit/recent", handler: app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit))},
-		{pattern: "GET /api/auth/session-witness", handler: app.withAuth(app.handleAuthSessionWitness)},
-		{pattern: "POST /api/auth/session-witness/verify", handler: app.withAuth(app.handleAuthSessionWitnessVerify)},
-		{pattern: "GET /api/posture", handler: app.withAuth(app.handlePosture)},
-		{pattern: "GET /api/evidence", handler: app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence))},
-		{pattern: "POST /api/permits", handler: app.withAuth(app.requireRole(RoleOperator, "permit.create", app.handleCreatePermit))},
-		{pattern: "POST /api/permits/{permitID}/run", handler: app.withAuth(app.requireRole(RoleOperator, "permit.run", app.handleRunPermit))},
-		{pattern: "POST /ui/warden/resolve", handler: app.withAuth(app.handleResolveHandleUI)},
-		{pattern: "POST /ui/permits", handler: app.withAuth(app.handleCreatePermitUI)},
-		{pattern: "POST /ui/permits/{permitID}/run", handler: app.withAuth(app.handleRunPermitUI)},
-		{pattern: "GET /access", handler: app.withAuth(app.handleAccessPage)},
-		{pattern: "GET /requests", handler: app.withAuth(app.handleRequestsPage)},
-		{pattern: "GET /ledger", handler: app.withAuth(app.handleLedgerPage)},
-		{pattern: "GET /assurance", handler: app.withAuth(app.handleAssurancePage)},
-		{pattern: "GET /settings", handler: app.withAuth(app.handleSettingsPage)},
-		{pattern: "GET /vault/new", handler: app.withAuth(app.handleNewSecretPage)},
-		{pattern: "GET /vault/new/plan.sh", handler: app.withAuth(app.handleNewSecretScript)},
-		{pattern: "GET /static/", handler: app.handleStatic},
-		{pattern: "GET /", handler: app.withAuth(app.handleDashboard)},
+		{pattern: "GET /healthz", permission: PermissionHealthRead, handler: app.handleHealth},
+		{pattern: "GET /readyz", permission: PermissionHealthRead, handler: app.handleReady},
+		{pattern: "GET /buildz", permission: PermissionHealthRead, handler: app.handleBuildReceipt},
+		{pattern: "GET /favicon.ico", permission: PermissionHealthRead, handler: app.handleFavicon},
+		{pattern: "GET /login", permission: PermissionHealthRead, handler: app.handleLogin},
+		{pattern: "GET /auth/reset", permission: PermissionHealthRead, handler: app.handleAuthReset},
+		{pattern: "GET /oidc/callback", permission: PermissionHealthRead, handler: app.handleCallback},
+		{pattern: "POST /logout", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleLogout},
+		{pattern: "GET /auth/smoke", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleAuthSmokePage},
+		{pattern: "GET /session-witness", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleSessionWitnessPage},
+		{pattern: "GET /session-witness.txt", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleSessionWitnessText},
+		{pattern: "GET /session-witness/verify", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleSessionWitnessVerifyPage},
+		{pattern: "POST /session-witness/verify", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleSessionWitnessVerifyPost},
+		{pattern: "POST /session-witness/verify-current", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleSessionWitnessVerifyCurrent},
+		{pattern: "GET /api/warden/descriptors", permission: PermissionDescriptorList, authenticated: true, handler: app.handleDescriptors},
+		{pattern: "POST /api/warden/resolve", permission: PermissionSecretUse, authenticated: true, handler: app.handleResolveHandle},
+		{pattern: "GET /api/audit/recent", permission: PermissionRoleBindingRead, authenticated: true, handler: app.handleRecentAudit},
+		{pattern: "GET /api/auth/session-witness", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleAuthSessionWitness},
+		{pattern: "POST /api/auth/session-witness/verify", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleAuthSessionWitnessVerify},
+		{pattern: "GET /api/posture", permission: PermissionDescriptorRead, authenticated: true, handler: app.handlePosture},
+		{pattern: "GET /api/evidence", permission: PermissionRoleBindingRead, authenticated: true, handler: app.handleEvidence},
+		{pattern: "POST /api/permits", permission: PermissionSecretUse, authenticated: true, handler: app.handleCreatePermit},
+		{pattern: "POST /api/permits/{permitID}/run", permission: PermissionManagedRun, authenticated: true, handler: app.handleRunPermit},
+		{pattern: "POST /ui/warden/resolve", permission: PermissionSecretUse, authenticated: true, handler: app.handleResolveHandleUI},
+		{pattern: "POST /ui/permits", permission: PermissionSecretUse, authenticated: true, handler: app.handleCreatePermitUI},
+		{pattern: "POST /ui/permits/{permitID}/run", permission: PermissionManagedRun, authenticated: true, handler: app.handleRunPermitUI},
+		{pattern: "GET /access", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleAccessPage},
+		{pattern: "GET /requests", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleRequestsPage},
+		{pattern: "GET /ledger", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleLedgerPage},
+		{pattern: "GET /assurance", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleAssurancePage},
+		{pattern: "GET /settings", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleSettingsPage},
+		{pattern: "GET /vault/new", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleNewSecretPage},
+		{pattern: "GET /vault/new/plan.sh", permission: PermissionManagedRun, authenticated: true, handler: app.handleNewSecretScript},
+		{pattern: "GET /static/", permission: PermissionHealthRead, handler: app.handleStatic},
+		{pattern: "GET /", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleDashboard},
 	}
 }
 
 func (app *App) routes() http.Handler {
 	mux := http.NewServeMux()
 	for _, route := range app.routeSpecs() {
-		mux.HandleFunc(route.pattern, route.handler)
+		handler := route.handler
+		if route.authenticated {
+			handler = app.withAuth(app.requirePermission(route.permission, route.pattern, handler))
+		}
+		mux.HandleFunc(route.pattern, handler)
 	}
 	return app.securityHeaders(app.requestIDs(app.rateLimit(app.limitRequestBody(app.safeHTTPBoundary(mux)))))
 }
@@ -804,6 +810,18 @@ func (app *App) requireRole(role, action string, next http.HandlerFunc) http.Han
 		if !HasRole(session, role) {
 			app.audit(r, action, "denied", session.Subject, "role "+role+" required")
 			writeJSONError(w, r, http.StatusForbidden, "role_denied", role+" role required")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (app *App) requirePermission(permission, action string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		session := currentSession(r.Context())
+		if !SessionHasPermission(session, permission) {
+			app.audit(r, action, "denied", session.Subject, "permission "+permission+" required")
+			writeJSONError(w, r, http.StatusForbidden, "role_denied", "required role permission missing")
 			return
 		}
 		next(w, r)
@@ -1848,11 +1866,23 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	projectedRoles, err := DeriveRolesChecked(
+		claims.Subject,
+		claims.Email,
+		ClaimRoleInputs(claims.Groups, claims.Roles, claims.ProjectRoles),
+		app.cfg.RolePolicy,
+	)
+	if err != nil {
+		app.clearOIDCLoginCookies(w)
+		app.audit(r, "auth.login.callback", "denied", "", "ambiguous role claims")
+		app.renderAuthError(w, r, http.StatusForbidden, "role_mapping_denied", "Zitadel role mappings are ambiguous or duplicated.")
+		return
+	}
 	session := Session{
 		Subject: claims.Subject,
 		Email:   claims.Email,
 		Name:    claims.Name,
-		Roles:   DeriveRoles(claims.Subject, claims.Email, ClaimRoleInputs(claims.Groups, claims.Roles, claims.ProjectRoles), app.cfg.RolePolicy),
+		Roles:   projectedRoles,
 		Expiry:  time.Now().UTC().Add(defaultSessionTTL),
 	}
 	app.writeSession(w, session)
@@ -1978,7 +2008,14 @@ func (app *App) readSession(r *http.Request) (Session, bool) {
 		return Session{}, false
 	}
 	if len(session.Roles) == 0 {
-		session.Roles = DeriveRoles(session.Subject, session.Email, nil, app.cfg.RolePolicy)
+		roles, err := DeriveRolesChecked(session.Subject, session.Email, nil, app.cfg.RolePolicy)
+		if err != nil {
+			return Session{}, false
+		}
+		session.Roles = roles
+	}
+	if !validateSessionRoles(session.Roles) {
+		return Session{}, false
 	}
 	return session, true
 }

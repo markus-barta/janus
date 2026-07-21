@@ -3,11 +3,13 @@
 use std::time::SystemTime;
 
 use crate::{
-    consumer::consumer_observe_event, ApprovalGrant, AuditAction, AuditEvent, AuditOutcome,
-    AuditSink, ClassPermitPolicy, ConsumerDescriptor, DelegatedUseContext, DelegationGrant,
-    DelegationPolicy, DelegationRevocation, Destination, ExecutorRef, JanusError, JanusResult,
-    PermitIssuer, PolicyDecision, PrincipalChain, ProfilePolicy, SecretDescriptor, SecretName,
-    SecretRef, SecretStore, SecretValue, Severity, UsePermit, UseRequest,
+    authorization_fingerprint, authorize_role_action, consumer::consumer_observe_event,
+    ApprovalGrant, AuditAction, AuditEvent, AuditOutcome, AuditSink, ClassPermitPolicy,
+    ConsumerDescriptor, DelegatedUseContext, DelegationGrant, DelegationPolicy,
+    DelegationRevocation, Destination, ExecutorRef, JanusError, JanusResult, Permission,
+    PermitIssuer, PolicyDecision, PrincipalChain, ProfilePolicy, RoleBinding, RoleDecisionInput,
+    RolePolicyV1, SecretDescriptor, SecretName, SecretRef, SecretStore, SecretValue, Severity,
+    UsePermit, UseRequest,
 };
 
 /// Policy/audit wrapper around a backend store.
@@ -15,6 +17,8 @@ pub struct SecretBroker<S, A> {
     store: S,
     policy: ProfilePolicy,
     audit: A,
+    role_policy: Option<RolePolicyV1>,
+    role_bindings: Vec<RoleBinding>,
 }
 
 impl<S, A> SecretBroker<S, A>
@@ -28,11 +32,74 @@ where
             store,
             policy,
             audit,
+            role_policy: None,
+            role_bindings: Vec::new(),
+        }
+    }
+
+    /// Enable checked role enforcement from trusted durable bindings.
+    pub fn with_role_authorization(
+        mut self,
+        role_policy: RolePolicyV1,
+        role_bindings: Vec<RoleBinding>,
+    ) -> Self {
+        self.role_policy = Some(role_policy);
+        self.role_bindings = role_bindings;
+        self
+    }
+
+    fn authorize(
+        &mut self,
+        principal: &PrincipalChain,
+        permission: Permission,
+        descriptor: Option<&SecretDescriptor>,
+        approval_fingerprint: Option<&str>,
+        delegation_fingerprint: Option<&str>,
+        now: SystemTime,
+    ) -> JanusResult<()> {
+        let Some(policy) = self.role_policy.as_ref() else {
+            return Ok(());
+        };
+        let owner_fingerprint = descriptor
+            .and_then(|descriptor| descriptor.owner.as_ref())
+            .map(|owner| authorization_fingerprint("janus-resource-owner-v1", owner.as_str()))
+            .transpose()?;
+        let input = RoleDecisionInput {
+            principal,
+            permission,
+            scope: &principal.scope,
+            target_binding: None,
+            resource_owner_fingerprint: owner_fingerprint.as_deref(),
+            resource_class: descriptor.and_then(|descriptor| descriptor.classification),
+            resource_lifecycle: descriptor.map(|descriptor| descriptor.lifecycle),
+            approval_fingerprint,
+            delegation_fingerprint,
+            audit_available: true,
+            duties: &[],
+            bindings: &self.role_bindings,
+            now,
+        };
+        let decision = authorize_role_action(policy, &input, &mut self.audit)?;
+        if decision.allowed {
+            Ok(())
+        } else {
+            Err(JanusError::policy_denied(
+                decision.reason_code,
+                "role authorization denied broker action",
+            ))
         }
     }
 
     /// Value-free list operation with audit evidence.
     pub async fn list(&mut self, principal: &PrincipalChain) -> JanusResult<Vec<SecretDescriptor>> {
+        self.authorize(
+            principal,
+            Permission::DescriptorList,
+            None,
+            None,
+            None,
+            SystemTime::now(),
+        )?;
         let descriptors = self
             .store
             .list()
@@ -93,6 +160,15 @@ where
             ));
         }
 
+        self.authorize(
+            principal,
+            Permission::DescriptorRead,
+            Some(&descriptor),
+            None,
+            None,
+            SystemTime::now(),
+        )?;
+
         self.audit.record(AuditEvent::new(
             AuditAction::SecretDescribe,
             AuditOutcome::Allowed,
@@ -106,6 +182,14 @@ where
 
     /// Value-free backend health check with audit evidence.
     pub async fn health(&mut self, principal: &PrincipalChain) -> JanusResult<crate::HealthStatus> {
+        self.authorize(
+            principal,
+            Permission::HealthRead,
+            None,
+            None,
+            None,
+            SystemTime::now(),
+        )?;
         self.audit.record(AuditEvent::new(
             AuditAction::BackendHealth,
             AuditOutcome::Allowed,
@@ -216,6 +300,15 @@ where
             return Err(JanusError::policy_denied(reason_code, detail));
         }
 
+        self.authorize(
+            principal,
+            Permission::SecretUse,
+            Some(&descriptor),
+            None,
+            None,
+            SystemTime::now(),
+        )?;
+
         self.audit.record(AuditEvent::new(
             AuditAction::SecretUse,
             AuditOutcome::Allowed,
@@ -303,6 +396,14 @@ where
         let class = descriptor
             .classification
             .expect("normal_use_denial guarantees classification is present");
+        self.authorize(
+            principal,
+            Permission::SecretUse,
+            Some(descriptor),
+            approval.map(|approval| approval.id().as_str()),
+            None,
+            now,
+        )?;
         let mut issuer = PermitIssuer::new(&self.policy, &mut self.audit);
         issuer.issue_for_class_with_approval(req, principal, now, class, approval)
     }
@@ -337,6 +438,14 @@ where
                 name: req.secret_ref.as_str().to_string(),
             });
         };
+        self.authorize(
+            principal,
+            Permission::SecretUse,
+            Some(descriptor),
+            None,
+            Some(grant.id().as_str()),
+            now,
+        )?;
         DelegationPolicy::validate_persisted_use(
             grant,
             revocation,
@@ -555,6 +664,17 @@ where
             ))?;
             return Err(JanusError::policy_denied(reason_code, detail));
         }
+
+        self.authorize(
+            principal,
+            Permission::SecretUse,
+            Some(&descriptor),
+            None,
+            permit
+                .delegation()
+                .map(|context| context.delegation_id().as_str()),
+            now,
+        )?;
 
         let class = descriptor
             .classification

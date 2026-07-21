@@ -6,6 +6,7 @@ ARG TARGETARCH
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY config/release-channels/v1.json ./config/release-channels/v1.json
+COPY config/authorization/role-matrix-v1.json ./config/authorization/role-matrix-v1.json
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) rust_target="x86_64-unknown-linux-gnu" ;; \

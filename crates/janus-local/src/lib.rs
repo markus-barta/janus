@@ -9,14 +9,20 @@
 #![forbid(unsafe_code)]
 
 mod audit;
+mod break_glass;
 mod delegation;
 mod migration;
 mod recovery;
 mod release;
 mod retention;
+mod roles;
 mod transfer;
 
 pub use audit::{AuditRecovery, JsonlAuditSink};
+pub use break_glass::{
+    BreakGlassListEntry, BreakGlassRecord, BreakGlassRegistry, BreakGlassStatus,
+    FileBreakGlassRegistry,
+};
 pub use delegation::{
     DelegationListEntry, DelegationRecord, DelegationRegistry, FileDelegationRegistry,
     NoopDelegationRegistry,
@@ -31,6 +37,11 @@ pub use release::{
 };
 pub use retention::{
     enforce_retention_ready, enforce_retention_ready_from_env, RetentionRunner, RetentionStatus,
+};
+pub use roles::{
+    enforce_runtime_role_from_env, load_role_authorization_from_env, FileRoleBindingRegistry,
+    LoadedRoleAuthorization, NoopRoleBindingRegistry, RoleBindingListEntry, RoleBindingRecord,
+    RoleBindingRegistry, RoleBindingRevocationSnapshotV1, RoleBindingStatus,
 };
 pub use transfer::{
     enforce_scope_transfer_ready_from_env, ScopeTransferRunner, ScopeTransferStatus,

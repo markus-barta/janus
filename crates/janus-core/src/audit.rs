@@ -80,6 +80,24 @@ pub enum AuditAction {
     ScopeTransferRollback,
     /// A runtime action was admitted to or denied from a process plane.
     RuntimePlane,
+    /// A role-policy decision admitted or denied an exact action.
+    RoleCheck,
+    /// A hard separation-of-duties boundary denied an action.
+    SeparationDeny,
+    /// A reviewed durable role binding was issued.
+    RoleAssign,
+    /// A durable role binding was immutably revoked.
+    RoleRevoke,
+    /// An exact break-glass activation was attempted or admitted.
+    BreakGlassActivate,
+    /// An active break-glass grant was used or denied.
+    BreakGlassUse,
+    /// A break-glass grant was revoked.
+    BreakGlassRevoke,
+    /// Expiry of a break-glass grant was observed.
+    BreakGlassExpire,
+    /// Mandatory post-use break-glass review advanced.
+    BreakGlassReview,
 }
 
 impl AuditAction {
@@ -123,6 +141,15 @@ impl AuditAction {
             Self::ScopeTransferPostflight => "scope_transfer.postflight",
             Self::ScopeTransferRollback => "scope_transfer.rollback",
             Self::RuntimePlane => "runtime.plane",
+            Self::RoleCheck => "role.check",
+            Self::SeparationDeny => "separation.deny",
+            Self::RoleAssign => "role.assign",
+            Self::RoleRevoke => "role.revoke",
+            Self::BreakGlassActivate => "break_glass.activate",
+            Self::BreakGlassUse => "break_glass.use",
+            Self::BreakGlassRevoke => "break_glass.revoke",
+            Self::BreakGlassExpire => "break_glass.expire",
+            Self::BreakGlassReview => "break_glass.review",
         }
     }
 
@@ -166,6 +193,15 @@ impl AuditAction {
             "scope_transfer.postflight" => Self::ScopeTransferPostflight,
             "scope_transfer.rollback" => Self::ScopeTransferRollback,
             "runtime.plane" => Self::RuntimePlane,
+            "role.check" => Self::RoleCheck,
+            "separation.deny" => Self::SeparationDeny,
+            "role.assign" => Self::RoleAssign,
+            "role.revoke" => Self::RoleRevoke,
+            "break_glass.activate" => Self::BreakGlassActivate,
+            "break_glass.use" => Self::BreakGlassUse,
+            "break_glass.revoke" => Self::BreakGlassRevoke,
+            "break_glass.expire" => Self::BreakGlassExpire,
+            "break_glass.review" => Self::BreakGlassReview,
             _ => return None,
         })
     }

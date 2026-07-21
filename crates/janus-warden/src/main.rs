@@ -14,16 +14,17 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use janus_core::{
-    AuditWrite, Destination, EgressMode, ExecutorRef, NamespaceId, Principal, PrincipalChain,
-    PrincipalId, PrincipalKind, ProfilePolicy, ReleaseAdmission, ScopePathV1, ScopeRef,
-    SecretBroker, SecretDescriptor, SecretMetadataOverlay, SecretStore, TrustLevel, UseProfile,
-    WorkloadId,
+    AuditEvent, AuditSink, AuditWrite, Destination, EgressMode, ExecutorRef, JanusResult,
+    NamespaceId, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfilePolicy,
+    ReleaseAdmission, ScopePathV1, ScopeRef, SecretBroker, SecretDescriptor, SecretMetadataOverlay,
+    SecretStore, TrustLevel, UseProfile, WorkloadId,
 };
 use janus_local::{
     enforce_migration_ready_from_env, enforce_recovery_drill_freshness_from_env,
     enforce_release_admission_from_env, enforce_retention_ready_from_env,
-    enforce_scope_transfer_ready_from_env, DelegationRegistry, FileDelegationRegistry,
-    FilePermitRegistry, NoopDelegationRegistry, NoopPermitStore, PermitStore,
+    enforce_scope_transfer_ready_from_env, load_role_authorization_from_env, DelegationRegistry,
+    FileDelegationRegistry, FilePermitRegistry, JsonlAuditSink, LoadedRoleAuthorization,
+    NoopDelegationRegistry, NoopPermitStore, PermitStore,
 };
 use janus_provider_age::AgeSecretStore;
 use janus_providers::SecretspecStore;
@@ -42,7 +43,21 @@ use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
 type Runtime =
-    WardenRuntime<WardenStore, AuditWrite, RuntimePermitStore, RuntimeDelegationRegistry>;
+    WardenRuntime<WardenStore, RuntimeAudit, RuntimePermitStore, RuntimeDelegationRegistry>;
+
+enum RuntimeAudit {
+    Memory(AuditWrite),
+    File(JsonlAuditSink),
+}
+
+impl AuditSink for RuntimeAudit {
+    fn record(&mut self, event: AuditEvent) -> JanusResult<()> {
+        match self {
+            Self::Memory(audit) => audit.record(event),
+            Self::File(audit) => audit.record(event),
+        }
+    }
+}
 
 enum WardenStore {
     Secretspec(SecretspecStore),
@@ -245,7 +260,9 @@ async fn main() -> Result<()> {
         .context("recovery drill freshness denied Warden startup")?;
     enforce_retention_ready_from_env(&release, &principal.scope)
         .context("retention evidence denied Warden startup")?;
-    let runtime = build_runtime_from_env(release).await?;
+    let role_authorization = load_role_authorization_from_env()
+        .context("role authorization posture denied Warden startup")?;
+    let runtime = build_runtime_from_env(release, role_authorization).await?;
     let server = McpWarden {
         runtime: Arc::new(Mutex::new(runtime)),
         guard: WardenEndpointGuard::new(AuditWrite::accepting()),
@@ -258,7 +275,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn build_runtime_from_env(release: ReleaseAdmission) -> Result<Runtime> {
+async fn build_runtime_from_env(
+    release: ReleaseAdmission,
+    role_authorization: Option<LoadedRoleAuthorization>,
+) -> Result<Runtime> {
     let store = load_store_from_env()?;
     let descriptors = store
         .list()
@@ -267,12 +287,29 @@ async fn build_runtime_from_env(release: ReleaseAdmission) -> Result<Runtime> {
     let policy = policy_from_env(&descriptors)?;
     let permits = permit_store_from_env()?;
     let delegations = delegation_registry_from_env()?;
-    Ok(WardenRuntime::with_permit_store(
-        SecretBroker::new(store, policy, AuditWrite::accepting()),
-        permits,
-    )
-    .with_delegation_registry(delegations)
-    .with_release_admission(release))
+    let audit = runtime_audit_from_env(role_authorization.is_some())?;
+    let mut broker = SecretBroker::new(store, policy, audit);
+    if let Some(authorization) = role_authorization {
+        broker = broker.with_role_authorization(authorization.policy, authorization.bindings);
+    }
+    Ok(WardenRuntime::with_permit_store(broker, permits)
+        .with_delegation_registry(delegations)
+        .with_release_admission(release))
+}
+
+fn runtime_audit_from_env(role_enforced: bool) -> Result<RuntimeAudit> {
+    let path = env::var_os("JANUS_WARDEN_AUDIT_FILE")
+        .or_else(|| env::var_os("JANUS_ROLE_AUDIT_FILE"))
+        .filter(|value| !value.is_empty());
+    match path {
+        Some(path) => Ok(RuntimeAudit::File(JsonlAuditSink::open(PathBuf::from(
+            path,
+        ))?)),
+        None if role_enforced => {
+            anyhow::bail!("JANUS_WARDEN_AUDIT_FILE or JANUS_ROLE_AUDIT_FILE is required")
+        }
+        None => Ok(RuntimeAudit::Memory(AuditWrite::accepting())),
+    }
 }
 
 fn load_store_from_env() -> Result<WardenStore> {

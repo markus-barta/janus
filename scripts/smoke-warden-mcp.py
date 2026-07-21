@@ -116,6 +116,8 @@ def smoke_env(fixture: Path, *, container: bool = False) -> dict[str, str]:
         "JANUS_WARDEN_SCOPE_PROJECT": "janus",
         "JANUS_WARDEN_SCOPE_REPOSITORY": "janus",
         "JANUS_WARDEN_SCOPE_ENVIRONMENT": "dev",
+        "JANUS_ROLE_AUTHORIZATION_MODE": "unsafe_disabled_dev",
+        "JANUS_PRODUCT_MODE": "self_hosted",
     }
     if not container:
         env["JANUS_WARDEN_PERMIT_DIR"] = str(root / "permits")

@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod audit;
+pub mod break_glass;
 pub mod broker;
 pub mod consumer;
 pub mod delegation;
@@ -23,6 +24,7 @@ pub mod recovery;
 pub mod refs;
 pub mod release;
 pub mod retention;
+pub mod roles;
 pub mod rotation;
 pub mod scope;
 pub mod stale;
@@ -34,6 +36,15 @@ pub mod value;
 pub use audit::{
     audit_integrity_hash, AuditAction, AuditEvent, AuditIntegrityInput, AuditOutcome, AuditSink,
     AuditWrite, Severity,
+};
+pub use break_glass::{
+    BreakGlassActivation, BreakGlassActivationId, BreakGlassActivationSnapshotV1,
+    BreakGlassAttempt, BreakGlassAttemptId, BreakGlassAttemptSnapshotV1, BreakGlassCompletion,
+    BreakGlassCompletionId, BreakGlassCompletionOutcome, BreakGlassCompletionSnapshotV1,
+    BreakGlassRequest, BreakGlassRequestId, BreakGlassRequestSnapshotV1, BreakGlassReview,
+    BreakGlassReviewClosure, BreakGlassReviewId, BreakGlassReviewSnapshotV1, BreakGlassRevocation,
+    BreakGlassRevocationId, BreakGlassRevocationSnapshotV1, BREAK_GLASS_SNAPSHOT_VERSION,
+    MAX_BREAK_GLASS_TTL,
 };
 pub use broker::SecretBroker;
 pub use consumer::{
@@ -80,6 +91,13 @@ pub use retention::{
     RetentionClassRule, RetentionConfigBinding, RetentionDisposition, RetentionEvidenceClass,
     RetentionEvidenceInput, RetentionEvidenceV1, RetentionHoldRegistryV1, RetentionHoldV1,
     RetentionPolicyV1,
+};
+pub use roles::{
+    authorization_fingerprint, authorize_role_action, Duty, DutyConflict, DutyEvidence, Permission,
+    Role, RoleBinding, RoleBindingId, RoleBindingSnapshotV1, RoleBindingSource,
+    RoleBindingSourceKind, RoleDecision, RoleDecisionInput, RoleDecisionSnapshotV1,
+    RolePolicySnapshotV1, RolePolicyV1, SeparationPolicy, MAX_ROLE_BINDING_TTL,
+    ROLE_BINDING_SNAPSHOT_VERSION, ROLE_POLICY_SNAPSHOT_VERSION,
 };
 pub use rotation::{
     RollbackPlan, RotationDecision, RotationOutcome, RotationPhase, RotationPlan, RotationPlanner,

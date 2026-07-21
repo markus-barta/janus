@@ -189,6 +189,7 @@ It exercises:
 - the approval-to-env-file operator flow;
 - the versioned approval-registry migration and rollback flow;
 - the exact-scope recovery and explicit boundary-transfer flow;
+- the exact, single-use break-glass lifecycle and independent review flow;
 - the Pharos beacon retirement flow; and
 - the engine container with the same value-free MCP assertions.
 

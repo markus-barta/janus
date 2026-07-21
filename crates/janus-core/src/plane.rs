@@ -99,11 +99,33 @@ pub enum RuntimeAction {
     PharosRetire,
     /// Pharos retirement reconciliation.
     PharosReconcile,
+    /// Durable role binding creation.
+    RoleBindingIssue,
+    /// Durable role binding inventory.
+    RoleBindingList,
+    /// Immutable role binding revocation.
+    RoleBindingRevoke,
+    /// Exact role binding status.
+    RoleBindingStatus,
+    /// Checked authorization policy status.
+    AuthorizationPolicyStatus,
+    /// Request one exact short-lived emergency activation.
+    BreakGlassRequest,
+    /// Separately approve one pending emergency activation.
+    BreakGlassApprove,
+    /// List value-free emergency lifecycle rows.
+    BreakGlassList,
+    /// Inspect one value-free emergency lifecycle status.
+    BreakGlassStatus,
+    /// Immutably revoke an emergency activation.
+    BreakGlassRevoke,
+    /// Independently close mandatory post-use review.
+    BreakGlassReview,
 }
 
 impl RuntimeAction {
     /// Every known action, used by release-blocking completeness tests.
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 41] = [
         Self::WardenListSecrets,
         Self::WardenDescribeSecret,
         Self::WardenRequestUse,
@@ -134,6 +156,17 @@ impl RuntimeAction {
         Self::Retention,
         Self::PharosRetire,
         Self::PharosReconcile,
+        Self::RoleBindingIssue,
+        Self::RoleBindingList,
+        Self::RoleBindingRevoke,
+        Self::RoleBindingStatus,
+        Self::AuthorizationPolicyStatus,
+        Self::BreakGlassRequest,
+        Self::BreakGlassApprove,
+        Self::BreakGlassList,
+        Self::BreakGlassStatus,
+        Self::BreakGlassRevoke,
+        Self::BreakGlassReview,
     ];
 
     /// The only process plane allowed to expose this action.
@@ -168,7 +201,18 @@ impl RuntimeAction {
             | Self::RecoveryDrill
             | Self::Retention
             | Self::PharosRetire
-            | Self::PharosReconcile => RuntimePlane::Admin,
+            | Self::PharosReconcile
+            | Self::RoleBindingIssue
+            | Self::RoleBindingList
+            | Self::RoleBindingRevoke
+            | Self::RoleBindingStatus
+            | Self::AuthorizationPolicyStatus
+            | Self::BreakGlassRequest
+            | Self::BreakGlassApprove
+            | Self::BreakGlassList
+            | Self::BreakGlassStatus
+            | Self::BreakGlassRevoke
+            | Self::BreakGlassReview => RuntimePlane::Admin,
         }
     }
 
@@ -205,6 +249,17 @@ impl RuntimeAction {
             Self::Retention => "admin.retention",
             Self::PharosRetire => "admin.pharos_retire",
             Self::PharosReconcile => "admin.pharos_reconcile",
+            Self::RoleBindingIssue => "admin.role_binding_issue",
+            Self::RoleBindingList => "admin.role_binding_list",
+            Self::RoleBindingRevoke => "admin.role_binding_revoke",
+            Self::RoleBindingStatus => "admin.role_binding_status",
+            Self::AuthorizationPolicyStatus => "admin.authorization_policy_status",
+            Self::BreakGlassRequest => "admin.break_glass_request",
+            Self::BreakGlassApprove => "admin.break_glass_approve",
+            Self::BreakGlassList => "admin.break_glass_list",
+            Self::BreakGlassStatus => "admin.break_glass_status",
+            Self::BreakGlassRevoke => "admin.break_glass_revoke",
+            Self::BreakGlassReview => "admin.break_glass_review",
         }
     }
 }
@@ -439,13 +494,24 @@ pub const fn runtime_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPo
         | RuntimeAction::RecoveryDrill
         | RuntimeAction::Retention
         | RuntimeAction::PharosRetire
-        | RuntimeAction::PharosReconcile => cli_endpoint_policy(action),
+        | RuntimeAction::PharosReconcile
+        | RuntimeAction::RoleBindingIssue
+        | RuntimeAction::RoleBindingList
+        | RuntimeAction::RoleBindingRevoke
+        | RuntimeAction::RoleBindingStatus
+        | RuntimeAction::AuthorizationPolicyStatus
+        | RuntimeAction::BreakGlassRequest
+        | RuntimeAction::BreakGlassApprove
+        | RuntimeAction::BreakGlassList
+        | RuntimeAction::BreakGlassStatus
+        | RuntimeAction::BreakGlassRevoke
+        | RuntimeAction::BreakGlassReview => cli_endpoint_policy(action),
     }
 }
 
 /// Closed endpoint-policy catalog. Adding an action requires extending both
 /// [`RuntimeAction::ALL`] and this release-reviewed matrix.
-pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 30] = [
+pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 41] = [
     runtime_endpoint_policy(RuntimeAction::WardenListSecrets),
     runtime_endpoint_policy(RuntimeAction::WardenDescribeSecret),
     runtime_endpoint_policy(RuntimeAction::WardenRequestUse),
@@ -476,6 +542,17 @@ pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 30] = [
     runtime_endpoint_policy(RuntimeAction::Retention),
     runtime_endpoint_policy(RuntimeAction::PharosRetire),
     runtime_endpoint_policy(RuntimeAction::PharosReconcile),
+    runtime_endpoint_policy(RuntimeAction::RoleBindingIssue),
+    runtime_endpoint_policy(RuntimeAction::RoleBindingList),
+    runtime_endpoint_policy(RuntimeAction::RoleBindingRevoke),
+    runtime_endpoint_policy(RuntimeAction::RoleBindingStatus),
+    runtime_endpoint_policy(RuntimeAction::AuthorizationPolicyStatus),
+    runtime_endpoint_policy(RuntimeAction::BreakGlassRequest),
+    runtime_endpoint_policy(RuntimeAction::BreakGlassApprove),
+    runtime_endpoint_policy(RuntimeAction::BreakGlassList),
+    runtime_endpoint_policy(RuntimeAction::BreakGlassStatus),
+    runtime_endpoint_policy(RuntimeAction::BreakGlassRevoke),
+    runtime_endpoint_policy(RuntimeAction::BreakGlassReview),
 ];
 
 /// Deterministic JSON value used by release assurance and the reviewed matrix.
@@ -573,7 +650,7 @@ mod tests {
 
     #[test]
     fn every_action_has_exactly_one_operational_plane() {
-        assert_eq!(RuntimeAction::ALL.len(), 30);
+        assert_eq!(RuntimeAction::ALL.len(), 41);
         assert_eq!(
             RuntimeAction::ALL
                 .iter()
@@ -586,7 +663,7 @@ mod tests {
                 .iter()
                 .filter(|action| action.required_plane() == RuntimePlane::Admin)
                 .count(),
-            22
+            33
         );
         assert!(RuntimeAction::ALL
             .iter()

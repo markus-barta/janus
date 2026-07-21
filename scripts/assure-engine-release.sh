@@ -28,6 +28,12 @@ cargo test --all --locked
 echo "==> janus engine release assurance: build smoke binaries"
 cargo build --locked -p janus-warden -p janusd
 
+# Isolated fixtures have no durable operator binding registry. They must opt in
+# explicitly to the only non-production compatibility posture; trusted product
+# modes reject this value in the runtime loader.
+export JANUS_ROLE_AUTHORIZATION_MODE="unsafe_disabled_dev"
+export JANUS_PRODUCT_MODE="self_hosted"
+
 echo "==> janus engine release assurance: runtime process-plane boundary smoke"
 scripts/smoke-janusd-planes.sh
 

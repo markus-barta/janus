@@ -13,7 +13,9 @@
     "permit-execution",
     "rotation-failure",
     "sealed-recovery",
-    "retention"
+    "retention",
+    "role-authorization",
+    "break-glass"
   ],
   "registered_reason_codes": [
     "migration_manifest_invalid",
@@ -58,7 +60,13 @@
     "retention_preflight_ok",
     "retention_config_changed",
     "retention_purge_ok",
-    "retention_rollback_ok"
+    "retention_rollback_ok",
+    "role_policy_broadens_ceiling",
+    "authorization_role_missing",
+    "separation_requester_approver",
+    "break_glass_action_forbidden",
+    "break_glass_already_consumed",
+    "break_glass_revoked"
   ],
   "required_scenario_ids": [
     "approval-manifest-malformed",
@@ -115,7 +123,13 @@
     "retention-mixed-plan",
     "retention-drift-tamper",
     "retention-grace-purge",
-    "retention-interrupted-rollback"
+    "retention-interrupted-rollback",
+    "role-policy-ceiling-broadening",
+    "role-cross-boundary-use",
+    "role-one-person-approval-loop",
+    "break-glass-broad-authority",
+    "break-glass-single-use",
+    "break-glass-revocation-restart"
   ],
   "scenarios": [
     {
@@ -775,6 +789,78 @@
       "attack_phase": "interrupted-quarantine",
       "expected_reason_code": "retention_rollback_ok",
       "expected_terminal_state": "rolled-back",
+      "audit_expectation": "required",
+      "value_returned": false
+    },
+    {
+      "id": "role-policy-ceiling-broadening",
+      "family": "role-authorization",
+      "package": "janus-core",
+      "test_binary": null,
+      "test_name": "roles::tests::snapshot_cannot_broaden_ceiling_or_hide_a_role",
+      "attack_phase": "policy-load",
+      "expected_reason_code": "role_policy_broadens_ceiling",
+      "expected_terminal_state": "denied",
+      "audit_expectation": "unavailable",
+      "value_returned": false
+    },
+    {
+      "id": "role-cross-boundary-use",
+      "family": "role-authorization",
+      "package": "janus-core",
+      "test_binary": null,
+      "test_name": "roles::tests::operator_can_use_but_owner_auditor_and_security_admin_cannot",
+      "attack_phase": "role-decision",
+      "expected_reason_code": "authorization_role_missing",
+      "expected_terminal_state": "denied",
+      "audit_expectation": "required",
+      "value_returned": false
+    },
+    {
+      "id": "role-one-person-approval-loop",
+      "family": "role-authorization",
+      "package": "janus-core",
+      "test_binary": null,
+      "test_name": "roles::tests::one_person_loops_are_hard_denials",
+      "attack_phase": "separation-check",
+      "expected_reason_code": "separation_requester_approver",
+      "expected_terminal_state": "denied",
+      "audit_expectation": "required",
+      "value_returned": false
+    },
+    {
+      "id": "break-glass-broad-authority",
+      "family": "break-glass",
+      "package": "janus-core",
+      "test_binary": null,
+      "test_name": "break_glass::tests::activation_denies_self_roles_broad_actions_and_long_ttl_with_critical_audit",
+      "attack_phase": "activation-scope",
+      "expected_reason_code": "break_glass_action_forbidden",
+      "expected_terminal_state": "denied",
+      "audit_expectation": "required",
+      "value_returned": false
+    },
+    {
+      "id": "break-glass-single-use",
+      "family": "break-glass",
+      "package": "janus-core",
+      "test_binary": null,
+      "test_name": "break_glass::tests::every_use_attempt_and_completion_is_critical_and_single_use",
+      "attack_phase": "second-use",
+      "expected_reason_code": "break_glass_already_consumed",
+      "expected_terminal_state": "denied",
+      "audit_expectation": "required",
+      "value_returned": false
+    },
+    {
+      "id": "break-glass-revocation-restart",
+      "family": "break-glass",
+      "package": "janus-local",
+      "test_binary": null,
+      "test_name": "break_glass::tests::revocation_expiry_and_denied_attempt_survive_restart",
+      "attack_phase": "restart-revocation",
+      "expected_reason_code": "break_glass_revoked",
+      "expected_terminal_state": "denied",
       "audit_expectation": "required",
       "value_returned": false
     }

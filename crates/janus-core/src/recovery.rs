@@ -35,6 +35,10 @@ pub enum RecoveryComponentKind {
     Approvals,
     /// Delegation grants and immutable revocation evidence.
     Delegations,
+    /// Durable role bindings and immutable revocation evidence.
+    RoleBindings,
+    /// Emergency requests, activations, attempts, completions, revocations, and reviews.
+    BreakGlassState,
     /// Lifecycle use and rotation evidence.
     LifecycleEvidence,
     /// Immutable destroy tombstones.
@@ -47,12 +51,14 @@ pub enum RecoveryComponentKind {
 
 impl RecoveryComponentKind {
     /// Every required v1 component in canonical order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::AgeCiphertext,
         Self::MetadataOverlay,
         Self::AuditLog,
         Self::Approvals,
         Self::Delegations,
+        Self::RoleBindings,
+        Self::BreakGlassState,
         Self::LifecycleEvidence,
         Self::Tombstones,
         Self::LifecycleEntry,
@@ -67,6 +73,8 @@ impl RecoveryComponentKind {
             Self::AuditLog => "audit_log",
             Self::Approvals => "approvals",
             Self::Delegations => "delegations",
+            Self::RoleBindings => "role_bindings",
+            Self::BreakGlassState => "break_glass_state",
             Self::LifecycleEvidence => "lifecycle_evidence",
             Self::Tombstones => "tombstones",
             Self::LifecycleEntry => "lifecycle_entry",

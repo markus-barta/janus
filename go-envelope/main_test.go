@@ -1856,7 +1856,7 @@ func TestPostureAPIIsValueFree(t *testing.T) {
 	if !strings.Contains(body, `"access"`) || !strings.Contains(body, `"role_gated_audit_evidence"`) {
 		t.Fatalf("posture response should include access policy: %s", body)
 	}
-	if !strings.Contains(body, `"role_duty_matrix":true`) || !strings.Contains(body, `"duty_model":"separated_admin_auditor_operator_viewer"`) || !strings.Contains(body, `"claim_policy":"explicit_only"`) || !strings.Contains(body, `"implicit_elevated_claims":false`) || !strings.Contains(body, `"key":"implicit_elevated_claims"`) || !strings.Contains(body, `"state":"disabled"`) {
+	if !strings.Contains(body, `"role_duty_matrix":true`) || !strings.Contains(body, `"duty_model":"shared_v1_roles_with_hard_separation"`) || !strings.Contains(body, `"claim_policy":"explicit_only"`) || !strings.Contains(body, `"implicit_elevated_claims":false`) || !strings.Contains(body, `"key":"implicit_elevated_claims"`) || !strings.Contains(body, `"state":"disabled"`) {
 		t.Fatalf("posture response should include role duty matrix posture: %s", body)
 	}
 	if !strings.Contains(body, `"role_availability"`) || !strings.Contains(body, `"dashboard_strip":true`) || !strings.Contains(body, `"role_availability_ux"`) {
@@ -2462,15 +2462,15 @@ func TestRolePolicyMapsZitadelClaims(t *testing.T) {
 	if !hasTestRole(roles, RoleViewer) || !hasTestRole(roles, RoleAuditor) {
 		t.Fatalf("expected viewer and auditor roles, got %#v", roles)
 	}
-	if hasTestRole(roles, RoleAdmin) {
-		t.Fatalf("auditor claim should not grant admin: %#v", roles)
+	if hasTestRole(roles, RoleSecurityAdmin) {
+		t.Fatalf("auditor claim should not grant security admin: %#v", roles)
 	}
 }
 
 func TestRolePolicyRejectsUnconfiguredElevatedClaims(t *testing.T) {
 	for _, claim := range []string{"janus:admin", "janus_admin", "janus-admin", "janus:auditor", "janus:operator"} {
 		roles := DeriveRoles("user-1", "user@example.test", []string{claim}, RolePolicy{BootstrapOwner: false})
-		if !hasTestRole(roles, RoleViewer) || hasTestRole(roles, RoleAdmin) || hasTestRole(roles, RoleAuditor) || hasTestRole(roles, RoleOperator) {
+		if !hasTestRole(roles, RoleViewer) || hasTestRole(roles, RoleSecurityAdmin) || hasTestRole(roles, RoleAuditor) || hasTestRole(roles, RoleOperator) {
 			t.Fatalf("unconfigured claim %q should only grant viewer, got %#v", claim, roles)
 		}
 	}
@@ -2480,33 +2480,35 @@ func TestRolePolicyRejectsUnconfiguredElevatedClaims(t *testing.T) {
 	}
 }
 
-func TestRolePolicyBootstrapOwnerGrantsV1Roles(t *testing.T) {
+func TestRolePolicyLegacyBootstrapOwnerGrantsNoElevatedRoles(t *testing.T) {
 	roles := DeriveRoles("owner", "", nil, RolePolicy{BootstrapOwner: true})
-	for _, role := range []string{RoleViewer, RoleAdmin, RoleAuditor, RoleOperator} {
-		if !hasTestRole(roles, role) {
-			t.Fatalf("expected bootstrap role %s in %#v", role, roles)
-		}
+	if len(roles) != 1 || roles[0] != RoleViewer {
+		t.Fatalf("legacy bootstrap must be inert, got %#v", roles)
 	}
 }
 
 func TestRolePolicyExplicitOwnerBindingClosesBootstrapGate(t *testing.T) {
 	policy := RolePolicy{
-		AdminSubjects:    map[string]bool{"markus@barta.com": true},
-		AuditorSubjects:  map[string]bool{"markus@barta.com": true},
-		OperatorSubjects: map[string]bool{"markus@barta.com": true},
-		BootstrapOwner:   false,
+		SecurityAdminSubjects: map[string]bool{"security-subject": true},
+		OwnerSubjects:         map[string]bool{"owner-subject": true},
+		ApproverSubjects:      map[string]bool{"approver-subject": true},
+		AuditorSubjects:       map[string]bool{"auditor-subject": true},
+		OperatorSubjects:      map[string]bool{"operator-subject": true},
+		BreakGlassAdminGroups: map[string]bool{"break-glass-group": true},
+		ServiceAdminGroups:    map[string]bool{"service-group": true},
+		WorkloadAdminGroups:   map[string]bool{"workload-group": true},
 	}
-	roles := DeriveRoles("zitadel-subject", "markus@barta.com", nil, policy)
-	for _, role := range []string{RoleViewer, RoleAdmin, RoleAuditor, RoleOperator} {
+	roles := DeriveRoles("security-subject", "", nil, policy)
+	for _, role := range []string{RoleViewer, RoleSecurityAdmin} {
 		if !hasTestRole(roles, role) {
-			t.Fatalf("expected explicit owner role %s in %#v", role, roles)
+			t.Fatalf("expected exact role %s in %#v", role, roles)
 		}
 	}
 	posture := AccessPostureFor(policy)
 	if !posture.ExplicitBindings || posture.BootstrapOwner || posture.GateCount != 0 || posture.ValueReturned {
 		t.Fatalf("explicit role policy should close bootstrap gate: %#v", posture)
 	}
-	if posture.SubjectBindingCount != 3 || posture.GroupBindingCount != 0 || posture.ElevatedBindingCount != 3 || posture.ClaimPolicy != "explicit_only" || posture.ImplicitElevatedClaims {
+	if posture.SubjectBindingCount != 5 || posture.GroupBindingCount != 3 || posture.ElevatedBindingCount != 8 || posture.ClaimPolicy != "explicit_only" || posture.ImplicitElevatedClaims {
 		t.Fatalf("explicit role policy should expose value-free binding counts: %#v", posture)
 	}
 	if !accessSourceHasState(posture.BindingSources, "subject_bindings", "configured") || !accessSourceHasState(posture.BindingSources, "implicit_elevated_claims", "disabled") || !accessSourceHasState(posture.BindingSources, "bootstrap_owner", "off") {
@@ -2516,38 +2518,46 @@ func TestRolePolicyExplicitOwnerBindingClosesBootstrapGate(t *testing.T) {
 
 func TestRolePolicyReadinessDistinguishesBootstrapAndExplicitLanes(t *testing.T) {
 	bootstrap := RolePolicyReadinessFor(RolePolicy{BootstrapOwner: true}, AccessPostureFor(RolePolicy{BootstrapOwner: true}))
-	if bootstrap.Ready || bootstrap.Status != "blocked" || bootstrap.BootstrapOwnerState != "active" || !bootstrap.BootstrapOwnerBlocked || bootstrap.ReadyLanes != 0 || bootstrap.MissingLanes != 3 || bootstrap.ValueReturned {
+	if bootstrap.Ready || bootstrap.Status != "blocked" || bootstrap.BootstrapOwnerState != "blocked_legacy" || !bootstrap.BootstrapOwnerBlocked || bootstrap.ReadyLanes != 0 || bootstrap.MissingLanes != 8 || bootstrap.TotalLanes != 8 || bootstrap.ValueReturned {
 		t.Fatalf("bootstrap policy should be visibly blocked without values: %#v", bootstrap)
 	}
-	if !rolePolicyReadinessHasLane(bootstrap.Lanes, RoleAdmin, "missing") || !rolePolicyReadinessHasLane(bootstrap.Lanes, RoleAuditor, "missing") || !rolePolicyReadinessHasLane(bootstrap.Lanes, RoleOperator, "missing") {
-		t.Fatalf("bootstrap policy should show all elevated lanes missing: %#v", bootstrap.Lanes)
+	for _, role := range AllRoles()[1:] {
+		if !rolePolicyReadinessHasLane(bootstrap.Lanes, role, "missing") {
+			t.Fatalf("bootstrap policy should show %s lane missing: %#v", role, bootstrap.Lanes)
+		}
 	}
 
 	partialPolicy := RolePolicy{
-		AdminSubjects:  map[string]bool{"subject-placeholder": true},
-		AuditorGroups:  map[string]bool{"group-placeholder": true},
-		BootstrapOwner: true,
+		SecurityAdminSubjects: map[string]bool{"security-subject": true},
+		AuditorGroups:         map[string]bool{"auditor-group": true},
+		BootstrapOwner:        true,
 	}
 	partial := RolePolicyReadinessFor(partialPolicy, AccessPostureFor(partialPolicy))
-	if partial.Ready || partial.Status != "blocked" || partial.BootstrapOwnerState != "inactive" || partial.BootstrapOwnerBlocked || partial.ReadyLanes != 2 || partial.MissingLanes != 1 {
-		t.Fatalf("partial explicit policy should show missing lane and inactive bootstrap: %#v", partial)
+	if partial.Ready || partial.Status != "blocked" || partial.BootstrapOwnerState != "blocked_legacy" || !partial.BootstrapOwnerBlocked || partial.ReadyLanes != 2 || partial.MissingLanes != 6 {
+		t.Fatalf("partial explicit policy should show missing lanes and blocked bootstrap: %#v", partial)
 	}
-	if !rolePolicyReadinessHasLane(partial.Lanes, RoleAdmin, "ready") || !rolePolicyReadinessHasLane(partial.Lanes, RoleAuditor, "ready") || !rolePolicyReadinessHasLane(partial.Lanes, RoleOperator, "missing") {
+	if !rolePolicyReadinessHasLane(partial.Lanes, RoleSecurityAdmin, "ready") || !rolePolicyReadinessHasLane(partial.Lanes, RoleAuditor, "ready") || !rolePolicyReadinessHasLane(partial.Lanes, RoleOperator, "missing") {
 		t.Fatalf("partial policy should distinguish ready and missing lanes: %#v", partial.Lanes)
 	}
 
 	explicitPolicy := RolePolicy{
-		AdminSubjects:    map[string]bool{"subject-placeholder": true},
-		AuditorGroups:    map[string]bool{"group-placeholder": true},
-		OperatorSubjects: map[string]bool{"operator-placeholder": true},
-		BootstrapOwner:   false,
+		OperatorSubjects:        map[string]bool{"operator-subject": true},
+		OwnerSubjects:           map[string]bool{"owner-subject": true},
+		ApproverSubjects:        map[string]bool{"approver-subject": true},
+		AuditorGroups:           map[string]bool{"auditor-group": true},
+		SecurityAdminSubjects:   map[string]bool{"security-subject": true},
+		BreakGlassAdminSubjects: map[string]bool{"break-glass-subject": true},
+		ServiceAdminGroups:      map[string]bool{"service-group": true},
+		WorkloadAdminGroups:     map[string]bool{"workload-group": true},
 	}
 	explicit := RolePolicyReadinessFor(explicitPolicy, AccessPostureFor(explicitPolicy))
-	if !explicit.Ready || explicit.Status != "ready" || explicit.BootstrapOwnerState != "off" || explicit.ReadyLanes != 3 || explicit.MissingLanes != 0 || explicit.SubjectValuesReturned || explicit.GroupValuesReturned || explicit.ClaimValuesReturned || explicit.TokenReturned || explicit.EnvValuesReturned || explicit.BackendPathReturned || explicit.ValueReturned {
+	if !explicit.Ready || explicit.Status != "ready" || explicit.BootstrapOwnerState != "off" || explicit.ReadyLanes != 8 || explicit.MissingLanes != 0 || explicit.TotalLanes != 8 || explicit.SubjectValuesReturned || explicit.GroupValuesReturned || explicit.ClaimValuesReturned || explicit.TokenReturned || explicit.EnvValuesReturned || explicit.BackendPathReturned || explicit.ValueReturned {
 		t.Fatalf("explicit policy should be ready and value-free: %#v", explicit)
 	}
-	if !rolePolicyReadinessHasLane(explicit.Lanes, RoleAdmin, "ready") || !rolePolicyReadinessHasLane(explicit.Lanes, RoleAuditor, "ready") || !rolePolicyReadinessHasLane(explicit.Lanes, RoleOperator, "ready") {
-		t.Fatalf("explicit policy should show all elevated lanes ready: %#v", explicit.Lanes)
+	for _, role := range AllRoles()[1:] {
+		if !rolePolicyReadinessHasLane(explicit.Lanes, role, "ready") {
+			t.Fatalf("explicit policy should show %s lane ready: %#v", role, explicit.Lanes)
+		}
 	}
 }
 
@@ -2580,10 +2590,9 @@ func TestBuildProvenanceReceiptDistinguishesBoundAndUnknownBuilds(t *testing.T) 
 
 func TestProductModePostureDistinguishesClaims(t *testing.T) {
 	policy := RolePolicy{
-		AdminSubjects:    map[string]bool{"markus@barta.com": true},
-		AuditorSubjects:  map[string]bool{"markus@barta.com": true},
-		OperatorSubjects: map[string]bool{"markus@barta.com": true},
-		BootstrapOwner:   false,
+		SecurityAdminSubjects: map[string]bool{"security-subject": true},
+		AuditorSubjects:       map[string]bool{"auditor-subject": true},
+		OperatorSubjects:      map[string]bool{"operator-subject": true},
 	}
 	access := AccessPostureFor(policy)
 	audit := AuditPosture{ChainVerified: true, SinkWritable: true}
@@ -2866,11 +2875,11 @@ func TestDockerComposePinsExplicitJanusRoleBindings(t *testing.T) {
 	}
 	body := string(raw)
 	for _, want := range []string{
-		"JANUS_BOOTSTRAP_OWNER=false",
-		"JANUS_ADMIN_SUBJECTS=markus@barta.com",
+		"JANUS_UNSAFE_BOOTSTRAP_OWNER=false",
+		"JANUS_SECURITY_ADMIN_SUBJECTS=markus@barta.com",
 		"JANUS_AUDITOR_SUBJECTS=markus@barta.com",
 		"JANUS_OPERATOR_SUBJECTS=markus@barta.com",
-		"JANUS_ADMIN_GROUPS=janus:admin",
+		"JANUS_SECURITY_ADMIN_GROUPS=janus:security_admin",
 		"JANUS_AUDITOR_GROUPS=janus:auditor",
 		"JANUS_OPERATOR_GROUPS=janus:operator",
 	} {

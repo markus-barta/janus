@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "break_glass_admin.rs"]
+mod break_glass_admin;
 #[path = "lifecycle_entry.rs"]
 mod lifecycle_entry;
 #[path = "lifecycle_queue.rs"]
@@ -18,6 +20,8 @@ mod pharos_retirement;
 mod recovery;
 #[path = "retention.rs"]
 mod retention;
+#[path = "role_admin.rs"]
+mod role_admin;
 #[path = "scope_transfer.rs"]
 mod scope_transfer;
 
@@ -34,15 +38,17 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use janus_core::{
     authorize_runtime_action, ApprovalGrant, AuditAction, AuditEvent, AuditOutcome, AuditSink,
-    AuditWrite, BlastRadius, ClassPermitPolicy, ConsumerDescriptor, ConsumerKind, ConsumerRef,
-    ConsumerRegistry, DelegationId, DelegationPolicy, Destination, EgressMode, Environment,
-    ExecutorRef, JanusError, LifecycleTransitionPolicy, NamespaceId, OwnerRef, Principal,
-    PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReloadMethod,
-    RotationOutcome, RuntimeAction, RuntimePlane, RuntimeTransport, SafeLabel, ScopePathV1,
-    ScopeRef, SecretAgeEvidence, SecretBroker, SecretDescriptor, SecretLifecycle, SecretMeta,
-    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretTombstoneRequest, Severity,
-    StaleSecretPolicy, StaleSecretReportRow, StaleSecretReporter, TombstonePolicy, TrustLevel,
-    UsePermit, UseProfile, UseRequest, ValidationProbe, WorkloadId,
+    AuditWrite, BlastRadius, BreakGlassActivation, BreakGlassActivationId, BreakGlassAttempt,
+    BreakGlassCompletion, BreakGlassCompletionOutcome, ClassPermitPolicy, ConsumerDescriptor,
+    ConsumerKind, ConsumerRef, ConsumerRegistry, DelegationId, DelegationPolicy, Destination,
+    EgressMode, Environment, ExecutorRef, JanusError, LifecycleTransitionPolicy, NamespaceId,
+    OwnerRef, Permission, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId,
+    ProfilePolicy, Purpose, ReloadMethod, RotationOutcome, RuntimeAction, RuntimePlane,
+    RuntimeTransport, SafeLabel, ScopePathV1, ScopeRef, SecretAgeEvidence, SecretBroker,
+    SecretDescriptor, SecretLifecycle, SecretMeta, SecretMetadataOverlay, SecretName, SecretRef,
+    SecretStore, SecretTombstoneRequest, Severity, StaleSecretPolicy, StaleSecretReportRow,
+    StaleSecretReporter, TombstonePolicy, TrustLevel, UsePermit, UseProfile, UseRequest,
+    ValidationProbe, WorkloadId,
 };
 use janus_executor::{
     ApprovedUseExecutor, EnvFileHashSidecarFormat, EnvFileHashSidecarSpec, EnvFilePlan,
@@ -56,10 +62,10 @@ use janus_forge::{
 use janus_local::{
     enforce_migration_ready_from_env, enforce_recovery_drill_freshness_from_env,
     enforce_release_admission_from_env, enforce_retention_ready_from_env,
-    enforce_scope_transfer_ready_from_env, ApprovalListEntry,
-    ApprovalRegistry as SharedApprovalRegistry, DelegationRegistry, FileApprovalRegistry,
-    FileDelegationRegistry, FileLifecycleEvidenceRegistry, FilePermitRegistry,
-    FileTombstoneRegistry, JsonlAuditSink,
+    enforce_runtime_role_from_env, enforce_scope_transfer_ready_from_env, ApprovalListEntry,
+    ApprovalRegistry as SharedApprovalRegistry, BreakGlassRegistry, DelegationRegistry,
+    FileApprovalRegistry, FileBreakGlassRegistry, FileDelegationRegistry,
+    FileLifecycleEvidenceRegistry, FilePermitRegistry, FileTombstoneRegistry, JsonlAuditSink,
     LifecycleEvidenceRegistry as SharedLifecycleEvidenceRegistry,
     PermitRegistry as SharedPermitRegistry, PermitStore as SharedPermitStore,
     TombstoneRegistry as SharedTombstoneRegistry,
@@ -103,6 +109,19 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
     let principal = release_principal_from_env()?;
     enforce_process_plane(selected_plane, action, &principal)?;
     enforce_cli_argument_budget(action, &args)?;
+    let emergency_activation = requested_break_glass_activation(&args, action)?;
+    let role_authorization = if emergency_activation.is_some() {
+        None
+    } else {
+        enforce_runtime_role_from_env(action, &principal, None, &[], SystemTime::now())
+            .context("role authorization denied runtime action")?
+    };
+    if break_glass_admin::is_break_glass_command(&args) {
+        return break_glass_admin::run(&args, &principal);
+    }
+    if role_admin::is_role_admin_command(&args) {
+        return role_admin::run(&args, &principal, role_authorization.as_ref());
+    }
     if migration::is_migration_command(&args) {
         let release = enforce_release_admission_from_env(&principal)
             .context("release admission denied janusd-admin migration")?;
@@ -163,7 +182,7 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
         Command::RunManaged(config) => run_managed_command(config).await,
         Command::EnvFilePreflight(config) => run_env_file_preflight(config).await,
         Command::EnvFile(config) => run_env_file(config).await,
-        Command::Approve(command) => run_approve(command).await,
+        Command::Approve(command) => run_approve(command, &principal).await,
         Command::Delegation(command) => run_delegation(command).await,
         Command::LifecycleTransition(config) => run_lifecycle_transition(config).await,
         Command::LifecycleStaleReport(config) => run_lifecycle_stale_report(config).await,
@@ -257,7 +276,8 @@ struct ForgeRotateGeneratedConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RunManagedCommandConfig {
     profile_id: ProfileId,
-    permit: PermitToken,
+    permit: Option<PermitToken>,
+    break_glass_activation: Option<BreakGlassActivationId>,
     requested_args: Vec<String>,
 }
 
@@ -270,7 +290,8 @@ struct RunManagedPreflightConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EnvFileConfig {
     profile_id: ProfileId,
-    permit: PermitToken,
+    permit: Option<PermitToken>,
+    break_glass_activation: Option<BreakGlassActivationId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -293,6 +314,7 @@ struct ApprovePermitConfig {
     approval: ApprovalToken,
     permit_ttl: Option<Duration>,
     revoke_approval: bool,
+    recipient: DelegationPrincipalSpec,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -551,16 +573,289 @@ async fn run_forge_rotate_generated(config: ForgeRotateGeneratedConfig) -> Resul
     Ok(())
 }
 
-async fn run_managed_command(config: RunManagedCommandConfig) -> Result<()> {
+#[derive(Debug)]
+struct ActiveBreakGlassUse {
+    registry: FileBreakGlassRegistry,
+    activation: BreakGlassActivation,
+    attempt: BreakGlassAttempt,
+}
+
+impl ActiveBreakGlassUse {
+    fn begin(
+        activation_id: &BreakGlassActivationId,
+        actor: &PrincipalChain,
+        permission: Permission,
+        target: SecretRef,
+        now: SystemTime,
+    ) -> Result<Self> {
+        let registry = FileBreakGlassRegistry::new(break_glass_registry_dir()?);
+        let mut audit = break_glass_audit_sink()?;
+        Self::begin_with(
+            registry,
+            activation_id,
+            actor,
+            permission,
+            target,
+            now,
+            &mut audit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin_with(
+        registry: FileBreakGlassRegistry,
+        activation_id: &BreakGlassActivationId,
+        actor: &PrincipalChain,
+        permission: Permission,
+        target: SecretRef,
+        now: SystemTime,
+        audit: &mut impl AuditSink,
+    ) -> Result<Self> {
+        let record = registry.get(activation_id.as_str())?;
+        let attempt = BreakGlassAttempt::authorize(
+            &record.activation,
+            actor,
+            actor.scope.clone(),
+            permission,
+            target,
+            now,
+            record.revocation.as_ref(),
+            record.completion.is_some() || record.attempts.iter().any(BreakGlassAttempt::allowed),
+            audit,
+        )?;
+        registry.record_attempt(&attempt)?;
+        if !attempt.allowed() {
+            return Err(JanusError::policy_denied(
+                attempt.reason_code(),
+                "break-glass activation denied the exact use attempt",
+            )
+            .into());
+        }
+        Ok(Self {
+            registry,
+            activation: record.activation,
+            attempt,
+        })
+    }
+
+    fn complete(&self, actor: &PrincipalChain, outcome: BreakGlassCompletionOutcome) -> Result<()> {
+        let mut audit = break_glass_audit_sink()?;
+        self.complete_with(actor, outcome, SystemTime::now(), &mut audit)
+    }
+
+    fn complete_with(
+        &self,
+        actor: &PrincipalChain,
+        outcome: BreakGlassCompletionOutcome,
+        completed_at: SystemTime,
+        audit: &mut impl AuditSink,
+    ) -> Result<()> {
+        let completion = BreakGlassCompletion::complete(
+            &self.activation,
+            &self.attempt,
+            actor,
+            outcome,
+            completed_at,
+            audit,
+        )?;
+        self.registry.record_completion(&completion)?;
+        Ok(())
+    }
+}
+
+async fn issue_break_glass_permit(
+    activation: &BreakGlassActivation,
+    profile_id: &ProfileId,
+    profiles: &ManagedCommandProfileCatalog,
+    descriptors: &[SecretDescriptor],
+    principal: &PrincipalChain,
+    permits: &FilePermitRegistry,
+    now: SystemTime,
+) -> Result<PermitToken> {
+    issue_break_glass_permit_with(
+        activation,
+        profile_id,
+        profiles,
+        descriptors,
+        principal,
+        permits,
+        load_age_store_from_env()?,
+        now,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn issue_break_glass_permit_with<S>(
+    activation: &BreakGlassActivation,
+    profile_id: &ProfileId,
+    profiles: &ManagedCommandProfileCatalog,
+    descriptors: &[SecretDescriptor],
+    principal: &PrincipalChain,
+    permits: &FilePermitRegistry,
+    store: S,
+    now: SystemTime,
+) -> Result<PermitToken>
+where
+    S: SecretStore,
+{
+    let binding = profiles
+        .profile_binding(profile_id)
+        .context("break-glass reviewed profile not found")?;
+    if &binding.secret_ref != activation.request().target() {
+        return Err(JanusError::policy_denied(
+            "break_glass_target_mismatch",
+            "break-glass activation does not match the reviewed profile target",
+        )
+        .into());
+    }
+    let descriptor = descriptors
+        .iter()
+        .find(|descriptor| descriptor.secret_ref == binding.secret_ref)
+        .ok_or_else(|| JanusError::NotInManifest {
+            name: binding.secret_ref.as_str().to_string(),
+        })?;
+    if descriptor.scope != principal.scope
+        || descriptor.scope != *activation.request().scope()
+        || !descriptor
+            .allowed_uses
+            .iter()
+            .any(|allowed| allowed == profile_id)
+    {
+        return Err(JanusError::policy_denied(
+            "break_glass_profile_mismatch",
+            "break-glass profile is outside the exact descriptor scope or allowlist",
+        )
+        .into());
+    }
+    if let Some((reason_code, detail)) = descriptor.normal_use_denial() {
+        return Err(JanusError::policy_denied(reason_code, detail).into());
+    }
+    let class = descriptor
+        .classification
+        .expect("normal_use_denial guarantees classification is present");
+    let remaining = activation
+        .request()
+        .expires_at()
+        .duration_since(now)
+        .map_err(|_| {
+            JanusError::policy_denied("break_glass_expired", "break-glass activation has expired")
+        })?;
+    let ttl = ClassPermitPolicy::for_class(class)
+        .max_ttl()
+        .map_or(remaining, |limit| remaining.min(limit));
+    if ttl.is_zero() {
+        return Err(JanusError::policy_denied(
+            "break_glass_expired",
+            "break-glass activation has expired",
+        )
+        .into());
+    }
+    let profile = UseProfile {
+        id: profile_id.clone(),
+        scope: descriptor.scope.clone(),
+        secret_ref: descriptor.secret_ref.clone(),
+        executor: binding.executor,
+        destination: binding.destination.clone(),
+        egress: EgressMode::Connector,
+        trust_level: TrustLevel::L2,
+        ttl,
+        single_use: true,
+        enabled: true,
+    };
+    let request = UseRequest {
+        secret_ref: descriptor.secret_ref.clone(),
+        scope: descriptor.scope.clone(),
+        profile_id: profile_id.clone(),
+        destination: binding.destination,
+        purpose: Purpose::new("separately approved emergency action")?,
+    };
+    let approval = ApprovalGrant::for_request(
+        &request,
+        &profile,
+        class,
+        activation.request().expires_at(),
+        SafeLabel::new("break-glass activation approval")?,
+    );
+    let mut broker = SecretBroker::new(
+        store,
+        ProfilePolicy::new(vec![profile]),
+        AuditWrite::accepting(),
+    );
+    let permit = broker
+        .request_use_with_approval(&request, principal, now, Some(&approval))
+        .await?;
+    SharedPermitStore::store(permits, &permit)?;
+    PermitToken::new(permit.id().as_str())
+}
+
+fn finish_break_glass_failure(
+    guard: Option<&ActiveBreakGlassUse>,
+    principal: &PrincipalChain,
+    source: anyhow::Error,
+) -> Result<()> {
+    if let Some(guard) = guard {
+        guard
+            .complete(principal, BreakGlassCompletionOutcome::Failed)
+            .context("failed to persist required break-glass failure evidence")?;
+    }
+    Err(source)
+}
+
+async fn run_managed_command(mut config: RunManagedCommandConfig) -> Result<()> {
     let manifest_path = run_profile_manifest_path()?;
     let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
+    let principal = run_principal_from_env()?;
+    let emergency = match config.break_glass_activation.as_ref() {
+        Some(activation_id) => {
+            let target = profiles
+                .profile_binding(&config.profile_id)
+                .context("break-glass reviewed managed-command profile not found")?
+                .secret_ref;
+            Some(ActiveBreakGlassUse::begin(
+                activation_id,
+                &principal,
+                Permission::ManagedRun,
+                target,
+                SystemTime::now(),
+            )?)
+        }
+        None => None,
+    };
     let permits = FilePermitRegistry::new(run_permit_registry_dir()?);
-    let store = load_age_store_from_env()?;
-    let descriptors = store
-        .list()
-        .await
-        .context("failed to load current descriptors for managed command use")?;
-    let policy = profiles.use_policy(&descriptors)?;
+    let setup: Result<_> = async {
+        let store = load_age_store_from_env()?;
+        let descriptors = store
+            .list()
+            .await
+            .context("failed to load current descriptors for managed command use")?;
+        let policy = profiles.use_policy(&descriptors)?;
+        let permit = match emergency.as_ref() {
+            Some(guard) => {
+                issue_break_glass_permit(
+                    &guard.activation,
+                    &config.profile_id,
+                    &profiles,
+                    &descriptors,
+                    &principal,
+                    &permits,
+                    guard.attempt.attempted_at(),
+                )
+                .await?
+            }
+            None => config
+                .permit
+                .clone()
+                .context("normal managed-command use requires --permit")?,
+        };
+        Ok((store, policy, permit))
+    }
+    .await;
+    let (store, policy, permit) = match setup {
+        Ok(setup) => setup,
+        Err(error) => return finish_break_glass_failure(emergency.as_ref(), &principal, error),
+    };
+    config.permit = Some(permit);
     let executor = DelegatingApprovedUseExecutor {
         executor: ApprovedUseExecutor::new(SecretBroker::new(
             store,
@@ -569,15 +864,27 @@ async fn run_managed_command(config: RunManagedCommandConfig) -> Result<()> {
         )),
         delegations: FileDelegationRegistry::new(delegation_registry_dir()),
     };
-    let principal = run_principal_from_env()?;
     let mut runner = ProfileManifestManagedCommandRunner {
         profiles,
         permits,
         executor,
-        principal,
+        principal: principal.clone(),
         clock: SystemManagedCommandClock,
     };
-    let outcome = run_managed_command_with(&config, &mut runner).await?;
+    let outcome = match run_managed_command_with(&config, &mut runner).await {
+        Ok(outcome) => outcome,
+        Err(error) => return finish_break_glass_failure(emergency.as_ref(), &principal, error),
+    };
+    if let Some(guard) = emergency.as_ref() {
+        let completion_outcome = if outcome.exit_success {
+            BreakGlassCompletionOutcome::Succeeded
+        } else {
+            BreakGlassCompletionOutcome::Failed
+        };
+        guard
+            .complete(&principal, completion_outcome)
+            .context("failed to persist required break-glass completion evidence")?;
+    }
     let lifecycle_evidence = FileLifecycleEvidenceRegistry::new(lifecycle_evidence_registry_dir());
     record_managed_command_evidence(&outcome, &lifecycle_evidence, SystemTime::now())?;
     emit_run_managed_outcome(&outcome);
@@ -592,16 +899,60 @@ async fn run_managed_command_preflight(config: RunManagedPreflightConfig) -> Res
     Ok(())
 }
 
-async fn run_env_file(config: EnvFileConfig) -> Result<()> {
+async fn run_env_file(mut config: EnvFileConfig) -> Result<()> {
     let manifest_path = run_profile_manifest_path()?;
     let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
+    let principal = run_principal_from_env()?;
+    let emergency = match config.break_glass_activation.as_ref() {
+        Some(activation_id) => {
+            let target = profiles
+                .profile_binding(&config.profile_id)
+                .context("break-glass reviewed env-file profile not found")?
+                .secret_ref;
+            Some(ActiveBreakGlassUse::begin(
+                activation_id,
+                &principal,
+                Permission::EnvFile,
+                target,
+                SystemTime::now(),
+            )?)
+        }
+        None => None,
+    };
     let permits = FilePermitRegistry::new(run_permit_registry_dir()?);
-    let store = load_age_store_from_env()?;
-    let descriptors = store
-        .list()
-        .await
-        .context("failed to load current descriptors for env-file use")?;
-    let policy = profiles.use_policy(&descriptors)?;
+    let setup: Result<_> = async {
+        let store = load_age_store_from_env()?;
+        let descriptors = store
+            .list()
+            .await
+            .context("failed to load current descriptors for env-file use")?;
+        let policy = profiles.use_policy(&descriptors)?;
+        let permit = match emergency.as_ref() {
+            Some(guard) => {
+                issue_break_glass_permit(
+                    &guard.activation,
+                    &config.profile_id,
+                    &profiles,
+                    &descriptors,
+                    &principal,
+                    &permits,
+                    guard.attempt.attempted_at(),
+                )
+                .await?
+            }
+            None => config
+                .permit
+                .clone()
+                .context("normal env-file use requires --permit")?,
+        };
+        Ok((store, policy, permit))
+    }
+    .await;
+    let (store, policy, permit) = match setup {
+        Ok(setup) => setup,
+        Err(error) => return finish_break_glass_failure(emergency.as_ref(), &principal, error),
+    };
+    config.permit = Some(permit);
     let executor = DelegatingApprovedUseExecutor {
         executor: ApprovedUseExecutor::new(SecretBroker::new(
             store,
@@ -610,15 +961,22 @@ async fn run_env_file(config: EnvFileConfig) -> Result<()> {
         )),
         delegations: FileDelegationRegistry::new(delegation_registry_dir()),
     };
-    let principal = run_principal_from_env()?;
     let mut runner = ProfileManifestEnvFileRunner {
         profiles,
         permits,
         executor,
-        principal,
+        principal: principal.clone(),
         clock: SystemManagedCommandClock,
     };
-    let outcome = run_env_file_with(&config, &mut runner).await?;
+    let outcome = match run_env_file_with(&config, &mut runner).await {
+        Ok(outcome) => outcome,
+        Err(error) => return finish_break_glass_failure(emergency.as_ref(), &principal, error),
+    };
+    if let Some(guard) = emergency.as_ref() {
+        guard
+            .complete(&principal, BreakGlassCompletionOutcome::Succeeded)
+            .context("failed to persist required break-glass completion evidence")?;
+    }
     let lifecycle_evidence = FileLifecycleEvidenceRegistry::new(lifecycle_evidence_registry_dir());
     record_secret_use_evidence(&outcome.secret_ref, &lifecycle_evidence, SystemTime::now())?;
     emit_env_file_outcome(&outcome);
@@ -633,7 +991,7 @@ async fn run_env_file_preflight(config: EnvFilePreflightConfig) -> Result<()> {
     Ok(())
 }
 
-async fn run_approve(command: ApproveCommand) -> Result<()> {
+async fn run_approve(command: ApproveCommand, actor: &PrincipalChain) -> Result<()> {
     let registry = FileApprovalRegistry::new(approval_registry_dir()?);
     match command {
         ApproveCommand::Issue(config) => {
@@ -652,13 +1010,12 @@ async fn run_approve(command: ApproveCommand) -> Result<()> {
         ApproveCommand::Permit(config) => {
             let permits = FilePermitRegistry::new(run_permit_registry_dir()?);
             let store = load_age_store_from_env()?;
-            let principal = run_principal_from_env()?;
             let outcome = issue_approved_permit_with(
                 &config,
                 &registry,
                 &permits,
                 store,
-                &principal,
+                actor,
                 SystemTime::now(),
             )
             .await?;
@@ -1107,7 +1464,7 @@ async fn build_lifecycle_stale_report_with<S, A>(
     config: &LifecycleStaleReportConfig,
     store: S,
     evidence: &BTreeMap<SecretRef, SecretAgeEvidence>,
-    principal: &PrincipalChain,
+    actor: &PrincipalChain,
     audit: &mut A,
     now: SystemTime,
 ) -> Result<Vec<StaleSecretReportRow>>
@@ -1121,7 +1478,7 @@ where
         .context("failed to list descriptors for lifecycle stale report")?;
     let policy = StaleSecretPolicy::new(config.stale_after, config.missing_evidence_after);
     StaleSecretReporter::new(policy)
-        .report(&descriptors, evidence, now, principal, audit)
+        .report(&descriptors, evidence, now, actor, audit)
         .map_err(Into::into)
 }
 
@@ -1129,7 +1486,7 @@ async fn record_lifecycle_destroy_with<S, R, A>(
     config: &LifecycleDestroyRecordConfig,
     store: S,
     registry: &R,
-    principal: &PrincipalChain,
+    actor: &PrincipalChain,
     audit: &mut A,
     now: SystemTime,
 ) -> Result<LifecycleDestroyRecordCliOutcome>
@@ -1157,8 +1514,8 @@ where
         now,
         retain_until,
     );
-    let tombstone = TombstonePolicy::record(descriptor, request, principal, audit)?;
-    SharedTombstoneRegistry::record(registry, &tombstone, principal)?;
+    let tombstone = TombstonePolicy::record(descriptor, request, actor, audit)?;
+    SharedTombstoneRegistry::record(registry, &tombstone, actor)?;
 
     Ok(LifecycleDestroyRecordCliOutcome {
         secret_ref: tombstone.secret_ref().as_str().to_string(),
@@ -1595,7 +1952,7 @@ async fn issue_approved_permit_with<S, R, P>(
     approvals: &R,
     permits: &P,
     store: S,
-    principal: &PrincipalChain,
+    actor: &PrincipalChain,
     now: SystemTime,
 ) -> Result<ApprovedPermitIssueOutcome>
 where
@@ -1604,6 +1961,18 @@ where
     P: SharedPermitStore,
 {
     let approval = approvals.get(config.approval.as_str())?;
+    let recipient = delegation_principal(
+        &config.recipient,
+        &approval.scope().executor,
+        approval.scope().scope.clone(),
+    );
+    if recipient.binding_key() == actor.binding_key() {
+        return Err(JanusError::policy_denied(
+            "separation_approver_executor",
+            "approval actor cannot receive the resulting use permit",
+        )
+        .into());
+    }
     let ttl = permit_ttl_for_approval(&approval, config.permit_ttl, now)?;
     let profile = use_profile_for_approval(&approval, ttl);
     let request = use_request_for_approval(&approval);
@@ -1613,7 +1982,7 @@ where
         AuditWrite::accepting(),
     );
     let permit = broker
-        .request_use_with_approval(&request, principal, now, Some(&approval))
+        .request_use_with_approval(&request, &recipient, now, Some(&approval))
         .await?;
     if permit.approval().is_none() {
         return Err(JanusError::policy_denied(
@@ -2050,7 +2419,12 @@ where
         if profile.allowed_args() != config.requested_args.as_slice() {
             anyhow::bail!("janusd-use run command arguments do not match the reviewed profile");
         }
-        let permit = self.permits.resolve(&config.permit)?;
+        let permit = self.permits.resolve(
+            config
+                .permit
+                .as_ref()
+                .context("managed-command permit was not prepared")?,
+        )?;
         self.executor
             .run(
                 profile,
@@ -2181,7 +2555,12 @@ where
             .profiles
             .env_file_profile(&config.profile_id)
             .context("env-file profile not found")?;
-        let permit = self.permits.resolve(&config.permit)?;
+        let permit = self.permits.resolve(
+            config
+                .permit
+                .as_ref()
+                .context("env-file permit was not prepared")?,
+        )?;
         self.executor
             .render(profile, &permit, &self.principal, self.clock.now())
             .await
@@ -2876,6 +3255,39 @@ fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
         [scope_transfer, ..] if scope_transfer == "scope-transfer" => RuntimeAction::ScopeTransfer,
         [recovery_drill, ..] if recovery_drill == "recovery-drill" => RuntimeAction::RecoveryDrill,
         [retention, ..] if retention == "retention" => RuntimeAction::Retention,
+        [role_binding, issue, ..] if role_binding == "role-binding" && issue == "issue" => {
+            RuntimeAction::RoleBindingIssue
+        }
+        [role_binding, list] if role_binding == "role-binding" && list == "list" => {
+            RuntimeAction::RoleBindingList
+        }
+        [role_binding, revoke, ..] if role_binding == "role-binding" && revoke == "revoke" => {
+            RuntimeAction::RoleBindingRevoke
+        }
+        [role_binding, status, ..] if role_binding == "role-binding" && status == "status" => {
+            RuntimeAction::RoleBindingStatus
+        }
+        [policy, status] if policy == "authorization-policy" && status == "status" => {
+            RuntimeAction::AuthorizationPolicyStatus
+        }
+        [break_glass, request, ..] if break_glass == "break-glass" && request == "request" => {
+            RuntimeAction::BreakGlassRequest
+        }
+        [break_glass, approve, ..] if break_glass == "break-glass" && approve == "approve" => {
+            RuntimeAction::BreakGlassApprove
+        }
+        [break_glass, list] if break_glass == "break-glass" && list == "list" => {
+            RuntimeAction::BreakGlassList
+        }
+        [break_glass, status, ..] if break_glass == "break-glass" && status == "status" => {
+            RuntimeAction::BreakGlassStatus
+        }
+        [break_glass, revoke, ..] if break_glass == "break-glass" && revoke == "revoke" => {
+            RuntimeAction::BreakGlassRevoke
+        }
+        [break_glass, review, ..] if break_glass == "break-glass" && review == "review" => {
+            RuntimeAction::BreakGlassReview
+        }
         [lifecycle_entry, ..] if lifecycle_entry == "lifecycle-entry" => {
             RuntimeAction::LifecycleEntry
         }
@@ -2953,6 +3365,38 @@ fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
         ),
     };
     Ok(action)
+}
+
+fn requested_break_glass_activation(
+    args: &[String],
+    action: RuntimeAction,
+) -> Result<Option<BreakGlassActivationId>> {
+    let mut activation = None;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--" {
+            break;
+        }
+        if args[index] == "--break-glass-activation" {
+            if activation.is_some() {
+                anyhow::bail!("--break-glass-activation may only be provided once");
+            }
+            let value = args
+                .get(index + 1)
+                .context("--break-glass-activation requires a value")?;
+            activation = Some(BreakGlassActivationId::from_opaque(value.clone())?);
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    if activation.is_some() && !matches!(action, RuntimeAction::ManagedRun | RuntimeAction::EnvFile)
+    {
+        anyhow::bail!(
+            "break-glass activation is only accepted by exact managed run or env-file actions"
+        );
+    }
+    Ok(activation)
 }
 
 fn enforce_cli_argument_budget(action: RuntimeAction, args: &[String]) -> Result<()> {
@@ -3558,6 +4002,7 @@ fn parse_approve_permit(args: impl IntoIterator<Item = String>) -> Result<Approv
     let mut approval = None;
     let mut permit_ttl = None;
     let mut revoke_approval = false;
+    let mut recipient = DelegationPrincipalSpec::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -3589,6 +4034,21 @@ fn parse_approve_permit(args: impl IntoIterator<Item = String>) -> Result<Approv
                 }
                 revoke_approval = true;
             }
+            "--recipient-human" => replace_once(
+                &mut recipient.human,
+                "--recipient-human",
+                PrincipalId::new(required_arg("--recipient-human", args.next())?)?,
+            )?,
+            "--recipient-agent" => replace_once(
+                &mut recipient.agent,
+                "--recipient-agent",
+                PrincipalId::new(required_arg("--recipient-agent", args.next())?)?,
+            )?,
+            "--recipient-workload" => replace_once(
+                &mut recipient.workload,
+                "--recipient-workload",
+                PrincipalId::new(required_arg("--recipient-workload", args.next())?)?,
+            )?,
             "--secret" | "--secret-ref" | "--value" | "--raw-value" | "--profile" => {
                 anyhow::bail!("approve permit accepts only an approval id and permit controls")
             }
@@ -3600,6 +4060,7 @@ fn parse_approve_permit(args: impl IntoIterator<Item = String>) -> Result<Approv
         approval: approval.context("--approval is required")?,
         permit_ttl,
         revoke_approval,
+        recipient,
     })
 }
 
@@ -3823,6 +4284,7 @@ fn parse_positive_days(flag: &'static str, value: &str) -> Result<Duration> {
 fn parse_run_managed(args: impl IntoIterator<Item = String>) -> Result<RunManagedCommandConfig> {
     let mut profile_id = None;
     let mut permit = None;
+    let mut break_glass_activation = None;
     let mut requested_args = Vec::new();
     let mut saw_separator = false;
     let mut args = args.into_iter();
@@ -3845,6 +4307,17 @@ fn parse_run_managed(args: impl IntoIterator<Item = String>) -> Result<RunManage
                     anyhow::bail!("--permit may only be provided once");
                 }
             }
+            "--break-glass-activation" => {
+                if break_glass_activation
+                    .replace(BreakGlassActivationId::from_opaque(required_arg(
+                        "--break-glass-activation",
+                        args.next(),
+                    )?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--break-glass-activation may only be provided once");
+                }
+            }
             "--" => {
                 saw_separator = true;
                 requested_args.extend(args);
@@ -3862,9 +4335,9 @@ fn parse_run_managed(args: impl IntoIterator<Item = String>) -> Result<RunManage
     let Some(profile_id) = profile_id else {
         anyhow::bail!("--profile is required");
     };
-    let Some(permit) = permit else {
-        anyhow::bail!("--permit is required");
-    };
+    if permit.is_some() == break_glass_activation.is_some() {
+        anyhow::bail!("exactly one of --permit or --break-glass-activation is required");
+    }
     if !saw_separator {
         anyhow::bail!("janusd run requires -- before command arguments");
     }
@@ -3872,6 +4345,7 @@ fn parse_run_managed(args: impl IntoIterator<Item = String>) -> Result<RunManage
     Ok(RunManagedCommandConfig {
         profile_id,
         permit,
+        break_glass_activation,
         requested_args,
     })
 }
@@ -3900,6 +4374,9 @@ fn parse_run_managed_preflight(
                 break;
             }
             "--permit" => anyhow::bail!("run preflight does not accept a permit"),
+            "--break-glass-activation" => {
+                anyhow::bail!("run preflight does not accept a break-glass activation")
+            }
             "--secret" | "--secret-ref" | "--value" | "--env" | "--binary" | "--destination"
             | "--executor" => {
                 anyhow::bail!("run preflight policy fields come from the reviewed profile")
@@ -3927,6 +4404,7 @@ fn parse_run_managed_preflight(
 fn parse_env_file(args: impl IntoIterator<Item = String>) -> Result<EnvFileConfig> {
     let mut profile_id = None;
     let mut permit = None;
+    let mut break_glass_activation = None;
     let mut args = args.into_iter();
 
     while let Some(arg) = args.next() {
@@ -3947,6 +4425,17 @@ fn parse_env_file(args: impl IntoIterator<Item = String>) -> Result<EnvFileConfi
                     anyhow::bail!("--permit may only be provided once");
                 }
             }
+            "--break-glass-activation" => {
+                if break_glass_activation
+                    .replace(BreakGlassActivationId::from_opaque(required_arg(
+                        "--break-glass-activation",
+                        args.next(),
+                    )?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--break-glass-activation may only be provided once");
+                }
+            }
             "--secret" | "--secret-ref" | "--value" | "--raw-value" | "--env" | "--output"
             | "--destination" | "--executor" | "--binary" => {
                 anyhow::bail!("env-file policy fields come from the reviewed profile")
@@ -3957,9 +4446,13 @@ fn parse_env_file(args: impl IntoIterator<Item = String>) -> Result<EnvFileConfi
         }
     }
 
+    if permit.is_some() == break_glass_activation.is_some() {
+        anyhow::bail!("exactly one of --permit or --break-glass-activation is required");
+    }
     Ok(EnvFileConfig {
         profile_id: profile_id.context("--profile is required")?,
-        permit: permit.context("--permit is required")?,
+        permit,
+        break_glass_activation,
     })
 }
 
@@ -3980,6 +4473,9 @@ fn parse_env_file_preflight(
                 }
             }
             "--permit" => anyhow::bail!("janusd env-file preflight does not accept permits"),
+            "--break-glass-activation" => {
+                anyhow::bail!("janusd env-file preflight does not accept a break-glass activation")
+            }
             "--secret" | "--secret-ref" | "--value" | "--raw-value" | "--env" | "--output"
             | "--destination" | "--executor" | "--binary" => {
                 anyhow::bail!("env-file preflight policy fields come from the reviewed profile")
@@ -4129,6 +4625,21 @@ fn run_permit_registry_dir() -> Result<PathBuf> {
     env_first(&["JANUS_RUN_PERMIT_DIR", "JANUS_PERMIT_DIR"])
         .map(PathBuf::from)
         .context("JANUS_RUN_PERMIT_DIR is required")
+}
+
+fn break_glass_registry_dir() -> Result<PathBuf> {
+    env::var_os("JANUS_BREAK_GLASS_ROOT")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .context("JANUS_BREAK_GLASS_ROOT is required")
+}
+
+fn break_glass_audit_sink() -> Result<JsonlAuditSink> {
+    let path = env::var_os("JANUS_ROLE_AUDIT_FILE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .context("JANUS_ROLE_AUDIT_FILE is required")?;
+    Ok(JsonlAuditSink::open(path)?)
 }
 
 fn approval_registry_dir() -> Result<PathBuf> {
@@ -4546,7 +5057,8 @@ Administration commands:
   approve issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \
     --egress connector|sandboxed|proxy_enforced|hook_guarded|declared_only \
     --expires-in-seconds SECONDS
-  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]
+  approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval] \
+    [--recipient-human ID] [--recipient-agent ID] [--recipient-workload ID]
   approve list
   approve revoke --approval appr_...
   delegation issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \
@@ -4556,6 +5068,20 @@ Administration commands:
   delegation list
   delegation inspect --delegation dlg_...
   delegation revoke --delegation dlg_... --reason REASON
+  role-binding issue --principal-binding BINDING --role ROLE --expires-in-seconds SECONDS \
+    --source-reference REF --reason REASON [--target-binding TARGET]
+  role-binding list
+  role-binding status --binding rbd_...
+  role-binding revoke --binding rbd_... --reason REASON
+  authorization-policy status
+  break-glass request --eligibility-binding rbd_... --permission managed_run.use|env_file.use \
+    --target-ref sec_... --reason REASON --expires-in-seconds SECONDS
+  break-glass approve --request bgr_...
+  break-glass list
+  break-glass status --activation bga_...
+  break-glass revoke --activation bga_... --reason REASON
+  break-glass review --activation bga_... --findings FINDINGS --remediation REMEDIATION \
+    --closure closed_no_findings|closed_remediated
   lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]
   lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]
   lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]
@@ -4589,7 +5115,7 @@ fn print_usage(selected_plane: Option<RuntimePlane>) {
             "janusd\n\nThe mixed Janus runtime entry point is retired and performs no operational command.\nUse 'janusd-use --help' for permit-bound use or 'janusd-admin --help' for administration.\nreason_code=legacy_mixed_entrypoint_retired value_returned=false"
         ),
         Some(RuntimePlane::Use) => eprintln!(
-            "janusd-use\n\nPermit-bound use commands:\n  run preflight --profile PROFILE -- ARG...\n  run --profile PROFILE --permit use_... -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE --permit use_...\n\nThis process cannot issue approvals, change lifecycle state, rotate, migrate, transfer scope, run recovery drills, or retire hosts.\nManaged-command preflight validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read.\nEnv-file preflight checks the reviewed profile and target path without a permit, backend, or secret read.\nAll non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."
+            "janusd-use\n\nPermit-bound use commands:\n  run preflight --profile PROFILE -- ARG...\n  run --profile PROFILE (--permit use_...|--break-glass-activation bga_...) -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE (--permit use_...|--break-glass-activation bga_...)\n\nThis process cannot issue approvals, change lifecycle state, rotate, migrate, transfer scope, run recovery drills, or retire hosts.\nManaged-command preflight validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read.\nEnv-file preflight checks the reviewed profile and target path without a permit, backend, or secret read.\nAll non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."
         ),
         Some(RuntimePlane::Admin) => eprintln!("{ADMIN_USAGE}"),
     }
@@ -4771,6 +5297,47 @@ mod tests {
                 &["pharos-beacon", "reconcile"][..],
                 RuntimeAction::PharosReconcile,
             ),
+            (
+                &["role-binding", "issue"][..],
+                RuntimeAction::RoleBindingIssue,
+            ),
+            (
+                &["role-binding", "list"][..],
+                RuntimeAction::RoleBindingList,
+            ),
+            (
+                &["role-binding", "revoke"][..],
+                RuntimeAction::RoleBindingRevoke,
+            ),
+            (
+                &["role-binding", "status"][..],
+                RuntimeAction::RoleBindingStatus,
+            ),
+            (
+                &["authorization-policy", "status"][..],
+                RuntimeAction::AuthorizationPolicyStatus,
+            ),
+            (
+                &["break-glass", "request"][..],
+                RuntimeAction::BreakGlassRequest,
+            ),
+            (
+                &["break-glass", "approve"][..],
+                RuntimeAction::BreakGlassApprove,
+            ),
+            (&["break-glass", "list"][..], RuntimeAction::BreakGlassList),
+            (
+                &["break-glass", "status"][..],
+                RuntimeAction::BreakGlassStatus,
+            ),
+            (
+                &["break-glass", "revoke"][..],
+                RuntimeAction::BreakGlassRevoke,
+            ),
+            (
+                &["break-glass", "review"][..],
+                RuntimeAction::BreakGlassReview,
+            ),
         ];
         assert_eq!(cases.len(), RuntimeAction::ALL.len() - 4);
         for (args, expected) in cases {
@@ -4842,7 +5409,9 @@ mod tests {
             assert!(!error.contains("SENSITIVE_CANARY_REMOTE_IDENTITY"));
         }
         for forbidden in ["--bind", "--listen", "--proxy", "forwarded-client"] {
-            assert!(!ADMIN_USAGE.contains(forbidden));
+            assert!(!ADMIN_USAGE
+                .split_whitespace()
+                .any(|token| token == forbidden));
         }
     }
 
@@ -5143,9 +5712,92 @@ mod tests {
         ]);
 
         assert_eq!(config.profile_id.as_str(), "profile.canary");
-        assert_eq!(config.permit.as_str(), "use_abc123");
+        assert_eq!(config.permit.as_ref().unwrap().as_str(), "use_abc123");
         assert_eq!(config.requested_args, vec!["release", "upload"]);
         assert!(!format!("{config:?}").contains("use_abc123"));
+    }
+
+    #[test]
+    fn parses_exact_break_glass_use_without_a_normal_permit() {
+        let activation = "bga_aaaaaaaaaaaaaaaaaaaaaaaa";
+        let run = parse_run_ok(&[
+            "run",
+            "--profile",
+            "profile.canary",
+            "--break-glass-activation",
+            activation,
+            "--",
+            "release",
+        ]);
+        assert!(run.permit.is_none());
+        assert_eq!(
+            run.break_glass_activation.as_ref().unwrap().as_str(),
+            activation
+        );
+
+        let env_file = parse_env_file_ok(&[
+            "env-file",
+            "--profile",
+            "profile.service_env",
+            "--break-glass-activation",
+            activation,
+        ]);
+        assert!(env_file.permit.is_none());
+        assert_eq!(
+            env_file.break_glass_activation.as_ref().unwrap().as_str(),
+            activation
+        );
+
+        for args in [
+            vec![
+                "run",
+                "--profile",
+                "profile.canary",
+                "--permit",
+                "use_abc123",
+                "--break-glass-activation",
+                activation,
+                "--",
+            ],
+            vec!["env-file", "--profile", "profile.service_env"],
+        ] {
+            let error = parse_args(args.into_iter().map(str::to_string)).unwrap_err();
+            assert!(error.to_string().contains("exactly one"));
+        }
+    }
+
+    #[test]
+    fn break_glass_role_bypass_is_narrow_and_ignores_managed_argv() {
+        let activation = "bga_aaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(
+            requested_break_glass_activation(
+                &[
+                    "run".to_string(),
+                    "--profile".to_string(),
+                    "profile.canary".to_string(),
+                    "--break-glass-activation".to_string(),
+                    activation.to_string(),
+                    "--".to_string(),
+                    "--break-glass-activation".to_string(),
+                    "not-a-top-level-value".to_string(),
+                ],
+                RuntimeAction::ManagedRun,
+            )
+            .unwrap()
+            .unwrap()
+            .as_str(),
+            activation
+        );
+        assert!(requested_break_glass_activation(
+            &[
+                "approve".to_string(),
+                "list".to_string(),
+                "--break-glass-activation".to_string(),
+                activation.to_string(),
+            ],
+            RuntimeAction::ApprovalList,
+        )
+        .is_err());
     }
 
     #[test]
@@ -5222,7 +5874,7 @@ mod tests {
         ]);
 
         assert_eq!(config.profile_id.as_str(), "profile.service_env");
-        assert_eq!(config.permit.as_str(), "use_abc123");
+        assert_eq!(config.permit.as_ref().unwrap().as_str(), "use_abc123");
         assert!(!format!("{config:?}").contains("use_abc123"));
 
         for flag in [
@@ -5364,10 +6016,16 @@ mod tests {
             "--permit-ttl-seconds",
             "30",
             "--revoke-approval",
+            "--recipient-human",
+            "operator@example.test",
         ]);
         assert_eq!(permit.approval.as_str(), "appr_abc123");
         assert_eq!(permit.permit_ttl, Some(Duration::from_secs(30)));
         assert!(permit.revoke_approval);
+        assert_eq!(
+            permit.recipient.human.as_ref().unwrap().as_str(),
+            "operator@example.test"
+        );
         assert!(!format!("{permit:?}").contains("appr_abc123"));
     }
 
@@ -6302,16 +6960,42 @@ mod tests {
         );
         SharedApprovalRegistry::store(&approvals, &approval).unwrap();
 
-        let outcome = issue_approved_permit_with(
+        let self_error = issue_approved_permit_with(
             &ApprovePermitConfig {
                 approval: ApprovalToken::new(approval.id().as_str()).unwrap(),
                 permit_ttl: Some(Duration::from_secs(30)),
-                revoke_approval: true,
+                revoke_approval: false,
+                recipient: DelegationPrincipalSpec::default(),
             },
             &approvals,
             &permits,
             fixture_store_with_class(&secret_ref, &name, &profile_id, SecretClass::BreakGlass),
             &fixture_principal(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(self_error
+            .to_string()
+            .contains("separation_approver_executor"));
+
+        let outcome = issue_approved_permit_with(
+            &ApprovePermitConfig {
+                approval: ApprovalToken::new(approval.id().as_str()).unwrap(),
+                permit_ttl: Some(Duration::from_secs(30)),
+                revoke_approval: true,
+                recipient: DelegationPrincipalSpec::default(),
+            },
+            &approvals,
+            &permits,
+            fixture_store_with_class(&secret_ref, &name, &profile_id, SecretClass::BreakGlass),
+            &PrincipalChain::new(
+                Principal::new(
+                    PrincipalKind::Executor,
+                    PrincipalId::new("approval-admin").unwrap(),
+                ),
+                test_scope(),
+            ),
             SystemTime::UNIX_EPOCH + Duration::from_secs(1),
         )
         .await
@@ -6335,6 +7019,10 @@ mod tests {
             Duration::from_secs(30)
         );
         assert!(permit.approval().is_some());
+        assert_eq!(
+            permit.snapshot().principal_binding,
+            fixture_principal().binding_key()
+        );
 
         let err = SharedApprovalRegistry::get(&approvals, approval.id().as_str()).unwrap_err();
         assert!(matches!(
@@ -6370,11 +7058,18 @@ mod tests {
                 approval: ApprovalToken::new(approval.id().as_str()).unwrap(),
                 permit_ttl: Some(Duration::from_secs(30)),
                 revoke_approval: true,
+                recipient: DelegationPrincipalSpec::default(),
             },
             &approvals,
             &permits,
             fixture_store_with_class(&secret_ref, &name, &profile_id, SecretClass::HighValue),
-            &fixture_principal(),
+            &PrincipalChain::new(
+                Principal::new(
+                    PrincipalKind::Executor,
+                    PrincipalId::new("approval-admin").unwrap(),
+                ),
+                test_scope(),
+            ),
             SystemTime::UNIX_EPOCH + Duration::from_secs(1),
         )
         .await
@@ -7564,7 +8259,8 @@ mod tests {
         let err = run_managed_command_with(
             &RunManagedCommandConfig {
                 profile_id: ProfileId::new("profile.canary").unwrap(),
-                permit: PermitToken::new("use_abc123").unwrap(),
+                permit: Some(PermitToken::new("use_abc123").unwrap()),
+                break_glass_activation: None,
                 requested_args: vec!["release".to_string(), "delete".to_string()],
             },
             &mut runner,
@@ -7627,6 +8323,134 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn break_glass_use_mints_one_exact_permit_and_requires_review() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = FileBreakGlassRegistry::new(root.path().join("break-glass"));
+        let permit_registry = FilePermitRegistry::new(root.path().join("permits"));
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let beneficiary = fixture_principal();
+        let activator = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("break-glass-activator").unwrap(),
+            ),
+            test_scope(),
+        );
+        let approver = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("break-glass-approver").unwrap(),
+            ),
+            test_scope(),
+        );
+        let eligibility = janus_core::RoleBinding::issue(
+            beneficiary.binding_key(),
+            test_scope(),
+            janus_core::Role::BreakGlassAdmin,
+            None,
+            now - Duration::from_secs(1),
+            now + Duration::from_secs(600),
+            janus_core::RoleBindingSource::new(
+                janus_core::RoleBindingSourceKind::LocalReviewed,
+                "break-glass-fixture-review",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let request = janus_core::BreakGlassRequest::request(
+            &eligibility,
+            &activator,
+            Permission::ManagedRun,
+            secret_ref.clone(),
+            SafeLabel::new("fixture emergency").unwrap(),
+            now,
+            Duration::from_secs(300),
+            &mut AuditWrite::accepting(),
+        )
+        .unwrap();
+        let activation = BreakGlassActivation::approve(
+            request.clone(),
+            &approver,
+            now + Duration::from_secs(1),
+            &mut AuditWrite::accepting(),
+        )
+        .unwrap();
+        registry.store_request(&request).unwrap();
+        registry.store_activation(&activation).unwrap();
+
+        let guard = ActiveBreakGlassUse::begin_with(
+            registry.clone(),
+            activation.id(),
+            &beneficiary,
+            Permission::ManagedRun,
+            secret_ref.clone(),
+            now + Duration::from_secs(2),
+            &mut AuditWrite::accepting(),
+        )
+        .unwrap();
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let profiles = ManagedCommandProfileCatalog::parse(&managed_profile_toml(
+            &secret_ref,
+            &["release".to_string()],
+        ))
+        .unwrap();
+        let store = fixture_store(
+            &secret_ref,
+            &SecretName::new("CANARY_TOKEN").unwrap(),
+            &profile_id,
+        );
+        let descriptors = store.list().await.unwrap();
+        let permit_token = issue_break_glass_permit_with(
+            &activation,
+            &profile_id,
+            &profiles,
+            &descriptors,
+            &beneficiary,
+            &permit_registry,
+            fixture_store(
+                &secret_ref,
+                &SecretName::new("CANARY_TOKEN").unwrap(),
+                &profile_id,
+            ),
+            now + Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let permit = SharedPermitRegistry::take(&permit_registry, permit_token.as_str()).unwrap();
+        assert_eq!(permit.secret_ref(), &secret_ref);
+        assert_eq!(permit.profile_id(), &profile_id);
+        assert_eq!(permit.scope_ref(), &test_scope());
+
+        guard
+            .complete_with(
+                &beneficiary,
+                BreakGlassCompletionOutcome::Succeeded,
+                now + Duration::from_secs(3),
+                &mut AuditWrite::accepting(),
+            )
+            .unwrap();
+        let record = registry.get(activation.id().as_str()).unwrap();
+        assert_eq!(
+            record.status_at(now + Duration::from_secs(4)),
+            janus_local::BreakGlassStatus::ReviewRequired
+        );
+
+        let error = ActiveBreakGlassUse::begin_with(
+            registry,
+            activation.id(),
+            &beneficiary,
+            Permission::ManagedRun,
+            secret_ref,
+            now + Duration::from_secs(4),
+            &mut AuditWrite::accepting(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("break_glass_already_consumed"));
+    }
+
     #[tokio::test]
     async fn profile_manifest_runner_resolves_permit_after_reviewed_args() {
         let secret_ref = SecretRef::new("sec_fixture").unwrap();
@@ -7644,7 +8468,8 @@ mod tests {
         let err = run_managed_command_with(
             &RunManagedCommandConfig {
                 profile_id: ProfileId::new("profile.canary").unwrap(),
-                permit: PermitToken::new("use_abc123").unwrap(),
+                permit: Some(PermitToken::new("use_abc123").unwrap()),
+                break_glass_activation: None,
                 requested_args: allowed_args,
             },
             &mut runner,
@@ -7781,7 +8606,8 @@ mod tests {
         fn config(&self) -> RunManagedCommandConfig {
             RunManagedCommandConfig {
                 profile_id: self.profile_id.clone(),
-                permit: self.permit_token.clone(),
+                permit: Some(self.permit_token.clone()),
+                break_glass_activation: None,
                 requested_args: self.requested_args.clone(),
             }
         }
@@ -7891,7 +8717,8 @@ mod tests {
         fn config(&self) -> EnvFileConfig {
             EnvFileConfig {
                 profile_id: self.profile_id.clone(),
-                permit: self.permit_token.clone(),
+                permit: Some(self.permit_token.clone()),
+                break_glass_activation: None,
             }
         }
 
@@ -7988,7 +8815,8 @@ mod tests {
         };
         let config = RunManagedCommandConfig {
             profile_id,
-            permit: PermitToken::new(permit.permit_id.clone()).unwrap(),
+            permit: Some(PermitToken::new(permit.permit_id.clone()).unwrap()),
+            break_glass_activation: None,
             requested_args: allowed_args,
         };
 
@@ -8026,7 +8854,7 @@ mod tests {
         ])
         .await;
         let mut config = harness.config();
-        config.permit = PermitToken::new("use_wrongfixture").unwrap();
+        config.permit = Some(PermitToken::new("use_wrongfixture").unwrap());
 
         let err = run_managed_command_with(&config, harness.runner_mut())
             .await
@@ -8183,7 +9011,7 @@ mod tests {
             .unwrap();
         let mut harness = FixtureEnvFileHarness::new(output_dir.path()).await;
         let mut config = harness.config();
-        config.permit = PermitToken::new("use_wrongfixture").unwrap();
+        config.permit = Some(PermitToken::new("use_wrongfixture").unwrap());
 
         let err = run_env_file_with(&config, harness.runner_mut())
             .await

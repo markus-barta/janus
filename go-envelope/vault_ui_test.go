@@ -28,7 +28,7 @@ func TestVaultPageRendersCardsTilesAndBrand(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "brand-mark", "brand-wordmark", "/static/janus-logo.svg", "Signed in", "3 elevated roles", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
+	for _, want := range []string{"JANUS", "every secret, accounted for", "/static/janus.css", "brand-mark", "brand-wordmark", "/static/janus-logo.svg", "Signed in", "8 elevated roles", "Secrets", "Need attention", "value_returned=false", "rotates every"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("vault page should render %q: %s", want, body)
 		}
@@ -260,10 +260,10 @@ func TestAccessPageRendersLanesWithoutIdentityValues(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RequireAuth = false
 	app.cfg.RolePolicy = RolePolicy{
-		AdminSubjects:    map[string]bool{"markus@barta.com": true},
-		AuditorSubjects:  map[string]bool{"markus@barta.com": true},
-		OperatorSubjects: map[string]bool{"markus@barta.com": true},
-		AdminGroups:      map[string]bool{"janus-admins": true},
+		SecurityAdminSubjects: map[string]bool{"markus@barta.com": true},
+		AuditorSubjects:       map[string]bool{"auditor-subject": true},
+		OperatorSubjects:      map[string]bool{"operator-subject": true},
+		SecurityAdminGroups:   map[string]bool{"janus-security-admins": true},
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/access", nil)
@@ -273,12 +273,12 @@ func TestAccessPageRendersLanesWithoutIdentityValues(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{"who may open which door", "identity values withheld", "Available now", "action readiness", "Role lanes", "Admin", "Auditor", "Operator", "Policy and ownership", "GET /api/audit/recent", "GET /vault/new/plan.sh", "Local development", "Baseline", "value_returned=false"} {
+	for _, want := range []string{"who may open which door", "identity values withheld", "Available now", "action readiness", "Role lanes", "Security admin", "Auditor", "Operator", "Authorization policy", "GET /api/audit/recent", "GET /vault/new/plan.sh", "Local development", "Baseline", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("access page should render %q: %s", want, body)
 		}
 	}
-	for _, forbidden := range []string{"markus@barta.com", "janus-admins", "dev-local", "Local Dev", "Zitadel + Janus", "signed_session_browser_proof"} {
+	for _, forbidden := range []string{"markus@barta.com", "janus-security-admins", "dev-local", "Local Dev", "Zitadel + Janus", "signed_session_browser_proof"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("access page leaked binding identity %q: %s", forbidden, body)
 		}
@@ -288,9 +288,9 @@ func TestAccessPageRendersLanesWithoutIdentityValues(t *testing.T) {
 func TestAccessPageDistinguishesAuthenticatedBrowserProof(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg.RolePolicy = RolePolicy{
-		AdminSubjects:    map[string]bool{"subject-secret-sentinel": true},
-		AuditorSubjects:  map[string]bool{"subject-secret-sentinel": true},
-		OperatorSubjects: map[string]bool{"subject-secret-sentinel": true},
+		SecurityAdminSubjects: map[string]bool{"security-subject-secret-sentinel": true},
+		AuditorSubjects:       map[string]bool{"auditor-subject-secret-sentinel": true},
+		OperatorSubjects:      map[string]bool{"operator-subject-secret-sentinel": true},
 	}
 	session := Session{Subject: "subject-secret-sentinel", Roles: AllRoles(), Expiry: time.Now().UTC().Add(time.Hour)}
 	cookieWriter := httptest.NewRecorder()

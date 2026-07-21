@@ -4,7 +4,7 @@ use std::fmt;
 
 use janus_core::{
     MigrationManifest, RecoveryComponentKind, RecoveryDrillManifest, ReleaseAdmissionReceipt,
-    ReleaseChannelPolicy, RetentionEvidenceClass, RetentionPolicyV1, ScopePathV1,
+    ReleaseChannelPolicy, RetentionEvidenceClass, RetentionPolicyV1, RolePolicyV1, ScopePathV1,
     ScopeTransferManifest, SecretMetadataOverlay,
 };
 use proptest::prelude::*;
@@ -14,6 +14,7 @@ const POLICY: &str = include_str!("../../../config/release-channels/v1.json");
 const RECEIPT: &str = include_str!("../../../fixtures/release-admission/trusted.json");
 const MIGRATION_TEMPLATE: &str =
     include_str!("../../../config/migrations/approval-registry-v0-v1.json.in");
+const ROLE_POLICY: &str = include_str!("../../../config/authorization/role-matrix-v1.json");
 
 #[derive(Clone)]
 struct RedactedInput(Vec<u8>);
@@ -210,7 +211,7 @@ fn valid_retention() -> String {
 }
 
 fn parser_accepts(kind: u8, contents: &str) -> bool {
-    match kind % 8 {
+    match kind % 9 {
         0 => ReleaseChannelPolicy::parse_json(contents).is_ok(),
         1 => ReleaseAdmissionReceipt::parse_json(contents).is_ok(),
         2 => MigrationManifest::parse_json(contents).is_ok(),
@@ -218,12 +219,13 @@ fn parser_accepts(kind: u8, contents: &str) -> bool {
         4 => ScopePathV1::parse_json(contents).is_ok(),
         5 => RecoveryDrillManifest::parse_json(contents).is_ok(),
         6 => SecretMetadataOverlay::parse_toml(contents).is_ok(),
-        _ => RetentionPolicyV1::parse_json(contents).is_ok(),
+        7 => RetentionPolicyV1::parse_json(contents).is_ok(),
+        _ => RolePolicyV1::parse_json(contents).is_ok(),
     }
 }
 
 fn valid_document(kind: u8) -> String {
-    match kind % 8 {
+    match kind % 9 {
         0 => POLICY.to_string(),
         1 => RECEIPT.to_string(),
         2 => valid_migration(),
@@ -231,13 +233,14 @@ fn valid_document(kind: u8) -> String {
         4 => valid_scope(),
         5 => valid_recovery(),
         6 => valid_metadata(),
-        _ => valid_retention(),
+        7 => valid_retention(),
+        _ => ROLE_POLICY.to_string(),
     }
 }
 
 fn structured_invalid(kind: u8, mutation: u8, split: usize) -> String {
     let valid = valid_document(kind);
-    if kind % 8 == 6 {
+    if kind % 9 == 6 {
         return match mutation % 5 {
             0 => format!("{}\n[", &valid[..split % valid.len()]),
             1 => format!("{valid}\nSENSITIVE_TRAILING_CANARY"),

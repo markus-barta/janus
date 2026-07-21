@@ -60,6 +60,8 @@ metadata_source="${source_root}/metadata_overlay"
 audit_source="${source_root}/audit_log"
 approval_source="${source_root}/approvals"
 delegation_source="${source_root}/delegations"
+role_binding_source="${source_root}/role_bindings"
+break_glass_source="${source_root}/break_glass_state"
 lifecycle_source="${source_root}/lifecycle_evidence"
 tombstone_source="${source_root}/tombstones"
 lifecycle_entry_source="${source_root}/lifecycle_entry"
@@ -87,6 +89,8 @@ mkdir -p \
   "${age_source}/janus/default" \
   "${approval_source}" \
   "${delegation_source}" \
+  "${role_binding_source}" \
+  "${break_glass_source}" \
   "${lifecycle_source}" \
   "${tombstone_source}" \
   "${lifecycle_entry_source}" \
@@ -98,6 +102,7 @@ mkdir -p \
 chmod 700 \
   "${runtime}" "${source_root}" "${age_source}" "${age_source}/janus" \
   "${age_source}/janus/default" "${approval_source}" "${delegation_source}" \
+  "${role_binding_source}" "${break_glass_source}" \
   "${lifecycle_source}" "${tombstone_source}" "${lifecycle_entry_source}" \
   "${admin_state_source}" "${permit_source}" "${operation_dir}" \
   "${evidence_dir}" "${config_dir}"
@@ -332,7 +337,8 @@ scope = "scp_" + hashlib.sha256(b"".join(field(value) for value in (
 root = pathlib.Path(os.environ["COMPONENT_ROOT"])
 kinds = [
     "age_ciphertext", "metadata_overlay", "audit_log", "approvals", "delegations",
-    "lifecycle_evidence", "tombstones", "lifecycle_entry", "admin_state",
+    "role_bindings", "break_glass_state", "lifecycle_evidence", "tombstones",
+    "lifecycle_entry", "admin_state",
 ]
 configs = []
 for name, key in (("secretspec", "SECRETSPEC"), ("approved-use", "PROFILES")):
