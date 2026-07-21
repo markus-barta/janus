@@ -66,6 +66,10 @@ pub enum AuditAction {
     AdminRestore,
     /// An offline clean-state recovery drill phase ran.
     RecoveryDrill,
+    /// Retention evidence was evaluated or moved to reversible quarantine.
+    RetentionApply,
+    /// Quarantined inert evidence was irreversibly expired.
+    RetentionExpire,
     /// A scope-bound recovery or transfer plan was admitted or denied.
     ScopeTransferPreflight,
     /// A scope-bound recovery or transfer changed persisted metadata.
@@ -112,6 +116,8 @@ impl AuditAction {
             Self::AdminReencrypt => "admin.reencrypt",
             Self::AdminRestore => "admin.restore",
             Self::RecoveryDrill => "recovery.drill",
+            Self::RetentionApply => "retention.apply",
+            Self::RetentionExpire => "retention.expire",
             Self::ScopeTransferPreflight => "scope_transfer.preflight",
             Self::ScopeTransferApply => "scope_transfer.apply",
             Self::ScopeTransferPostflight => "scope_transfer.postflight",
@@ -153,6 +159,8 @@ impl AuditAction {
             "admin.reencrypt" => Self::AdminReencrypt,
             "admin.restore" => Self::AdminRestore,
             "recovery.drill" => Self::RecoveryDrill,
+            "retention.apply" => Self::RetentionApply,
+            "retention.expire" => Self::RetentionExpire,
             "scope_transfer.preflight" => Self::ScopeTransferPreflight,
             "scope_transfer.apply" => Self::ScopeTransferApply,
             "scope_transfer.postflight" => Self::ScopeTransferPostflight,
@@ -514,6 +522,8 @@ mod tests {
             AuditAction::RotationLifecycle,
             AuditAction::AdminRestore,
             AuditAction::RecoveryDrill,
+            AuditAction::RetentionApply,
+            AuditAction::RetentionExpire,
         ] {
             assert_eq!(AuditAction::parse(action.as_str()), Some(action));
         }

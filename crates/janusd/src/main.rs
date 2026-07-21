@@ -16,6 +16,8 @@ mod migration;
 mod pharos_retirement;
 #[path = "recovery.rs"]
 mod recovery;
+#[path = "retention.rs"]
+mod retention;
 #[path = "scope_transfer.rs"]
 mod scope_transfer;
 
@@ -53,7 +55,8 @@ use janus_forge::{
 };
 use janus_local::{
     enforce_migration_ready_from_env, enforce_recovery_drill_freshness_from_env,
-    enforce_release_admission_from_env, enforce_scope_transfer_ready_from_env, ApprovalListEntry,
+    enforce_release_admission_from_env, enforce_retention_ready_from_env,
+    enforce_scope_transfer_ready_from_env, ApprovalListEntry,
     ApprovalRegistry as SharedApprovalRegistry, DelegationRegistry, FileApprovalRegistry,
     FileDelegationRegistry, FileLifecycleEvidenceRegistry, FilePermitRegistry,
     FileTombstoneRegistry, JsonlAuditSink,
@@ -115,6 +118,11 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
             .context("release admission denied janusd-admin recovery drill")?;
         return recovery::run(&args, release).await;
     }
+    if retention::is_retention_command(&args) {
+        let release = enforce_release_admission_from_env(&principal)
+            .context("release admission denied janusd-admin retention")?;
+        return retention::run(&args, release).await;
+    }
     if lifecycle_entry::is_lifecycle_entry_command(&args) {
         let release = enforce_release_admission_from_env(&principal)
             .context("release admission denied janusd-admin lifecycle entry")?;
@@ -142,6 +150,8 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
             .context("scope transfer state denied runtime startup")?;
         enforce_recovery_drill_freshness_from_env(&release, &principal.scope)
             .context("recovery drill freshness denied runtime startup")?;
+        enforce_retention_ready_from_env(&release, &principal.scope)
+            .context("retention evidence denied runtime startup")?;
     }
     match command {
         Command::Help => {
@@ -2863,6 +2873,7 @@ fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
         [migrate, ..] if migrate == "migrate" => RuntimeAction::Migration,
         [scope_transfer, ..] if scope_transfer == "scope-transfer" => RuntimeAction::ScopeTransfer,
         [recovery_drill, ..] if recovery_drill == "recovery-drill" => RuntimeAction::RecoveryDrill,
+        [retention, ..] if retention == "retention" => RuntimeAction::Retention,
         [lifecycle_entry, ..] if lifecycle_entry == "lifecycle-entry" => {
             RuntimeAction::LifecycleEntry
         }
@@ -4560,6 +4571,7 @@ Administration commands:
   migrate preflight|apply|postflight|rollback|status --manifest PATH
   scope-transfer preflight|apply|postflight|rollback|status --manifest PATH
   recovery-drill snapshot|preflight|restore|postflight|rollback|status --manifest PATH
+  retention preflight|quarantine|purge|rollback|status --policy PATH
   pharos-beacon retire --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH [--retain-for-days N]
   pharos-beacon reconcile --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH
 
@@ -4748,6 +4760,7 @@ mod tests {
             (&["migrate"][..], RuntimeAction::Migration),
             (&["scope-transfer"][..], RuntimeAction::ScopeTransfer),
             (&["recovery-drill"][..], RuntimeAction::RecoveryDrill),
+            (&["retention"][..], RuntimeAction::Retention),
             (
                 &["pharos-beacon", "retire"][..],
                 RuntimeAction::PharosRetire,

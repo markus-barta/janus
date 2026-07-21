@@ -48,6 +48,9 @@ JANUSD_USE_BIN="${repo}/target/debug/janusd-use" \
   JANUS_WARDEN_BIN="${repo}/target/debug/janus-warden" \
   scripts/smoke-janusd-recovery-drill.sh
 
+echo "==> janus engine release assurance: offline retention quarantine and purge smoke"
+JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-retention.sh
+
 echo "==> janus engine release assurance: local janusd-admin lifecycle-entry smoke"
 JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-lifecycle-entry.sh
 

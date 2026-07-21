@@ -4,7 +4,8 @@ use std::fmt;
 
 use janus_core::{
     MigrationManifest, RecoveryComponentKind, RecoveryDrillManifest, ReleaseAdmissionReceipt,
-    ReleaseChannelPolicy, ScopePathV1, ScopeTransferManifest, SecretMetadataOverlay,
+    ReleaseChannelPolicy, RetentionEvidenceClass, RetentionPolicyV1, ScopePathV1,
+    ScopeTransferManifest, SecretMetadataOverlay,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{FileFailurePersistence, RngAlgorithm, TestRng, TestRunner};
@@ -153,33 +154,90 @@ fn valid_recovery() -> String {
     .to_string()
 }
 
+fn valid_retention() -> String {
+    let scope = ScopePathV1::for_repository("fixture-org", "janus", "janus", "property")
+        .unwrap()
+        .scope_ref();
+    let rules = RetentionEvidenceClass::ALL
+        .iter()
+        .map(|class| {
+            let disposition = match class {
+                RetentionEvidenceClass::Approvals
+                | RetentionEvidenceClass::Delegations
+                | RetentionEvidenceClass::LifecycleEvidence => "quarantine_then_purge",
+                RetentionEvidenceClass::RecoveryEvidence => "replace_only",
+                _ => "retain",
+            };
+            serde_json::json!({
+                "class": class.as_str(),
+                "disposition": disposition,
+                "minimum_age_seconds": 86400,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema_version": 1,
+        "operation_id": "property-retention",
+        "scope_ref": scope.as_str(),
+        "release_artifact": "not_required:self_hosted",
+        "rules": rules,
+        "config_bindings": [{
+            "name": "metadata",
+            "path": "/tmp/janus-property-retention-metadata.toml",
+            "expected_fingerprint": format!("sha256:{}", "a".repeat(64)),
+        }],
+        "approval_root": "/tmp/janus-property-retention-approvals",
+        "delegation_root": "/tmp/janus-property-retention-delegations",
+        "lifecycle_evidence_root": "/tmp/janus-property-retention-lifecycle",
+        "metadata_overlay_path": "/tmp/janus-property-retention-metadata.toml",
+        "tombstone_root": "/tmp/janus-property-retention-tombstones",
+        "audit_path": "/tmp/janus-property-retention-audit.jsonl",
+        "recovery_evidence_path": "/tmp/janus-property-retention-recovery.json",
+        "admin_evidence_root": "/tmp/janus-property-retention-admin",
+        "hold_registry_path": "/tmp/janus-property-retention-holds.json",
+        "quarantine_root": "/tmp/janus-property-retention-quarantine",
+        "state_root": "/tmp/janus-property-retention-state",
+        "operation_audit_path": "/tmp/janus-property-retention-operation.jsonl",
+        "evidence_path": "/tmp/janus-property-retention-evidence.json",
+        "minimum_free_bytes": 1,
+        "maximum_records": 1024,
+        "maximum_bytes": 1048576,
+        "preflight_max_age_seconds": 60,
+        "quarantine_grace_seconds": 3600,
+        "evidence_max_age_seconds": 86400,
+    })
+    .to_string()
+}
+
 fn parser_accepts(kind: u8, contents: &str) -> bool {
-    match kind % 7 {
+    match kind % 8 {
         0 => ReleaseChannelPolicy::parse_json(contents).is_ok(),
         1 => ReleaseAdmissionReceipt::parse_json(contents).is_ok(),
         2 => MigrationManifest::parse_json(contents).is_ok(),
         3 => ScopeTransferManifest::parse_json(contents).is_ok(),
         4 => ScopePathV1::parse_json(contents).is_ok(),
         5 => RecoveryDrillManifest::parse_json(contents).is_ok(),
-        _ => SecretMetadataOverlay::parse_toml(contents).is_ok(),
+        6 => SecretMetadataOverlay::parse_toml(contents).is_ok(),
+        _ => RetentionPolicyV1::parse_json(contents).is_ok(),
     }
 }
 
 fn valid_document(kind: u8) -> String {
-    match kind % 7 {
+    match kind % 8 {
         0 => POLICY.to_string(),
         1 => RECEIPT.to_string(),
         2 => valid_migration(),
         3 => valid_transfer(),
         4 => valid_scope(),
         5 => valid_recovery(),
-        _ => valid_metadata(),
+        6 => valid_metadata(),
+        _ => valid_retention(),
     }
 }
 
 fn structured_invalid(kind: u8, mutation: u8, split: usize) -> String {
     let valid = valid_document(kind);
-    if kind % 7 == 6 {
+    if kind % 8 == 6 {
         return match mutation % 5 {
             0 => format!("{}\n[", &valid[..split % valid.len()]),
             1 => format!("{valid}\nSENSITIVE_TRAILING_CANARY"),

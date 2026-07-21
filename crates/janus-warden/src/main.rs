@@ -21,9 +21,9 @@ use janus_core::{
 };
 use janus_local::{
     enforce_migration_ready_from_env, enforce_recovery_drill_freshness_from_env,
-    enforce_release_admission_from_env, enforce_scope_transfer_ready_from_env, DelegationRegistry,
-    FileDelegationRegistry, FilePermitRegistry, NoopDelegationRegistry, NoopPermitStore,
-    PermitStore,
+    enforce_release_admission_from_env, enforce_retention_ready_from_env,
+    enforce_scope_transfer_ready_from_env, DelegationRegistry, FileDelegationRegistry,
+    FilePermitRegistry, NoopDelegationRegistry, NoopPermitStore, PermitStore,
 };
 use janus_provider_age::AgeSecretStore;
 use janus_providers::SecretspecStore;
@@ -243,6 +243,8 @@ async fn main() -> Result<()> {
         .context("scope transfer state denied Warden startup")?;
     enforce_recovery_drill_freshness_from_env(&release, &principal.scope)
         .context("recovery drill freshness denied Warden startup")?;
+    enforce_retention_ready_from_env(&release, &principal.scope)
+        .context("retention evidence denied Warden startup")?;
     let runtime = build_runtime_from_env(release).await?;
     let server = McpWarden {
         runtime: Arc::new(Mutex::new(runtime)),

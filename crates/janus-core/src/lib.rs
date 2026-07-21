@@ -21,6 +21,7 @@ pub mod principal;
 pub mod recovery;
 pub mod refs;
 pub mod release;
+pub mod retention;
 pub mod rotation;
 pub mod scope;
 pub mod stale;
@@ -70,6 +71,11 @@ pub use refs::{
 pub use release::{
     ProductMode, ReleaseAdmission, ReleaseAdmissionDecision, ReleaseAdmissionReceipt,
     ReleaseChannelPolicy,
+};
+pub use retention::{
+    RetentionClassRule, RetentionConfigBinding, RetentionDisposition, RetentionEvidenceClass,
+    RetentionEvidenceInput, RetentionEvidenceV1, RetentionHoldRegistryV1, RetentionHoldV1,
+    RetentionPolicyV1,
 };
 pub use rotation::{
     RollbackPlan, RotationDecision, RotationOutcome, RotationPhase, RotationPlan, RotationPlanner,

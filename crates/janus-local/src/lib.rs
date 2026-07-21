@@ -13,6 +13,7 @@ mod delegation;
 mod migration;
 mod recovery;
 mod release;
+mod retention;
 mod transfer;
 
 pub use audit::{AuditRecovery, JsonlAuditSink};
@@ -27,6 +28,9 @@ pub use recovery::{
 };
 pub use release::{
     audit_release_admission, enforce_release_admission_from_env, load_release_admission,
+};
+pub use retention::{
+    enforce_retention_ready, enforce_retention_ready_from_env, RetentionRunner, RetentionStatus,
 };
 pub use transfer::{
     enforce_scope_transfer_ready_from_env, ScopeTransferRunner, ScopeTransferStatus,

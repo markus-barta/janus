@@ -27,6 +27,7 @@ ALLOWED_FAMILIES = (
     "permit-execution",
     "rotation-failure",
     "sealed-recovery",
+    "retention",
 )
 ALLOWED_TERMINAL_STATES = frozenset(
     {"blocked", "completed", "denied", "rolled-back"}

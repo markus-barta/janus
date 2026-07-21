@@ -93,6 +93,8 @@ pub enum RuntimeAction {
     ScopeTransfer,
     /// Sealed offline clean-state recovery drill.
     RecoveryDrill,
+    /// Offline evidence-retention cycle.
+    Retention,
     /// Pharos credential retirement.
     PharosRetire,
     /// Pharos retirement reconciliation.
@@ -101,7 +103,7 @@ pub enum RuntimeAction {
 
 impl RuntimeAction {
     /// Every known action, used by release-blocking completeness tests.
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 30] = [
         Self::WardenListSecrets,
         Self::WardenDescribeSecret,
         Self::WardenRequestUse,
@@ -129,6 +131,7 @@ impl RuntimeAction {
         Self::Migration,
         Self::ScopeTransfer,
         Self::RecoveryDrill,
+        Self::Retention,
         Self::PharosRetire,
         Self::PharosReconcile,
     ];
@@ -163,6 +166,7 @@ impl RuntimeAction {
             | Self::Migration
             | Self::ScopeTransfer
             | Self::RecoveryDrill
+            | Self::Retention
             | Self::PharosRetire
             | Self::PharosReconcile => RuntimePlane::Admin,
         }
@@ -198,6 +202,7 @@ impl RuntimeAction {
             Self::Migration => "admin.migration",
             Self::ScopeTransfer => "admin.scope_transfer",
             Self::RecoveryDrill => "admin.recovery_drill",
+            Self::Retention => "admin.retention",
             Self::PharosRetire => "admin.pharos_retire",
             Self::PharosReconcile => "admin.pharos_reconcile",
         }
@@ -432,6 +437,7 @@ pub const fn runtime_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPo
         | RuntimeAction::Migration
         | RuntimeAction::ScopeTransfer
         | RuntimeAction::RecoveryDrill
+        | RuntimeAction::Retention
         | RuntimeAction::PharosRetire
         | RuntimeAction::PharosReconcile => cli_endpoint_policy(action),
     }
@@ -439,7 +445,7 @@ pub const fn runtime_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPo
 
 /// Closed endpoint-policy catalog. Adding an action requires extending both
 /// [`RuntimeAction::ALL`] and this release-reviewed matrix.
-pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 29] = [
+pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 30] = [
     runtime_endpoint_policy(RuntimeAction::WardenListSecrets),
     runtime_endpoint_policy(RuntimeAction::WardenDescribeSecret),
     runtime_endpoint_policy(RuntimeAction::WardenRequestUse),
@@ -467,6 +473,7 @@ pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 29] = [
     runtime_endpoint_policy(RuntimeAction::Migration),
     runtime_endpoint_policy(RuntimeAction::ScopeTransfer),
     runtime_endpoint_policy(RuntimeAction::RecoveryDrill),
+    runtime_endpoint_policy(RuntimeAction::Retention),
     runtime_endpoint_policy(RuntimeAction::PharosRetire),
     runtime_endpoint_policy(RuntimeAction::PharosReconcile),
 ];
@@ -566,7 +573,7 @@ mod tests {
 
     #[test]
     fn every_action_has_exactly_one_operational_plane() {
-        assert_eq!(RuntimeAction::ALL.len(), 29);
+        assert_eq!(RuntimeAction::ALL.len(), 30);
         assert_eq!(
             RuntimeAction::ALL
                 .iter()
@@ -579,7 +586,7 @@ mod tests {
                 .iter()
                 .filter(|action| action.required_plane() == RuntimePlane::Admin)
                 .count(),
-            21
+            22
         );
         assert!(RuntimeAction::ALL
             .iter()

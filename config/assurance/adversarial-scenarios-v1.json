@@ -12,7 +12,8 @@
     "warden-abuse",
     "permit-execution",
     "rotation-failure",
-    "sealed-recovery"
+    "sealed-recovery",
+    "retention"
   ],
   "registered_reason_codes": [
     "migration_manifest_invalid",
@@ -53,7 +54,11 @@
     "recovery_bundle_tampered",
     "recovery_source_not_offline",
     "recovery_rollback_ok",
-    "recovery_evidence_stale"
+    "recovery_evidence_stale",
+    "retention_preflight_ok",
+    "retention_config_changed",
+    "retention_purge_ok",
+    "retention_rollback_ok"
   ],
   "required_scenario_ids": [
     "approval-manifest-malformed",
@@ -106,7 +111,11 @@
     "recovery-bundle-tampered",
     "recovery-source-audit-incomplete",
     "recovery-interrupted-rollback",
-    "recovery-freshness-stale"
+    "recovery-freshness-stale",
+    "retention-mixed-plan",
+    "retention-drift-tamper",
+    "retention-grace-purge",
+    "retention-interrupted-rollback"
   ],
   "scenarios": [
     {
@@ -719,6 +728,54 @@
       "expected_reason_code": "recovery_evidence_stale",
       "expected_terminal_state": "blocked",
       "audit_expectation": "unavailable",
+      "value_returned": false
+    },
+    {
+      "id": "retention-mixed-plan",
+      "family": "retention",
+      "package": "janus-local",
+      "test_binary": null,
+      "test_name": "retention::tests::mixed_plan_quarantines_only_inert_unheld_state_and_rolls_back_exactly",
+      "attack_phase": "closed-set-planning",
+      "expected_reason_code": "retention_preflight_ok",
+      "expected_terminal_state": "rolled-back",
+      "audit_expectation": "required",
+      "value_returned": false
+    },
+    {
+      "id": "retention-drift-tamper",
+      "family": "retention",
+      "package": "janus-local",
+      "test_binary": null,
+      "test_name": "retention::tests::source_hold_config_and_quarantine_drift_fail_closed_without_canary_echo",
+      "attack_phase": "binding-drift",
+      "expected_reason_code": "retention_config_changed",
+      "expected_terminal_state": "denied",
+      "audit_expectation": "required",
+      "value_returned": false
+    },
+    {
+      "id": "retention-grace-purge",
+      "family": "retention",
+      "package": "janus-local",
+      "test_binary": null,
+      "test_name": "retention::tests::purge_waits_for_grace_is_idempotent_and_writes_current_value_free_evidence",
+      "attack_phase": "irreversible-purge",
+      "expected_reason_code": "retention_purge_ok",
+      "expected_terminal_state": "completed",
+      "audit_expectation": "required",
+      "value_returned": false
+    },
+    {
+      "id": "retention-interrupted-rollback",
+      "family": "retention",
+      "package": "janus-local",
+      "test_binary": null,
+      "test_name": "retention::tests::interrupted_partial_quarantine_rolls_back_exact_files",
+      "attack_phase": "interrupted-quarantine",
+      "expected_reason_code": "retention_rollback_ok",
+      "expected_terminal_state": "rolled-back",
+      "audit_expectation": "required",
       "value_returned": false
     }
   ]

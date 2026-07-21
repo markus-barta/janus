@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use janus_core::{Principal, PrincipalChain, PrincipalId, PrincipalKind, ReleaseAdmission};
-use janus_local::{ApprovalMigrationRunner, MigrationStatus};
+use janus_local::{enforce_retention_ready_from_env, ApprovalMigrationRunner, MigrationStatus};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MigrationOperation {
@@ -27,13 +27,18 @@ pub(super) fn is_migration_command(args: &[String]) -> bool {
 
 pub(super) fn run(args: &[String], release: ReleaseAdmission) -> Result<()> {
     let command = parse(args)?;
+    let principal = migration_principal_from_env()?;
     let runner =
-        ApprovalMigrationRunner::load(&command.manifest, release, migration_principal_from_env()?)
+        ApprovalMigrationRunner::load(&command.manifest, release.clone(), principal.clone())
             .context("failed to load reviewed migration")?;
     let status = match command.operation {
         MigrationOperation::Preflight => runner.preflight(SystemTime::now()),
         MigrationOperation::Apply => runner.apply(SystemTime::now()),
-        MigrationOperation::Postflight => runner.postflight(),
+        MigrationOperation::Postflight => {
+            enforce_retention_ready_from_env(&release, &principal.scope)
+                .context("migrated retention evidence is not current")?;
+            runner.postflight()
+        }
         MigrationOperation::Rollback => runner.rollback(),
         MigrationOperation::Status => runner.status(),
     }

@@ -7,7 +7,9 @@ use janus_core::{
     Principal, PrincipalChain, PrincipalId, PrincipalKind, ReleaseAdmission, SecretMetadataOverlay,
     SecretStore,
 };
-use janus_local::{JsonlAuditSink, RecoveryDrillRunner, RecoveryDrillStatus};
+use janus_local::{
+    enforce_retention_ready_from_env, JsonlAuditSink, RecoveryDrillRunner, RecoveryDrillStatus,
+};
 use janus_provider_age::AgeSecretStore;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,7 +35,7 @@ pub(super) fn is_recovery_drill_command(args: &[String]) -> bool {
 pub(super) async fn run(args: &[String], release: ReleaseAdmission) -> Result<()> {
     let command = parse(args)?;
     let principal = recovery_principal_from_env()?;
-    let runner = RecoveryDrillRunner::load(&command.manifest, release, principal.clone())
+    let runner = RecoveryDrillRunner::load(&command.manifest, release.clone(), principal.clone())
         .context("failed to load reviewed recovery drill")?;
     let status = match command.operation {
         RecoveryOperation::Snapshot => runner.snapshot(SystemTime::now()),
@@ -50,6 +52,8 @@ pub(super) async fn run(args: &[String], release: ReleaseAdmission) -> Result<()
                 .prepare_postflight()
                 .context("recovery postflight preparation failed closed")?;
             let checked = verify_provider_recoverability(&runner, &target, &principal).await?;
+            enforce_retention_ready_from_env(&release, &principal.scope)
+                .context("recovered retention evidence is not current")?;
             runner.postflight(SystemTime::now(), checked)
         }
         RecoveryOperation::Rollback => runner.rollback(),
