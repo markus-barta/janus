@@ -9,9 +9,9 @@ name: go-envelope
 on:
   push:
     branches: [main]
-    paths: ['go-envelope/**', '.github/workflows/go-envelope.yml']
+    paths: ['go-envelope/**', 'config/assurance/minimization-proof-v1.json', 'scripts/run-minimization-proof.py', '.github/workflows/go-envelope.yml']
   pull_request:
-    paths: ['go-envelope/**', '.github/workflows/go-envelope.yml']
+    paths: ['go-envelope/**', 'config/assurance/minimization-proof-v1.json', 'scripts/run-minimization-proof.py', '.github/workflows/go-envelope.yml']
   # Release the envelope image by pushing a tag like `go-envelope-v1.144`.
   release:
     types: [published]
@@ -34,6 +34,8 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./...
+      - name: cross-surface Go minimization proof
+        run: python3 ../scripts/run-minimization-proof.py --stack go
 
   image:
     # Only on a published GitHub Release whose tag starts with go-envelope-v.

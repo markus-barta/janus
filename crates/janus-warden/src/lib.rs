@@ -79,34 +79,6 @@ pub fn tool_definitions() -> &'static [ToolDefinition; 4] {
     &TOOL_DEFINITIONS
 }
 
-const FORBIDDEN_MODEL_OUTPUT_KEYS: &[&str] = &[
-    "value",
-    "values",
-    "secret_value",
-    "secret_values",
-    "secret_literal",
-    "literal",
-    "plaintext",
-    "plain_text",
-    "raw_secret",
-    "raw_value",
-    "raw_name",
-    "owner",
-    "owner_ref",
-    "classification",
-    "secret_class",
-    "secret_name",
-    "backend_path",
-    "source_path",
-    "request_body",
-    "env",
-    "environment",
-    "token",
-    "cookie",
-    "connector_output",
-    "permit_payload",
-];
-
 /// Model-facing descriptor. It intentionally omits raw manifest names and
 /// backend paths.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -892,30 +864,10 @@ fn optional_secret_ref(args: &Value) -> Option<SecretRef> {
 fn enforce_tool_response_boundary(response: &ToolCallResponse) -> Result<(), &'static str> {
     let value =
         serde_json::to_value(response).expect("Warden tool response should serialize for guard");
-    enforce_value_free_json(&value)
-}
-
-fn enforce_value_free_json(value: &Value) -> Result<(), &'static str> {
-    match value {
-        Value::Object(map) => {
-            for (key, nested) in map {
-                if key == "value_returned" && nested != &Value::Bool(false) {
-                    return Err("value_returned_true");
-                }
-                if FORBIDDEN_MODEL_OUTPUT_KEYS.contains(&key.as_str()) {
-                    return Err("forbidden_value_key");
-                }
-                enforce_value_free_json(nested)?;
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                enforce_value_free_json(item)?;
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-    }
-    Ok(())
+    janus_core::enforce_value_free_json(&value).map_err(|violation| match violation {
+        janus_core::MinimizationViolation::ValueReturned => "value_returned_true",
+        janus_core::MinimizationViolation::ForbiddenField => "forbidden_value_key",
+    })
 }
 
 fn redaction_required_response() -> ToolCallResponse {
@@ -1695,7 +1647,7 @@ mod tests {
             .as_deref()
             .is_some_and(|artifact| artifact.ends_with(DIGEST)));
         assert!(!health.value_returned);
-        enforce_value_free_json(&serde_json::to_value(&health).unwrap()).unwrap();
+        janus_core::enforce_value_free_json(&serde_json::to_value(&health).unwrap()).unwrap();
     }
 
     proptest! {
@@ -1784,7 +1736,8 @@ mod tests {
                             first.error.as_ref().map(|error| error.reason_code),
                             second.error.as_ref().map(|error| error.reason_code),
                         );
-                        enforce_value_free_json(&serde_json::to_value(&first).unwrap()).unwrap();
+                        janus_core::enforce_value_free_json(&serde_json::to_value(&first).unwrap())
+                            .unwrap();
                         outputs.push(first);
                         outputs.push(second);
                     }

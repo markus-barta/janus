@@ -178,6 +178,8 @@ tools supplied by the development shell.
 It exercises:
 
 - the locked Rust workspace test suite;
+- the strict cross-surface minimization contract, bounded runner, and
+  synthetic-canary diagnostics;
 - a real reference-only Warden MCP session;
 - the hard use/admin process boundary and retired mixed entry point;
 - the approval-to-env-file operator flow;
@@ -201,7 +203,15 @@ The transitional envelope remains independently testable:
 cd go-envelope
 go build ./...
 go test ./...
+cd ..
+python3 scripts/run-minimization-proof.py --stack go
 ```
+
+The reviewed surface inventory and only two allowed plaintext sinks live in
+`config/assurance/minimization-proof-v1.json`. The runner rejects unknown
+fields, missing proof IDs, uncovered surfaces, broadened sinks, arbitrary
+commands, stale review dates, unresolved selectors, oversized output, and
+timeouts without printing captured test or process output.
 
 ## Operator paths
 

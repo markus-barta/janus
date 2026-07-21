@@ -544,43 +544,56 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 	return app, nil
 }
 
+type routeSpec struct {
+	pattern string
+	handler http.HandlerFunc
+}
+
+func (app *App) routeSpecs() []routeSpec {
+	return []routeSpec{
+		{pattern: "GET /healthz", handler: app.handleHealth},
+		{pattern: "GET /readyz", handler: app.handleReady},
+		{pattern: "GET /buildz", handler: app.handleBuildReceipt},
+		{pattern: "GET /favicon.ico", handler: app.handleFavicon},
+		{pattern: "GET /login", handler: app.handleLogin},
+		{pattern: "GET /auth/reset", handler: app.handleAuthReset},
+		{pattern: "GET /oidc/callback", handler: app.handleCallback},
+		{pattern: "POST /logout", handler: app.withAuth(app.handleLogout)},
+		{pattern: "GET /auth/smoke", handler: app.withAuth(app.handleAuthSmokePage)},
+		{pattern: "GET /session-witness", handler: app.withAuth(app.handleSessionWitnessPage)},
+		{pattern: "GET /session-witness.txt", handler: app.withAuth(app.handleSessionWitnessText)},
+		{pattern: "GET /session-witness/verify", handler: app.withAuth(app.handleSessionWitnessVerifyPage)},
+		{pattern: "POST /session-witness/verify", handler: app.withAuth(app.handleSessionWitnessVerifyPost)},
+		{pattern: "POST /session-witness/verify-current", handler: app.withAuth(app.handleSessionWitnessVerifyCurrent)},
+		{pattern: "GET /api/warden/descriptors", handler: app.withAuth(app.handleDescriptors)},
+		{pattern: "POST /api/warden/resolve", handler: app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle))},
+		{pattern: "GET /api/audit/recent", handler: app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit))},
+		{pattern: "GET /api/auth/session-witness", handler: app.withAuth(app.handleAuthSessionWitness)},
+		{pattern: "POST /api/auth/session-witness/verify", handler: app.withAuth(app.handleAuthSessionWitnessVerify)},
+		{pattern: "GET /api/posture", handler: app.withAuth(app.handlePosture)},
+		{pattern: "GET /api/evidence", handler: app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence))},
+		{pattern: "POST /api/permits", handler: app.withAuth(app.requireRole(RoleOperator, "permit.create", app.handleCreatePermit))},
+		{pattern: "POST /api/permits/{permitID}/run", handler: app.withAuth(app.requireRole(RoleOperator, "permit.run", app.handleRunPermit))},
+		{pattern: "POST /ui/warden/resolve", handler: app.withAuth(app.handleResolveHandleUI)},
+		{pattern: "POST /ui/permits", handler: app.withAuth(app.handleCreatePermitUI)},
+		{pattern: "POST /ui/permits/{permitID}/run", handler: app.withAuth(app.handleRunPermitUI)},
+		{pattern: "GET /access", handler: app.withAuth(app.handleAccessPage)},
+		{pattern: "GET /requests", handler: app.withAuth(app.handleRequestsPage)},
+		{pattern: "GET /ledger", handler: app.withAuth(app.handleLedgerPage)},
+		{pattern: "GET /assurance", handler: app.withAuth(app.handleAssurancePage)},
+		{pattern: "GET /settings", handler: app.withAuth(app.handleSettingsPage)},
+		{pattern: "GET /vault/new", handler: app.withAuth(app.handleNewSecretPage)},
+		{pattern: "GET /vault/new/plan.sh", handler: app.withAuth(app.handleNewSecretScript)},
+		{pattern: "GET /static/", handler: app.handleStatic},
+		{pattern: "GET /", handler: app.withAuth(app.handleDashboard)},
+	}
+}
+
 func (app *App) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", app.handleHealth)
-	mux.HandleFunc("GET /readyz", app.handleReady)
-	mux.HandleFunc("GET /buildz", app.handleBuildReceipt)
-	mux.HandleFunc("GET /favicon.ico", app.handleFavicon)
-	mux.HandleFunc("GET /login", app.handleLogin)
-	mux.HandleFunc("GET /auth/reset", app.handleAuthReset)
-	mux.HandleFunc("GET /oidc/callback", app.handleCallback)
-	mux.HandleFunc("POST /logout", app.withAuth(app.handleLogout))
-	mux.HandleFunc("GET /auth/smoke", app.withAuth(app.handleAuthSmokePage))
-	mux.HandleFunc("GET /session-witness", app.withAuth(app.handleSessionWitnessPage))
-	mux.HandleFunc("GET /session-witness.txt", app.withAuth(app.handleSessionWitnessText))
-	mux.HandleFunc("GET /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPage))
-	mux.HandleFunc("POST /session-witness/verify", app.withAuth(app.handleSessionWitnessVerifyPost))
-	mux.HandleFunc("POST /session-witness/verify-current", app.withAuth(app.handleSessionWitnessVerifyCurrent))
-	mux.HandleFunc("GET /api/warden/descriptors", app.withAuth(app.handleDescriptors))
-	mux.HandleFunc("POST /api/warden/resolve", app.withAuth(app.requireRole(RoleOperator, "warden.resolve", app.handleResolveHandle)))
-	mux.HandleFunc("GET /api/audit/recent", app.withAuth(app.requireRole(RoleAuditor, "audit.recent", app.handleRecentAudit)))
-	mux.HandleFunc("GET /api/auth/session-witness", app.withAuth(app.handleAuthSessionWitness))
-	mux.HandleFunc("POST /api/auth/session-witness/verify", app.withAuth(app.handleAuthSessionWitnessVerify))
-	mux.HandleFunc("GET /api/posture", app.withAuth(app.handlePosture))
-	mux.HandleFunc("GET /api/evidence", app.withAuth(app.requireRole(RoleAuditor, "evidence.export", app.handleEvidence)))
-	mux.HandleFunc("POST /api/permits", app.withAuth(app.requireRole(RoleOperator, "permit.create", app.handleCreatePermit)))
-	mux.HandleFunc("POST /api/permits/{permitID}/run", app.withAuth(app.requireRole(RoleOperator, "permit.run", app.handleRunPermit)))
-	mux.HandleFunc("POST /ui/warden/resolve", app.withAuth(app.handleResolveHandleUI))
-	mux.HandleFunc("POST /ui/permits", app.withAuth(app.handleCreatePermitUI))
-	mux.HandleFunc("POST /ui/permits/{permitID}/run", app.withAuth(app.handleRunPermitUI))
-	mux.HandleFunc("GET /access", app.withAuth(app.handleAccessPage))
-	mux.HandleFunc("GET /requests", app.withAuth(app.handleRequestsPage))
-	mux.HandleFunc("GET /ledger", app.withAuth(app.handleLedgerPage))
-	mux.HandleFunc("GET /assurance", app.withAuth(app.handleAssurancePage))
-	mux.HandleFunc("GET /settings", app.withAuth(app.handleSettingsPage))
-	mux.HandleFunc("GET /vault/new", app.withAuth(app.handleNewSecretPage))
-	mux.HandleFunc("GET /vault/new/plan.sh", app.withAuth(app.handleNewSecretScript))
-	mux.HandleFunc("GET /static/", app.handleStatic)
-	mux.HandleFunc("GET /", app.withAuth(app.handleDashboard))
+	for _, route := range app.routeSpecs() {
+		mux.HandleFunc(route.pattern, route.handler)
+	}
 	return app.securityHeaders(app.requestIDs(app.rateLimit(app.limitRequestBody(app.safeHTTPBoundary(mux)))))
 }
 

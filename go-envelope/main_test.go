@@ -2015,95 +2015,95 @@ func TestEvidenceExportIsValueFree(t *testing.T) {
 	out := httptest.NewRecorder()
 	app.withAuth(app.handleEvidence)(out, req)
 	if out.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if got := out.Header().Get("Content-Disposition"); !strings.Contains(got, "janus-evidence.json") {
-		t.Fatalf("evidence response should be downloadable, got Content-Disposition %q", got)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	headerHash := out.Header().Get("X-Janus-Evidence-Hash")
 	if len(headerHash) != 64 || out.Header().Get("X-Janus-Evidence-Algorithm") != "sha256-json-v1" || out.Header().Get("X-Janus-Evidence-Body-Field") != "integrity.pack_hash" || out.Header().Get("X-Janus-Value-Returned") != "false" {
-		t.Fatalf("evidence response should include exact value-free receipt headers: %#v", out.Header())
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	body := out.Body.String()
 	if !strings.Contains(body, `"value_returned":false`) || strings.Contains(body, `"plaintext"`) {
-		t.Fatalf("evidence response should be value-free: %s", body)
+		t.Fatal(minimizationDiagnostic("forbidden_literal"))
 	}
 	var pack EvidencePack
 	if err := json.Unmarshal(out.Body.Bytes(), &pack); err != nil {
-		t.Fatalf("evidence response should decode: %v", err)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if pack.Integrity == nil || pack.Integrity.PackHash != headerHash {
-		t.Fatalf("evidence body hash should match exact download header: header=%q pack=%#v", headerHash, pack.Integrity)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if pack.Receipt == nil || pack.Receipt.PackHash != headerHash || pack.Receipt.HashHeader != "X-Janus-Evidence-Hash" || pack.Receipt.BodyField != "integrity.pack_hash" || pack.Receipt.ValueReturned {
-		t.Fatalf("evidence response should include exact value-free receipt: %#v", pack.Receipt)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if pack.AuditTrail.ValueReturned || !pack.AuditTrail.ChronologicalHistory || !pack.AuditTrail.ReceiptHashLinkage || pack.AuditTrail.RawPathReturned || pack.AuditTrail.RawReasonReturned || pack.AuditTrail.RequestBodyReturned || pack.AuditTrail.EnvReturned || pack.AuditTrail.BackendPathReturned || pack.AuditTrail.SourcePathReturned || pack.AuditTrail.ConnectorOutputReturned || pack.AuditTrail.PermitPayloadValueReturned || pack.AuditTrail.SecretValueReturned {
-		t.Fatalf("evidence audit trail should expose explicit value-free flags: %#v", pack.AuditTrail)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if len(pack.RecentAudit) == 0 || pack.RecentAudit[0].Channel != "POST browser action" || pack.RecentAudit[0].ReasonClass != "no_connector" || pack.RecentAudit[0].Scope != "zitadel-janus-oidc" {
-		t.Fatalf("evidence recent audit should use sanitized witness rows: %#v", pack.RecentAudit)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	for _, want := range []string{`"audit_trail"`, `"recent_audit"`, `"channel":"POST browser action"`, `"reason_class":"no_connector"`, `"chronological_history":true`, `"receipt_hash_linkage":true`, `"raw_path_returned":false`, `"raw_reason_returned":false`, `"request_body_returned":false`, `"env_returned":false`, `"backend_path_returned":false`, `"source_path_returned":false`, `"connector_output_returned":false`, `"permit_payload_value_returned":false`, `"secret_value_returned":false`} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("evidence response should include safe audit witness %q: %s", want, body)
+			t.Fatal(minimizationDiagnostic("evidence_shape"))
 		}
 	}
 	for _, forbidden := range []string{"/ui/permits", "request_body=raw-secret", "env=SECRET", "connector_output=secret", "backend_path=/tmp", "source_path=/src"} {
 		if strings.Contains(body, forbidden) {
-			t.Fatalf("evidence response leaked raw audit marker %q: %s", forbidden, body)
+			t.Fatal(minimizationDiagnostic("forbidden_literal"))
 		}
 	}
 	if !strings.Contains(body, `"redaction_model"`) {
-		t.Fatalf("evidence response should explain redaction model: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"evidence_boundary"`) || !strings.Contains(body, `"gate":"export_ready"`) || !strings.Contains(body, `"secret_values"`) || !strings.Contains(body, `"backend_source_paths"`) || !strings.Contains(body, `"hash_available":true`) {
-		t.Fatalf("evidence response should include export boundary: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"evidence_receipt"`) || !strings.Contains(body, `"hash_header":"X-Janus-Evidence-Hash"`) || !strings.Contains(body, `"body_field":"integrity.pack_hash"`) || !strings.Contains(body, `"coverage":"evidence_json_without_integrity_or_receipt"`) {
-		t.Fatalf("evidence response should include exact receipt body: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"assurance_summary"`) || !strings.Contains(body, `"proven"`) || !strings.Contains(body, `"review"`) || !strings.Contains(body, `"Browser and API boundary"`) {
-		t.Fatalf("evidence response should include assurance summary: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"operational_status"`) || !strings.Contains(body, `"key":"evidence_export"`) || !strings.Contains(body, `"key":"scope_boundary"`) {
-		t.Fatalf("evidence response should include operational status: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"action_readiness"`) || !strings.Contains(body, `"key":"posture_view"`) || !strings.Contains(body, `"key":"policy_posture"`) || !strings.Contains(body, `"value_returned":false`) {
-		t.Fatalf("evidence response should include action readiness: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"authenticated_role_evidence"`) || !strings.Contains(body, `"label":"Signed-in role receipt"`) || !strings.Contains(body, `"evidence_signal":"signed_in_role_receipt_no_identity_values"`) || !strings.Contains(body, `"identity_values_returned":false`) || !strings.Contains(body, `"subject_returned":false`) || !strings.Contains(body, `"email_returned":false`) || !strings.Contains(body, `"name_returned":false`) || !strings.Contains(body, `"claim_values_returned":false`) || !strings.Contains(body, `"token_returned":false`) {
-		t.Fatalf("evidence response should include authenticated role evidence: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if pack.AuthenticatedBrowser.ValueReturned || pack.AuthenticatedBrowser.IdentityValuesReturned || pack.AuthenticatedBrowser.TokenReturned || pack.AuthenticatedBrowser.CookieValueReturned || pack.AuthenticatedBrowser.SecretValueReturned {
-		t.Fatalf("evidence authenticated browser witness should stay value-free: %#v", pack.AuthenticatedBrowser)
+		t.Fatal(minimizationDiagnostic("forbidden_literal"))
 	}
 	if !strings.Contains(body, `"authenticated_browser_witness"`) || !strings.Contains(body, `"label":"Authenticated browser witness"`) || !strings.Contains(body, `"evidence_signal":"signed_session_browser_proof_no_identity_values"`) || !strings.Contains(body, `"session_cookie_policy":"host_prefixed_strict_signed"`) || !strings.Contains(body, `"csrf_boundary":"bound_to_signed_session"`) || !strings.Contains(body, `"csp_boundary":"script_src_none"`) || !strings.Contains(body, `"connector_output_returned":false`) || !strings.Contains(body, `"permit_payload_returned":false`) || !strings.Contains(body, `"secret_value_returned":false`) {
-		t.Fatalf("evidence response should include authenticated browser witness: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"assurance_gates"`) || !strings.Contains(body, `"key":"value_leak_sentinel"`) {
-		t.Fatalf("evidence response should include assurance gates: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"negative_path_assurance"`) || !strings.Contains(body, `"key":"role_denial"`) || !strings.Contains(body, `"key":"audit_sink_degraded"`) || !strings.Contains(body, `"key":"request_correlation"`) {
-		t.Fatalf("evidence response should include negative-path assurance: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"degraded_guidance"`) || !strings.Contains(body, `"key":"readiness"`) || !strings.Contains(body, `"key":"audit_sink"`) {
-		t.Fatalf("evidence response should include degraded-state guidance: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"privacy_posture"`) || !strings.Contains(body, `"key":"raw_metadata"`) || !strings.Contains(body, `"cookie_secrets"`) {
-		t.Fatalf("evidence response should include privacy posture: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"scope_posture"`) {
-		t.Fatalf("evidence response should include scope posture: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"lifecycle_posture"`) {
-		t.Fatalf("evidence response should include lifecycle posture: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"permit_posture"`) {
-		t.Fatalf("evidence response should include permit posture: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 	if !strings.Contains(body, `"integrity"`) || !strings.Contains(body, `"pack_hash"`) {
-		t.Fatalf("evidence response should include integrity metadata: %s", body)
+		t.Fatal(minimizationDiagnostic("evidence_shape"))
 	}
 }
 
@@ -3144,9 +3144,17 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 	app.cfg.RequireAuth = false
 	app.oauth = testOAuthConfig()
 	app.verifier = &oidc.IDTokenVerifier{}
+	app.store.AppendAudit(AuditEntry{
+		Action:  "minimization.proof",
+		Outcome: "denied",
+		Method:  http.MethodPost,
+		Path:    "/JANUS_BACKEND_PATH_CANARY_296/JANUS_IDENTITY_CLAIM_CANARY_296",
+		Reason:  "JANUS_PROMPT_MODEL_CANARY_296 JANUS_STDOUT_CANARY_296 JANUS_STDERR_CANARY_296 JANUS_ENV_DUMP_CANARY_296",
+	})
 
 	cases := []struct {
 		name        string
+		pattern     string
 		method      string
 		path        string
 		body        string
@@ -3154,45 +3162,82 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		status      int
 		setup       func(*http.Request)
 	}{
-		{name: "health", method: http.MethodGet, path: "/healthz", status: http.StatusOK},
-		{name: "ready", method: http.MethodGet, path: "/readyz", status: http.StatusOK},
-		{name: "favicon", method: http.MethodGet, path: "/favicon.ico", status: http.StatusNoContent},
-		{name: "login", method: http.MethodGet, path: "/login", status: http.StatusFound},
-		{name: "auth reset", method: http.MethodGet, path: "/auth/reset", status: http.StatusOK},
+		{name: "health", pattern: "GET /healthz", method: http.MethodGet, path: "/healthz", status: http.StatusOK},
+		{name: "ready", pattern: "GET /readyz", method: http.MethodGet, path: "/readyz", status: http.StatusOK},
+		{name: "build receipt", pattern: "GET /buildz", method: http.MethodGet, path: "/buildz", status: http.StatusOK},
+		{name: "favicon", pattern: "GET /favicon.ico", method: http.MethodGet, path: "/favicon.ico", status: http.StatusNoContent},
+		{name: "login", pattern: "GET /login", method: http.MethodGet, path: "/login", status: http.StatusFound},
+		{name: "auth reset", pattern: "GET /auth/reset", method: http.MethodGet, path: "/auth/reset", status: http.StatusOK},
 		{
-			name:   "bad callback",
-			method: http.MethodGet,
-			path:   "/oidc/callback?state=wrong&code=raw-secret-value",
-			status: http.StatusBadRequest,
+			name:    "bad callback",
+			pattern: "GET /oidc/callback",
+			method:  http.MethodGet,
+			path:    "/oidc/callback?state=wrong&code=JANUS_SECRET_CANARY_296",
+			status:  http.StatusBadRequest,
 			setup: func(req *http.Request) {
 				req.AddCookie(&http.Cookie{Name: hostStateCookie, Value: "state-cookie-secret"})
 				req.AddCookie(&http.Cookie{Name: hostNonceCookie, Value: "nonce-cookie-secret"})
-				req.AddCookie(&http.Cookie{Name: hostPKCECookie, Value: "pkce-cookie-secret"})
+				req.AddCookie(&http.Cookie{Name: hostPKCECookie, Value: "JANUS_AUTH_COOKIE_CANARY_296"})
 			},
 		},
 		{name: "browser missing", method: http.MethodGet, path: "/missing?ref=secret-cookie-secret", status: http.StatusNotFound},
 		{name: "api missing", method: http.MethodGet, path: "/api/missing?ref=raw-secret-value", status: http.StatusNotFound},
 		{name: "api method", method: http.MethodDelete, path: "/api/posture", status: http.StatusMethodNotAllowed},
-		{name: "posture", method: http.MethodGet, path: "/api/posture", status: http.StatusOK},
-		{name: "auth witness", method: http.MethodGet, path: "/api/auth/session-witness", status: http.StatusOK},
-		{name: "auth smoke", method: http.MethodGet, path: "/auth/smoke", status: http.StatusOK},
-		{name: "session witness page", method: http.MethodGet, path: "/session-witness", status: http.StatusOK},
-		{name: "session witness text", method: http.MethodGet, path: "/session-witness.txt", status: http.StatusOK},
-		{name: "session witness verifier", method: http.MethodGet, path: "/session-witness/verify", status: http.StatusOK},
-		{name: "session witness verifier bad post", method: http.MethodPost, path: "/session-witness/verify", body: "proof_line=secret-cookie-secret&proof_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", contentType: "application/x-www-form-urlencoded", status: http.StatusUnprocessableEntity},
-		{name: "session witness verify current", method: http.MethodPost, path: "/session-witness/verify-current", status: http.StatusOK},
-		{name: "auth witness verifier bad post", method: http.MethodPost, path: "/api/auth/session-witness/verify", body: `{"proof_line":"secret-cookie-secret","proof_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, contentType: "application/json", status: http.StatusUnprocessableEntity},
-		{name: "descriptors", method: http.MethodGet, path: "/api/warden/descriptors", status: http.StatusOK},
-		{name: "audit", method: http.MethodGet, path: "/api/audit/recent", status: http.StatusOK},
-		{name: "evidence", method: http.MethodGet, path: "/api/evidence", status: http.StatusOK},
-		{name: "resolve", method: http.MethodPost, path: "/api/warden/resolve", body: `{"ref":"zitadel-janus-oidc","reason":"local smoke"}`, contentType: "application/json", status: http.StatusOK},
-		{name: "resolve bad json", method: http.MethodPost, path: "/api/warden/resolve", body: `{"ref":"raw-secret-value"`, contentType: "application/json", status: http.StatusBadRequest},
-		{name: "permit", method: http.MethodPost, path: "/api/permits", body: `{"ref":"zitadel-janus-oidc","action":"metadata_use","destination":"dashboard","reason":"local smoke"}`, contentType: "application/json", status: http.StatusCreated},
-		{name: "permit missing run", method: http.MethodPost, path: "/api/permits/missing/run", status: http.StatusNotFound},
-		{name: "dashboard", method: http.MethodGet, path: "/", status: http.StatusOK},
-		{name: "ui resolve", method: http.MethodPost, path: "/ui/warden/resolve", body: "ref=zitadel-janus-oidc&reason=local+smoke", contentType: "application/x-www-form-urlencoded", status: http.StatusOK},
-		{name: "ui permit", method: http.MethodPost, path: "/ui/permits", body: "ref=zitadel-janus-oidc&action=metadata_use&destination=dashboard&reason=local+smoke", contentType: "application/x-www-form-urlencoded", status: http.StatusOK},
-		{name: "ui permit missing run", method: http.MethodPost, path: "/ui/permits/missing/run", status: http.StatusNotFound},
+		{name: "logout", pattern: "POST /logout", method: http.MethodPost, path: "/logout", status: http.StatusFound},
+		{name: "posture", pattern: "GET /api/posture", method: http.MethodGet, path: "/api/posture", status: http.StatusOK},
+		{name: "auth witness", pattern: "GET /api/auth/session-witness", method: http.MethodGet, path: "/api/auth/session-witness", status: http.StatusOK},
+		{name: "auth smoke", pattern: "GET /auth/smoke", method: http.MethodGet, path: "/auth/smoke", status: http.StatusOK},
+		{name: "session witness page", pattern: "GET /session-witness", method: http.MethodGet, path: "/session-witness", status: http.StatusOK},
+		{name: "session witness text", pattern: "GET /session-witness.txt", method: http.MethodGet, path: "/session-witness.txt", status: http.StatusOK},
+		{name: "session witness verifier", pattern: "GET /session-witness/verify", method: http.MethodGet, path: "/session-witness/verify", status: http.StatusOK},
+		{name: "session witness verifier bad post", pattern: "POST /session-witness/verify", method: http.MethodPost, path: "/session-witness/verify", body: "proof_line=secret-cookie-secret&proof_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", contentType: "application/x-www-form-urlencoded", status: http.StatusUnprocessableEntity},
+		{name: "session witness verify current", pattern: "POST /session-witness/verify-current", method: http.MethodPost, path: "/session-witness/verify-current", status: http.StatusOK},
+		{name: "auth witness verifier bad post", pattern: "POST /api/auth/session-witness/verify", method: http.MethodPost, path: "/api/auth/session-witness/verify", body: `{"proof_line":"secret-cookie-secret","proof_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, contentType: "application/json", status: http.StatusUnprocessableEntity},
+		{name: "descriptors", pattern: "GET /api/warden/descriptors", method: http.MethodGet, path: "/api/warden/descriptors", status: http.StatusOK},
+		{name: "audit", pattern: "GET /api/audit/recent", method: http.MethodGet, path: "/api/audit/recent", status: http.StatusOK},
+		{name: "evidence", pattern: "GET /api/evidence", method: http.MethodGet, path: "/api/evidence", status: http.StatusOK},
+		{name: "resolve", pattern: "POST /api/warden/resolve", method: http.MethodPost, path: "/api/warden/resolve", body: `{"ref":"zitadel-janus-oidc","reason":"local smoke"}`, contentType: "application/json", status: http.StatusOK},
+		{name: "resolve bad json", method: http.MethodPost, path: "/api/warden/resolve", body: `{"ref":"JANUS_REQUEST_BODY_CANARY_296"`, contentType: "application/json", status: http.StatusBadRequest},
+		{name: "permit", pattern: "POST /api/permits", method: http.MethodPost, path: "/api/permits", body: `{"ref":"zitadel-janus-oidc","action":"metadata_use","destination":"dashboard","reason":"local smoke"}`, contentType: "application/json", status: http.StatusCreated},
+		{name: "permit missing run", pattern: "POST /api/permits/{permitID}/run", method: http.MethodPost, path: "/api/permits/missing/run", status: http.StatusNotFound},
+		{name: "dashboard", pattern: "GET /", method: http.MethodGet, path: "/", status: http.StatusOK},
+		{name: "access", pattern: "GET /access", method: http.MethodGet, path: "/access", status: http.StatusOK},
+		{name: "requests", pattern: "GET /requests", method: http.MethodGet, path: "/requests", status: http.StatusOK},
+		{name: "ledger", pattern: "GET /ledger", method: http.MethodGet, path: "/ledger", status: http.StatusOK},
+		{name: "assurance", pattern: "GET /assurance", method: http.MethodGet, path: "/assurance", status: http.StatusOK},
+		{name: "settings", pattern: "GET /settings", method: http.MethodGet, path: "/settings", status: http.StatusOK},
+		{name: "new secret", pattern: "GET /vault/new", method: http.MethodGet, path: "/vault/new", status: http.StatusOK},
+		{name: "new secret script denial", pattern: "GET /vault/new/plan.sh", method: http.MethodGet, path: "/vault/new/plan.sh", status: http.StatusBadRequest},
+		{name: "static asset", pattern: "GET /static/", method: http.MethodGet, path: "/static/janus.css", status: http.StatusOK},
+		{name: "ui resolve", pattern: "POST /ui/warden/resolve", method: http.MethodPost, path: "/ui/warden/resolve", body: "ref=zitadel-janus-oidc&reason=local+smoke", contentType: "application/x-www-form-urlencoded", status: http.StatusOK},
+		{name: "ui permit", pattern: "POST /ui/permits", method: http.MethodPost, path: "/ui/permits", body: "ref=zitadel-janus-oidc&action=metadata_use&destination=dashboard&reason=local+smoke", contentType: "application/x-www-form-urlencoded", status: http.StatusOK},
+		{name: "ui permit missing run", pattern: "POST /ui/permits/{permitID}/run", method: http.MethodPost, path: "/ui/permits/missing/run", status: http.StatusNotFound},
+	}
+
+	registered := make(map[string]bool, len(app.routeSpecs()))
+	for _, route := range app.routeSpecs() {
+		if registered[route.pattern] {
+			t.Fatal(minimizationDiagnostic("route_inventory"))
+		}
+		registered[route.pattern] = true
+	}
+	covered := make(map[string]bool, len(registered))
+	for _, tc := range cases {
+		if tc.pattern == "" {
+			continue
+		}
+		if covered[tc.pattern] {
+			t.Fatal(minimizationDiagnostic("route_inventory"))
+		}
+		covered[tc.pattern] = true
+	}
+	if len(covered) != len(registered) {
+		t.Fatal(minimizationDiagnostic("route_inventory"))
+	}
+	for pattern := range registered {
+		if !covered[pattern] {
+			t.Fatal(minimizationDiagnostic("route_inventory"))
+		}
 	}
 
 	for _, tc := range cases {
@@ -3209,7 +3254,7 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 			out := httptest.NewRecorder()
 			app.routes().ServeHTTP(out, req)
 			if out.Code != tc.status {
-				t.Fatalf("expected %d, got %d body=%s", tc.status, out.Code, out.Body.String())
+				t.Fatal(minimizationDiagnostic("unexpected_status"))
 			}
 			assertRouteResponseValueFree(t, tc.name, out)
 			assertJSONErrorRequestCorrelated(t, tc.name, reqID, out)
@@ -3261,6 +3306,7 @@ func TestJSONErrorResponsesAreRequestCorrelated(t *testing.T) {
 
 func assertRouteResponseValueFree(t *testing.T, name string, out *httptest.ResponseRecorder) {
 	t.Helper()
+	_ = name
 	var haystack strings.Builder
 	haystack.WriteString(out.Body.String())
 	for key, values := range out.Result().Header {
@@ -3271,6 +3317,15 @@ func assertRouteResponseValueFree(t *testing.T, name string, out *httptest.Respo
 	}
 	body := strings.ToLower(haystack.String())
 	for _, marker := range []string{
+		"janus_secret_canary_296",
+		"janus_prompt_model_canary_296",
+		"janus_stdout_canary_296",
+		"janus_stderr_canary_296",
+		"janus_env_dump_canary_296",
+		"janus_request_body_canary_296",
+		"janus_backend_path_canary_296",
+		"janus_auth_cookie_canary_296",
+		"janus_identity_claim_canary_296",
 		"plaintext",
 		"raw-secret-value",
 		"state-cookie-secret",
@@ -3289,21 +3344,38 @@ func assertRouteResponseValueFree(t *testing.T, name string, out *httptest.Respo
 		"value_returned=true",
 	} {
 		if strings.Contains(body, marker) {
-			t.Fatalf("%s response leaked marker %q: headers=%#v body=%s", name, marker, out.Result().Header, out.Body.String())
+			t.Fatal(minimizationDiagnostic("forbidden_literal"))
 		}
 	}
 }
 
 func assertJSONErrorRequestCorrelated(t *testing.T, name, reqID string, out *httptest.ResponseRecorder) {
 	t.Helper()
+	_ = name
 	if out.Code < http.StatusBadRequest || !strings.Contains(out.Header().Get("Content-Type"), "application/json") {
 		return
 	}
 	body := out.Body.String()
 	for _, want := range []string{`"request_id":"` + reqID + `"`, `"value_returned":false`} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("%s JSON error should include %s: %s", name, want, body)
+			t.Fatal(minimizationDiagnostic("request_correlation"))
 		}
+	}
+}
+
+func minimizationDiagnostic(reason string) string {
+	switch reason {
+	case "evidence_shape", "forbidden_literal", "request_correlation", "route_inventory", "unexpected_status":
+		return "minimization boundary failed: " + reason
+	default:
+		return "minimization boundary failed: unknown"
+	}
+}
+
+func TestMinimizationDiagnosticsNeverEchoUntrustedContent(t *testing.T) {
+	canary := "JANUS_SECRET_CANARY_296"
+	if got := minimizationDiagnostic(canary); strings.Contains(got, canary) || got != "minimization boundary failed: unknown" {
+		t.Fatal("minimization diagnostic sanitization failed")
 	}
 }
 

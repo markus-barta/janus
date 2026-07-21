@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "contract_id": "janus-minimization-proof-v1",
+  "owner": "janus-security",
+  "reviewed_on": "2026-07-21",
+  "limits": {
+    "proof_timeout_seconds": 600,
+    "max_capture_bytes": 1048576
+  },
+  "required_stacks": [
+    "rust",
+    "go"
+  ],
+  "surface_classes": [
+    "serialized-output",
+    "process-output",
+    "managed-execution",
+    "env-file",
+    "audit",
+    "admin-state",
+    "warden-transport",
+    "container-log",
+    "http-api",
+    "http-ui",
+    "evidence-export",
+    "ci-diagnostic",
+    "telemetry-absence"
+  ],
+  "forbidden_data_classes": [
+    "secret-value",
+    "prompt-model-text",
+    "command-stdout",
+    "command-stderr",
+    "environment-dump",
+    "request-body",
+    "backend-path",
+    "auth-cookie",
+    "identity-claim"
+  ],
+  "allowed_sinks": [
+    {
+      "id": "private-env-file-target",
+      "condition": "reviewed-private-target",
+      "data_classes": [
+        "secret-value",
+        "environment-dump"
+      ]
+    },
+    {
+      "id": "reviewed-managed-child-input",
+      "condition": "exact-reviewed-execution",
+      "data_classes": [
+        "secret-value",
+        "environment-dump"
+      ]
+    }
+  ],
+  "no_emitters": [
+    {
+      "id": "metrics",
+      "state": "not_implemented/no_emitter"
+    },
+    {
+      "id": "distributed-traces",
+      "state": "not_implemented/no_emitter"
+    }
+  ],
+  "required_proof_ids": [
+    "rust-serialized-output",
+    "rust-managed-output",
+    "rust-env-file-sink",
+    "rust-audit-admin",
+    "rust-warden-transport",
+    "rust-container-log",
+    "rust-telemetry-absence",
+    "go-closed-routes",
+    "go-evidence-export",
+    "go-diagnostic-sanitization",
+    "go-telemetry-absence"
+  ],
+  "proofs": [
+    {
+      "id": "rust-serialized-output",
+      "stack": "rust",
+      "surface_classes": [
+        "serialized-output"
+      ],
+      "command": {
+        "kind": "rust-test",
+        "package": "janus-core",
+        "selector": "minimization::tests::serialized_boundary_is_recursive_and_path_free"
+      }
+    },
+    {
+      "id": "rust-managed-output",
+      "stack": "rust",
+      "surface_classes": [
+        "process-output",
+        "managed-execution"
+      ],
+      "command": {
+        "kind": "rust-test",
+        "package": "janus-executor",
+        "selector": "tests::managed_command_runner_spawns_reviewed_process_and_redacts_output"
+      }
+    },
+    {
+      "id": "rust-env-file-sink",
+      "stack": "rust",
+      "surface_classes": [
+        "env-file"
+      ],
+      "command": {
+        "kind": "rust-test",
+        "package": "janus-executor",
+        "selector": "tests::env_file_handoff_writes_private_file_without_returning_literal"
+      }
+    },
+    {
+      "id": "rust-audit-admin",
+      "stack": "rust",
+      "surface_classes": [
+        "audit",
+        "admin-state"
+      ],
+      "command": {
+        "kind": "rust-test",
+        "package": "janus-local",
+        "selector": "audit::tests::security_property_audit_jsonl_rejects_arbitrary_complete_records_without_echo"
+      }
+    },
+    {
+      "id": "rust-warden-transport",
+      "stack": "rust",
+      "surface_classes": [
+        "warden-transport"
+      ],
+      "command": {
+        "kind": "rust-test",
+        "package": "janus-warden",
+        "selector": "tests::tool_response_boundary_rejects_value_bearing_shapes"
+      }
+    },
+    {
+      "id": "rust-container-log",
+      "stack": "rust",
+      "surface_classes": [
+        "container-log"
+      ],
+      "command": {
+        "kind": "repo-script",
+        "script": "scripts/smoke-engine-container.sh"
+      }
+    },
+    {
+      "id": "rust-telemetry-absence",
+      "stack": "rust",
+      "surface_classes": [
+        "telemetry-absence"
+      ],
+      "command": {
+        "kind": "static-telemetry-absence"
+      }
+    },
+    {
+      "id": "go-closed-routes",
+      "stack": "go",
+      "surface_classes": [
+        "http-api",
+        "http-ui"
+      ],
+      "command": {
+        "kind": "go-test",
+        "selector": "TestRouteValueLeakSentinelCoversPublicAPIAndUI"
+      }
+    },
+    {
+      "id": "go-evidence-export",
+      "stack": "go",
+      "surface_classes": [
+        "evidence-export"
+      ],
+      "command": {
+        "kind": "go-test",
+        "selector": "TestEvidenceExportIsValueFree"
+      }
+    },
+    {
+      "id": "go-diagnostic-sanitization",
+      "stack": "go",
+      "surface_classes": [
+        "ci-diagnostic"
+      ],
+      "command": {
+        "kind": "go-test",
+        "selector": "TestMinimizationDiagnosticsNeverEchoUntrustedContent"
+      }
+    },
+    {
+      "id": "go-telemetry-absence",
+      "stack": "go",
+      "surface_classes": [
+        "telemetry-absence"
+      ],
+      "command": {
+        "kind": "static-telemetry-absence"
+      }
+    }
+  ]
+}

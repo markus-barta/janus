@@ -15,6 +15,7 @@ pub mod error;
 pub mod manifest;
 pub mod metadata;
 pub mod migration;
+pub mod minimization;
 pub mod plane;
 pub mod policy;
 pub mod principal;
@@ -48,6 +49,9 @@ pub use error::{JanusError, JanusResult};
 pub use manifest::ManifestCatalog;
 pub use metadata::{SecretMetadataOverlay, SecretMetadataPatch};
 pub use migration::{MigrationCompatibility, MigrationManifest, MigrationPhase, MigrationRisk};
+pub use minimization::{
+    enforce_value_free_json, excludes_literals, MinimizationViolation, FORBIDDEN_OUTPUT_FIELDS,
+};
 pub use plane::{
     authorize_runtime_action, runtime_endpoint_matrix, runtime_endpoint_policy, RuntimeAbuseBudget,
     RuntimeAction, RuntimeControlApplicability, RuntimeEndpointPolicy, RuntimeInputEncoding,

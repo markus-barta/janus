@@ -30,6 +30,7 @@ on:
       - 'flake.nix'
       - 'flake.lock'
       - 'examples/**'
+      - 'config/assurance/**'
       - 'config/release-channels/**'
       - 'config/migrations/**'
       - 'fixtures/release-admission/**'

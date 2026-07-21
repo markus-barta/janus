@@ -15,6 +15,9 @@ echo "==> janus engine release assurance: bounded security properties"
 python3 scripts/run-security-properties.py --self-test
 python3 scripts/run-security-properties.py --release
 
+echo "==> janus engine release assurance: minimization proof runner"
+python3 scripts/run-minimization-proof.py --self-test
+
 echo "==> janus engine release assurance: reviewed adversarial recovery corpus"
 python3 scripts/run-adversarial-scenarios.py --self-test
 python3 scripts/run-adversarial-scenarios.py
@@ -60,7 +63,7 @@ JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-lifecy
 echo "==> janus engine release assurance: local Pharos retirement smoke"
 JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-pharos-retirement.sh
 
-echo "==> janus engine release assurance: engine container Warden MCP smoke"
-scripts/smoke-engine-container.sh
+echo "==> janus engine release assurance: cross-surface Rust minimization proof"
+python3 scripts/run-minimization-proof.py --stack rust
 
 echo "ok: janus engine release assurance passed"
