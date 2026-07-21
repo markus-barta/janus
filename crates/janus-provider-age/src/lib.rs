@@ -95,6 +95,42 @@ pub struct AgeRollbackMaterial {
 }
 
 impl AgeSecretStore {
+    /// Create encrypted material only when the manifest-declared target is absent.
+    ///
+    /// This is the entry-transaction primitive. Unlike [`SecretStore::set`], it
+    /// cannot overwrite existing ciphertext, even if another writer creates the
+    /// final path between the initial absence check and installation.
+    pub async fn create_if_absent(
+        &mut self,
+        name: &SecretName,
+        value: SecretValue,
+    ) -> JanusResult<AgeAdminOutcome> {
+        self.ensure_manifest(name)?;
+        self.ensure_scope_dir()?;
+        let path = self.path_for(name)?;
+        let scope_dir = self.scope_dir();
+        let recipients = self.recipients.clone();
+        let recipient_count = recipients.len();
+        let mut plaintext = value.expose_bytes().to_vec();
+        tokio::task::spawn_blocking(move || {
+            let _lock = try_lock_store_exclusive(&scope_dir)?;
+            let result = encrypt_to_new_file(&path, &scope_dir, &recipients, &plaintext);
+            plaintext.zeroize();
+            result
+        })
+        .await
+        .map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("age create task failed: {err}"),
+        })??;
+        Ok(AgeAdminOutcome {
+            action: "entry.create",
+            changed: true,
+            present_secrets: 1,
+            recipient_count,
+            value_returned: false,
+        })
+    }
+
     /// Build an age store from an already-reviewed manifest catalog.
     pub fn from_catalog(
         project: ProjectId,
@@ -770,6 +806,16 @@ fn encrypt_to_file(
     write_atomically(path, scope_dir, &encrypted)
 }
 
+fn encrypt_to_new_file(
+    path: &Path,
+    scope_dir: &Path,
+    recipient_strings: &[String],
+    plaintext: &[u8],
+) -> JanusResult<()> {
+    let encrypted = encrypt_to_bytes(recipient_strings, plaintext)?;
+    write_atomically_create_new(path, scope_dir, &encrypted)
+}
+
 fn encrypt_to_bytes(recipient_strings: &[String], plaintext: &[u8]) -> JanusResult<Vec<u8>> {
     let recipients = parse_recipients(recipient_strings)?;
     let recipient_refs = recipients
@@ -1050,6 +1096,53 @@ fn write_atomically(path: &Path, scope_dir: &Path, bytes: &[u8]) -> JanusResult<
     Ok(())
 }
 
+fn write_atomically_create_new(path: &Path, scope_dir: &Path, bytes: &[u8]) -> JanusResult<()> {
+    let parent = path.parent().ok_or_else(|| JanusError::StoreUnavailable {
+        detail: "age store path has no parent".to_string(),
+    })?;
+    create_secret_parent_dirs(parent, scope_dir)?;
+    let tmp = parent.join(format!(
+        ".janus-age-entry-{}.{}.tmp",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| JanusError::StoreUnavailable {
+                detail: format!("system clock before unix epoch: {err}"),
+            })?
+            .as_nanos()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(map_store_io)?;
+        set_file_private(&file)?;
+        file.write_all(bytes).map_err(map_store_io)?;
+        file.sync_all().map_err(map_store_io)?;
+        drop(file);
+        fs::hard_link(&tmp, path).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::AlreadyExists {
+                JanusError::policy_denied(
+                    "entry_target_present",
+                    "entry transaction cannot overwrite existing encrypted material",
+                )
+            } else {
+                map_store_io(err)
+            }
+        })?;
+        if let Err(err) = fs::remove_file(&tmp) {
+            let _ = fs::remove_file(path);
+            return Err(map_store_io(err));
+        }
+        sync_dir(parent)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 fn create_secret_parent_dirs(parent: &Path, scope_dir: &Path) -> JanusResult<()> {
     fs::create_dir_all(parent).map_err(map_store_io)?;
     let relative = parent
@@ -1328,6 +1421,42 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
         let admin_store = store(&fixture, fixture.admin_identity_file.clone());
         let recovered = admin_store.get(&fixture.canary).await.unwrap();
         assert_eq!(recovered.expose_bytes(), b"multi-recipient-canary");
+    }
+
+    #[tokio::test]
+    async fn entry_create_is_create_new_and_never_overwrites_ciphertext() {
+        let fixture = fixture();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+        let outcome = store
+            .create_if_absent(
+                &fixture.canary,
+                SecretValue::new(b"entry-original-canary".to_vec()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.action, "entry.create");
+        assert!(outcome.changed);
+        assert!(!outcome.value_returned);
+        let path = store.path_for(&fixture.canary).unwrap();
+        let original_ciphertext = fs::read(&path).unwrap();
+
+        let error = store
+            .create_if_absent(
+                &fixture.canary,
+                SecretValue::new(b"entry-overwrite-canary".to_vec()),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            JanusError::PolicyDenied {
+                reason_code: "entry_target_present",
+                ..
+            }
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original_ciphertext);
+        let recovered = store.get(&fixture.canary).await.unwrap();
+        assert_eq!(recovered.expose_bytes(), b"entry-original-canary");
     }
 
     #[tokio::test]

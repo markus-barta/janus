@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "lifecycle_entry.rs"]
+mod lifecycle_entry;
 #[path = "migration.rs"]
 mod migration;
 #[path = "pharos_retirement.rs"]
@@ -102,6 +104,14 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
         let release = enforce_release_admission_from_env(&principal)
             .context("release admission denied janusd-admin scope transfer")?;
         return scope_transfer::run(&args, release);
+    }
+    if lifecycle_entry::is_lifecycle_entry_command(&args) {
+        let release = enforce_release_admission_from_env(&principal)
+            .context("release admission denied janusd-admin lifecycle entry")?;
+        enforce_migration_ready_from_env().context("migration state denied lifecycle entry")?;
+        enforce_scope_transfer_ready_from_env()
+            .context("scope transfer state denied lifecycle entry")?;
+        return lifecycle_entry::run(&args, release).await;
     }
     let command = parse_args(args)?;
     debug_assert_eq!(command.runtime_action(), action);
@@ -2462,6 +2472,9 @@ fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
     let action = match args {
         [migrate, ..] if migrate == "migrate" => RuntimeAction::Migration,
         [scope_transfer, ..] if scope_transfer == "scope-transfer" => RuntimeAction::ScopeTransfer,
+        [lifecycle_entry, ..] if lifecycle_entry == "lifecycle-entry" => {
+            RuntimeAction::LifecycleEntry
+        }
         [forge, rotate, ..] if forge == "forge" && rotate == "rotate-generated" => {
             RuntimeAction::ForgeRotateGenerated
         }
@@ -3903,6 +3916,7 @@ Administration commands:
   forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \
     --validation PROBE --hook-manifest PATH [--reload METHOD] \
     [--alphabet url-safe|alphanumeric|hex] [--length N]
+  lifecycle-entry preflight|apply|activate|rollback|status --plan PATH
   migrate preflight|apply|postflight|rollback|status --manifest PATH
   scope-transfer preflight|apply|postflight|rollback|status --manifest PATH
   pharos-beacon retire --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH [--retain-for-days N]
@@ -4074,6 +4088,7 @@ mod tests {
                 &["forge", "rotate-generated"][..],
                 RuntimeAction::ForgeRotateGenerated,
             ),
+            (&["lifecycle-entry"][..], RuntimeAction::LifecycleEntry),
             (&["migrate"][..], RuntimeAction::Migration),
             (&["scope-transfer"][..], RuntimeAction::ScopeTransfer),
             (

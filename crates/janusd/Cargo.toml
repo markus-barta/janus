@@ -31,6 +31,7 @@ test = false
 anyhow = "1"
 async-trait = "0.1"
 base64 = "0.21"
+fs2 = "0.4"
 hex = "0.4"
 janus-core = { path = "../janus-core" }
 janus-executor = { path = "../janus-executor" }

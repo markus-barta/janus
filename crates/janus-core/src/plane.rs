@@ -75,6 +75,8 @@ pub enum RuntimeAction {
     LifecycleDestroyReconcile,
     /// Generated-value rotation.
     ForgeRotateGenerated,
+    /// Manifest-first draft secret create/import transaction.
+    LifecycleEntry,
     /// Versioned approval migration.
     Migration,
     /// Offline scope transfer.
@@ -87,7 +89,7 @@ pub enum RuntimeAction {
 
 impl RuntimeAction {
     /// Every known action, used by release-blocking completeness tests.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::WardenListSecrets,
         Self::WardenDescribeSecret,
         Self::WardenRequestUse,
@@ -106,6 +108,7 @@ impl RuntimeAction {
         Self::LifecycleDestroyFinalize,
         Self::LifecycleDestroyReconcile,
         Self::ForgeRotateGenerated,
+        Self::LifecycleEntry,
         Self::Migration,
         Self::ScopeTransfer,
         Self::PharosRetire,
@@ -133,6 +136,7 @@ impl RuntimeAction {
             | Self::LifecycleDestroyFinalize
             | Self::LifecycleDestroyReconcile
             | Self::ForgeRotateGenerated
+            | Self::LifecycleEntry
             | Self::Migration
             | Self::ScopeTransfer
             | Self::PharosRetire
@@ -161,6 +165,7 @@ impl RuntimeAction {
             Self::LifecycleDestroyFinalize => "admin.lifecycle_destroy_finalize",
             Self::LifecycleDestroyReconcile => "admin.lifecycle_destroy_reconcile",
             Self::ForgeRotateGenerated => "admin.forge_rotate_generated",
+            Self::LifecycleEntry => "admin.lifecycle_entry",
             Self::Migration => "admin.migration",
             Self::ScopeTransfer => "admin.scope_transfer",
             Self::PharosRetire => "admin.pharos_retire",
@@ -388,6 +393,7 @@ pub const fn runtime_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPo
         | RuntimeAction::LifecycleDestroyFinalize
         | RuntimeAction::LifecycleDestroyReconcile
         | RuntimeAction::ForgeRotateGenerated
+        | RuntimeAction::LifecycleEntry
         | RuntimeAction::Migration
         | RuntimeAction::ScopeTransfer
         | RuntimeAction::PharosRetire
@@ -397,7 +403,7 @@ pub const fn runtime_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPo
 
 /// Closed endpoint-policy catalog. Adding an action requires extending both
 /// [`RuntimeAction::ALL`] and this release-reviewed matrix.
-pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 22] = [
+pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 23] = [
     runtime_endpoint_policy(RuntimeAction::WardenListSecrets),
     runtime_endpoint_policy(RuntimeAction::WardenDescribeSecret),
     runtime_endpoint_policy(RuntimeAction::WardenRequestUse),
@@ -416,6 +422,7 @@ pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 22] = [
     runtime_endpoint_policy(RuntimeAction::LifecycleDestroyFinalize),
     runtime_endpoint_policy(RuntimeAction::LifecycleDestroyReconcile),
     runtime_endpoint_policy(RuntimeAction::ForgeRotateGenerated),
+    runtime_endpoint_policy(RuntimeAction::LifecycleEntry),
     runtime_endpoint_policy(RuntimeAction::Migration),
     runtime_endpoint_policy(RuntimeAction::ScopeTransfer),
     runtime_endpoint_policy(RuntimeAction::PharosRetire),
@@ -517,7 +524,7 @@ mod tests {
 
     #[test]
     fn every_action_has_exactly_one_operational_plane() {
-        assert_eq!(RuntimeAction::ALL.len(), 22);
+        assert_eq!(RuntimeAction::ALL.len(), 23);
         assert_eq!(
             RuntimeAction::ALL
                 .iter()
@@ -530,7 +537,7 @@ mod tests {
                 .iter()
                 .filter(|action| action.required_plane() == RuntimePlane::Admin)
                 .count(),
-            14
+            15
         );
         assert!(RuntimeAction::ALL
             .iter()

@@ -95,7 +95,11 @@ impl GeneratedValuePolicy {
         self.alphabet
     }
 
-    fn generate(&self) -> SecretValue {
+    /// Generate one bounded value for an internal write-side transaction.
+    ///
+    /// The returned value retains [`SecretValue`]'s redaction and zeroization
+    /// guarantees and must never be emitted by an operator-facing outcome.
+    pub fn generate_value(&self) -> SecretValue {
         let alphabet = self.alphabet.bytes();
         let mut rng = OsRng;
         let mut bytes = Vec::with_capacity(self.length);
@@ -230,7 +234,7 @@ where
         approval: &RotationApproval,
         principal: &PrincipalChain,
     ) -> JanusResult<RotationOutcome> {
-        let value = policy.generate();
+        let value = policy.generate_value();
         self.rotate_generated_with_value(name, value, approval, principal)
             .await
     }
@@ -1186,7 +1190,7 @@ mod tests {
         let policy = GeneratedValuePolicy::hex(32).unwrap();
         assert_eq!(policy.length(), 32);
         assert_eq!(policy.alphabet(), GeneratedAlphabet::Hex);
-        let value = policy.generate();
+        let value = policy.generate_value();
         assert_eq!(value.expose_bytes().len(), 32);
         assert!(value
             .expose_bytes()
