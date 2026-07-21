@@ -1242,7 +1242,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "janus-conformance"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "janus-core",
  "janus-local",
@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "janus-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "hex",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "janus-executor"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fs2",
  "janus-core",
@@ -1283,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "janus-forge"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "janus-core",
@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "janus-local"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fs2",
  "hex",
@@ -1310,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "janus-mock"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "janus-core",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "janus-provider-age"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "age",
  "async-trait",
@@ -1334,7 +1334,7 @@ dependencies = [
 
 [[package]]
 name = "janus-providers"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "janus-conformance",
@@ -1347,7 +1347,7 @@ dependencies = [
 
 [[package]]
 name = "janus-warden"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "janusd"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",

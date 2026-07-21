@@ -5,7 +5,7 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 admit="${repo}/scripts/admit-engine-release.sh"
 policy="${repo}/config/release-channels/v1.json"
 image="ghcr.io/markus-barta/janus/janus-engine"
-tag="rust-engine-v0.1.7"
+tag="rust-engine-v0.1.8"
 digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 revoked="sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 work="$(mktemp -d)"
@@ -60,6 +60,21 @@ expect_denied release_mode_downgrade \
 
 JANUS_TEST_COSIGN_BIN=false expect_denied release_signature_untrusted "${base_args[@]}"
 JANUS_TEST_GH_BIN=false expect_denied release_provenance_untrusted "${base_args[@]}"
+
+compatible_gh="${work}/gh-compatible"
+# shellcheck disable=SC2016 # literal lines for the fixture executable
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'args=" $* "' \
+  '[[ "$args" == *" --signer-workflow "* ]]' \
+  '[[ "$args" == *" --source-ref "* ]]' \
+  '[[ "$args" == *" --cert-oidc-issuer "* ]]' \
+  '[[ "$args" != *" --cert-identity "* ]]' \
+  >"${compatible_gh}"
+chmod 0700 "${compatible_gh}"
+JANUS_COSIGN_BIN=true JANUS_GH_BIN="${compatible_gh}" \
+  "${admit}" "${base_args[@]}" --output "${work}/gh-compatible.json" >/dev/null
 
 sbom_failing_gh="${work}/gh-sbom-failing"
 printf '%s\n' \
