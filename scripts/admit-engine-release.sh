@@ -158,7 +158,6 @@ identity="${identity_prefix}${tag}"
   --repo "${repository}" \
   --signer-workflow "${signer_workflow}" \
   --source-ref "${source_ref}" \
-  --cert-identity "${identity}" \
   --cert-oidc-issuer "${oidc_issuer}" \
   --predicate-type "${provenance_predicate}" >/dev/null ||
   fail "release_provenance_untrusted"
@@ -168,7 +167,6 @@ identity="${identity_prefix}${tag}"
   --repo "${repository}" \
   --signer-workflow "${signer_workflow}" \
   --source-ref "${source_ref}" \
-  --cert-identity "${identity}" \
   --cert-oidc-issuer "${oidc_issuer}" \
   --predicate-type "${sbom_predicate}" >/dev/null ||
   fail "release_sbom_untrusted"
