@@ -20,6 +20,14 @@ pub enum AuditAction {
     PermitApprove,
     /// Policy denied a permit.
     PermitDeny,
+    /// A narrow temporary delegation grant was issued.
+    DelegationGrant,
+    /// A delegation request or validation was denied.
+    DelegationDeny,
+    /// A delegation grant was revoked.
+    DelegationRevoke,
+    /// Expiry of a delegation grant was observed.
+    DelegationExpire,
     /// A consumer was declared.
     ConsumerDeclare,
     /// A consumer use event was observed.
@@ -79,6 +87,10 @@ impl AuditAction {
             Self::PermitIssue => "permit.issue",
             Self::PermitApprove => "permit.approve",
             Self::PermitDeny => "permit.deny",
+            Self::DelegationGrant => "delegation.grant",
+            Self::DelegationDeny => "delegation.deny",
+            Self::DelegationRevoke => "delegation.revoke",
+            Self::DelegationExpire => "delegation.expire",
             Self::ConsumerDeclare => "consumer.declare",
             Self::ConsumerObserve => "consumer.observe",
             Self::ConsumerValidate => "consumer.validate",
@@ -115,6 +127,10 @@ impl AuditAction {
             "permit.issue" => Self::PermitIssue,
             "permit.approve" => Self::PermitApprove,
             "permit.deny" => Self::PermitDeny,
+            "delegation.grant" => Self::DelegationGrant,
+            "delegation.deny" => Self::DelegationDeny,
+            "delegation.revoke" => Self::DelegationRevoke,
+            "delegation.expire" => Self::DelegationExpire,
             "consumer.declare" => Self::ConsumerDeclare,
             "consumer.observe" => Self::ConsumerObserve,
             "consumer.validate" => Self::ConsumerValidate,
@@ -471,6 +487,10 @@ mod tests {
             AuditAction::SecretList,
             AuditAction::SecretUse,
             AuditAction::PermitIssue,
+            AuditAction::DelegationGrant,
+            AuditAction::DelegationDeny,
+            AuditAction::DelegationRevoke,
+            AuditAction::DelegationExpire,
             AuditAction::RotationLifecycle,
             AuditAction::AdminRestore,
         ] {

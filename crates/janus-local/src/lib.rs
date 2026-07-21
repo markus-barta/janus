@@ -9,11 +9,15 @@
 #![forbid(unsafe_code)]
 
 mod audit;
+mod delegation;
 mod migration;
 mod release;
 mod transfer;
 
 pub use audit::{AuditRecovery, JsonlAuditSink};
+pub use delegation::{
+    DelegationListEntry, DelegationRecord, DelegationRegistry, FileDelegationRegistry,
+};
 pub use migration::{enforce_migration_ready_from_env, ApprovalMigrationRunner, MigrationStatus};
 pub use release::{
     audit_release_admission, enforce_release_admission_from_env, load_release_admission,

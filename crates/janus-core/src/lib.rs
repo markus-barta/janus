@@ -10,6 +10,7 @@
 pub mod audit;
 pub mod broker;
 pub mod consumer;
+pub mod delegation;
 pub mod error;
 pub mod manifest;
 pub mod metadata;
@@ -35,6 +36,11 @@ pub use broker::SecretBroker;
 pub use consumer::{
     BlastRadius, ConsumerDescriptor, ConsumerKind, ConsumerRegistry, Environment, OwnerRef,
     ReloadMethod,
+};
+pub use delegation::{
+    DelegationAction, DelegationDecision, DelegationGrant, DelegationGrantSnapshotV1, DelegationId,
+    DelegationPolicy, DelegationRevocation, DelegationRevocationSnapshotV1, DelegationScope,
+    DelegationStatus,
 };
 pub use error::{JanusError, JanusResult};
 pub use manifest::ManifestCatalog;
