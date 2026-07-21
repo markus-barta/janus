@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 423756c488b39fcbd13f3eb8a500b13386398df4f18897cac930d19b8a6a87d8 # shrinks to executor = "runner-a_a", wrong_executor = "other-runner-aa-", destination = "destination-a-a", wrong_destination = "other-destination-a--", scope = "scope/a0a", wrong_scope = "other-scope/a0a", ttl = 2, unknown_suffix = "0aaaa00a", canary = <redacted-generated-canary>

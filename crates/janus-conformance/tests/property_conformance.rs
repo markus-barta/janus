@@ -329,7 +329,14 @@ proptest! {
 
         let mut tampered_snapshot = permit.snapshot();
         tampered_snapshot.secret_ref = format!("sec_unknown_{unknown_suffix}");
-        let tampered = UsePermit::from_snapshot(tampered_snapshot).unwrap();
+        let tampered = UsePermit::from_snapshot(tampered_snapshot).unwrap_err();
+        assert!(matches!(
+            tampered,
+            JanusError::PermitInvalid {
+                reason_code: "denied_permit_binding_mismatch",
+                ..
+            }
+        ));
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         runtime.block_on(async {
             let mut broker = SecretBroker::new(
@@ -339,18 +346,24 @@ proptest! {
             );
             let denied = match broker
                 .use_permit(
-                    &tampered,
+                    &copied,
                     &caller,
                     &ExecutorRef::new(executor).unwrap(),
                     &Destination::new(destination).unwrap(),
-                    valid_at,
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(ttl),
                 )
                 .await
             {
                 Err(error) => error,
                 Ok(_) => panic!("tampered permit unexpectedly returned a secret value"),
             };
-            assert!(matches!(denied, JanusError::NotInManifest { .. }));
+            assert!(matches!(
+                denied,
+                JanusError::PermitInvalid {
+                    reason_code: "denied_expired_permit",
+                    ..
+                }
+            ));
             assert_literal_absent(
                 &canary,
                 &format!("{denied:?} {denied}"),

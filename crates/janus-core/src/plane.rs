@@ -63,6 +63,14 @@ pub enum RuntimeAction {
     ApprovalList,
     /// Approval revocation.
     ApprovalRevoke,
+    /// Exact-use delegation grant creation.
+    DelegationIssue,
+    /// Delegation inventory listing.
+    DelegationList,
+    /// Delegation inspection.
+    DelegationInspect,
+    /// Immutable delegation revocation.
+    DelegationRevoke,
     /// Lifecycle transition.
     LifecycleTransition,
     /// Lifecycle staleness report.
@@ -91,7 +99,7 @@ pub enum RuntimeAction {
 
 impl RuntimeAction {
     /// Every known action, used by release-blocking completeness tests.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 28] = [
         Self::WardenListSecrets,
         Self::WardenDescribeSecret,
         Self::WardenRequestUse,
@@ -104,6 +112,10 @@ impl RuntimeAction {
         Self::ApprovalPermit,
         Self::ApprovalList,
         Self::ApprovalRevoke,
+        Self::DelegationIssue,
+        Self::DelegationList,
+        Self::DelegationInspect,
+        Self::DelegationRevoke,
         Self::LifecycleTransition,
         Self::LifecycleStaleReport,
         Self::LifecycleDestroyRecord,
@@ -133,6 +145,10 @@ impl RuntimeAction {
             | Self::ApprovalPermit
             | Self::ApprovalList
             | Self::ApprovalRevoke
+            | Self::DelegationIssue
+            | Self::DelegationList
+            | Self::DelegationInspect
+            | Self::DelegationRevoke
             | Self::LifecycleTransition
             | Self::LifecycleStaleReport
             | Self::LifecycleDestroyRecord
@@ -163,6 +179,10 @@ impl RuntimeAction {
             Self::ApprovalPermit => "admin.approval_permit",
             Self::ApprovalList => "admin.approval_list",
             Self::ApprovalRevoke => "admin.approval_revoke",
+            Self::DelegationIssue => "admin.delegation_issue",
+            Self::DelegationList => "admin.delegation_list",
+            Self::DelegationInspect => "admin.delegation_inspect",
+            Self::DelegationRevoke => "admin.delegation_revoke",
             Self::LifecycleTransition => "admin.lifecycle_transition",
             Self::LifecycleStaleReport => "admin.lifecycle_stale_report",
             Self::LifecycleDestroyRecord => "admin.lifecycle_destroy_record",
@@ -392,6 +412,10 @@ pub const fn runtime_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPo
         | RuntimeAction::ApprovalPermit
         | RuntimeAction::ApprovalList
         | RuntimeAction::ApprovalRevoke
+        | RuntimeAction::DelegationIssue
+        | RuntimeAction::DelegationList
+        | RuntimeAction::DelegationInspect
+        | RuntimeAction::DelegationRevoke
         | RuntimeAction::LifecycleTransition
         | RuntimeAction::LifecycleStaleReport
         | RuntimeAction::LifecycleDestroyRecord
@@ -409,7 +433,7 @@ pub const fn runtime_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPo
 
 /// Closed endpoint-policy catalog. Adding an action requires extending both
 /// [`RuntimeAction::ALL`] and this release-reviewed matrix.
-pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 24] = [
+pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 28] = [
     runtime_endpoint_policy(RuntimeAction::WardenListSecrets),
     runtime_endpoint_policy(RuntimeAction::WardenDescribeSecret),
     runtime_endpoint_policy(RuntimeAction::WardenRequestUse),
@@ -422,6 +446,10 @@ pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 24] = [
     runtime_endpoint_policy(RuntimeAction::ApprovalPermit),
     runtime_endpoint_policy(RuntimeAction::ApprovalList),
     runtime_endpoint_policy(RuntimeAction::ApprovalRevoke),
+    runtime_endpoint_policy(RuntimeAction::DelegationIssue),
+    runtime_endpoint_policy(RuntimeAction::DelegationList),
+    runtime_endpoint_policy(RuntimeAction::DelegationInspect),
+    runtime_endpoint_policy(RuntimeAction::DelegationRevoke),
     runtime_endpoint_policy(RuntimeAction::LifecycleTransition),
     runtime_endpoint_policy(RuntimeAction::LifecycleStaleReport),
     runtime_endpoint_policy(RuntimeAction::LifecycleDestroyRecord),
@@ -531,7 +559,7 @@ mod tests {
 
     #[test]
     fn every_action_has_exactly_one_operational_plane() {
-        assert_eq!(RuntimeAction::ALL.len(), 24);
+        assert_eq!(RuntimeAction::ALL.len(), 28);
         assert_eq!(
             RuntimeAction::ALL
                 .iter()
@@ -544,7 +572,7 @@ mod tests {
                 .iter()
                 .filter(|action| action.required_plane() == RuntimePlane::Admin)
                 .count(),
-            16
+            20
         );
         assert!(RuntimeAction::ALL
             .iter()

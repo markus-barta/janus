@@ -18,9 +18,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use janus_core::{
-    AuditSink, ConsumerDescriptor, ConsumerKind, ConsumerRef, Destination, ExecutorRef, JanusError,
-    JanusResult, PrincipalChain, ProfileId, SafeLabel, SecretBroker, SecretRef, SecretStore,
-    SecretValue, UsePermit,
+    AuditSink, ConsumerDescriptor, ConsumerKind, ConsumerRef, DelegationGrant,
+    DelegationRevocation, Destination, ExecutorRef, JanusError, JanusResult, PrincipalChain,
+    ProfileId, SafeLabel, SecretBroker, SecretRef, SecretStore, SecretValue, UsePermit,
 };
 use sha2::{Digest, Sha256};
 
@@ -849,14 +849,30 @@ where
     where
         F: FnOnce(SecretEnvBinding<'_>) -> JanusResult<()>,
     {
+        self.execute_with_secret_and_delegation(invocation, None, execute)
+            .await
+    }
+
+    /// Consume a permit with exact current delegation evidence when acting as
+    /// a grantor, without exposing a literal to the caller.
+    pub async fn execute_with_secret_and_delegation<F>(
+        &mut self,
+        invocation: ApprovedUseInvocation<'_>,
+        delegation: Option<(&DelegationGrant, Option<&DelegationRevocation>)>,
+        execute: F,
+    ) -> JanusResult<ApprovedUseOutcome>
+    where
+        F: FnOnce(SecretEnvBinding<'_>) -> JanusResult<()>,
+    {
         let value = self
             .broker
-            .use_permit(
+            .use_permit_with_delegation(
                 invocation.permit,
                 invocation.principal,
                 &invocation.executor,
                 &invocation.destination,
                 invocation.now,
+                delegation,
             )
             .await?;
         let outcome = ApprovedUseOutcome {
@@ -884,6 +900,21 @@ where
     where
         F: FnOnce(ManagedCommandExecution<'_>) -> JanusResult<ManagedCommandOutput>,
     {
+        self.execute_managed_command_with_delegation(request, None, execute)
+            .await
+    }
+
+    /// Execute a reviewed managed command using exact current delegation
+    /// evidence for a delegated permit.
+    pub async fn execute_managed_command_with_delegation<F>(
+        &mut self,
+        request: ManagedCommandRequest<'_>,
+        delegation: Option<(&DelegationGrant, Option<&DelegationRevocation>)>,
+        execute: F,
+    ) -> JanusResult<ManagedCommandOutcome>
+    where
+        F: FnOnce(ManagedCommandExecution<'_>) -> JanusResult<ManagedCommandOutput>,
+    {
         if request.permit.profile_id() != request.profile.profile_id() {
             return Err(JanusError::permit_invalid(
                 "denied_profile_mismatch",
@@ -899,12 +930,13 @@ where
         let plan = request.profile.preflight_command(&request.requested_args)?;
         let value = self
             .broker
-            .use_permit(
+            .use_permit_with_delegation(
                 request.permit,
                 request.principal,
                 request.profile.executor(),
                 request.profile.destination(),
                 request.now,
+                delegation,
             )
             .await?;
         let output = execute(ManagedCommandExecution {
@@ -931,8 +963,21 @@ where
         &mut self,
         request: ManagedCommandRequest<'_>,
     ) -> JanusResult<ManagedCommandOutcome> {
-        self.execute_managed_command(request, |execution| execution.run_process())
+        self.run_managed_command_with_delegation(request, None)
             .await
+    }
+
+    /// Spawn a reviewed managed command with exact current delegation
+    /// evidence for a delegated permit.
+    pub async fn run_managed_command_with_delegation(
+        &mut self,
+        request: ManagedCommandRequest<'_>,
+        delegation: Option<(&DelegationGrant, Option<&DelegationRevocation>)>,
+    ) -> JanusResult<ManagedCommandOutcome> {
+        self.execute_managed_command_with_delegation(request, delegation, |execution| {
+            execution.run_process()
+        })
+        .await
     }
 
     /// Render a reviewed service env file from a permit-bound secret.
@@ -943,6 +988,16 @@ where
     pub async fn render_env_file(
         &mut self,
         request: EnvFileRequest<'_>,
+    ) -> JanusResult<EnvFileOutcome> {
+        self.render_env_file_with_delegation(request, None).await
+    }
+
+    /// Render a reviewed private env file with exact current delegation
+    /// evidence for a delegated permit.
+    pub async fn render_env_file_with_delegation(
+        &mut self,
+        request: EnvFileRequest<'_>,
+        delegation: Option<(&DelegationGrant, Option<&DelegationRevocation>)>,
     ) -> JanusResult<EnvFileOutcome> {
         if request.permit.profile_id() != request.profile.profile_id() {
             return Err(JanusError::permit_invalid(
@@ -963,12 +1018,13 @@ where
         }
         let value = self
             .broker
-            .use_permit(
+            .use_permit_with_delegation(
                 request.permit,
                 request.principal,
                 request.profile.executor(),
                 request.profile.destination(),
                 request.now,
+                delegation,
             )
             .await?;
         write_env_file_atomic(&plan.output_path, &plan.env_name, &value)?;
@@ -1305,10 +1361,10 @@ mod tests {
 
     use janus_core::{
         AuditAction, AuditOutcome, AuditWrite, BlastRadius, ConsumerDescriptor, ConsumerKind,
-        ConsumerRef, EgressMode, Environment, JanusError, ManifestCatalog, OwnerRef, Principal,
-        PrincipalId, PrincipalKind, ProfilePolicy, Purpose, ReloadMethod, SafeLabel, ScopePathV1,
-        ScopeRef, SecretClass, SecretLifecycle, SecretMeta, SecretName, TrustLevel, UseProfile,
-        UseRequest, ValidationProbe,
+        ConsumerRef, DelegationPolicy, EgressMode, Environment, JanusError, ManifestCatalog,
+        OwnerRef, Principal, PrincipalId, PrincipalKind, ProfilePolicy, Purpose, ReloadMethod,
+        SafeLabel, ScopePathV1, ScopeRef, SecretClass, SecretLifecycle, SecretMeta, SecretName,
+        TrustLevel, UseProfile, UseRequest, ValidationProbe,
     };
     use janus_mock::MockStore;
 
@@ -1613,6 +1669,91 @@ mod tests {
                 && !event.value_returned
         }));
         assert!(!format!("{:?}", audit.events()).contains("expected-canary"));
+    }
+
+    #[tokio::test]
+    async fn revocation_after_delegated_permit_issue_blocks_secret_exposure() {
+        let (executor, _plain_permit, mut grantor, executor_ref, destination, profile) =
+            executor_fixture().await;
+        grantor.human = Some(Principal::new(
+            PrincipalKind::Human,
+            PrincipalId::new("human-grantor").unwrap(),
+        ));
+        let mut delegate = principal("janus-run@m5", "janus/dev");
+        delegate.agent = Some(Principal::new(
+            PrincipalKind::AgentSession,
+            PrincipalId::new("session:delegate,model:codex").unwrap(),
+        ));
+        let (store, policy, mut audit) = executor.into_broker().into_parts();
+        let descriptor = store
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|descriptor| descriptor.secret_ref == *profile.secret_ref())
+            .unwrap();
+        let request = UseRequest {
+            scope: scope(),
+            secret_ref: profile.secret_ref().clone(),
+            profile_id: profile.profile_id().clone(),
+            destination: destination.clone(),
+            purpose: Purpose::new("deploy canary").unwrap(),
+        };
+        let grant = DelegationPolicy::issue_use(
+            &policy,
+            &descriptor,
+            &request,
+            &grantor,
+            &delegate,
+            None,
+            START,
+            START + Duration::from_secs(30),
+            SafeLabel::new("coverage").unwrap(),
+            &mut audit,
+        )
+        .unwrap();
+        let mut broker = SecretBroker::new(store, policy, audit);
+        let permit = broker
+            .request_use_with_delegation(&request, &delegate, START, &grant, None)
+            .await
+            .unwrap();
+        let (_store, _policy, mut audit) = broker.into_parts();
+        let revocation = DelegationPolicy::authorize_revocation(
+            &grant,
+            &delegate,
+            START + Duration::from_millis(500),
+            SafeLabel::new("coverage ended").unwrap(),
+            &mut audit,
+        )
+        .unwrap();
+        let mut executor = ApprovedUseExecutor::new(SecretBroker::new(_store, _policy, audit));
+        let mut callback_called = false;
+        let error = executor
+            .execute_with_secret_and_delegation(
+                invocation(&permit, &delegate, executor_ref, destination),
+                Some((&grant, Some(&revocation))),
+                |_binding| {
+                    callback_called = true;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(!callback_called);
+        assert!(matches!(
+            error,
+            JanusError::PolicyDenied {
+                reason_code: "delegation_revoked",
+                ..
+            }
+        ));
+        let (_store, _policy, audit) = executor.into_broker().into_parts();
+        assert!(audit.events().iter().any(|event| {
+            event.action == AuditAction::SecretUse
+                && event.outcome == AuditOutcome::Denied
+                && event.reason_code == "delegation_revoked"
+                && event.delegation.is_some()
+        }));
     }
 
     #[tokio::test]

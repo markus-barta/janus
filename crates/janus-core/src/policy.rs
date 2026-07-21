@@ -4,8 +4,9 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
-    AuditAction, AuditEvent, AuditOutcome, AuditSink, Destination, ExecutorRef, JanusError,
-    JanusResult, PrincipalChain, SafeLabel, ScopeRef, SecretClass, SecretRef, Severity,
+    AuditAction, AuditEvent, AuditOutcome, AuditSink, DelegatedUseContext,
+    DelegatedUseContextSnapshotV1, Destination, ExecutorRef, JanusError, JanusResult,
+    PrincipalChain, SafeLabel, ScopeRef, SecretClass, SecretRef, Severity,
 };
 use sha2::{Digest, Sha256};
 
@@ -635,29 +636,48 @@ pub enum PolicyDecision {
 pub struct PermitId(String);
 
 impl PermitId {
-    fn derive(
-        profile: &UseProfile,
-        principal: &PrincipalChain,
+    #[allow(clippy::too_many_arguments)]
+    fn derive_exact(
+        secret_ref: &SecretRef,
+        scope: &ScopeRef,
+        profile_id: &ProfileId,
+        destination: &Destination,
+        executor: &ExecutorRef,
+        egress: EgressMode,
         purpose: &Purpose,
-        now: SystemTime,
+        principal_binding: &str,
+        expires_at: SystemTime,
+        delegation: Option<&DelegatedUseContext>,
     ) -> Self {
-        let timestamp = now
+        let expiry = expires_at
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos()
-            .to_le_bytes();
+            .to_be_bytes();
         let mut hasher = Sha256::new();
-        hasher.update(profile.id.as_str().as_bytes());
+        hasher.update(b"janus-use-permit-v2");
         hasher.update(b"\0");
-        hasher.update(profile.secret_ref.as_str().as_bytes());
+        hasher.update(secret_ref.as_str().as_bytes());
         hasher.update(b"\0");
-        hasher.update(profile.scope.as_str().as_bytes());
+        hasher.update(scope.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(profile_id.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(destination.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(executor.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(egress.as_str().as_bytes());
         hasher.update(b"\0");
         hasher.update(purpose.as_str().as_bytes());
         hasher.update(b"\0");
-        hasher.update(principal.binding_key().as_bytes());
+        hasher.update(principal_binding.as_bytes());
         hasher.update(b"\0");
-        hasher.update(timestamp);
+        hasher.update(expiry);
+        if let Some(delegation) = delegation {
+            hasher.update(b"\0delegation\0");
+            hasher.update(delegation.integrity_text().as_bytes());
+        }
         let digest = hasher.finalize();
         Self(format!("use_{}", hex::encode(&digest[..12])))
     }
@@ -703,8 +723,10 @@ pub struct UsePermit {
     egress: EgressMode,
     purpose: Purpose,
     approval: Option<ApprovalGrant>,
+    delegation: Option<DelegatedUseContext>,
     principal_binding: String,
     expires_at: SystemTime,
+    binding_version: Option<u8>,
 }
 
 /// Durable, value-free snapshot of a permit.
@@ -732,12 +754,16 @@ pub struct UsePermitSnapshot {
     pub purpose: String,
     /// Approval grant this permit was issued under, if any.
     pub approval: Option<ApprovalGrantSnapshot>,
+    /// Exact value-free acting-as context, if issued through delegation.
+    pub delegation: Option<DelegatedUseContextSnapshotV1>,
     /// Principal binding key this permit is bound to.
     pub principal_binding: String,
     /// Permit expiry seconds since the Unix epoch.
     pub expires_at_unix_secs: u64,
     /// Permit expiry nanoseconds within the epoch second.
     pub expires_at_subsec_nanos: u32,
+    /// Derived permit binding format. Missing only for legacy registry records.
+    pub binding_version: Option<u8>,
 }
 
 impl UsePermit {
@@ -747,9 +773,28 @@ impl UsePermit {
         principal: &PrincipalChain,
         now: SystemTime,
         approval: Option<&ApprovalGrant>,
+        delegation: Option<&DelegatedUseContext>,
     ) -> Self {
+        let profile_expiry = now + profile.ttl;
+        let expires_at = delegation
+            .map(DelegatedUseContext::expires_at)
+            .map_or(profile_expiry, |grant_expiry| {
+                profile_expiry.min(grant_expiry)
+            });
+        let principal_binding = principal.binding_key();
         Self {
-            id: PermitId::derive(profile, principal, &req.purpose, now),
+            id: PermitId::derive_exact(
+                &profile.secret_ref,
+                &profile.scope,
+                &profile.id,
+                &profile.destination,
+                &profile.executor,
+                profile.egress,
+                &req.purpose,
+                &principal_binding,
+                expires_at,
+                delegation,
+            ),
             secret_ref: profile.secret_ref.clone(),
             scope: profile.scope.clone(),
             profile_id: profile.id.clone(),
@@ -758,8 +803,10 @@ impl UsePermit {
             egress: profile.egress,
             purpose: req.purpose.clone(),
             approval: approval.cloned(),
-            principal_binding: principal.binding_key(),
-            expires_at: now + profile.ttl,
+            delegation: delegation.cloned(),
+            principal_binding,
+            expires_at,
+            binding_version: Some(1),
         }
     }
 
@@ -808,6 +855,11 @@ impl UsePermit {
         self.approval.as_ref()
     }
 
+    /// Exact value-free acting-as context, if delegated.
+    pub fn delegation(&self) -> Option<&DelegatedUseContext> {
+        self.delegation.as_ref()
+    }
+
     /// Remaining permit lifetime at a supplied instant.
     pub fn remaining_ttl_at(&self, now: SystemTime) -> Duration {
         self.expires_at.duration_since(now).unwrap_or_default()
@@ -834,9 +886,11 @@ impl UsePermit {
             egress: self.egress.as_str().to_string(),
             purpose: self.purpose.as_str().to_string(),
             approval: self.approval.as_ref().map(ApprovalGrant::snapshot),
+            delegation: self.delegation.as_ref().map(DelegatedUseContext::snapshot),
             principal_binding: self.principal_binding.clone(),
             expires_at_unix_secs: expires_at.as_secs(),
             expires_at_subsec_nanos: expires_at.subsec_nanos(),
+            binding_version: self.binding_version,
         }
     }
 
@@ -854,7 +908,15 @@ impl UsePermit {
                 kind: "permit_expiry",
             });
         }
-        Ok(Self {
+        if !matches!(snapshot.binding_version, None | Some(1))
+            || (snapshot.delegation.is_some() && snapshot.binding_version != Some(1))
+        {
+            return Err(JanusError::permit_invalid(
+                "denied_permit_binding_invalid",
+                "permit binding format is invalid",
+            ));
+        }
+        let permit = Self {
             id: PermitId::from_opaque(snapshot.permit_id)?,
             secret_ref: SecretRef::new(snapshot.secret_ref)?,
             scope: ScopeRef::from_opaque(snapshot.scope_ref)?,
@@ -867,13 +929,48 @@ impl UsePermit {
                 .approval
                 .map(ApprovalGrant::from_snapshot)
                 .transpose()?,
+            delegation: snapshot
+                .delegation
+                .map(DelegatedUseContext::from_snapshot)
+                .transpose()?,
             principal_binding: snapshot.principal_binding,
             expires_at: UNIX_EPOCH
                 + Duration::new(
                     snapshot.expires_at_unix_secs,
                     snapshot.expires_at_subsec_nanos,
                 ),
-        })
+            binding_version: snapshot.binding_version,
+        };
+        if let Some(delegation) = &permit.delegation {
+            delegation.validate_permit_binding(
+                &permit.secret_ref,
+                &permit.scope,
+                &permit.purpose,
+                &permit.principal_binding,
+                permit.expires_at,
+            )?;
+        }
+        if permit.binding_version == Some(1) {
+            let expected = PermitId::derive_exact(
+                &permit.secret_ref,
+                &permit.scope,
+                &permit.profile_id,
+                &permit.destination,
+                &permit.executor,
+                permit.egress,
+                &permit.purpose,
+                &permit.principal_binding,
+                permit.expires_at,
+                permit.delegation.as_ref(),
+            );
+            if permit.id != expected {
+                return Err(JanusError::permit_invalid(
+                    "denied_permit_binding_mismatch",
+                    "permit id does not match its exact binding",
+                ));
+            }
+        }
+        Ok(permit)
     }
 
     /// Check whether this permit can be consumed by a principal/executor/destination.
@@ -901,6 +998,15 @@ impl UsePermit {
                 "denied_wrong_principal",
                 "permit principal binding does not match caller",
             ));
+        }
+        if let Some(delegation) = &self.delegation {
+            delegation.validate_permit_binding(
+                &self.secret_ref,
+                &self.scope,
+                &self.purpose,
+                &self.principal_binding,
+                self.expires_at,
+            )?;
         }
         if &self.executor != executor {
             return Err(JanusError::permit_invalid(
@@ -930,8 +1036,10 @@ impl fmt::Debug for UsePermit {
             .field("egress", &self.egress)
             .field("purpose", &self.purpose)
             .field("approval", &self.approval)
+            .field("delegation", &self.delegation)
             .field("principal_binding", &"<redacted>")
             .field("expires_at", &self.expires_at)
+            .field("binding_version", &self.binding_version)
             .finish()
     }
 }
@@ -948,9 +1056,11 @@ impl fmt::Debug for UsePermitSnapshot {
             .field("egress", &self.egress)
             .field("purpose", &self.purpose)
             .field("approval", &self.approval)
+            .field("delegation", &self.delegation)
             .field("principal_binding", &"<redacted>")
             .field("expires_at_unix_secs", &self.expires_at_unix_secs)
             .field("expires_at_subsec_nanos", &self.expires_at_subsec_nanos)
+            .field("binding_version", &self.binding_version)
             .finish()
     }
 }
@@ -969,6 +1079,19 @@ impl ProfilePolicy {
 
     /// Decide whether a request matches an enabled profile.
     pub fn decide(&self, req: &UseRequest, principal: &PrincipalChain) -> PolicyDecision {
+        self.decide_for_executor(req, &principal.scope, principal.executor.id.as_str())
+    }
+
+    /// Decide against exact persisted scope/executor authority without
+    /// requiring a live principal session. Delegation revalidation uses this
+    /// for the original grantor while still matching the live delegate
+    /// separately.
+    pub(crate) fn decide_for_executor(
+        &self,
+        req: &UseRequest,
+        scope: &ScopeRef,
+        executor: &str,
+    ) -> PolicyDecision {
         let profile = self
             .profiles
             .iter()
@@ -985,13 +1108,13 @@ impl ProfilePolicy {
                 detail: "profile is disabled".to_string(),
             };
         }
-        if req.scope != principal.scope || profile.scope != req.scope {
+        if &req.scope != scope || profile.scope != req.scope {
             return PolicyDecision::Deny {
                 reason_code: "denied_scope_mismatch",
                 detail: "profile, request, and principal scope must match exactly".to_string(),
             };
         }
-        if profile.executor.as_str() != principal.executor.id.as_str() {
+        if profile.executor.as_str() != executor {
             return PolicyDecision::Deny {
                 reason_code: "denied_wrong_executor",
                 detail: "profile executor does not match principal chain".to_string(),
@@ -1075,6 +1198,7 @@ struct IssueDecision<'a> {
     allow_severity: Severity,
     deny_severity: Severity,
     approval: Option<&'a ApprovalGrant>,
+    delegation: Option<&'a DelegatedUseContext>,
 }
 
 impl<P, A> PermitIssuer<P, A>
@@ -1102,6 +1226,7 @@ where
             allow_severity: Severity::Notice,
             deny_severity: Severity::Warning,
             approval: None,
+            delegation: None,
         })
     }
 
@@ -1139,6 +1264,30 @@ where
             allow_severity: class_policy.allow_severity(),
             deny_severity: class_policy.deny_severity(),
             approval: approval_to_bind,
+            delegation: None,
+        })
+    }
+
+    /// Issue one low/normal permit after an exact delegation has already been
+    /// revalidated against current policy.
+    pub fn issue_for_delegation(
+        &mut self,
+        req: &UseRequest,
+        principal: &PrincipalChain,
+        now: SystemTime,
+        class: SecretClass,
+        delegation: &DelegatedUseContext,
+    ) -> JanusResult<UsePermit> {
+        let class_policy = ClassPermitPolicy::for_class(class);
+        self.issue_with_decision(IssueDecision {
+            req,
+            principal,
+            now,
+            decision: self.policy.as_ref().decide_for_class(req, principal, class),
+            allow_severity: class_policy.allow_severity(),
+            deny_severity: class_policy.deny_severity(),
+            approval: None,
+            delegation: Some(delegation),
         })
     }
 
@@ -1151,6 +1300,7 @@ where
             allow_severity,
             deny_severity,
             approval,
+            delegation,
         } = issue;
         match decision {
             PolicyDecision::Allow => {
@@ -1167,41 +1317,55 @@ where
                         .with_evidence(grant.reason().clone()),
                     )?;
                 }
-                self.audit.record(AuditEvent::new(
+                let request_event = AuditEvent::new(
                     AuditAction::PermitRequest,
                     AuditOutcome::Allowed,
                     "ok",
                     allow_severity,
                     Some(req.secret_ref.clone()),
                     principal,
-                ))?;
-                self.audit.record(AuditEvent::new(
+                );
+                self.audit.record(match delegation {
+                    Some(delegation) => request_event.with_delegation(delegation.clone()),
+                    None => request_event,
+                })?;
+                let issue_event = AuditEvent::new(
                     AuditAction::PermitIssue,
                     AuditOutcome::Allowed,
                     "ok",
                     allow_severity,
                     Some(req.secret_ref.clone()),
                     principal,
-                ))?;
+                );
+                self.audit.record(match delegation {
+                    Some(delegation) => issue_event.with_delegation(delegation.clone()),
+                    None => issue_event,
+                })?;
                 let profile = self
                     .policy
                     .as_ref()
                     .matching_profile(req)
                     .expect("allow decision requires a matching profile");
-                Ok(UsePermit::new(profile, req, principal, now, approval))
+                Ok(UsePermit::new(
+                    profile, req, principal, now, approval, delegation,
+                ))
             }
             PolicyDecision::Deny {
                 reason_code,
                 detail,
             } => {
-                self.audit.record(AuditEvent::new(
+                let deny_event = AuditEvent::new(
                     AuditAction::PermitDeny,
                     AuditOutcome::Denied,
                     reason_code,
                     deny_severity,
                     Some(req.secret_ref.clone()),
                     principal,
-                ))?;
+                );
+                self.audit.record(match delegation {
+                    Some(delegation) => deny_event.with_delegation(delegation.clone()),
+                    None => deny_event,
+                })?;
                 Err(JanusError::policy_denied(reason_code, detail))
             }
         }

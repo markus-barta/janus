@@ -111,7 +111,7 @@ impl fmt::Debug for DelegationId {
 }
 
 /// Exact authority delegated for one reviewed use.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DelegationScope {
     /// Exact original authority binding.
     pub grantor_binding: String,
@@ -141,8 +141,28 @@ pub struct DelegationScope {
     pub policy_fingerprint: String,
 }
 
+impl fmt::Debug for DelegationScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DelegationScope")
+            .field("grantor_binding", &"<redacted>")
+            .field("delegate_binding", &"<redacted>")
+            .field("action", &self.action)
+            .field("secret_ref", &self.secret_ref)
+            .field("scope_ref", &self.scope_ref)
+            .field("class", &self.class)
+            .field("lifecycle", &self.lifecycle)
+            .field("profile_id", &self.profile_id)
+            .field("executor", &self.executor)
+            .field("destination", &self.destination)
+            .field("egress", &self.egress)
+            .field("purpose_fingerprint", &"<redacted>")
+            .field("policy_fingerprint", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Strict, value-free durable representation of a delegation grant.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DelegationGrantSnapshotV1 {
     /// Exact schema version.
@@ -185,6 +205,33 @@ pub struct DelegationGrantSnapshotV1 {
     pub expires_at_subsec_nanos: u32,
     /// Curated value-free reason.
     pub reason: String,
+}
+
+impl fmt::Debug for DelegationGrantSnapshotV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DelegationGrantSnapshotV1")
+            .field("schema_version", &self.schema_version)
+            .field("delegation_id", &self.delegation_id)
+            .field("grantor_binding", &"<redacted>")
+            .field("delegate_binding", &"<redacted>")
+            .field("action", &self.action)
+            .field("secret_ref", &self.secret_ref)
+            .field("scope_ref", &self.scope_ref)
+            .field("class", &self.class)
+            .field("lifecycle", &self.lifecycle)
+            .field("profile_id", &self.profile_id)
+            .field("executor", &self.executor)
+            .field("destination", &self.destination)
+            .field("egress", &self.egress)
+            .field("purpose_fingerprint", &"<redacted>")
+            .field("policy_fingerprint", &"<redacted>")
+            .field("issued_at_unix_secs", &self.issued_at_unix_secs)
+            .field("issued_at_subsec_nanos", &self.issued_at_subsec_nanos)
+            .field("expires_at_unix_secs", &self.expires_at_unix_secs)
+            .field("expires_at_subsec_nanos", &self.expires_at_subsec_nanos)
+            .field("reason", &self.reason)
+            .finish()
+    }
 }
 
 /// One exact, non-chainable delegation grant.
@@ -392,6 +439,281 @@ impl DelegationGrant {
     }
 }
 
+/// Strict durable representation of the value-free acting-as context carried
+/// by a delegated permit and its audit evidence.
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegatedUseContextSnapshotV1 {
+    /// Exact schema version.
+    pub schema_version: u8,
+    /// Opaque delegation grant id.
+    pub delegation_id: String,
+    /// Exact original authority binding.
+    pub grantor_binding: String,
+    /// Exact acting principal binding.
+    pub delegate_binding: String,
+    /// Closed delegated action.
+    pub action: String,
+    /// Exact opaque secret target.
+    pub secret_ref: String,
+    /// Exact opaque authorization scope.
+    pub scope_ref: String,
+    /// Curated value-free grant reason.
+    pub reason: String,
+    /// Grant expiry seconds since Unix epoch.
+    pub expires_at_unix_secs: u64,
+    /// Grant expiry nanoseconds.
+    pub expires_at_subsec_nanos: u32,
+    /// Opaque hash of the exact purpose.
+    pub purpose_fingerprint: String,
+    /// Opaque hash of the current policy inputs observed at issue time.
+    pub policy_fingerprint: String,
+}
+
+impl fmt::Debug for DelegatedUseContextSnapshotV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DelegatedUseContextSnapshotV1")
+            .field("schema_version", &self.schema_version)
+            .field("delegation_id", &"<redacted>")
+            .field("grantor_binding", &"<redacted>")
+            .field("delegate_binding", &"<redacted>")
+            .field("action", &self.action)
+            .field("secret_ref", &self.secret_ref)
+            .field("scope_ref", &self.scope_ref)
+            .field("reason", &self.reason)
+            .field("expires_at_unix_secs", &self.expires_at_unix_secs)
+            .field("expires_at_subsec_nanos", &self.expires_at_subsec_nanos)
+            .field("purpose_fingerprint", &"<redacted>")
+            .field("policy_fingerprint", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Value-free acting-as context carried through permit issue and consumption.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DelegatedUseContext {
+    delegation_id: DelegationId,
+    grantor_binding: String,
+    delegate_binding: String,
+    action: DelegationAction,
+    secret_ref: SecretRef,
+    scope_ref: ScopeRef,
+    reason: SafeLabel,
+    expires_at: SystemTime,
+    purpose_fingerprint: String,
+    policy_fingerprint: String,
+}
+
+impl DelegatedUseContext {
+    /// Build the exact acting-as context for one validated grant.
+    pub fn from_grant(grant: &DelegationGrant) -> Self {
+        Self {
+            delegation_id: grant.id.clone(),
+            grantor_binding: grant.scope.grantor_binding.clone(),
+            delegate_binding: grant.scope.delegate_binding.clone(),
+            action: grant.scope.action,
+            secret_ref: grant.scope.secret_ref.clone(),
+            scope_ref: grant.scope.scope_ref.clone(),
+            reason: grant.reason.clone(),
+            expires_at: grant.expires_at,
+            purpose_fingerprint: grant.scope.purpose_fingerprint.clone(),
+            policy_fingerprint: grant.scope.policy_fingerprint.clone(),
+        }
+    }
+
+    /// Opaque delegation id.
+    pub fn delegation_id(&self) -> &DelegationId {
+        &self.delegation_id
+    }
+
+    /// Exact original authority binding.
+    pub fn grantor_binding(&self) -> &str {
+        &self.grantor_binding
+    }
+
+    /// Exact acting principal binding.
+    pub fn delegate_binding(&self) -> &str {
+        &self.delegate_binding
+    }
+
+    /// Closed delegated action.
+    pub fn action(&self) -> DelegationAction {
+        self.action
+    }
+
+    /// Exact opaque secret target.
+    pub fn secret_ref(&self) -> &SecretRef {
+        &self.secret_ref
+    }
+
+    /// Exact opaque authorization scope.
+    pub fn scope_ref(&self) -> &ScopeRef {
+        &self.scope_ref
+    }
+
+    /// Curated value-free reason.
+    pub fn reason(&self) -> &SafeLabel {
+        &self.reason
+    }
+
+    /// Grant expiry.
+    pub fn expires_at(&self) -> SystemTime {
+        self.expires_at
+    }
+
+    /// Opaque purpose fingerprint.
+    pub fn purpose_fingerprint(&self) -> &str {
+        &self.purpose_fingerprint
+    }
+
+    /// Opaque policy fingerprint.
+    pub fn policy_fingerprint(&self) -> &str {
+        &self.policy_fingerprint
+    }
+
+    /// Export a strict value-free durable snapshot.
+    pub fn snapshot(&self) -> DelegatedUseContextSnapshotV1 {
+        let expires_at = self
+            .expires_at
+            .duration_since(UNIX_EPOCH)
+            .expect("validated delegation context expiry");
+        DelegatedUseContextSnapshotV1 {
+            schema_version: DELEGATION_SNAPSHOT_VERSION,
+            delegation_id: self.delegation_id.as_str().to_string(),
+            grantor_binding: self.grantor_binding.clone(),
+            delegate_binding: self.delegate_binding.clone(),
+            action: self.action.as_str().to_string(),
+            secret_ref: self.secret_ref.as_str().to_string(),
+            scope_ref: self.scope_ref.as_str().to_string(),
+            reason: self.reason.as_str().to_string(),
+            expires_at_unix_secs: expires_at.as_secs(),
+            expires_at_subsec_nanos: expires_at.subsec_nanos(),
+            purpose_fingerprint: self.purpose_fingerprint.clone(),
+            policy_fingerprint: self.policy_fingerprint.clone(),
+        }
+    }
+
+    /// Rehydrate a strict value-free durable snapshot.
+    pub fn from_snapshot(snapshot: DelegatedUseContextSnapshotV1) -> JanusResult<Self> {
+        if snapshot.schema_version != DELEGATION_SNAPSHOT_VERSION {
+            return Err(delegation_invalid(
+                "delegation_context_schema_unsupported",
+                "delegation context version is unsupported",
+            ));
+        }
+        validate_bounded(
+            "delegation_grantor_binding",
+            &snapshot.grantor_binding,
+            MAX_BINDING_BYTES,
+        )
+        .map_err(|_| malformed_context())?;
+        validate_bounded(
+            "delegation_delegate_binding",
+            &snapshot.delegate_binding,
+            MAX_BINDING_BYTES,
+        )
+        .map_err(|_| malformed_context())?;
+        validate_bounded("delegation_reason", &snapshot.reason, MAX_REASON_BYTES)
+            .map_err(|_| malformed_context())?;
+        validate_fingerprint(&snapshot.purpose_fingerprint).map_err(|_| malformed_context())?;
+        validate_fingerprint(&snapshot.policy_fingerprint).map_err(|_| malformed_context())?;
+        Ok(Self {
+            delegation_id: DelegationId::from_opaque(snapshot.delegation_id)
+                .map_err(|_| malformed_context())?,
+            grantor_binding: snapshot.grantor_binding,
+            delegate_binding: snapshot.delegate_binding,
+            action: DelegationAction::parse(&snapshot.action).map_err(|_| malformed_context())?,
+            secret_ref: parse_exact_secret_ref(snapshot.secret_ref)
+                .map_err(|_| malformed_context())?,
+            scope_ref: ScopeRef::from_opaque(snapshot.scope_ref)
+                .map_err(|_| malformed_context())?,
+            reason: SafeLabel::new(snapshot.reason).map_err(|_| malformed_context())?,
+            expires_at: time_from_parts(
+                snapshot.expires_at_unix_secs,
+                snapshot.expires_at_subsec_nanos,
+            )
+            .map_err(|_| malformed_context())?,
+            purpose_fingerprint: snapshot.purpose_fingerprint,
+            policy_fingerprint: snapshot.policy_fingerprint,
+        })
+    }
+
+    /// Verify that durable acting-as context is the exact context of a grant.
+    pub fn validate_for(&self, grant: &DelegationGrant) -> JanusResult<()> {
+        if self != &Self::from_grant(grant) {
+            return Err(delegation_invalid(
+                "delegation_context_mismatch",
+                "delegation context does not match the exact grant",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Verify the context is exactly bound to one delegated permit request.
+    pub fn validate_permit_binding(
+        &self,
+        secret_ref: &SecretRef,
+        scope_ref: &ScopeRef,
+        purpose: &crate::Purpose,
+        principal_binding: &str,
+        permit_expires_at: SystemTime,
+    ) -> JanusResult<()> {
+        if self.action != DelegationAction::Use
+            || &self.secret_ref != secret_ref
+            || &self.scope_ref != scope_ref
+            || self.delegate_binding != principal_binding
+            || self.purpose_fingerprint
+                != fingerprint_text("janus-delegation-purpose-v1", purpose.as_str())
+            || permit_expires_at > self.expires_at
+        {
+            return Err(delegation_invalid(
+                "delegation_context_mismatch",
+                "delegation context does not match the permit binding",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Canonical value-free integrity input used by permit and audit hashes.
+    pub(crate) fn integrity_text(&self) -> String {
+        let expires_at = self
+            .expires_at
+            .duration_since(UNIX_EPOCH)
+            .expect("validated delegation context expiry");
+        format!(
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            self.delegation_id.as_str(),
+            self.grantor_binding,
+            self.delegate_binding,
+            self.action.as_str(),
+            self.secret_ref.as_str(),
+            self.scope_ref.as_str(),
+            self.reason.as_str(),
+            expires_at.as_secs(),
+            expires_at.subsec_nanos(),
+            self.purpose_fingerprint,
+            self.policy_fingerprint,
+        )
+    }
+}
+
+impl fmt::Debug for DelegatedUseContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DelegatedUseContext")
+            .field("delegation_id", &self.delegation_id)
+            .field("grantor_binding", &"<redacted>")
+            .field("delegate_binding", &"<redacted>")
+            .field("action", &self.action)
+            .field("secret_ref", &self.secret_ref)
+            .field("scope_ref", &self.scope_ref)
+            .field("reason", &self.reason)
+            .field("expires_at", &self.expires_at)
+            .field("purpose_fingerprint", &"<redacted>")
+            .field("policy_fingerprint", &"<redacted>")
+            .finish()
+    }
+}
+
 impl fmt::Debug for DelegationGrant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DelegationGrant")
@@ -405,7 +727,7 @@ impl fmt::Debug for DelegationGrant {
 }
 
 /// Strict durable revocation evidence.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DelegationRevocationSnapshotV1 {
     /// Exact schema version.
@@ -422,13 +744,37 @@ pub struct DelegationRevocationSnapshotV1 {
     pub reason: String,
 }
 
+impl fmt::Debug for DelegationRevocationSnapshotV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DelegationRevocationSnapshotV1")
+            .field("schema_version", &self.schema_version)
+            .field("delegation_id", &self.delegation_id)
+            .field("revoked_at_unix_secs", &self.revoked_at_unix_secs)
+            .field("revoked_at_subsec_nanos", &self.revoked_at_subsec_nanos)
+            .field("revoked_by_binding", &"<redacted>")
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
 /// Immutable value-free evidence that a delegation was revoked.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DelegationRevocation {
     delegation_id: DelegationId,
     revoked_at: SystemTime,
     revoked_by_binding: String,
     reason: SafeLabel,
+}
+
+impl fmt::Debug for DelegationRevocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DelegationRevocation")
+            .field("delegation_id", &self.delegation_id)
+            .field("revoked_at", &self.revoked_at)
+            .field("revoked_by_binding", &"<redacted>")
+            .field("reason", &self.reason)
+            .finish()
+    }
 }
 
 impl DelegationRevocation {
@@ -526,6 +872,7 @@ impl DelegationRevocation {
         }
         if self.revoked_by_binding != grant.scope.grantor_binding
             && self.revoked_by_binding != grant.scope.delegate_binding
+            && !is_operator_revocation_binding(&self.revoked_by_binding)
         {
             return Err(delegation_invalid(
                 "delegation_revoker_unauthorized",
@@ -787,6 +1134,173 @@ impl DelegationPolicy {
         DelegationDecision::Allow
     }
 
+    /// Make a pure current-policy decision using the exact persisted grantor
+    /// authority binding. This is the runtime path used while the grantor is
+    /// offline; the current live delegate remains fully matched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decide_persisted_use(
+        grant: &DelegationGrant,
+        revocation: Option<&DelegationRevocation>,
+        profiles: &ProfilePolicy,
+        descriptor: &SecretDescriptor,
+        request: &UseRequest,
+        delegate: &PrincipalChain,
+        now: SystemTime,
+    ) -> DelegationDecision {
+        if let Some(revocation) = revocation {
+            if revocation.validate_for(grant).is_err() {
+                return deny(
+                    "delegation_revocation_mismatch",
+                    "revocation does not match the delegation grant",
+                );
+            }
+            return deny("delegation_revoked", "delegation grant is revoked");
+        }
+        if now < grant.issued_at {
+            return deny(
+                "delegation_not_yet_valid",
+                "delegation grant is not yet valid",
+            );
+        }
+        if now >= grant.expires_at {
+            return deny("delegation_expired", "delegation grant is expired");
+        }
+        if grant.scope.delegate_binding != delegate.binding_key() {
+            return deny(
+                "delegation_wrong_delegate",
+                "delegation delegate binding does not match",
+            );
+        }
+        if grant.scope.secret_ref != request.secret_ref
+            || grant.scope.secret_ref != descriptor.secret_ref
+        {
+            return deny(
+                "delegation_target_mismatch",
+                "delegation target does not match",
+            );
+        }
+        if grant.scope.scope_ref != request.scope
+            || grant.scope.scope_ref != descriptor.scope
+            || grant.scope.scope_ref != delegate.scope
+        {
+            return deny(
+                "delegation_scope_mismatch",
+                "delegation scope does not match exactly",
+            );
+        }
+        if Some(grant.scope.class) != descriptor.classification {
+            return deny(
+                "delegation_class_changed",
+                "delegation secret class changed",
+            );
+        }
+        if grant.scope.lifecycle != descriptor.lifecycle {
+            return deny(
+                "delegation_lifecycle_changed",
+                "delegation lifecycle changed",
+            );
+        }
+        if grant.scope.profile_id != request.profile_id {
+            return deny(
+                "delegation_profile_mismatch",
+                "delegation profile does not match",
+            );
+        }
+        if grant.scope.destination != request.destination {
+            return deny(
+                "delegation_destination_mismatch",
+                "delegation destination does not match",
+            );
+        }
+        if grant.scope.purpose_fingerprint
+            != fingerprint_text("janus-delegation-purpose-v1", request.purpose.as_str())
+        {
+            return deny(
+                "delegation_purpose_mismatch",
+                "delegation purpose does not match",
+            );
+        }
+
+        let current = match build_current_scope_for_authority(
+            profiles,
+            descriptor,
+            request,
+            grant.scope.grantor_binding.clone(),
+            &grant.scope.scope_ref,
+            grant.scope.executor.as_str(),
+            delegate,
+            None,
+        ) {
+            Ok(scope) => scope,
+            Err(decision) => return decision,
+        };
+        if current.executor != grant.scope.executor {
+            return deny("delegation_executor_changed", "delegation executor changed");
+        }
+        if current.egress != grant.scope.egress {
+            return deny("delegation_egress_changed", "delegation egress changed");
+        }
+        if current.policy_fingerprint != grant.scope.policy_fingerprint {
+            return deny("delegation_policy_changed", "delegation policy changed");
+        }
+        DelegationDecision::Allow
+    }
+
+    /// Validate one persisted grant for the live delegate and record required
+    /// value-free denial/expiry evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_persisted_use<A: AuditSink>(
+        grant: &DelegationGrant,
+        revocation: Option<&DelegationRevocation>,
+        profiles: &ProfilePolicy,
+        descriptor: &SecretDescriptor,
+        request: &UseRequest,
+        delegate: &PrincipalChain,
+        now: SystemTime,
+        audit: &mut A,
+    ) -> JanusResult<()> {
+        let decision = Self::decide_persisted_use(
+            grant, revocation, profiles, descriptor, request, delegate, now,
+        );
+        match decision {
+            DelegationDecision::Allow => Ok(()),
+            DelegationDecision::Deny {
+                reason_code,
+                detail,
+            } if reason_code == "delegation_expired" => {
+                audit.record(
+                    AuditEvent::new(
+                        AuditAction::DelegationExpire,
+                        AuditOutcome::Denied,
+                        reason_code,
+                        Severity::Warning,
+                        Some(descriptor.secret_ref.clone()),
+                        delegate,
+                    )
+                    .with_delegation(DelegatedUseContext::from_grant(grant)),
+                )?;
+                Err(delegation_invalid(reason_code, detail))
+            }
+            DelegationDecision::Deny {
+                reason_code,
+                detail,
+            } => {
+                audit.record(
+                    AuditEvent::new(
+                        AuditAction::DelegationDeny,
+                        AuditOutcome::Denied,
+                        reason_code,
+                        Severity::Warning,
+                        Some(descriptor.secret_ref.clone()),
+                        delegate,
+                    )
+                    .with_delegation(DelegatedUseContext::from_grant(grant)),
+                )?;
+                Err(delegation_invalid(reason_code, detail))
+            }
+        }
+    }
+
     /// Validate one exact delegated use and record required denial/expiry
     /// evidence. This deliberately does not issue or consume a permit.
     #[allow(clippy::too_many_arguments)]
@@ -833,8 +1347,8 @@ impl DelegationPolicy {
         }
     }
 
-    /// Authorize immutable revocation evidence. Grantor and delegate may
-    /// revoke; future administrator revocation belongs to the role-aware slice.
+    /// Authorize immutable self-service revocation evidence for the grantor or
+    /// delegate. Trusted administration uses `authorize_operator_revocation`.
     pub fn authorize_revocation<A: AuditSink>(
         grant: &DelegationGrant,
         actor: &PrincipalChain,
@@ -900,6 +1414,65 @@ impl DelegationPolicy {
         )?;
         Ok(revocation)
     }
+
+    /// Authorize revocation from the trusted administration process boundary.
+    ///
+    /// This does not grant normal-use authority to the operator. The durable
+    /// evidence carries only an opaque fingerprint of the operator binding;
+    /// the complete operator chain remains in the required audit event.
+    pub fn authorize_operator_revocation<A: AuditSink>(
+        grant: &DelegationGrant,
+        operator: &PrincipalChain,
+        revoked_at: SystemTime,
+        reason: SafeLabel,
+        audit: &mut A,
+    ) -> JanusResult<DelegationRevocation> {
+        if validate_bounded("delegation_reason", reason.as_str(), MAX_REASON_BYTES).is_err() {
+            return record_denial(
+                audit,
+                grant.scope.secret_ref.clone(),
+                operator,
+                Some(grant.id()),
+                deny(
+                    "delegation_reason_invalid",
+                    "delegation reason is outside the reviewed bound",
+                ),
+            );
+        }
+        if revoked_at < grant.issued_at {
+            return record_denial(
+                audit,
+                grant.scope.secret_ref.clone(),
+                operator,
+                Some(grant.id()),
+                deny(
+                    "delegation_revocation_invalid",
+                    "revocation predates the delegation grant",
+                ),
+            );
+        }
+        let revocation = DelegationRevocation {
+            delegation_id: grant.id.clone(),
+            revoked_at,
+            revoked_by_binding: format!(
+                "operator:{}",
+                fingerprint_text("janus-delegation-operator-v1", &operator.binding_key())
+            ),
+            reason,
+        };
+        audit.record(
+            AuditEvent::new(
+                AuditAction::DelegationRevoke,
+                AuditOutcome::Allowed,
+                "delegation_revoked_by_operator",
+                Severity::High,
+                Some(grant.scope.secret_ref.clone()),
+                operator,
+            )
+            .with_evidence(delegation_reason_evidence(grant.id(), &revocation.reason)),
+        )?;
+        Ok(revocation)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -911,13 +1484,35 @@ fn build_current_scope(
     delegate: &PrincipalChain,
     parent_delegation: Option<&DelegationGrant>,
 ) -> Result<DelegationScope, DelegationDecision> {
+    build_current_scope_for_authority(
+        profiles,
+        descriptor,
+        request,
+        grantor.binding_key(),
+        &grantor.scope,
+        grantor.executor.id.as_str(),
+        delegate,
+        parent_delegation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_current_scope_for_authority(
+    profiles: &ProfilePolicy,
+    descriptor: &SecretDescriptor,
+    request: &UseRequest,
+    grantor_binding: String,
+    grantor_scope: &ScopeRef,
+    grantor_executor: &str,
+    delegate: &PrincipalChain,
+    parent_delegation: Option<&DelegationGrant>,
+) -> Result<DelegationScope, DelegationDecision> {
     if parent_delegation.is_some() {
         return Err(deny(
             "delegation_chaining_denied",
             "delegation grants cannot be chained",
         ));
     }
-    let grantor_binding = grantor.binding_key();
     let delegate_binding = delegate.binding_key();
     if validate_bounded(
         "delegation_grantor_binding",
@@ -958,7 +1553,7 @@ fn build_current_scope(
         ));
     }
     if descriptor.scope != request.scope
-        || descriptor.scope != grantor.scope
+        || &descriptor.scope != grantor_scope
         || descriptor.scope != delegate.scope
     {
         return Err(deny(
@@ -1008,7 +1603,7 @@ fn build_current_scope(
         ));
     }
     if !matches!(
-        profiles.decide(request, grantor),
+        profiles.decide_for_executor(request, grantor_scope, grantor_executor),
         crate::PolicyDecision::Allow
     ) {
         return Err(deny(
@@ -1193,6 +1788,12 @@ fn validate_fingerprint(value: &str) -> JanusResult<()> {
     Ok(())
 }
 
+fn is_operator_revocation_binding(value: &str) -> bool {
+    value
+        .strip_prefix("operator:")
+        .is_some_and(|fingerprint| validate_fingerprint(fingerprint).is_ok())
+}
+
 fn parse_exact_secret_ref(value: String) -> JanusResult<SecretRef> {
     if !is_exact_secret_ref(&value) {
         return Err(delegation_invalid(
@@ -1289,6 +1890,13 @@ fn malformed_snapshot() -> JanusError {
     delegation_invalid(
         "delegation_snapshot_malformed",
         "delegation snapshot is malformed",
+    )
+}
+
+fn malformed_context() -> JanusError {
+    delegation_invalid(
+        "delegation_context_malformed",
+        "delegation context is malformed",
     )
 }
 
@@ -1468,6 +2076,125 @@ mod tests {
         .unwrap();
         assert_eq!(audit.events()[0].action, AuditAction::DelegationGrant);
         assert!(!audit.events()[0].value_returned);
+    }
+
+    #[test]
+    fn acting_as_context_round_trips_strictly_without_debug_leaks() {
+        let fixture = fixture();
+        let mut audit = AuditWrite::accepting();
+        let grant = issue(&fixture, &mut audit);
+        let context = DelegatedUseContext::from_grant(&grant);
+        let encoded = serde_json::to_vec(&context.snapshot()).unwrap();
+        let snapshot: DelegatedUseContextSnapshotV1 = serde_json::from_slice(&encoded).unwrap();
+        let restored = DelegatedUseContext::from_snapshot(snapshot.clone()).unwrap();
+        assert_eq!(restored, context);
+        restored.validate_for(&grant).unwrap();
+
+        let debug = format!("{snapshot:?} {restored:?} {grant:?} {:?}", grant.snapshot());
+        assert!(!debug.contains(&fixture.grantor.binding_key()));
+        assert!(!debug.contains(&fixture.delegate.binding_key()));
+        assert!(debug.contains("<redacted>"));
+
+        let mut unknown = serde_json::to_value(context.snapshot()).unwrap();
+        unknown["unknown"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<DelegatedUseContextSnapshotV1>(unknown).is_err());
+
+        let mut tampered = context.snapshot();
+        tampered.delegate_binding = fixture.grantor.binding_key();
+        let tampered = DelegatedUseContext::from_snapshot(tampered).unwrap();
+        assert!(matches!(
+            tampered.validate_for(&grant),
+            Err(JanusError::PolicyDenied {
+                reason_code: "delegation_context_mismatch",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn persisted_validation_keeps_grantor_offline_and_rechecks_live_delegate() {
+        let fixture = fixture();
+        let profiles = ProfilePolicy::new(vec![fixture.profile.clone()]);
+        let mut audit = AuditWrite::accepting();
+        let grant = issue(&fixture, &mut audit);
+        DelegationPolicy::validate_persisted_use(
+            &grant,
+            None,
+            &profiles,
+            &fixture.descriptor,
+            &fixture.request,
+            &fixture.delegate,
+            UNIX_EPOCH + Duration::from_secs(20),
+            &mut audit,
+        )
+        .unwrap();
+
+        let mut wrong_delegate = fixture.delegate.clone();
+        wrong_delegate.workload = Some(Principal::new(
+            PrincipalKind::Workload,
+            PrincipalId::new("wrong-workload").unwrap(),
+        ));
+        assert!(matches!(
+            DelegationPolicy::validate_persisted_use(
+                &grant,
+                None,
+                &profiles,
+                &fixture.descriptor,
+                &fixture.request,
+                &wrong_delegate,
+                UNIX_EPOCH + Duration::from_secs(20),
+                &mut audit,
+            ),
+            Err(JanusError::PolicyDenied {
+                reason_code: "delegation_wrong_delegate",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn trusted_operator_revocation_is_opaque_durable_and_blocks_use() {
+        let fixture = fixture();
+        let mut audit = AuditWrite::accepting();
+        let grant = issue(&fixture, &mut audit);
+        let operator = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("janusd-admin").unwrap(),
+            ),
+            fixture.scope.clone(),
+        );
+        let revocation = DelegationPolicy::authorize_operator_revocation(
+            &grant,
+            &operator,
+            UNIX_EPOCH + Duration::from_secs(20),
+            SafeLabel::new("operator stop").unwrap(),
+            &mut audit,
+        )
+        .unwrap();
+        assert!(revocation.revoked_by_binding().starts_with("operator:"));
+        assert!(!revocation.revoked_by_binding().contains("janusd-admin"));
+        let restored = DelegationRevocation::from_snapshot(revocation.snapshot()).unwrap();
+        assert_eq!(
+            grant
+                .status_at(Some(&restored), UNIX_EPOCH + Duration::from_secs(21))
+                .unwrap(),
+            DelegationStatus::Revoked
+        );
+
+        let mut malformed_operator = revocation.snapshot();
+        malformed_operator.revoked_by_binding = "operator:not-a-fingerprint".to_string();
+        let malformed_operator = DelegationRevocation::from_snapshot(malformed_operator).unwrap();
+        assert!(matches!(
+            grant.status_at(
+                Some(&malformed_operator),
+                UNIX_EPOCH + Duration::from_secs(21)
+            ),
+            Err(JanusError::PolicyDenied {
+                reason_code: "delegation_revoker_unauthorized",
+                ..
+            })
+        ));
     }
 
     #[test]

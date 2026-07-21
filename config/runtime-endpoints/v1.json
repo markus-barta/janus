@@ -293,6 +293,102 @@
       "requests": null,
       "window_ms": null
     },
+    "action": "admin.delegation_issue",
+    "audit": "required",
+    "cache": "not_applicable",
+    "concurrency_limit": 1,
+    "csrf": "not_applicable",
+    "error_redaction": "value_free",
+    "input_encoding": "argv",
+    "max_serialized_arguments_bytes": 65536,
+    "origin": "not_applicable",
+    "plane": "admin",
+    "remote_identity": "rejected",
+    "response_security_headers": "not_applicable",
+    "timeout": {
+      "milliseconds": null,
+      "mode": "process_lifetime"
+    },
+    "transport": "process_argv"
+  },
+  {
+    "abuse_budget": {
+      "mode": "process_invocation",
+      "requests": null,
+      "window_ms": null
+    },
+    "action": "admin.delegation_list",
+    "audit": "required",
+    "cache": "not_applicable",
+    "concurrency_limit": 1,
+    "csrf": "not_applicable",
+    "error_redaction": "value_free",
+    "input_encoding": "argv",
+    "max_serialized_arguments_bytes": 65536,
+    "origin": "not_applicable",
+    "plane": "admin",
+    "remote_identity": "rejected",
+    "response_security_headers": "not_applicable",
+    "timeout": {
+      "milliseconds": null,
+      "mode": "process_lifetime"
+    },
+    "transport": "process_argv"
+  },
+  {
+    "abuse_budget": {
+      "mode": "process_invocation",
+      "requests": null,
+      "window_ms": null
+    },
+    "action": "admin.delegation_inspect",
+    "audit": "required",
+    "cache": "not_applicable",
+    "concurrency_limit": 1,
+    "csrf": "not_applicable",
+    "error_redaction": "value_free",
+    "input_encoding": "argv",
+    "max_serialized_arguments_bytes": 65536,
+    "origin": "not_applicable",
+    "plane": "admin",
+    "remote_identity": "rejected",
+    "response_security_headers": "not_applicable",
+    "timeout": {
+      "milliseconds": null,
+      "mode": "process_lifetime"
+    },
+    "transport": "process_argv"
+  },
+  {
+    "abuse_budget": {
+      "mode": "process_invocation",
+      "requests": null,
+      "window_ms": null
+    },
+    "action": "admin.delegation_revoke",
+    "audit": "required",
+    "cache": "not_applicable",
+    "concurrency_limit": 1,
+    "csrf": "not_applicable",
+    "error_redaction": "value_free",
+    "input_encoding": "argv",
+    "max_serialized_arguments_bytes": 65536,
+    "origin": "not_applicable",
+    "plane": "admin",
+    "remote_identity": "rejected",
+    "response_security_headers": "not_applicable",
+    "timeout": {
+      "milliseconds": null,
+      "mode": "process_lifetime"
+    },
+    "transport": "process_argv"
+  },
+  {
+    "abuse_budget": {
+      "mode": "process_invocation",
+      "requests": null,
+      "window_ms": null
+    },
     "action": "admin.lifecycle_transition",
     "audit": "required",
     "cache": "not_applicable",

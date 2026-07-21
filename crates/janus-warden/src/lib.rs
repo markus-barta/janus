@@ -15,12 +15,13 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime};
 
 use janus_core::{
-    runtime_endpoint_policy, AuditAction, AuditEvent, AuditOutcome, AuditSink, HealthStatus,
-    JanusError, JanusResult, PrincipalChain, ProductMode, ProfileId, Purpose, ReleaseAdmission,
-    RuntimeAbuseBudget, RuntimeAction, RuntimePlane, RuntimeTimeoutPolicy, RuntimeTransport,
-    SecretBroker, SecretDescriptor, SecretRef, SecretStore, Severity, TrustLevel, UsePermit,
+    runtime_endpoint_policy, AuditAction, AuditEvent, AuditOutcome, AuditSink, DelegationId,
+    HealthStatus, JanusError, JanusResult, PrincipalChain, ProductMode, ProfileId, Purpose,
+    ReleaseAdmission, RuntimeAbuseBudget, RuntimeAction, RuntimePlane, RuntimeTimeoutPolicy,
+    RuntimeTransport, SecretBroker, SecretDescriptor, SecretRef, SecretStore, Severity, TrustLevel,
+    UsePermit,
 };
-use janus_local::{NoopPermitStore, PermitStore};
+use janus_local::{DelegationRegistry, NoopDelegationRegistry, NoopPermitStore, PermitStore};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -49,8 +50,8 @@ pub const TOOL_DEFINITIONS: [ToolDefinition; 4] = [
     },
     ToolDefinition {
         name: "request_use",
-        description: "Request an opaque short-lived UsePermit by SecretRef, reviewed profile id, and purpose. Destination, executor, egress, command, args, and TTL come from policy, not caller input.",
-        input_schema: r#"{"type":"object","properties":{"secret_ref":{"type":"string"},"profile_id":{"type":"string"},"purpose":{"type":"string"}},"required":["secret_ref","profile_id","purpose"],"additionalProperties":false}"#,
+        description: "Request an opaque short-lived UsePermit by SecretRef, reviewed profile id, purpose, and optional exact delegation id. Destination, executor, egress, command, args, and TTL come from policy, not caller input.",
+        input_schema: r#"{"type":"object","properties":{"secret_ref":{"type":"string"},"profile_id":{"type":"string"},"purpose":{"type":"string"},"delegation_id":{"type":"string"}},"required":["secret_ref","profile_id","purpose"],"additionalProperties":false}"#,
     },
     ToolDefinition {
         name: "health",
@@ -207,6 +208,8 @@ pub struct RequestUseArgs {
     pub profile_id: ProfileId,
     /// Caller purpose/reason.
     pub purpose: Purpose,
+    /// Optional exact-use delegation grant selected by opaque id.
+    pub delegation_id: Option<DelegationId>,
 }
 
 /// JSON dispatch response for transport shims.
@@ -419,8 +422,8 @@ where
 
 /// Apply the release-reviewed Warden admission, concurrency, and timeout
 /// policy around one SDK-agnostic tool dispatch.
-pub async fn call_tool_guarded<S, A, P, G>(
-    runtime: &tokio::sync::Mutex<WardenRuntime<S, A, P>>,
+pub async fn call_tool_guarded<S, A, P, D, G>(
+    runtime: &tokio::sync::Mutex<WardenRuntime<S, A, P, D>>,
     guard: &WardenEndpointGuard<G>,
     name: &str,
     args: Value,
@@ -431,6 +434,7 @@ where
     S: SecretStore,
     A: AuditSink,
     P: PermitStore,
+    D: DelegationRegistry,
     G: AuditSink,
 {
     let _permit = match guard.admit(name, &args, principal, Instant::now()) {
@@ -483,13 +487,14 @@ fn audit_unavailable_response() -> ToolCallResponse {
 }
 
 /// SDK-agnostic Warden handler over the Janus broker.
-pub struct WardenRuntime<S, A, P = NoopPermitStore> {
+pub struct WardenRuntime<S, A, P = NoopPermitStore, D = NoopDelegationRegistry> {
     broker: SecretBroker<S, A>,
     permits: P,
+    delegations: D,
     release: ReleaseAdmission,
 }
 
-impl<S, A> WardenRuntime<S, A, NoopPermitStore>
+impl<S, A> WardenRuntime<S, A, NoopPermitStore, NoopDelegationRegistry>
 where
     S: SecretStore,
     A: AuditSink,
@@ -500,7 +505,7 @@ where
     }
 }
 
-impl<S, A, P> WardenRuntime<S, A, P>
+impl<S, A, P> WardenRuntime<S, A, P, NoopDelegationRegistry>
 where
     S: SecretStore,
     A: AuditSink,
@@ -511,10 +516,29 @@ where
         Self {
             broker,
             permits,
+            delegations: NoopDelegationRegistry,
             release: ReleaseAdmission::not_required(ProductMode::SelfHosted),
         }
     }
 
+    /// Attach the exact delegation registry used for optional acting-as use.
+    pub fn with_delegation_registry<D>(self, delegations: D) -> WardenRuntime<S, A, P, D> {
+        WardenRuntime {
+            broker: self.broker,
+            permits: self.permits,
+            delegations,
+            release: self.release,
+        }
+    }
+}
+
+impl<S, A, P, D> WardenRuntime<S, A, P, D>
+where
+    S: SecretStore,
+    A: AuditSink,
+    P: PermitStore,
+    D: DelegationRegistry,
+{
     /// Attach the release posture established during runtime startup.
     pub fn with_release_admission(mut self, release: ReleaseAdmission) -> Self {
         self.release = release;
@@ -560,16 +584,30 @@ where
         principal: &PrincipalChain,
         now: SystemTime,
     ) -> JanusResult<RequestUseResponse> {
-        let permit = self
-            .broker
-            .request_profile_use(
-                &args.secret_ref,
-                &args.profile_id,
-                args.purpose,
-                principal,
-                now,
-            )
-            .await?;
+        let permit = if let Some(delegation_id) = args.delegation_id {
+            let record = self.delegations.get(delegation_id.as_str())?;
+            self.broker
+                .request_delegated_profile_use(
+                    &args.secret_ref,
+                    &args.profile_id,
+                    args.purpose,
+                    principal,
+                    now,
+                    &record.grant,
+                    record.revocation.as_ref(),
+                )
+                .await?
+        } else {
+            self.broker
+                .request_profile_use(
+                    &args.secret_ref,
+                    &args.profile_id,
+                    args.purpose,
+                    principal,
+                    now,
+                )
+                .await?
+        };
         self.permits.store(&permit)?;
         Ok(permit_view(&permit))
     }
@@ -808,13 +846,25 @@ fn require_exact_keys(args: &Value, expected: &[&'static str]) -> Result<(), Too
 }
 
 fn request_use_args_from_json(args: &Value) -> Result<RequestUseArgs, ToolErrorView> {
-    require_exact_keys(args, &["secret_ref", "profile_id", "purpose"])?;
+    let expected = if args.get("delegation_id").is_some() {
+        &["secret_ref", "profile_id", "purpose", "delegation_id"][..]
+    } else {
+        &["secret_ref", "profile_id", "purpose"][..]
+    };
+    require_exact_keys(args, expected)?;
     Ok(RequestUseArgs {
         secret_ref: SecretRef::new(required_string(args, "secret_ref")?)
             .map_err(tool_invalid_identifier)?,
         profile_id: ProfileId::new(required_string(args, "profile_id")?)
             .map_err(tool_invalid_identifier)?,
         purpose: Purpose::new(required_string(args, "purpose")?)
+            .map_err(tool_invalid_identifier)?,
+        delegation_id: args
+            .get("delegation_id")
+            .map(|_| required_string(args, "delegation_id"))
+            .transpose()?
+            .map(DelegationId::from_opaque)
+            .transpose()
             .map_err(tool_invalid_identifier)?,
     })
 }
@@ -941,13 +991,13 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use janus_core::{
-        AuditAction, AuditEvent, AuditOutcome, AuditWrite, Destination, EgressMode, ExecutorRef,
-        HealthStatus, JanusError, ManifestCatalog, OwnerRef, Principal, PrincipalChain,
-        PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReleaseAdmissionDecision,
-        ReleaseAdmissionReceipt, ReleaseChannelPolicy, RotationOutcome, RotationSpec, SafeLabel,
-        ScopePathV1, ScopeRef, SecretBroker, SecretClass, SecretDescriptor, SecretLifecycle,
-        SecretMeta, SecretName, SecretRef, SecretValue, Severity, StoreCapabilities, TrustLevel,
-        UseProfile,
+        AuditAction, AuditEvent, AuditOutcome, AuditWrite, DelegationGrant, DelegationPolicy,
+        DelegationRevocation, Destination, EgressMode, ExecutorRef, HealthStatus, JanusError,
+        ManifestCatalog, OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind,
+        ProfileId, ProfilePolicy, Purpose, ReleaseAdmissionDecision, ReleaseAdmissionReceipt,
+        ReleaseChannelPolicy, RotationOutcome, RotationSpec, SafeLabel, ScopePathV1, ScopeRef,
+        SecretBroker, SecretClass, SecretDescriptor, SecretLifecycle, SecretMeta, SecretName,
+        SecretRef, SecretValue, Severity, StoreCapabilities, TrustLevel, UseProfile, UseRequest,
     };
     use janus_mock::MockStore;
     use proptest::prelude::*;
@@ -1208,6 +1258,43 @@ mod tests {
         fn store(&self, _permit: &UsePermit) -> JanusResult<()> {
             Err(JanusError::StoreUnavailable {
                 detail: "permit store unavailable".to_string(),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct FixtureDelegationRegistry {
+        grant: DelegationGrant,
+        revocation: Option<DelegationRevocation>,
+    }
+
+    impl DelegationRegistry for FixtureDelegationRegistry {
+        fn store(&self, _grant: &DelegationGrant) -> JanusResult<()> {
+            Err(JanusError::StoreUnavailable {
+                detail: "fixture registry is read-only".to_string(),
+            })
+        }
+
+        fn get(&self, delegation_id: &str) -> JanusResult<janus_local::DelegationRecord> {
+            if delegation_id != self.grant.id().as_str() {
+                return Err(JanusError::policy_denied(
+                    "delegation_unknown",
+                    "delegation grant was not found",
+                ));
+            }
+            Ok(janus_local::DelegationRecord {
+                grant: self.grant.clone(),
+                revocation: self.revocation.clone(),
+            })
+        }
+
+        fn list(&self) -> JanusResult<Vec<janus_local::DelegationListEntry>> {
+            Ok(Vec::new())
+        }
+
+        fn revoke(&self, _revocation: &DelegationRevocation) -> JanusResult<()> {
+            Err(JanusError::StoreUnavailable {
+                detail: "fixture registry is read-only".to_string(),
             })
         }
     }
@@ -1907,6 +1994,7 @@ mod tests {
                     secret_ref,
                     profile_id: ProfileId::new("profile.canary").unwrap(),
                     purpose: Purpose::new("deploy canary").unwrap(),
+                    delegation_id: None,
                 },
                 &principal,
                 SystemTime::UNIX_EPOCH,
@@ -1922,6 +2010,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_use_accepts_exact_delegation_and_rechecks_revocation() {
+        let (runtime, secret_ref) = runtime();
+        let (store, policy, mut audit) = runtime.into_broker().into_parts();
+        let descriptor = store
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|descriptor| descriptor.secret_ref == secret_ref)
+            .unwrap();
+        let profile = policy
+            .profile_for(&secret_ref, &ProfileId::new("profile.canary").unwrap())
+            .unwrap()
+            .clone();
+        let mut grantor = principal();
+        grantor.human = Some(Principal::new(
+            PrincipalKind::Human,
+            PrincipalId::new("human-grantor").unwrap(),
+        ));
+        let delegate = full_principal();
+        let purpose = Purpose::new("deploy canary").unwrap();
+        let request = UseRequest {
+            secret_ref: secret_ref.clone(),
+            scope: scope(),
+            profile_id: profile.id.clone(),
+            destination: profile.destination.clone(),
+            purpose: purpose.clone(),
+        };
+        let grant = DelegationPolicy::issue_use(
+            &policy,
+            &descriptor,
+            &request,
+            &grantor,
+            &delegate,
+            None,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(30),
+            SafeLabel::new("coverage").unwrap(),
+            &mut audit,
+        )
+        .unwrap();
+        let registry = FixtureDelegationRegistry {
+            grant: grant.clone(),
+            revocation: None,
+        };
+        let mut runtime = WardenRuntime::new(SecretBroker::new(store, policy, audit))
+            .with_delegation_registry(registry);
+        let permit = runtime
+            .request_use(
+                RequestUseArgs {
+                    secret_ref: secret_ref.clone(),
+                    profile_id: profile.id.clone(),
+                    purpose: purpose.clone(),
+                    delegation_id: Some(grant.id().clone()),
+                },
+                &delegate,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        assert!(permit.permit_id.starts_with("use_"));
+
+        let (store, policy, mut audit) = runtime.into_broker().into_parts();
+        let revocation = DelegationPolicy::authorize_revocation(
+            &grant,
+            &delegate,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+            SafeLabel::new("coverage ended").unwrap(),
+            &mut audit,
+        )
+        .unwrap();
+        let registry = FixtureDelegationRegistry {
+            grant: grant.clone(),
+            revocation: Some(revocation),
+        };
+        let mut runtime = WardenRuntime::new(SecretBroker::new(store, policy, audit))
+            .with_delegation_registry(registry);
+        let error = runtime
+            .request_use(
+                RequestUseArgs {
+                    secret_ref,
+                    profile_id: profile.id,
+                    purpose,
+                    delegation_id: Some(grant.id().clone()),
+                },
+                &delegate,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(3),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            JanusError::PolicyDenied {
+                reason_code: "delegation_revoked",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn request_use_stores_permit_for_local_handoff() {
         let recorder = RecordingPermitStore::default();
         let observed = recorder.permit_ids.clone();
@@ -1934,6 +2122,7 @@ mod tests {
                     secret_ref,
                     profile_id: ProfileId::new("profile.canary").unwrap(),
                     purpose: Purpose::new("deploy canary").unwrap(),
+                    delegation_id: None,
                 },
                 &principal,
                 SystemTime::UNIX_EPOCH,
@@ -1956,6 +2145,7 @@ mod tests {
                     secret_ref,
                     profile_id: ProfileId::new("profile.canary").unwrap(),
                     purpose: Purpose::new("deploy canary").unwrap(),
+                    delegation_id: None,
                 },
                 &principal,
                 SystemTime::UNIX_EPOCH,
@@ -1977,6 +2167,7 @@ mod tests {
                     secret_ref: SecretRef::new("sec_copied_stale").unwrap(),
                     profile_id: ProfileId::new("profile.canary").unwrap(),
                     purpose: Purpose::new("deploy canary").unwrap(),
+                    delegation_id: None,
                 },
                 &principal,
                 SystemTime::UNIX_EPOCH,

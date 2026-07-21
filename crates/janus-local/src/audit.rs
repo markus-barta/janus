@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use janus_core::{
     audit_integrity_hash, AuditAction, AuditEvent, AuditIntegrityInput, AuditOutcome, AuditSink,
-    JanusError, JanusResult, SafeLabel, SecretRef, Severity,
+    DelegatedUseContext, DelegatedUseContextSnapshotV1, JanusError, JanusResult, SafeLabel,
+    SecretRef, Severity,
 };
 use serde::{Deserialize, Serialize};
 
@@ -206,6 +207,8 @@ struct JsonlAuditRecord {
     event_hash: String,
     value_returned: bool,
     evidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delegation: Option<DelegatedUseContextSnapshotV1>,
 }
 
 impl JsonlAuditRecord {
@@ -237,6 +240,7 @@ impl JsonlAuditRecord {
                 .evidence
                 .as_ref()
                 .map(|evidence| evidence.as_str().to_string()),
+            delegation: event.delegation.as_ref().map(DelegatedUseContext::snapshot),
         })
     }
 
@@ -262,6 +266,12 @@ impl JsonlAuditRecord {
             SafeLabel::new(evidence.clone())
                 .map_err(|_| audit_unavailable("audit log integrity validation failed"))?;
         }
+        let delegation = self
+            .delegation
+            .clone()
+            .map(DelegatedUseContext::from_snapshot)
+            .transpose()
+            .map_err(|_| audit_unavailable("audit log integrity validation failed"))?;
 
         let expected_hash = audit_integrity_hash(AuditIntegrityInput {
             action: &self.action,
@@ -274,6 +284,7 @@ impl JsonlAuditRecord {
             prev_hash: &self.prev_hash,
             value_returned: self.value_returned,
             evidence: self.evidence.as_deref(),
+            delegation: delegation.as_ref(),
         });
         if self.event_hash != expected_hash {
             return Err(audit_unavailable("audit log integrity validation failed"));
@@ -408,10 +419,11 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use janus_core::{
-        AuditWrite, Destination, EgressMode, ExecutorRef, ManifestCatalog, OwnerRef, PermitIssuer,
-        Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose,
-        ScopePathV1, ScopeRef, SecretBroker, SecretClass, SecretLifecycle, SecretMeta, SecretName,
-        TrustLevel, UseProfile, UseRequest,
+        AuditWrite, DelegatedUseContext, DelegationPolicy, Destination, EgressMode, ExecutorRef,
+        ManifestCatalog, OwnerRef, PermitIssuer, Principal, PrincipalChain, PrincipalId,
+        PrincipalKind, ProfileId, ProfilePolicy, Purpose, SafeLabel, ScopePathV1, ScopeRef,
+        SecretBroker, SecretClass, SecretDescriptor, SecretLifecycle, SecretMeta, SecretName,
+        SecretRef, TrustLevel, UseProfile, UseRequest,
     };
     use janus_mock::MockStore;
     use proptest::prelude::*;
@@ -513,6 +525,70 @@ mod tests {
         )
     }
 
+    fn delegated_context() -> DelegatedUseContext {
+        let secret_ref = SecretRef::new("sec_audit_fixture").unwrap();
+        let profile_id = ProfileId::new("profile.audit").unwrap();
+        let executor = ExecutorRef::new("runner-a").unwrap();
+        let destination = Destination::new("deploy-api").unwrap();
+        let descriptor = SecretDescriptor {
+            name: SecretName::new("AUDIT_FIXTURE").unwrap(),
+            secret_ref: secret_ref.clone(),
+            label: SafeLabel::new("Audit fixture").unwrap(),
+            scope: scope(),
+            owner: Some(OwnerRef::new("infra").unwrap()),
+            classification: Some(SecretClass::Normal),
+            lifecycle: SecretLifecycle::Active,
+            required: true,
+            trust_level: TrustLevel::L2,
+            allowed_uses: vec![profile_id.clone()],
+            present: true,
+        };
+        let profile = UseProfile {
+            id: profile_id.clone(),
+            scope: scope(),
+            secret_ref: secret_ref.clone(),
+            executor,
+            destination: destination.clone(),
+            egress: EgressMode::Connector,
+            trust_level: TrustLevel::L2,
+            ttl: Duration::from_secs(60),
+            single_use: true,
+            enabled: true,
+        };
+        let request = UseRequest {
+            secret_ref,
+            scope: scope(),
+            profile_id,
+            destination,
+            purpose: Purpose::new("audit fixture").unwrap(),
+        };
+        let mut grantor = principal();
+        grantor.human = Some(Principal::new(
+            PrincipalKind::Human,
+            PrincipalId::new("grantor").unwrap(),
+        ));
+        let mut delegate = principal();
+        delegate.agent = Some(Principal::new(
+            PrincipalKind::AgentSession,
+            PrincipalId::new("session:delegate").unwrap(),
+        ));
+        let mut audit = AuditWrite::accepting();
+        let grant = DelegationPolicy::issue_use(
+            &ProfilePolicy::new(vec![profile]),
+            &descriptor,
+            &request,
+            &grantor,
+            &delegate,
+            None,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(30),
+            SafeLabel::new("coverage").unwrap(),
+            &mut audit,
+        )
+        .unwrap();
+        DelegatedUseContext::from_grant(&grant)
+    }
+
     fn records(path: &Path) -> Vec<Value> {
         fs::read_to_string(path)
             .unwrap()
@@ -555,6 +631,29 @@ mod tests {
 
         let records = records(&path);
         assert_eq!(records.len(), 2);
+        assert_eq!(records[1]["sequence"], 2);
+        assert_eq!(records[1]["prev_hash"], records[0]["event_hash"]);
+    }
+
+    #[test]
+    fn mixed_plain_and_delegated_audit_records_recover_with_context_integrity() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit/events.jsonl");
+        let delegation_id = {
+            let context = delegated_context();
+            let id = context.delegation_id().as_str().to_string();
+            let mut sink = JsonlAuditSink::open(&path).unwrap();
+            sink.record(event("plain")).unwrap();
+            sink.record(event("delegated").with_delegation(context))
+                .unwrap();
+            id
+        };
+
+        let reopened = JsonlAuditSink::open(&path).unwrap();
+        assert_eq!(reopened.recovery().last_sequence, 2);
+        let records = records(&path);
+        assert!(records[0].get("delegation").is_none());
+        assert_eq!(records[1]["delegation"]["delegation_id"], delegation_id);
         assert_eq!(records[1]["sequence"], 2);
         assert_eq!(records[1]["prev_hash"], records[0]["event_hash"]);
     }

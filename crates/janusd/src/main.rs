@@ -31,14 +31,14 @@ use async_trait::async_trait;
 use janus_core::{
     authorize_runtime_action, ApprovalGrant, AuditAction, AuditEvent, AuditOutcome, AuditSink,
     AuditWrite, BlastRadius, ClassPermitPolicy, ConsumerDescriptor, ConsumerKind, ConsumerRef,
-    ConsumerRegistry, Destination, EgressMode, Environment, ExecutorRef, JanusError,
-    LifecycleTransitionPolicy, NamespaceId, OwnerRef, Principal, PrincipalChain, PrincipalId,
-    PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReloadMethod, RotationOutcome, RuntimeAction,
-    RuntimePlane, RuntimeTransport, SafeLabel, ScopePathV1, ScopeRef, SecretAgeEvidence,
-    SecretBroker, SecretDescriptor, SecretLifecycle, SecretMeta, SecretMetadataOverlay, SecretName,
-    SecretRef, SecretStore, SecretTombstoneRequest, Severity, StaleSecretPolicy,
-    StaleSecretReportRow, StaleSecretReporter, TombstonePolicy, TrustLevel, UsePermit, UseProfile,
-    UseRequest, ValidationProbe, WorkloadId,
+    ConsumerRegistry, DelegationId, DelegationPolicy, Destination, EgressMode, Environment,
+    ExecutorRef, JanusError, LifecycleTransitionPolicy, NamespaceId, OwnerRef, Principal,
+    PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReloadMethod,
+    RotationOutcome, RuntimeAction, RuntimePlane, RuntimeTransport, SafeLabel, ScopePathV1,
+    ScopeRef, SecretAgeEvidence, SecretBroker, SecretDescriptor, SecretLifecycle, SecretMeta,
+    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretTombstoneRequest, Severity,
+    StaleSecretPolicy, StaleSecretReportRow, StaleSecretReporter, TombstonePolicy, TrustLevel,
+    UsePermit, UseProfile, UseRequest, ValidationProbe, WorkloadId,
 };
 use janus_executor::{
     ApprovedUseExecutor, EnvFileHashSidecarFormat, EnvFileHashSidecarSpec, EnvFilePlan,
@@ -52,8 +52,9 @@ use janus_forge::{
 use janus_local::{
     enforce_migration_ready_from_env, enforce_release_admission_from_env,
     enforce_scope_transfer_ready_from_env, ApprovalListEntry,
-    ApprovalRegistry as SharedApprovalRegistry, FileApprovalRegistry,
-    FileLifecycleEvidenceRegistry, FilePermitRegistry, FileTombstoneRegistry, JsonlAuditSink,
+    ApprovalRegistry as SharedApprovalRegistry, DelegationRegistry, FileApprovalRegistry,
+    FileDelegationRegistry, FileLifecycleEvidenceRegistry, FilePermitRegistry,
+    FileTombstoneRegistry, JsonlAuditSink,
     LifecycleEvidenceRegistry as SharedLifecycleEvidenceRegistry,
     PermitRegistry as SharedPermitRegistry, PermitStore as SharedPermitStore,
     TombstoneRegistry as SharedTombstoneRegistry,
@@ -144,6 +145,7 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
         Command::EnvFilePreflight(config) => run_env_file_preflight(config).await,
         Command::EnvFile(config) => run_env_file(config).await,
         Command::Approve(command) => run_approve(command).await,
+        Command::Delegation(command) => run_delegation(command).await,
         Command::LifecycleTransition(config) => run_lifecycle_transition(config).await,
         Command::LifecycleStaleReport(config) => run_lifecycle_stale_report(config).await,
         Command::LifecycleDestroyRecord(config) => run_lifecycle_destroy_record(config).await,
@@ -162,6 +164,7 @@ enum Command {
     EnvFilePreflight(EnvFilePreflightConfig),
     EnvFile(EnvFileConfig),
     Approve(ApproveCommand),
+    Delegation(DelegationCommand),
     LifecycleTransition(LifecycleTransitionConfig),
     LifecycleStaleReport(LifecycleStaleReportConfig),
     LifecycleDestroyRecord(LifecycleDestroyRecordConfig),
@@ -183,6 +186,10 @@ impl Command {
             Self::Approve(ApproveCommand::Permit(_)) => RuntimeAction::ApprovalPermit,
             Self::Approve(ApproveCommand::List) => RuntimeAction::ApprovalList,
             Self::Approve(ApproveCommand::Revoke(_)) => RuntimeAction::ApprovalRevoke,
+            Self::Delegation(DelegationCommand::Issue(_)) => RuntimeAction::DelegationIssue,
+            Self::Delegation(DelegationCommand::List) => RuntimeAction::DelegationList,
+            Self::Delegation(DelegationCommand::Inspect(_)) => RuntimeAction::DelegationInspect,
+            Self::Delegation(DelegationCommand::Revoke(_)) => RuntimeAction::DelegationRevoke,
             Self::LifecycleTransition(_) => RuntimeAction::LifecycleTransition,
             Self::LifecycleStaleReport(_) => RuntimeAction::LifecycleStaleReport,
             Self::LifecycleDestroyRecord(_) => RuntimeAction::LifecycleDestroyRecord,
@@ -206,6 +213,14 @@ enum ApproveCommand {
     Permit(ApprovePermitConfig),
     List,
     Revoke(ApproveRevokeConfig),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DelegationCommand {
+    Issue(Box<DelegationIssueConfig>),
+    List,
+    Inspect(DelegationInspectConfig),
+    Revoke(DelegationRevokeConfig),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -264,6 +279,46 @@ struct ApprovePermitConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ApproveRevokeConfig {
     approval: ApprovalToken,
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+struct DelegationPrincipalSpec {
+    human: Option<PrincipalId>,
+    agent: Option<PrincipalId>,
+    workload: Option<PrincipalId>,
+}
+
+impl fmt::Debug for DelegationPrincipalSpec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DelegationPrincipalSpec")
+            .field("human", &self.human.as_ref().map(|_| "<redacted>"))
+            .field("agent", &self.agent.as_ref().map(|_| "<redacted>"))
+            .field("workload", &self.workload.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DelegationIssueConfig {
+    secret_ref: SecretRef,
+    profile_id: ProfileId,
+    purpose: Purpose,
+    reason: SafeLabel,
+    expires_in: Duration,
+    grantor: DelegationPrincipalSpec,
+    delegate: DelegationPrincipalSpec,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DelegationInspectConfig {
+    delegation_id: DelegationId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DelegationRevokeConfig {
+    delegation_id: DelegationId,
+    reason: SafeLabel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -482,11 +537,19 @@ async fn run_managed_command(config: RunManagedCommandConfig) -> Result<()> {
     let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
     let permits = FilePermitRegistry::new(run_permit_registry_dir()?);
     let store = load_age_store_from_env()?;
-    let executor = ApprovedUseExecutor::new(SecretBroker::new(
-        store,
-        ProfilePolicy::default(),
-        AuditWrite::accepting(),
-    ));
+    let descriptors = store
+        .list()
+        .await
+        .context("failed to load current descriptors for managed command use")?;
+    let policy = profiles.use_policy(&descriptors)?;
+    let executor = DelegatingApprovedUseExecutor {
+        executor: ApprovedUseExecutor::new(SecretBroker::new(
+            store,
+            policy,
+            AuditWrite::accepting(),
+        )),
+        delegations: FileDelegationRegistry::new(delegation_registry_dir()),
+    };
     let principal = run_principal_from_env()?;
     let mut runner = ProfileManifestManagedCommandRunner {
         profiles,
@@ -515,11 +578,19 @@ async fn run_env_file(config: EnvFileConfig) -> Result<()> {
     let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
     let permits = FilePermitRegistry::new(run_permit_registry_dir()?);
     let store = load_age_store_from_env()?;
-    let executor = ApprovedUseExecutor::new(SecretBroker::new(
-        store,
-        ProfilePolicy::default(),
-        AuditWrite::accepting(),
-    ));
+    let descriptors = store
+        .list()
+        .await
+        .context("failed to load current descriptors for env-file use")?;
+    let policy = profiles.use_policy(&descriptors)?;
+    let executor = DelegatingApprovedUseExecutor {
+        executor: ApprovedUseExecutor::new(SecretBroker::new(
+            store,
+            policy,
+            AuditWrite::accepting(),
+        )),
+        delegations: FileDelegationRegistry::new(delegation_registry_dir()),
+    };
     let principal = run_principal_from_env()?;
     let mut runner = ProfileManifestEnvFileRunner {
         profiles,
@@ -584,6 +655,116 @@ async fn run_approve(command: ApproveCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn run_delegation(command: DelegationCommand) -> Result<()> {
+    let registry = FileDelegationRegistry::new(delegation_registry_dir());
+    match command {
+        DelegationCommand::Issue(config) => {
+            let profiles = ManagedCommandProfileCatalog::load(&run_profile_manifest_path()?)?;
+            let store = load_age_store_from_env()?;
+            let descriptors = store
+                .list()
+                .await
+                .context("failed to list current descriptors for delegation issue")?;
+            let descriptor = descriptors
+                .iter()
+                .find(|descriptor| descriptor.secret_ref == config.secret_ref)
+                .ok_or_else(|| JanusError::NotInManifest {
+                    name: config.secret_ref.as_str().to_string(),
+                })?;
+            let profile = profiles
+                .profile_binding(&config.profile_id)
+                .context("delegation profile not found")?;
+            if profile.secret_ref != config.secret_ref {
+                anyhow::bail!("delegation profile does not match the exact secret ref");
+            }
+            let policy = profiles.use_policy(&descriptors)?;
+            let grantor =
+                delegation_principal(&config.grantor, &profile.executor, descriptor.scope.clone());
+            let delegate = delegation_principal(
+                &config.delegate,
+                &profile.executor,
+                descriptor.scope.clone(),
+            );
+            let request = UseRequest {
+                secret_ref: config.secret_ref,
+                scope: descriptor.scope.clone(),
+                profile_id: config.profile_id,
+                destination: profile.destination,
+                purpose: config.purpose,
+            };
+            let now = SystemTime::now();
+            let mut audit = AuditWrite::accepting();
+            let grant = DelegationPolicy::issue_use(
+                &policy,
+                descriptor,
+                &request,
+                &grantor,
+                &delegate,
+                None,
+                now,
+                now + config.expires_in,
+                config.reason,
+                &mut audit,
+            )?;
+            DelegationRegistry::store(&registry, &grant)?;
+            emit_delegation_issue_outcome(&grant);
+        }
+        DelegationCommand::List => {
+            let rows = DelegationRegistry::list(&registry)?;
+            emit_delegation_list_outcome(&rows, SystemTime::now());
+        }
+        DelegationCommand::Inspect(config) => {
+            let record = DelegationRegistry::get(&registry, config.delegation_id.as_str())?;
+            emit_delegation_inspect_outcome(&record, SystemTime::now())?;
+        }
+        DelegationCommand::Revoke(config) => {
+            let record = DelegationRegistry::get(&registry, config.delegation_id.as_str())?;
+            if record.revocation.is_some() {
+                anyhow::bail!("delegation is already revoked");
+            }
+            let operator = delegation_operator_principal_from_env()?;
+            let mut audit = AuditWrite::accepting();
+            let revocation = DelegationPolicy::authorize_operator_revocation(
+                &record.grant,
+                &operator,
+                SystemTime::now(),
+                config.reason,
+                &mut audit,
+            )?;
+            DelegationRegistry::revoke(&registry, &revocation)?;
+            emit_delegation_revoke_outcome(revocation.delegation_id());
+        }
+    }
+    Ok(())
+}
+
+fn delegation_principal(
+    spec: &DelegationPrincipalSpec,
+    executor: &ExecutorRef,
+    scope: ScopeRef,
+) -> PrincipalChain {
+    let mut principal = PrincipalChain::new(
+        Principal::new(
+            PrincipalKind::Executor,
+            PrincipalId::new(executor.as_str()).expect("validated executor is a principal id"),
+        ),
+        scope,
+    );
+    principal.human = spec
+        .human
+        .clone()
+        .map(|id| Principal::new(PrincipalKind::Human, id));
+    principal.agent = spec
+        .agent
+        .clone()
+        .map(|id| Principal::new(PrincipalKind::AgentSession, id));
+    principal.workload = spec
+        .workload
+        .clone()
+        .map(|id| Principal::new(PrincipalKind::Workload, id));
+    principal
 }
 
 async fn run_lifecycle_transition(config: LifecycleTransitionConfig) -> Result<()> {
@@ -1627,6 +1808,75 @@ fn emit_approve_revoke_outcome(approval: &ApprovalToken) {
     );
 }
 
+fn emit_delegation_issue_outcome(grant: &janus_core::DelegationGrant) {
+    println!(
+        "janusd-admin delegation issue ok delegation_id={} secret_ref={} scope_ref={} action={} class={} lifecycle={} profile_id={} executor={} destination={} egress={} expires_at_unix_secs={} value_returned=false",
+        grant.id().as_str(),
+        grant.scope().secret_ref.as_str(),
+        grant.scope().scope_ref.as_str(),
+        grant.scope().action.as_str(),
+        grant.scope().class.as_str(),
+        grant.scope().lifecycle.as_str(),
+        grant.scope().profile_id.as_str(),
+        grant.scope().executor.as_str(),
+        grant.scope().destination.as_str(),
+        grant.scope().egress.as_str(),
+        unix_seconds(grant.expires_at()),
+    );
+}
+
+fn emit_delegation_list_outcome(rows: &[janus_local::DelegationListEntry], now: SystemTime) {
+    println!(
+        "janusd-admin delegation list count={} value_returned=false",
+        rows.len()
+    );
+    for row in rows {
+        println!(
+            "delegation_id={} secret_ref={} scope_ref={} action={} class={} lifecycle={} status={} issued_at_unix_secs={} expires_at_unix_secs={} value_returned=false",
+            row.delegation_id.as_str(),
+            row.secret_ref.as_str(),
+            row.scope_ref.as_str(),
+            row.action.as_str(),
+            row.class.as_str(),
+            row.lifecycle.as_str(),
+            row.status_at(now).as_str(),
+            unix_seconds(row.issued_at),
+            unix_seconds(row.expires_at),
+        );
+    }
+}
+
+fn emit_delegation_inspect_outcome(
+    record: &janus_local::DelegationRecord,
+    now: SystemTime,
+) -> Result<()> {
+    let grant = &record.grant;
+    println!(
+        "janusd-admin delegation inspect ok delegation_id={} secret_ref={} scope_ref={} action={} class={} lifecycle={} profile_id={} executor={} destination={} egress={} status={} issued_at_unix_secs={} expires_at_unix_secs={} value_returned=false",
+        grant.id().as_str(),
+        grant.scope().secret_ref.as_str(),
+        grant.scope().scope_ref.as_str(),
+        grant.scope().action.as_str(),
+        grant.scope().class.as_str(),
+        grant.scope().lifecycle.as_str(),
+        grant.scope().profile_id.as_str(),
+        grant.scope().executor.as_str(),
+        grant.scope().destination.as_str(),
+        grant.scope().egress.as_str(),
+        record.status_at(now)?.as_str(),
+        unix_seconds(grant.issued_at()),
+        unix_seconds(grant.expires_at()),
+    );
+    Ok(())
+}
+
+fn emit_delegation_revoke_outcome(delegation_id: &DelegationId) {
+    println!(
+        "janusd-admin delegation revoke ok delegation_id={} value_returned=false",
+        delegation_id.as_str()
+    );
+}
+
 async fn run_managed_command_with<R>(
     config: &RunManagedCommandConfig,
     runner: &mut R,
@@ -1674,6 +1924,11 @@ trait ManagedCommandExecutor {
     ) -> Result<ManagedCommandCliOutcome>;
 }
 
+struct DelegatingApprovedUseExecutor<S, A, D> {
+    executor: ApprovedUseExecutor<S, A>,
+    delegations: D,
+}
+
 #[async_trait]
 impl<S, A> ManagedCommandExecutor for ApprovedUseExecutor<S, A>
 where
@@ -1696,6 +1951,45 @@ where
                 requested_args,
                 now,
             })
+            .await?;
+        Ok(outcome.into())
+    }
+}
+
+#[async_trait]
+impl<S, A, D> ManagedCommandExecutor for DelegatingApprovedUseExecutor<S, A, D>
+where
+    S: SecretStore + Send,
+    A: AuditSink + Send,
+    D: DelegationRegistry + Send,
+{
+    async fn run(
+        &mut self,
+        profile: &ManagedCommandProfile,
+        permit: &UsePermit,
+        principal: &PrincipalChain,
+        requested_args: Vec<String>,
+        now: SystemTime,
+    ) -> Result<ManagedCommandCliOutcome> {
+        let record = permit
+            .delegation()
+            .map(|context| self.delegations.get(context.delegation_id().as_str()))
+            .transpose()?;
+        let evidence = record
+            .as_ref()
+            .map(|record| (&record.grant, record.revocation.as_ref()));
+        let outcome = self
+            .executor
+            .run_managed_command_with_delegation(
+                ManagedCommandRequest {
+                    profile,
+                    permit,
+                    principal,
+                    requested_args,
+                    now,
+                },
+                evidence,
+            )
             .await?;
         Ok(outcome.into())
     }
@@ -1806,6 +2100,43 @@ where
                 principal,
                 now,
             })
+            .await?;
+        Ok(outcome.into())
+    }
+}
+
+#[async_trait]
+impl<S, A, D> EnvFileExecutor for DelegatingApprovedUseExecutor<S, A, D>
+where
+    S: SecretStore + Send,
+    A: AuditSink + Send,
+    D: DelegationRegistry + Send,
+{
+    async fn render(
+        &mut self,
+        profile: &EnvFileProfile,
+        permit: &UsePermit,
+        principal: &PrincipalChain,
+        now: SystemTime,
+    ) -> Result<EnvFileCliOutcome> {
+        let record = permit
+            .delegation()
+            .map(|context| self.delegations.get(context.delegation_id().as_str()))
+            .transpose()?;
+        let evidence = record
+            .as_ref()
+            .map(|record| (&record.grant, record.revocation.as_ref()));
+        let outcome = self
+            .executor
+            .render_env_file_with_delegation(
+                EnvFileRequest {
+                    profile,
+                    permit,
+                    principal,
+                    now,
+                },
+                evidence,
+            )
             .await?;
         Ok(outcome.into())
     }
@@ -2044,6 +2375,39 @@ impl ManagedCommandProfileCatalog {
                 executor: profile.executor().clone(),
                 destination: profile.destination().clone(),
             })
+    }
+
+    fn use_policy(&self, descriptors: &[SecretDescriptor]) -> Result<ProfilePolicy> {
+        let ttl = env::var("JANUS_WARDEN_PERMIT_TTL_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(300);
+        let mut profiles = Vec::new();
+        for descriptor in descriptors {
+            for profile_id in &descriptor.allowed_uses {
+                let Some(binding) = self.profile_binding(profile_id) else {
+                    continue;
+                };
+                if binding.secret_ref != descriptor.secret_ref {
+                    anyhow::bail!(
+                        "approved-use profile secret does not match the current descriptor"
+                    );
+                }
+                profiles.push(UseProfile {
+                    id: profile_id.clone(),
+                    scope: descriptor.scope.clone(),
+                    secret_ref: descriptor.secret_ref.clone(),
+                    executor: binding.executor,
+                    destination: binding.destination,
+                    egress: EgressMode::Connector,
+                    trust_level: TrustLevel::L2,
+                    ttl: Duration::from_secs(ttl),
+                    single_use: true,
+                    enabled: true,
+                });
+            }
+        }
+        Ok(ProfilePolicy::new(profiles))
     }
 }
 
@@ -2520,6 +2884,18 @@ fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
         [approve, revoke, ..] if approve == "approve" && revoke == "revoke" => {
             RuntimeAction::ApprovalRevoke
         }
+        [delegation, issue, ..] if delegation == "delegation" && issue == "issue" => {
+            RuntimeAction::DelegationIssue
+        }
+        [delegation, list, ..] if delegation == "delegation" && list == "list" => {
+            RuntimeAction::DelegationList
+        }
+        [delegation, inspect, ..] if delegation == "delegation" && inspect == "inspect" => {
+            RuntimeAction::DelegationInspect
+        }
+        [delegation, revoke, ..] if delegation == "delegation" && revoke == "revoke" => {
+            RuntimeAction::DelegationRevoke
+        }
         [lifecycle, transition, ..] if lifecycle == "lifecycle" && transition == "transition" => {
             RuntimeAction::LifecycleTransition
         }
@@ -2670,6 +3046,25 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
             parse_approve_revoke(rest.iter().cloned())
                 .map(ApproveCommand::Revoke)
                 .map(Command::Approve)
+        }
+        [delegation, issue, rest @ ..] if delegation == "delegation" && issue == "issue" => {
+            parse_delegation_issue(rest.iter().cloned())
+                .map(Box::new)
+                .map(DelegationCommand::Issue)
+                .map(Command::Delegation)
+        }
+        [delegation, list] if delegation == "delegation" && list == "list" => {
+            Ok(Command::Delegation(DelegationCommand::List))
+        }
+        [delegation, inspect, rest @ ..] if delegation == "delegation" && inspect == "inspect" => {
+            parse_delegation_inspect(rest.iter().cloned())
+                .map(DelegationCommand::Inspect)
+                .map(Command::Delegation)
+        }
+        [delegation, revoke, rest @ ..] if delegation == "delegation" && revoke == "revoke" => {
+            parse_delegation_revoke(rest.iter().cloned())
+                .map(DelegationCommand::Revoke)
+                .map(Command::Delegation)
         }
         [lifecycle, transition, rest @ ..]
             if lifecycle == "lifecycle" && transition == "transition" =>
@@ -3213,6 +3608,162 @@ fn parse_approve_revoke(args: impl IntoIterator<Item = String>) -> Result<Approv
     })
 }
 
+fn parse_delegation_issue(args: impl IntoIterator<Item = String>) -> Result<DelegationIssueConfig> {
+    let mut secret_ref = None;
+    let mut profile_id = None;
+    let mut purpose = None;
+    let mut reason = None;
+    let mut expires_in = None;
+    let mut grantor = DelegationPrincipalSpec::default();
+    let mut delegate = DelegationPrincipalSpec::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--secret-ref" => replace_once(
+                &mut secret_ref,
+                "--secret-ref",
+                SecretRef::new(required_arg("--secret-ref", args.next())?)?,
+            )?,
+            "--profile" => replace_once(
+                &mut profile_id,
+                "--profile",
+                ProfileId::new(required_arg("--profile", args.next())?)?,
+            )?,
+            "--purpose" => replace_once(
+                &mut purpose,
+                "--purpose",
+                Purpose::new(required_arg("--purpose", args.next())?)?,
+            )?,
+            "--reason" => replace_once(
+                &mut reason,
+                "--reason",
+                SafeLabel::new(required_arg("--reason", args.next())?)?,
+            )?,
+            "--expires-in-seconds" => replace_once(
+                &mut expires_in,
+                "--expires-in-seconds",
+                parse_delegation_ttl(&required_arg("--expires-in-seconds", args.next())?)?,
+            )?,
+            "--grantor-human" => replace_once(
+                &mut grantor.human,
+                "--grantor-human",
+                PrincipalId::new(required_arg("--grantor-human", args.next())?)?,
+            )?,
+            "--grantor-agent" => replace_once(
+                &mut grantor.agent,
+                "--grantor-agent",
+                PrincipalId::new(required_arg("--grantor-agent", args.next())?)?,
+            )?,
+            "--grantor-workload" => replace_once(
+                &mut grantor.workload,
+                "--grantor-workload",
+                PrincipalId::new(required_arg("--grantor-workload", args.next())?)?,
+            )?,
+            "--delegate-human" => replace_once(
+                &mut delegate.human,
+                "--delegate-human",
+                PrincipalId::new(required_arg("--delegate-human", args.next())?)?,
+            )?,
+            "--delegate-agent" => replace_once(
+                &mut delegate.agent,
+                "--delegate-agent",
+                PrincipalId::new(required_arg("--delegate-agent", args.next())?)?,
+            )?,
+            "--delegate-workload" => replace_once(
+                &mut delegate.workload,
+                "--delegate-workload",
+                PrincipalId::new(required_arg("--delegate-workload", args.next())?)?,
+            )?,
+            "--secret" | "--value" | "--raw-value" | "--egress" | "--destination"
+            | "--executor" => {
+                anyhow::bail!("delegation issue accepts only exact value-free scope fields")
+            }
+            other if other.starts_with('-') => {
+                anyhow::bail!("unsupported janusd delegation flag")
+            }
+            _ => anyhow::bail!("unsupported janusd delegation argument"),
+        }
+    }
+    Ok(DelegationIssueConfig {
+        secret_ref: secret_ref.context("--secret-ref is required")?,
+        profile_id: profile_id.context("--profile is required")?,
+        purpose: purpose.context("--purpose is required")?,
+        reason: reason.context("--reason is required")?,
+        expires_in: expires_in.context("--expires-in-seconds is required")?,
+        grantor,
+        delegate,
+    })
+}
+
+fn parse_delegation_inspect(
+    args: impl IntoIterator<Item = String>,
+) -> Result<DelegationInspectConfig> {
+    let mut delegation_id = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--delegation" => replace_once(
+                &mut delegation_id,
+                "--delegation",
+                DelegationId::from_opaque(required_arg("--delegation", args.next())?)?,
+            )?,
+            "--value" | "--secret" | "--secret-ref" => {
+                anyhow::bail!("delegation inspect accepts only a delegation id")
+            }
+            other if other.starts_with('-') => {
+                anyhow::bail!("unsupported janusd delegation flag")
+            }
+            _ => anyhow::bail!("unsupported janusd delegation argument"),
+        }
+    }
+    Ok(DelegationInspectConfig {
+        delegation_id: delegation_id.context("--delegation is required")?,
+    })
+}
+
+fn parse_delegation_revoke(
+    args: impl IntoIterator<Item = String>,
+) -> Result<DelegationRevokeConfig> {
+    let mut delegation_id = None;
+    let mut reason = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--delegation" => replace_once(
+                &mut delegation_id,
+                "--delegation",
+                DelegationId::from_opaque(required_arg("--delegation", args.next())?)?,
+            )?,
+            "--reason" => replace_once(
+                &mut reason,
+                "--reason",
+                SafeLabel::new(required_arg("--reason", args.next())?)?,
+            )?,
+            "--value" | "--secret" | "--secret-ref" => {
+                anyhow::bail!("delegation revoke accepts only an id and value-free reason")
+            }
+            other if other.starts_with('-') => {
+                anyhow::bail!("unsupported janusd delegation flag")
+            }
+            _ => anyhow::bail!("unsupported janusd delegation argument"),
+        }
+    }
+    Ok(DelegationRevokeConfig {
+        delegation_id: delegation_id.context("--delegation is required")?,
+        reason: reason.context("--reason is required")?,
+    })
+}
+
+fn parse_delegation_ttl(value: &str) -> Result<Duration> {
+    let seconds = value
+        .parse::<u64>()
+        .context("invalid --expires-in-seconds")?;
+    if seconds == 0 || seconds > MAX_APPROVAL_TTL_SECONDS {
+        anyhow::bail!("delegation expiry must be between 1 and 3600 seconds");
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
 fn parse_approval_ttl(value: &str) -> Result<Duration> {
     let seconds = value
         .parse::<u64>()
@@ -3563,6 +4114,16 @@ fn approval_registry_dir() -> Result<PathBuf> {
         .context("JANUS_APPROVAL_DIR is required")
 }
 
+fn delegation_registry_dir() -> PathBuf {
+    env_first(&[
+        "JANUS_RUN_DELEGATION_DIR",
+        "JANUS_WARDEN_DELEGATION_DIR",
+        "JANUS_DELEGATION_DIR",
+    ])
+    .map(PathBuf::from)
+    .unwrap_or_else(|| PathBuf::from("/var/lib/janus/delegations"))
+}
+
 fn lifecycle_evidence_registry_dir() -> PathBuf {
     env_first(&["JANUS_LIFECYCLE_EVIDENCE_DIR", "JANUS_STALE_EVIDENCE_DIR"])
         .map(PathBuf::from)
@@ -3578,10 +4139,36 @@ fn lifecycle_tombstone_registry_dir() -> PathBuf {
 fn run_principal_from_env() -> Result<PrincipalChain> {
     let executor = env_first(&["JANUS_RUN_EXECUTOR", "JANUS_WARDEN_EXECUTOR"])
         .unwrap_or_else(|| "warden-stdio".to_string());
-    Ok(PrincipalChain::new(
+    let mut principal = PrincipalChain::new(
         Principal::new(PrincipalKind::Executor, PrincipalId::new(executor)?),
         runtime_scope_from_env()?,
-    ))
+    );
+    principal.human = optional_runtime_principal(
+        PrincipalKind::Human,
+        &["JANUS_RUN_HUMAN", "JANUS_WARDEN_HUMAN"],
+    )?;
+    principal.workload = optional_runtime_principal(
+        PrincipalKind::Workload,
+        &["JANUS_RUN_WORKLOAD", "JANUS_WARDEN_WORKLOAD"],
+    )?;
+    let agent_session = env_first(&["JANUS_RUN_AGENT_SESSION", "JANUS_WARDEN_AGENT_SESSION"]);
+    let agent_model = env_first(&["JANUS_RUN_AGENT_MODEL", "JANUS_WARDEN_AGENT_MODEL"]);
+    let agent_id = match (agent_session, agent_model) {
+        (Some(session), Some(model)) => Some(format!("session:{session},model:{model}")),
+        (Some(session), None) => Some(format!("session:{session}")),
+        (None, Some(model)) => Some(format!("model:{model}")),
+        (None, None) => None,
+    };
+    principal.agent = agent_id
+        .map(|id| PrincipalId::new(id).map(|id| Principal::new(PrincipalKind::AgentSession, id)))
+        .transpose()?;
+    Ok(principal)
+}
+
+fn optional_runtime_principal(kind: PrincipalKind, keys: &[&str]) -> Result<Option<Principal>> {
+    env_first(keys)
+        .map(|id| Ok(Principal::new(kind, PrincipalId::new(id)?)))
+        .transpose()
 }
 
 fn load_age_store_from_env() -> Result<AgeSecretStore> {
@@ -3873,6 +4460,15 @@ fn release_principal_from_env() -> Result<PrincipalChain> {
     ))
 }
 
+fn delegation_operator_principal_from_env() -> Result<PrincipalChain> {
+    let executor = env_first(&["JANUS_ADMIN_EXECUTOR", "JANUS_RELEASE_EXECUTOR"])
+        .unwrap_or_else(|| "janusd-admin".to_string());
+    Ok(PrincipalChain::new(
+        Principal::new(PrincipalKind::Executor, PrincipalId::new(executor)?),
+        runtime_scope_from_env()?,
+    ))
+}
+
 fn runtime_scope_from_env() -> Result<ScopeRef> {
     #[cfg(test)]
     if env::var("JANUS_SCOPE_ORGANIZATION").is_err()
@@ -3930,6 +4526,13 @@ Administration commands:
   approve permit --approval appr_... [--permit-ttl-seconds SECONDS] [--revoke-approval]
   approve list
   approve revoke --approval appr_...
+  delegation issue --secret-ref REF --profile PROFILE --purpose PURPOSE --reason REASON \
+    --expires-in-seconds SECONDS \
+    [--grantor-human ID] [--grantor-agent ID] [--grantor-workload ID] \
+    [--delegate-human ID] [--delegate-agent ID] [--delegate-workload ID]
+  delegation list
+  delegation inspect --delegation dlg_...
+  delegation revoke --delegation dlg_... --reason REASON
   lifecycle transition --secret-ref REF --to STATE --reason REASON [--metadata-file PATH]
   lifecycle stale-report [--evidence-file PATH] [--stale-after-days N] [--missing-evidence-after-days N]
   lifecycle destroy-record --secret-ref REF --reason REASON --retain-for-days N [--metadata-file PATH]
@@ -4091,6 +4694,16 @@ mod tests {
             (&["approve", "permit"][..], RuntimeAction::ApprovalPermit),
             (&["approve", "list"][..], RuntimeAction::ApprovalList),
             (&["approve", "revoke"][..], RuntimeAction::ApprovalRevoke),
+            (&["delegation", "issue"][..], RuntimeAction::DelegationIssue),
+            (&["delegation", "list"][..], RuntimeAction::DelegationList),
+            (
+                &["delegation", "inspect"][..],
+                RuntimeAction::DelegationInspect,
+            ),
+            (
+                &["delegation", "revoke"][..],
+                RuntimeAction::DelegationRevoke,
+            ),
             (
                 &["lifecycle", "transition"][..],
                 RuntimeAction::LifecycleTransition,
@@ -4214,6 +4827,7 @@ mod tests {
             Command::EnvFilePreflight(_) => panic!("expected forge config"),
             Command::EnvFile(_) => panic!("expected forge config"),
             Command::Approve(_) => panic!("expected forge config"),
+            Command::Delegation(_) => panic!("expected forge config"),
             Command::LifecycleTransition(_) => panic!("expected forge config"),
             Command::LifecycleStaleReport(_) => panic!("expected forge config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected forge config"),
@@ -4232,6 +4846,7 @@ mod tests {
             Command::EnvFile(_) => panic!("expected run config"),
             Command::Help => panic!("expected run config"),
             Command::Approve(_) => panic!("expected run config"),
+            Command::Delegation(_) => panic!("expected run config"),
             Command::LifecycleTransition(_) => panic!("expected run config"),
             Command::LifecycleStaleReport(_) => panic!("expected run config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected run config"),
@@ -4256,6 +4871,7 @@ mod tests {
             Command::RunManagedPreflight(_) => panic!("expected env-file config"),
             Command::RunManaged(_) => panic!("expected env-file config"),
             Command::Approve(_) => panic!("expected env-file config"),
+            Command::Delegation(_) => panic!("expected env-file config"),
             Command::Help => panic!("expected env-file config"),
             Command::LifecycleTransition(_) => panic!("expected env-file config"),
             Command::LifecycleStaleReport(_) => panic!("expected env-file config"),
@@ -4274,6 +4890,7 @@ mod tests {
             Command::RunManagedPreflight(_) => panic!("expected env-file preflight config"),
             Command::RunManaged(_) => panic!("expected env-file preflight config"),
             Command::Approve(_) => panic!("expected env-file preflight config"),
+            Command::Delegation(_) => panic!("expected env-file preflight config"),
             Command::Help => panic!("expected env-file preflight config"),
             Command::LifecycleTransition(_) => panic!("expected env-file preflight config"),
             Command::LifecycleStaleReport(_) => panic!("expected env-file preflight config"),
@@ -4293,6 +4910,7 @@ mod tests {
             Command::EnvFilePreflight(_) => panic!("expected approve issue config"),
             Command::EnvFile(_) => panic!("expected approve issue config"),
             Command::Approve(_) => panic!("expected approve issue config"),
+            Command::Delegation(_) => panic!("expected approve issue config"),
             Command::Help => panic!("expected approve issue config"),
             Command::LifecycleTransition(_) => panic!("expected approve issue config"),
             Command::LifecycleStaleReport(_) => panic!("expected approve issue config"),
@@ -4312,6 +4930,7 @@ mod tests {
             Command::EnvFilePreflight(_) => panic!("expected approve permit config"),
             Command::EnvFile(_) => panic!("expected approve permit config"),
             Command::Approve(_) => panic!("expected approve permit config"),
+            Command::Delegation(_) => panic!("expected approve permit config"),
             Command::Help => panic!("expected approve permit config"),
             Command::LifecycleTransition(_) => panic!("expected approve permit config"),
             Command::LifecycleStaleReport(_) => panic!("expected approve permit config"),
@@ -4331,6 +4950,7 @@ mod tests {
             Command::EnvFilePreflight(_) => panic!("expected approve revoke config"),
             Command::EnvFile(_) => panic!("expected approve revoke config"),
             Command::Approve(_) => panic!("expected approve revoke config"),
+            Command::Delegation(_) => panic!("expected approve revoke config"),
             Command::Help => panic!("expected approve revoke config"),
             Command::LifecycleTransition(_) => panic!("expected approve revoke config"),
             Command::LifecycleStaleReport(_) => panic!("expected approve revoke config"),
@@ -4350,6 +4970,7 @@ mod tests {
             Command::EnvFilePreflight(_) => panic!("expected lifecycle config"),
             Command::EnvFile(_) => panic!("expected lifecycle config"),
             Command::Approve(_) => panic!("expected lifecycle config"),
+            Command::Delegation(_) => panic!("expected lifecycle config"),
             Command::Help => panic!("expected lifecycle config"),
             Command::LifecycleStaleReport(_) => panic!("expected lifecycle config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected lifecycle config"),
@@ -4371,6 +4992,7 @@ mod tests {
             Command::EnvFilePreflight(_) => panic!("expected lifecycle stale-report config"),
             Command::EnvFile(_) => panic!("expected lifecycle stale-report config"),
             Command::Approve(_) => panic!("expected lifecycle stale-report config"),
+            Command::Delegation(_) => panic!("expected lifecycle stale-report config"),
             Command::Help => panic!("expected lifecycle stale-report config"),
             Command::LifecycleDestroyRecord(_) => panic!("expected lifecycle stale-report config"),
             Command::LifecycleDestroyFinalize(_) => {
@@ -4398,6 +5020,7 @@ mod tests {
             Command::EnvFilePreflight(_) => panic!("expected lifecycle destroy-record config"),
             Command::EnvFile(_) => panic!("expected lifecycle destroy-record config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-record config"),
+            Command::Delegation(_) => panic!("expected lifecycle destroy-record config"),
             Command::Help => panic!("expected lifecycle destroy-record config"),
             Command::LifecycleDestroyFinalize(_) => {
                 panic!("expected lifecycle destroy-record config")
@@ -4429,6 +5052,7 @@ mod tests {
             Command::EnvFilePreflight(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::EnvFile(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-finalize config"),
+            Command::Delegation(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::Help => panic!("expected lifecycle destroy-finalize config"),
             Command::LifecycleDestroyReconcile(_) => {
                 panic!("expected lifecycle destroy-finalize config")
@@ -4464,6 +5088,7 @@ mod tests {
             }
             Command::EnvFile(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-reconcile config"),
+            Command::Delegation(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::Help => panic!("expected lifecycle destroy-reconcile config"),
             Command::PharosBeacon(_) => panic!("expected lifecycle destroy-reconcile config"),
         }
@@ -4716,6 +5341,89 @@ mod tests {
         assert_eq!(permit.permit_ttl, Some(Duration::from_secs(30)));
         assert!(permit.revoke_approval);
         assert!(!format!("{permit:?}").contains("appr_abc123"));
+    }
+
+    #[test]
+    fn parses_delegation_admin_surface_without_principal_debug_leaks() {
+        let command = parse_args(
+            [
+                "delegation",
+                "issue",
+                "--secret-ref",
+                "sec_fixture",
+                "--profile",
+                "profile.canary",
+                "--purpose",
+                "reviewed deploy",
+                "--reason",
+                "coverage",
+                "--expires-in-seconds",
+                "120",
+                "--grantor-human",
+                "human-grantor",
+                "--delegate-agent",
+                "session:delegate,model:codex",
+                "--delegate-workload",
+                "workload-a",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+        let Command::Delegation(DelegationCommand::Issue(config)) = command else {
+            panic!("expected delegation issue config")
+        };
+        assert_eq!(config.expires_in, Duration::from_secs(120));
+        let debug = format!("{config:?}");
+        for hidden in [
+            "human-grantor",
+            "session:delegate,model:codex",
+            "workload-a",
+        ] {
+            assert!(!debug.contains(hidden));
+        }
+        assert!(debug.contains("<redacted>"));
+
+        let id = "dlg_000000000000000000000000";
+        assert!(matches!(
+            parse_args(
+                ["delegation", "inspect", "--delegation", id]
+                    .into_iter()
+                    .map(str::to_string)
+            )
+            .unwrap(),
+            Command::Delegation(DelegationCommand::Inspect(_))
+        ));
+        assert!(matches!(
+            parse_args(
+                [
+                    "delegation",
+                    "revoke",
+                    "--delegation",
+                    id,
+                    "--reason",
+                    "stop",
+                ]
+                .into_iter()
+                .map(str::to_string)
+            )
+            .unwrap(),
+            Command::Delegation(DelegationCommand::Revoke(_))
+        ));
+
+        let error = parse_args(
+            [
+                "delegation",
+                "issue",
+                "--value",
+                "SENSITIVE_DELEGATION_CANARY",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("value-free"));
+        assert!(!error.to_string().contains("SENSITIVE_DELEGATION_CANARY"));
     }
 
     #[test]
@@ -7224,6 +7932,7 @@ mod tests {
                     secret_ref: secret_ref.clone(),
                     profile_id: profile_id.clone(),
                     purpose: Purpose::new("fixture handoff").unwrap(),
+                    delegation_id: None,
                 },
                 &principal,
                 SystemTime::UNIX_EPOCH,

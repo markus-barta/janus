@@ -30,6 +30,28 @@ pub trait DelegationRegistry {
     fn revoke(&self, revocation: &DelegationRevocation) -> JanusResult<()>;
 }
 
+/// Fail-closed delegation registry used when delegation is not configured.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoopDelegationRegistry;
+
+impl DelegationRegistry for NoopDelegationRegistry {
+    fn store(&self, _grant: &DelegationGrant) -> JanusResult<()> {
+        Err(unavailable("delegation registry is not configured"))
+    }
+
+    fn get(&self, _delegation_id: &str) -> JanusResult<DelegationRecord> {
+        Err(unavailable("delegation registry is not configured"))
+    }
+
+    fn list(&self) -> JanusResult<Vec<DelegationListEntry>> {
+        Ok(Vec::new())
+    }
+
+    fn revoke(&self, _revocation: &DelegationRevocation) -> JanusResult<()> {
+        Err(unavailable("delegation registry is not configured"))
+    }
+}
+
 /// One persisted grant plus optional immutable revocation evidence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DelegationRecord {

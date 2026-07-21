@@ -17,6 +17,7 @@ mod transfer;
 pub use audit::{AuditRecovery, JsonlAuditSink};
 pub use delegation::{
     DelegationListEntry, DelegationRecord, DelegationRegistry, FileDelegationRegistry,
+    NoopDelegationRegistry,
 };
 pub use migration::{enforce_migration_ready_from_env, ApprovalMigrationRunner, MigrationStatus};
 pub use release::{
@@ -32,9 +33,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use janus_core::{
-    ApprovalGrant, ApprovalGrantSnapshot, ApprovalId, Destination, EgressMode, ExecutorRef,
-    JanusError, JanusResult, PrincipalChain, ProfileId, Purpose, SafeLabel, ScopeRef,
-    SecretAgeEvidence, SecretClass, SecretRef, SecretTombstone, UsePermit, UsePermitSnapshot,
+    ApprovalGrant, ApprovalGrantSnapshot, ApprovalId, DelegatedUseContextSnapshotV1, Destination,
+    EgressMode, ExecutorRef, JanusError, JanusResult, PrincipalChain, ProfileId, Purpose,
+    SafeLabel, ScopeRef, SecretAgeEvidence, SecretClass, SecretRef, SecretTombstone, UsePermit,
+    UsePermitSnapshot,
 };
 use serde::{Deserialize, Serialize};
 
@@ -673,9 +675,13 @@ struct PermitFileRecord {
     egress: Option<String>,
     purpose: Option<String>,
     approval: Option<ApprovalGrantFileRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delegation: Option<DelegatedUseContextSnapshotV1>,
     principal_binding: String,
     expires_at_unix_secs: u64,
     expires_at_subsec_nanos: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binding_version: Option<u8>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -722,7 +728,7 @@ struct SecretTombstoneFileRecord {
 impl From<UsePermitSnapshot> for PermitFileRecord {
     fn from(snapshot: UsePermitSnapshot) -> Self {
         Self {
-            version: 4,
+            version: 5,
             permit_id: snapshot.permit_id,
             scope_ref: Some(snapshot.scope_ref),
             secret_ref: snapshot.secret_ref,
@@ -732,16 +738,21 @@ impl From<UsePermitSnapshot> for PermitFileRecord {
             egress: Some(snapshot.egress),
             purpose: Some(snapshot.purpose),
             approval: snapshot.approval.map(ApprovalGrantFileRecord::from),
+            delegation: snapshot.delegation,
             principal_binding: snapshot.principal_binding,
             expires_at_unix_secs: snapshot.expires_at_unix_secs,
             expires_at_subsec_nanos: snapshot.expires_at_subsec_nanos,
+            binding_version: snapshot.binding_version,
         }
     }
 }
 
 impl PermitFileRecord {
     fn into_snapshot(self) -> JanusResult<UsePermitSnapshot> {
-        if !matches!(self.version, 1..=4) {
+        if !matches!(self.version, 1..=5)
+            || (self.version < 5 && (self.delegation.is_some() || self.binding_version.is_some()))
+            || (self.version == 5 && self.binding_version != Some(1))
+        {
             return Err(JanusError::permit_invalid(
                 "denied_unsupported_permit_record",
                 "permit registry entry version is unsupported",
@@ -765,9 +776,11 @@ impl PermitFileRecord {
                 .approval
                 .map(ApprovalGrantFileRecord::into_snapshot)
                 .transpose()?,
+            delegation: self.delegation,
             principal_binding: self.principal_binding,
             expires_at_unix_secs: self.expires_at_unix_secs,
             expires_at_subsec_nanos: self.expires_at_subsec_nanos,
+            binding_version: self.binding_version,
         })
     }
 }
@@ -1415,10 +1428,11 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use janus_core::{
-        ApprovalGrant, AuditWrite, Destination, EgressMode, ExecutorRef, OwnerRef, PermitIssuer,
-        Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose,
-        SafeLabel, ScopePathV1, ScopeRef, SecretClass, SecretDescriptor, SecretLifecycle,
-        SecretName, SecretRef, TombstonePolicy, TrustLevel, UseProfile, UseRequest,
+        ApprovalGrant, AuditWrite, DelegatedUseContext, DelegationPolicy, Destination, EgressMode,
+        ExecutorRef, OwnerRef, PermitIssuer, Principal, PrincipalChain, PrincipalId, PrincipalKind,
+        ProfileId, ProfilePolicy, Purpose, SafeLabel, ScopePathV1, ScopeRef, SecretClass,
+        SecretDescriptor, SecretLifecycle, SecretName, SecretRef, TombstonePolicy, TrustLevel,
+        UseProfile, UseRequest,
     };
 
     use super::*;
@@ -1498,6 +1512,87 @@ mod tests {
         )
     }
 
+    fn fixture_delegated_permit(now: SystemTime) -> UsePermit {
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let profile_id = ProfileId::new("profile.fixture").unwrap();
+        let executor = ExecutorRef::new("janus-run@fixture").unwrap();
+        let destination = Destination::new("deploy-api").unwrap();
+        let descriptor = SecretDescriptor {
+            name: SecretName::new("FIXTURE").unwrap(),
+            secret_ref: secret_ref.clone(),
+            label: SafeLabel::new("Fixture").unwrap(),
+            scope: scope(),
+            owner: Some(OwnerRef::new("infra").unwrap()),
+            classification: Some(SecretClass::Normal),
+            lifecycle: SecretLifecycle::Active,
+            required: true,
+            trust_level: TrustLevel::L2,
+            allowed_uses: vec![profile_id.clone()],
+            present: true,
+        };
+        let profile = UseProfile {
+            id: profile_id.clone(),
+            scope: scope(),
+            secret_ref: secret_ref.clone(),
+            executor,
+            destination: destination.clone(),
+            egress: EgressMode::Connector,
+            trust_level: TrustLevel::L2,
+            ttl: Duration::from_secs(60),
+            single_use: true,
+            enabled: true,
+        };
+        let request = UseRequest {
+            scope: scope(),
+            secret_ref,
+            profile_id,
+            destination,
+            purpose: Purpose::new("fixture delegation").unwrap(),
+        };
+        let mut grantor = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("janus-run@fixture").unwrap(),
+            ),
+            scope(),
+        );
+        grantor.human = Some(Principal::new(
+            PrincipalKind::Human,
+            PrincipalId::new("grantor").unwrap(),
+        ));
+        let mut delegate = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("janus-run@fixture").unwrap(),
+            ),
+            scope(),
+        );
+        delegate.agent = Some(Principal::new(
+            PrincipalKind::AgentSession,
+            PrincipalId::new("session:delegate").unwrap(),
+        ));
+        let policy = ProfilePolicy::new(vec![profile]);
+        let mut audit = AuditWrite::accepting();
+        let grant = DelegationPolicy::issue_use(
+            &policy,
+            &descriptor,
+            &request,
+            &grantor,
+            &delegate,
+            None,
+            now,
+            now + Duration::from_secs(30),
+            SafeLabel::new("coverage").unwrap(),
+            &mut audit,
+        )
+        .unwrap();
+        let context = DelegatedUseContext::from_grant(&grant);
+        let mut issuer = PermitIssuer::new(&policy, &mut audit);
+        issuer
+            .issue_for_delegation(&request, &delegate, now, SecretClass::Normal, &context)
+            .unwrap()
+    }
+
     fn fixture_tombstone(
         secret_ref: &SecretRef,
         destroyed_at: SystemTime,
@@ -1551,6 +1646,30 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn file_registry_round_trips_delegated_permit_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = FilePermitRegistry::new(dir.path());
+        let permit = fixture_delegated_permit(SystemTime::UNIX_EPOCH);
+        let permit_id = permit.id().as_str().to_string();
+
+        registry.store(&permit).unwrap();
+        let record: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join(format!("{permit_id}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record["version"], 5);
+        assert_eq!(record["binding_version"], 1);
+        assert!(record["delegation"].is_object());
+
+        let rehydrated = registry.take(&permit_id).unwrap();
+        assert_eq!(rehydrated, permit);
+        assert_eq!(
+            rehydrated.delegation().unwrap().delegation_id().as_str(),
+            permit.delegation().unwrap().delegation_id().as_str()
+        );
     }
 
     #[test]

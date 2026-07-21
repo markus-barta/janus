@@ -1,6 +1,6 @@
 //! Audit-as-evidence contracts.
 
-use crate::{JanusError, JanusResult, PrincipalChain, SafeLabel, SecretRef};
+use crate::{DelegatedUseContext, JanusError, JanusResult, PrincipalChain, SafeLabel, SecretRef};
 use sha2::{Digest, Sha256};
 
 /// Actions Janus core can audit.
@@ -257,6 +257,8 @@ pub struct AuditIntegrityInput<'a> {
     pub value_returned: bool,
     /// Optional value-free evidence label.
     pub evidence: Option<&'a str>,
+    /// Optional exact value-free acting-as context.
+    pub delegation: Option<&'a DelegatedUseContext>,
 }
 
 /// Calculate the canonical SHA-256 hash for one audit record.
@@ -288,6 +290,10 @@ pub fn audit_integrity_hash(input: AuditIntegrityInput<'_>) -> String {
     field(&mut hasher, input.prev_hash.as_bytes());
     field(&mut hasher, &[u8::from(input.value_returned)]);
     optional_field(&mut hasher, input.evidence);
+    if let Some(delegation) = input.delegation {
+        field(&mut hasher, b"delegation-v1");
+        field(&mut hasher, delegation.integrity_text().as_bytes());
+    }
     hex::encode(hasher.finalize())
 }
 
@@ -316,6 +322,8 @@ pub struct AuditEvent {
     pub value_returned: bool,
     /// Optional value-free evidence label, such as an approval reason.
     pub evidence: Option<SafeLabel>,
+    /// Optional exact acting-as context.
+    pub delegation: Option<DelegatedUseContext>,
 }
 
 impl AuditEvent {
@@ -340,12 +348,19 @@ impl AuditEvent {
             event_hash: None,
             value_returned: false,
             evidence: None,
+            delegation: None,
         }
     }
 
     /// Attach value-free evidence to an event.
     pub fn with_evidence(mut self, evidence: SafeLabel) -> Self {
         self.evidence = Some(evidence);
+        self
+    }
+
+    /// Attach exact value-free acting-as context.
+    pub fn with_delegation(mut self, delegation: DelegatedUseContext) -> Self {
+        self.delegation = Some(delegation);
         self
     }
 
@@ -363,6 +378,7 @@ impl AuditEvent {
             prev_hash: &prev_hash,
             value_returned: self.value_returned,
             evidence: self.evidence.as_ref().map(SafeLabel::as_str),
+            delegation: self.delegation.as_ref(),
         });
         self.sequence = Some(sequence);
         self.prev_hash = Some(prev_hash);
@@ -514,6 +530,7 @@ mod tests {
             prev_hash: "genesis",
             value_returned: false,
             evidence: None,
+            delegation: None,
         };
         let value_free_hash = audit_integrity_hash(base);
         let value_bearing_hash = audit_integrity_hash(AuditIntegrityInput {

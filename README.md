@@ -262,6 +262,16 @@ the file atomically and privately, and reports only value-free outcome fields.
 See [`docs/env-file-handoff-runbook.md`](docs/env-file-handoff-runbook.md) for
 the complete checked flow.
 
+### Exact-use delegation
+
+An already-authorized principal can delegate one exact reviewed normal-use
+path to one distinct human/agent/workload chain for up to one hour. Warden
+accepts only the opaque `dlg_...` id in addition to its normal `request_use`
+fields; `janusd-use` reloads and revalidates the grant immediately before the
+secret read, so revoke and expiry also stop permits issued earlier. See the
+[`exact-use delegation runbook`](docs/delegation-runbook.md) for issuance,
+identity environment variables, inspection, revocation, and failure triage.
+
 ### Generated rotation
 
 ```bash

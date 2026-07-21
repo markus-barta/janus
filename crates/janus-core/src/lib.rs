@@ -38,9 +38,9 @@ pub use consumer::{
     ReloadMethod,
 };
 pub use delegation::{
-    DelegationAction, DelegationDecision, DelegationGrant, DelegationGrantSnapshotV1, DelegationId,
-    DelegationPolicy, DelegationRevocation, DelegationRevocationSnapshotV1, DelegationScope,
-    DelegationStatus,
+    DelegatedUseContext, DelegatedUseContextSnapshotV1, DelegationAction, DelegationDecision,
+    DelegationGrant, DelegationGrantSnapshotV1, DelegationId, DelegationPolicy,
+    DelegationRevocation, DelegationRevocationSnapshotV1, DelegationScope, DelegationStatus,
 };
 pub use error::{JanusError, JanusResult};
 pub use manifest::ManifestCatalog;

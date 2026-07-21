@@ -26,7 +26,7 @@
   },
   {
     "name": "request_use",
-    "description": "Request an opaque short-lived UsePermit by SecretRef, reviewed profile id, and purpose. Destination, executor, egress, command, args, and TTL come from policy, not caller input.",
+    "description": "Request an opaque short-lived UsePermit by SecretRef, reviewed profile id, purpose, and optional exact delegation id. Destination, executor, egress, command, args, and TTL come from policy, not caller input.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -37,6 +37,9 @@
           "type": "string"
         },
         "purpose": {
+          "type": "string"
+        },
+        "delegation_id": {
           "type": "string"
         }
       },

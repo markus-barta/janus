@@ -2,7 +2,7 @@
   "schema_version": 1,
   "corpus_id": "janus-adversarial-v1",
   "owner": "janus-security",
-  "reviewed_on": "2026-07-20",
+  "reviewed_on": "2026-07-21",
   "fixture_policy": "synthetic-value-free",
   "timeout_seconds": 240,
   "required_families": [
@@ -41,6 +41,7 @@
     "denied_wrong_principal",
     "denied_wrong_executor",
     "denied_unapproved_destination",
+    "delegation_revoked",
     "invalid_manifest",
     "denied_unreviewed_command_args",
     "validation_failed",
@@ -85,6 +86,7 @@
     "executor-wrong-scope",
     "executor-wrong-executor",
     "executor-wrong-destination",
+    "delegated-permit-revoked-before-read",
     "executor-tampered-binary",
     "executor-unreviewed-command",
     "rotation-validation-rollback",
@@ -547,6 +549,18 @@
       "expected_reason_code": "invalid_manifest",
       "expected_terminal_state": "denied",
       "audit_expectation": "unavailable",
+      "value_returned": false
+    },
+    {
+      "id": "delegated-permit-revoked-before-read",
+      "family": "permit-execution",
+      "package": "janus-executor",
+      "test_binary": null,
+      "test_name": "tests::revocation_after_delegated_permit_issue_blocks_secret_exposure",
+      "attack_phase": "delegation-revalidation",
+      "expected_reason_code": "delegation_revoked",
+      "expected_terminal_state": "denied",
+      "audit_expectation": "required",
       "value_returned": false
     },
     {

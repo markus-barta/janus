@@ -21,7 +21,8 @@ use janus_core::{
 };
 use janus_local::{
     enforce_migration_ready_from_env, enforce_release_admission_from_env,
-    enforce_scope_transfer_ready_from_env, FilePermitRegistry, NoopPermitStore, PermitStore,
+    enforce_scope_transfer_ready_from_env, DelegationRegistry, FileDelegationRegistry,
+    FilePermitRegistry, NoopDelegationRegistry, NoopPermitStore, PermitStore,
 };
 use janus_provider_age::AgeSecretStore;
 use janus_providers::SecretspecStore;
@@ -39,7 +40,8 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
-type Runtime = WardenRuntime<WardenStore, AuditWrite, RuntimePermitStore>;
+type Runtime =
+    WardenRuntime<WardenStore, AuditWrite, RuntimePermitStore, RuntimeDelegationRegistry>;
 
 enum WardenStore {
     Secretspec(SecretspecStore),
@@ -49,6 +51,41 @@ enum WardenStore {
 enum RuntimePermitStore {
     Noop(NoopPermitStore),
     File(FilePermitRegistry),
+}
+
+enum RuntimeDelegationRegistry {
+    Noop(NoopDelegationRegistry),
+    File(FileDelegationRegistry),
+}
+
+impl DelegationRegistry for RuntimeDelegationRegistry {
+    fn store(&self, grant: &janus_core::DelegationGrant) -> janus_core::JanusResult<()> {
+        match self {
+            Self::Noop(registry) => registry.store(grant),
+            Self::File(registry) => registry.store(grant),
+        }
+    }
+
+    fn get(&self, delegation_id: &str) -> janus_core::JanusResult<janus_local::DelegationRecord> {
+        match self {
+            Self::Noop(registry) => registry.get(delegation_id),
+            Self::File(registry) => registry.get(delegation_id),
+        }
+    }
+
+    fn list(&self) -> janus_core::JanusResult<Vec<janus_local::DelegationListEntry>> {
+        match self {
+            Self::Noop(registry) => registry.list(),
+            Self::File(registry) => registry.list(),
+        }
+    }
+
+    fn revoke(&self, revocation: &janus_core::DelegationRevocation) -> janus_core::JanusResult<()> {
+        match self {
+            Self::Noop(registry) => registry.revoke(revocation),
+            Self::File(registry) => registry.revoke(revocation),
+        }
+    }
 }
 
 impl PermitStore for RuntimePermitStore {
@@ -224,10 +261,12 @@ async fn build_runtime_from_env(release: ReleaseAdmission) -> Result<Runtime> {
         .context("failed to list backend manifest descriptors during Warden boot")?;
     let policy = policy_from_env(&descriptors)?;
     let permits = permit_store_from_env()?;
+    let delegations = delegation_registry_from_env()?;
     Ok(WardenRuntime::with_permit_store(
         SecretBroker::new(store, policy, AuditWrite::accepting()),
         permits,
     )
+    .with_delegation_registry(delegations)
     .with_release_admission(release))
 }
 
@@ -339,6 +378,16 @@ fn permit_store_from_env() -> Result<RuntimePermitStore> {
         return Ok(RuntimePermitStore::Noop(NoopPermitStore));
     };
     Ok(RuntimePermitStore::File(FilePermitRegistry::new(dir)))
+}
+
+fn delegation_registry_from_env() -> Result<RuntimeDelegationRegistry> {
+    let Some(dir) = optional_env_first(&["JANUS_WARDEN_DELEGATION_DIR", "JANUS_DELEGATION_DIR"])?
+    else {
+        return Ok(RuntimeDelegationRegistry::Noop(NoopDelegationRegistry));
+    };
+    Ok(RuntimeDelegationRegistry::File(
+        FileDelegationRegistry::new(dir),
+    ))
 }
 
 fn principal_from_env() -> Result<PrincipalChain> {
