@@ -1,0 +1,14 @@
+{
+  "schema": "inspr.pharos.beacon-token-generation.v2",
+  "generation": "17fa715d01efa6a7a08c8ebccbe93d1e0239b5601ee455ff1f22675dff3233f4",
+  "hosts": [
+    {
+      "name": "ares",
+      "token_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "name": "athena",
+      "token_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ]
+}

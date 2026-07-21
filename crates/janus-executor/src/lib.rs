@@ -8,6 +8,13 @@
 
 #![forbid(unsafe_code)]
 
+mod pharos_generation;
+
+pub use pharos_generation::{
+    publish_host as publish_pharos_beacon_token_generation_host,
+    retire_host as retire_pharos_beacon_token_generation_host,
+};
+
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
@@ -22,6 +29,7 @@ use janus_core::{
     DelegationRevocation, Destination, ExecutorRef, JanusError, JanusResult, PrincipalChain,
     ProfileId, SafeLabel, SecretBroker, SecretRef, SecretStore, SecretValue, UsePermit,
 };
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 
 /// Request to consume one approved-use permit.
@@ -149,15 +157,15 @@ pub struct EnvFileProfileSpec {
 /// Supported value-free hash sidecar formats for service handoff.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnvFileHashSidecarFormat {
-    /// Pharos `inspr.pharos.beacon-token-hashes.v1` JSON contract.
-    PharosBeaconTokenHashesV1,
+    /// Pharos immutable `inspr.pharos.beacon-token-generation.v2` contract.
+    PharosBeaconTokenGenerationV2,
 }
 
 impl EnvFileHashSidecarFormat {
     /// Stable value-free format label.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::PharosBeaconTokenHashesV1 => "pharos-beacon-token-hashes-v1",
+            Self::PharosBeaconTokenGenerationV2 => "pharos-beacon-token-generation-v2",
         }
     }
 }
@@ -214,6 +222,14 @@ impl EnvFileProfile {
                 if sidecar.output_path == spec.output_path {
                     return Err(JanusError::InvalidManifest {
                         detail: "env-file hash sidecar output path must differ from env file"
+                            .to_string(),
+                    });
+                }
+                if sidecar.format == EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2
+                    && !pharos_generation::valid_host_name(sidecar.subject.as_str())
+                {
+                    return Err(JanusError::InvalidManifest {
+                        detail: "Pharos hash sidecar subject must be a canonical host name"
                             .to_string(),
                     });
                 }
@@ -1145,7 +1161,7 @@ fn write_hash_sidecar_atomic(sidecar: &EnvFileHashSidecar, value: &SecretValue) 
                 detail: "failed to create temporary hash sidecar".to_string(),
             })?;
         created_temp = true;
-        write_hash_sidecar(&mut file, sidecar, value)?;
+        let token_sha256 = write_hash_sidecar(&mut file, sidecar, value)?;
         file.flush().map_err(|_| JanusError::StoreUnavailable {
             detail: "failed to flush temporary hash sidecar".to_string(),
         })?;
@@ -1156,6 +1172,7 @@ fn write_hash_sidecar_atomic(sidecar: &EnvFileHashSidecar, value: &SecretValue) 
             detail: "failed to replace hash sidecar atomically".to_string(),
         })?;
         created_temp = false;
+        pharos_generation::publish_entry(parent, sidecar.subject(), &token_sha256)?;
         Ok(())
     })();
     if created_temp {
@@ -1298,28 +1315,21 @@ fn write_hash_sidecar(
     mut writer: impl Write,
     sidecar: &EnvFileHashSidecar,
     value: &SecretValue,
-) -> JanusResult<()> {
+) -> JanusResult<String> {
     match sidecar.format() {
-        EnvFileHashSidecarFormat::PharosBeaconTokenHashesV1 => {
-            let hash = sha256_hex(value.expose_bytes());
-            writer
-                .write_all(b"{\n  \"schema\": \"inspr.pharos.beacon-token-hashes.v1\",\n  \"hosts\": [\n    { \"name\": ")
-                .and_then(|_| write_json_string(&mut writer, sidecar.subject().as_str()))
-                .and_then(|_| writer.write_all(b", \"token_sha256\": \""))
-                .and_then(|_| writer.write_all(hash.as_bytes()))
-                .and_then(|_| writer.write_all(b"\" }\n  ]\n}\n"))
-                .map_err(|_| JanusError::StoreUnavailable {
-                    detail: "failed to write hash sidecar".to_string(),
-                })
+        EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2 => {
+            pharos_generation::write_entry(&mut writer, sidecar.subject(), value.expose_bytes())
         }
     }
 }
 
+#[cfg(test)]
 fn sha256_hex(value: &[u8]) -> String {
     let digest = Sha256::digest(value);
     hex(&digest)
 }
 
+#[cfg(test)]
 fn hex(bytes: &[u8]) -> String {
     const CHARS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -1328,29 +1338,6 @@ fn hex(bytes: &[u8]) -> String {
         out.push(CHARS[(b & 0x0f) as usize] as char);
     }
     out
-}
-
-fn write_json_string(mut writer: impl Write, value: &str) -> std::io::Result<()> {
-    writer.write_all(b"\"")?;
-    for ch in value.chars() {
-        match ch {
-            '"' => writer.write_all(br#"\""#)?,
-            '\\' => writer.write_all(br#"\\"#)?,
-            '\u{08}' => writer.write_all(br#"\b"#)?,
-            '\u{0c}' => writer.write_all(br#"\f"#)?,
-            '\n' => writer.write_all(br#"\n"#)?,
-            '\r' => writer.write_all(br#"\r"#)?,
-            '\t' => writer.write_all(br#"\t"#)?,
-            ch if ch.is_control() => {
-                write!(writer, "\\u{:04x}", ch as u32)?;
-            }
-            ch => {
-                let mut buf = [0_u8; 4];
-                writer.write_all(ch.encode_utf8(&mut buf).as_bytes())?;
-            }
-        }
-    }
-    writer.write_all(b"\"")
 }
 
 #[cfg(test)]
@@ -1589,7 +1576,7 @@ mod tests {
             env_name: SafeLabel::new("SERVICE_TOKEN").unwrap(),
             output_path,
             hash_sidecar: Some(EnvFileHashSidecarSpec {
-                format: EnvFileHashSidecarFormat::PharosBeaconTokenHashesV1,
+                format: EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2,
                 subject: SafeLabel::new("ares").unwrap(),
                 output_path: hash_output_path,
             }),
@@ -2446,10 +2433,21 @@ mod tests {
             .unwrap();
 
         let sidecar = fs::read_to_string(&hash_output_path).unwrap();
-        assert!(sidecar.contains("\"schema\": \"inspr.pharos.beacon-token-hashes.v1\""));
-        assert!(sidecar.contains("\"name\": \"ares\""));
+        assert!(sidecar.contains("\"schema\":\"inspr.pharos.beacon-token-entry.v2\""));
+        assert!(sidecar.contains("\"name\":\"ares\""));
         assert!(sidecar.contains(&sha256_hex(b"expected-canary")));
         assert!(!sidecar.contains("expected-canary"));
+        let generation = fs::read_to_string(dir.join("current"))
+            .expect("generation pointer exists")
+            .trim()
+            .to_string();
+        let generation_payload =
+            fs::read_to_string(dir.join(format!("generation-{generation}.json")))
+                .expect("immutable generation exists");
+        assert!(
+            generation_payload.contains("\"schema\":\"inspr.pharos.beacon-token-generation.v2\"")
+        );
+        assert!(!generation_payload.contains("expected-canary"));
         assert_eq!(
             fs::metadata(&hash_output_path)
                 .unwrap()
@@ -2469,9 +2467,7 @@ mod tests {
         assert!(!outcome.value_returned);
         assert!(!format!("{outcome:?}").contains("expected-canary"));
 
-        let _ = fs::remove_file(output_path);
-        let _ = fs::remove_file(hash_output_path);
-        let _ = fs::remove_dir(dir);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]

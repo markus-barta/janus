@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use janus_core::SecretLifecycle;
-use janus_executor::{EnvFileHashSidecarFormat, EnvFileProfile};
+use janus_executor::{
+    retire_pharos_beacon_token_generation_host, EnvFileHashSidecarFormat, EnvFileProfile,
+};
 use serde::{Deserialize, Serialize};
 
 const INTENT_SCHEMA: &str = "inspr.pharos.janus-retirements.v1";
@@ -232,6 +234,7 @@ impl FilePharosRetirementRegistry {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OutputRetirement {
+    host: String,
     env_file: PathBuf,
     env_staged: PathBuf,
     hash_file: PathBuf,
@@ -247,11 +250,28 @@ impl OutputRetirement {
 
     pub(crate) fn stage(&self) -> PharosRetirementResult<()> {
         let env_moved = stage_one(&self.env_file, &self.env_staged)?;
-        if let Err(error) = stage_one(&self.hash_file, &self.hash_staged) {
+        let hash_moved = match stage_one(&self.hash_file, &self.hash_staged) {
+            Ok(moved) => moved,
+            Err(error) => {
+                if env_moved {
+                    let _ = fs::rename(&self.env_staged, &self.env_file);
+                }
+                return Err(error);
+            }
+        };
+        let generation_root = self.hash_file.parent().ok_or_else(|| {
+            PharosRetirementFailure::new("pharos_beacon_retirement_profile_mismatch")
+        })?;
+        if retire_pharos_beacon_token_generation_host(generation_root, &self.host).is_err() {
+            if hash_moved || self.hash_staged.exists() {
+                let _ = fs::rename(&self.hash_staged, &self.hash_file);
+            }
             if env_moved {
                 let _ = fs::rename(&self.env_staged, &self.env_file);
             }
-            return Err(error);
+            return Err(PharosRetirementFailure::new(
+                "pharos_beacon_retirement_generation_publish_failed",
+            ));
         }
         Ok(())
     }
@@ -605,7 +625,7 @@ pub(crate) fn prepare_binding(
     let sidecar = profile
         .hash_sidecar()
         .ok_or_else(|| PharosRetirementFailure::new("pharos_beacon_retirement_profile_mismatch"))?;
-    if sidecar.format() != EnvFileHashSidecarFormat::PharosBeaconTokenHashesV1
+    if sidecar.format() != EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2
         || sidecar.subject().as_str() != request.host
     {
         return Err(PharosRetirementFailure::new(
@@ -629,6 +649,7 @@ pub(crate) fn prepare_binding(
         profile_id: profile.profile_id().as_str().to_string(),
         secret_ref: profile.secret_ref().as_str().to_string(),
         output: OutputRetirement {
+            host: request.host.clone(),
             env_file: profile.output_path().to_path_buf(),
             env_staged,
             hash_file: sidecar.output_path().to_path_buf(),
@@ -962,7 +983,9 @@ mod tests {
         ExecutorRef, OwnerRef, ProfileId, ReloadMethod, SafeLabel, ScopePathV1, ScopeRef,
         SecretLifecycle, SecretRef,
     };
-    use janus_executor::{EnvFileHashSidecarSpec, EnvFileProfileSpec};
+    use janus_executor::{
+        publish_pharos_beacon_token_generation_host, EnvFileHashSidecarSpec, EnvFileProfileSpec,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -988,10 +1011,16 @@ mod tests {
             let hashes = temp.path().join("beacon-token-hashes");
             fs::create_dir_all(&beacons).unwrap();
             fs::create_dir_all(&hashes).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&hashes, fs::Permissions::from_mode(0o700)).unwrap();
+            }
             let env_file = beacons.join("ares.env");
             let hash_file = hashes.join("ares.json");
             fs::write(&env_file, "rendered\n").unwrap();
             fs::write(&hash_file, "{}\n").unwrap();
+            publish_pharos_beacon_token_generation_host(&hashes, "ares", &"a".repeat(64)).unwrap();
             let intent_file = temp.path().join("retired-hosts.json");
             write_intent(&intent_file, "destroyed", None);
 
@@ -1004,7 +1033,7 @@ mod tests {
                 env_name: SafeLabel::new("PHAROS_TOKEN").unwrap(),
                 output_path: env_file,
                 hash_sidecar: Some(EnvFileHashSidecarSpec {
-                    format: EnvFileHashSidecarFormat::PharosBeaconTokenHashesV1,
+                    format: EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2,
                     subject: SafeLabel::new("ares").unwrap(),
                     output_path: hash_file,
                 }),
@@ -1481,7 +1510,7 @@ mod tests {
             env_name: SafeLabel::new("PHAROS_TOKEN").unwrap(),
             output_path: fixture.binding.outputs().env_file.clone(),
             hash_sidecar: Some(EnvFileHashSidecarSpec {
-                format: EnvFileHashSidecarFormat::PharosBeaconTokenHashesV1,
+                format: EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2,
                 subject: SafeLabel::new("ares").unwrap(),
                 output_path: fixture.binding.outputs().hash_file.clone(),
             }),
