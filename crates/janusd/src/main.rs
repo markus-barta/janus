@@ -8,6 +8,8 @@
 
 #[path = "lifecycle_entry.rs"]
 mod lifecycle_entry;
+#[path = "lifecycle_queue.rs"]
+mod lifecycle_queue;
 #[path = "migration.rs"]
 mod migration;
 #[path = "pharos_retirement.rs"]
@@ -112,6 +114,15 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
         enforce_scope_transfer_ready_from_env()
             .context("scope transfer state denied lifecycle entry")?;
         return lifecycle_entry::run(&args, release).await;
+    }
+    if lifecycle_queue::is_action_queue_command(&args) {
+        let release = enforce_release_admission_from_env(&principal)
+            .context("release admission denied janusd-admin lifecycle action queue")?;
+        enforce_migration_ready_from_env()
+            .context("migration state denied lifecycle action queue")?;
+        enforce_scope_transfer_ready_from_env()
+            .context("scope transfer state denied lifecycle action queue")?;
+        return lifecycle_queue::run(&args, release).await;
     }
     let command = parse_args(args)?;
     debug_assert_eq!(command.runtime_action(), action);
@@ -1033,6 +1044,12 @@ fn reconcile_descriptor_tombstone(
                 "destroy_tombstone_pending_finalize",
                 true,
                 "run_destroy_finalize",
+            ),
+            (SecretLifecycle::PendingDelete, false) => (
+                "drift",
+                "pending_delete_missing_tombstone",
+                true,
+                "record_destroy_tombstone",
             ),
             (SecretLifecycle::Destroyed, true) => {
                 ("ok", "destroy_tombstone_reconcile_ok", false, "none")
@@ -2474,6 +2491,11 @@ fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
         [scope_transfer, ..] if scope_transfer == "scope-transfer" => RuntimeAction::ScopeTransfer,
         [lifecycle_entry, ..] if lifecycle_entry == "lifecycle-entry" => {
             RuntimeAction::LifecycleEntry
+        }
+        [lifecycle, action_queue, ..]
+            if lifecycle == "lifecycle" && action_queue == "action-queue" =>
+        {
+            RuntimeAction::LifecycleActionQueue
         }
         [forge, rotate, ..] if forge == "forge" && rotate == "rotate-generated" => {
             RuntimeAction::ForgeRotateGenerated
@@ -3917,6 +3939,11 @@ Administration commands:
     --validation PROBE --hook-manifest PATH [--reload METHOD] \
     [--alphabet url-safe|alphanumeric|hex] [--length N]
   lifecycle-entry preflight|apply|activate|rollback|status --plan PATH
+  lifecycle action-queue --profile-manifest PATH --entry-state-dir PATH --audit-path PATH \
+    [--format text|json] [--action-required-only] [--owner OWNER] \
+    [--lifecycle STATE] [--action CODE] [--metadata-file PATH] \
+    [--evidence-file PATH] [--stale-after-days N] \
+    [--missing-evidence-after-days N] [--output PATH]
   migrate preflight|apply|postflight|rollback|status --manifest PATH
   scope-transfer preflight|apply|postflight|rollback|status --manifest PATH
   pharos-beacon retire --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH [--retain-for-days N]
@@ -4089,6 +4116,10 @@ mod tests {
                 RuntimeAction::ForgeRotateGenerated,
             ),
             (&["lifecycle-entry"][..], RuntimeAction::LifecycleEntry),
+            (
+                &["lifecycle", "action-queue"][..],
+                RuntimeAction::LifecycleActionQueue,
+            ),
             (&["migrate"][..], RuntimeAction::Migration),
             (&["scope-transfer"][..], RuntimeAction::ScopeTransfer),
             (
@@ -6242,6 +6273,9 @@ mod tests {
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let pending_name = SecretName::new("PENDING").unwrap();
         let pending_ref = SecretRef::for_manifest_entry(&test_scope(), &pending_name);
+        let pending_missing_name = SecretName::new("PENDING_MISSING").unwrap();
+        let pending_missing_ref =
+            SecretRef::for_manifest_entry(&test_scope(), &pending_missing_name);
         let destroyed_missing_name = SecretName::new("DESTROYED_MISSING").unwrap();
         let destroyed_missing_ref =
             SecretRef::for_manifest_entry(&test_scope(), &destroyed_missing_name);
@@ -6297,6 +6331,11 @@ mod tests {
                 SecretLifecycle::Destroyed,
             ),
             (
+                pending_missing_ref.clone(),
+                pending_missing_name.clone(),
+                SecretLifecycle::PendingDelete,
+            ),
+            (
                 active_ref.clone(),
                 active_name.clone(),
                 SecretLifecycle::Active,
@@ -6319,7 +6358,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.len(), 6);
         let by_ref = rows
             .iter()
             .map(|row| (row.secret_ref.as_str().to_string(), row))
@@ -6333,6 +6372,17 @@ mod tests {
         assert_eq!(pending.metadata_lifecycle, "pending_delete");
         assert_eq!(pending.tombstone_state, "present");
         assert!(pending.action_required);
+
+        let pending_missing = by_ref.get(pending_missing_ref.as_str()).unwrap();
+        assert_eq!(pending_missing.status, "drift");
+        assert_eq!(
+            pending_missing.reason_code,
+            "pending_delete_missing_tombstone"
+        );
+        assert_eq!(pending_missing.action, "record_destroy_tombstone");
+        assert_eq!(pending_missing.metadata_lifecycle, "pending_delete");
+        assert_eq!(pending_missing.tombstone_state, "missing");
+        assert!(pending_missing.action_required);
 
         let destroyed_missing = by_ref.get(destroyed_missing_ref.as_str()).unwrap();
         assert_eq!(destroyed_missing.status, "drift");

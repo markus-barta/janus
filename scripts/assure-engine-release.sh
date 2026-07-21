@@ -45,6 +45,9 @@ JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-scope-
 echo "==> janus engine release assurance: local janusd-admin lifecycle-entry smoke"
 JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-lifecycle-entry.sh
 
+echo "==> janus engine release assurance: local janusd-admin lifecycle action queue smoke"
+JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-lifecycle-queue.sh
+
 echo "==> janus engine release assurance: local Pharos retirement smoke"
 JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-pharos-retirement.sh
 

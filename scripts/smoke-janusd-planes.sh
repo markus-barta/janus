@@ -65,6 +65,8 @@ assert_wrong_plane "use to lifecycle stale report" "${use_bin}" lifecycle stale-
 assert_wrong_plane "use to destroy record" "${use_bin}" lifecycle destroy-record "${canary}"
 assert_wrong_plane "use to destroy finalize" "${use_bin}" lifecycle destroy-finalize "${canary}"
 assert_wrong_plane "use to destroy reconcile" "${use_bin}" lifecycle destroy-reconcile "${canary}"
+assert_wrong_plane "use to lifecycle entry" "${use_bin}" lifecycle-entry "${canary}"
+assert_wrong_plane "use to lifecycle action queue" "${use_bin}" lifecycle action-queue "${canary}"
 assert_wrong_plane "use to forge" "${use_bin}" forge rotate-generated "${canary}"
 assert_wrong_plane "use to migration" "${use_bin}" migrate status --manifest "${canary}"
 assert_wrong_plane "use to scope transfer" "${use_bin}" scope-transfer status --manifest "${canary}"
@@ -82,7 +84,7 @@ assert_wrong_plane "legacy to use" "${legacy_bin}" run "${canary}"
 assert_wrong_plane "legacy to admin" "${legacy_bin}" approve list
 
 audit_count="$(grep -c '"action":"runtime.plane"' "${JANUS_RUNTIME_AUDIT_FILE}")"
-[ "${audit_count}" = "20" ] || fail "runtime-plane audit did not record every denial"
+[ "${audit_count}" = "22" ] || fail "runtime-plane audit did not record every denial"
 if grep -F "${canary}" "${JANUS_RUNTIME_AUDIT_FILE}" >/dev/null 2>&1; then
   fail "runtime-plane audit contained caller input"
 fi

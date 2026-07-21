@@ -461,6 +461,30 @@
       "requests": null,
       "window_ms": null
     },
+    "action": "admin.lifecycle_action_queue",
+    "audit": "required",
+    "cache": "not_applicable",
+    "concurrency_limit": 1,
+    "csrf": "not_applicable",
+    "error_redaction": "value_free",
+    "input_encoding": "argv",
+    "max_serialized_arguments_bytes": 65536,
+    "origin": "not_applicable",
+    "plane": "admin",
+    "remote_identity": "rejected",
+    "response_security_headers": "not_applicable",
+    "timeout": {
+      "milliseconds": null,
+      "mode": "process_lifetime"
+    },
+    "transport": "process_argv"
+  },
+  {
+    "abuse_budget": {
+      "mode": "process_invocation",
+      "requests": null,
+      "window_ms": null
+    },
     "action": "admin.migration",
     "audit": "required",
     "cache": "not_applicable",

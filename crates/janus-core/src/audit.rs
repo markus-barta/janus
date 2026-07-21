@@ -38,6 +38,8 @@ pub enum AuditAction {
     SecretLifecycle,
     /// A value-free stale lifecycle report row was emitted.
     SecretStalenessReport,
+    /// A unified value-free lifecycle action queue snapshot was emitted.
+    SecretLifecycleQueue,
     /// Backend health was checked.
     BackendHealth,
     /// A running artifact was admitted or rejected by release policy.
@@ -86,6 +88,7 @@ impl AuditAction {
             Self::RotationLifecycle => "rotation.lifecycle",
             Self::SecretLifecycle => "secret.lifecycle",
             Self::SecretStalenessReport => "secret.staleness_report",
+            Self::SecretLifecycleQueue => "secret.lifecycle_queue",
             Self::BackendHealth => "backend.health",
             Self::ReleaseAdmission => "release.admission",
             Self::UpgradePreflight => "upgrade.preflight",
@@ -121,6 +124,7 @@ impl AuditAction {
             "rotation.lifecycle" => Self::RotationLifecycle,
             "secret.lifecycle" => Self::SecretLifecycle,
             "secret.staleness_report" => Self::SecretStalenessReport,
+            "secret.lifecycle_queue" => Self::SecretLifecycleQueue,
             "backend.health" => Self::BackendHealth,
             "release.admission" => Self::ReleaseAdmission,
             "upgrade.preflight" => Self::UpgradePreflight,

@@ -281,6 +281,44 @@ impl FileLifecycleEvidenceRegistry {
         &self.dir
     }
 
+    /// List existing evidence without creating or chmodding registry state.
+    pub fn list_existing_bounded(
+        &self,
+        max_entries: usize,
+        max_file_bytes: u64,
+    ) -> JanusResult<Vec<SecretAgeEvidence>> {
+        check_existing_private_dir(&self.dir, "lifecycle evidence registry unavailable")?;
+        let mut records = Vec::new();
+        for entry in fs::read_dir(&self.dir)
+            .map_err(|_| store_unavailable("failed to list lifecycle evidence registry"))?
+        {
+            let entry =
+                entry.map_err(|_| store_unavailable("failed to list lifecycle evidence entry"))?;
+            let path = entry.path();
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| store_unavailable("lifecycle evidence entry name is malformed"))?;
+            let secret_ref_text = file_name.strip_suffix(".json").ok_or_else(|| {
+                store_unavailable("lifecycle evidence registry contains an unsupported entry")
+            })?;
+            if records.len() >= max_entries {
+                return Err(store_unavailable(
+                    "lifecycle evidence registry entry limit exceeded",
+                ));
+            }
+            check_bounded_private_file(
+                &path,
+                max_file_bytes,
+                "lifecycle evidence registry entry is unavailable",
+            )?;
+            let secret_ref = SecretRef::new(secret_ref_text)?;
+            records.push(read_lifecycle_evidence(&path, &secret_ref)?);
+        }
+        records.sort_by(|left, right| left.secret_ref.as_str().cmp(right.secret_ref.as_str()));
+        Ok(records)
+    }
+
     fn ensure_dir(&self) -> JanusResult<()> {
         fs::create_dir_all(&self.dir)
             .map_err(|_| store_unavailable("lifecycle evidence registry unavailable"))?;
@@ -337,6 +375,42 @@ impl FileTombstoneRegistry {
     /// Registry root directory.
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// List existing tombstones without creating or chmodding registry state.
+    pub fn list_existing_bounded(
+        &self,
+        max_entries: usize,
+        max_file_bytes: u64,
+    ) -> JanusResult<Vec<SecretTombstoneRecord>> {
+        check_existing_private_dir(&self.dir, "tombstone registry unavailable")?;
+        let mut records = Vec::new();
+        for entry in fs::read_dir(&self.dir)
+            .map_err(|_| store_unavailable("failed to list tombstone registry"))?
+        {
+            let entry =
+                entry.map_err(|_| store_unavailable("failed to list tombstone registry entry"))?;
+            let path = entry.path();
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| store_unavailable("tombstone entry name is malformed"))?;
+            let secret_ref_text = file_name.strip_suffix(".json").ok_or_else(|| {
+                store_unavailable("tombstone registry contains an unsupported entry")
+            })?;
+            if records.len() >= max_entries {
+                return Err(store_unavailable("tombstone registry entry limit exceeded"));
+            }
+            check_bounded_private_file(
+                &path,
+                max_file_bytes,
+                "tombstone registry entry is unavailable",
+            )?;
+            let secret_ref = SecretRef::new(secret_ref_text)?;
+            records.push(read_tombstone(&path, &secret_ref)?);
+        }
+        records.sort_by(|left, right| left.secret_ref.as_str().cmp(right.secret_ref.as_str()));
+        Ok(records)
     }
 
     fn ensure_dir(&self) -> JanusResult<()> {
@@ -1216,6 +1290,40 @@ fn check_secure_approval_file(path: &Path) -> JanusResult<()> {
                 "denied_insecure_approval_file",
                 "approval registry entry is not private",
             ));
+        }
+    }
+    Ok(())
+}
+
+fn check_existing_private_dir(path: &Path, unavailable: &'static str) -> JanusResult<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| store_unavailable(unavailable))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(store_unavailable(unavailable));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(store_unavailable(unavailable));
+        }
+    }
+    Ok(())
+}
+
+fn check_bounded_private_file(
+    path: &Path,
+    max_file_bytes: u64,
+    unavailable: &'static str,
+) -> JanusResult<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| store_unavailable(unavailable))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > max_file_bytes {
+        return Err(store_unavailable(unavailable));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(store_unavailable(unavailable));
         }
     }
     Ok(())

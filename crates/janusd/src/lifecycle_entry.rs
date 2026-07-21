@@ -163,6 +163,16 @@ struct EntryStatus {
     value_returned: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct EntryJournalSummary {
+    pub operation_id: String,
+    pub secret_ref: SecretRef,
+    pub phase: String,
+    pub reason_code: String,
+    pub preflighted_at_unix_secs: u64,
+    pub release_matches: bool,
+}
+
 struct EntryTransaction {
     plan: EntryPlan,
     release: ReleaseAdmission,
@@ -1359,6 +1369,105 @@ fn verify_journal(journal: &EntryJournal) -> Result<()> {
         );
     }
     Ok(())
+}
+
+pub(super) fn scan_journal_summaries(
+    state_dir: &Path,
+    release: &ReleaseAdmission,
+    max_entries: usize,
+    max_file_bytes: usize,
+) -> Result<Vec<EntryJournalSummary>> {
+    reject_symlink(state_dir)?;
+    let metadata = fs::metadata(state_dir).map_err(|_| {
+        JanusError::policy_denied(
+            "entry_state_unavailable",
+            "entry state directory is unavailable",
+        )
+    })?;
+    if !metadata.is_dir() {
+        anyhow::bail!("entry state path is not a directory");
+    }
+    ensure_private_mode(&metadata)?;
+
+    let expected_release = release_fingerprint(release);
+    let mut summaries = Vec::new();
+    for entry in fs::read_dir(state_dir).map_err(|_| {
+        JanusError::policy_denied(
+            "entry_state_unavailable",
+            "entry state directory is unavailable",
+        )
+    })? {
+        let entry = entry.map_err(|_| {
+            JanusError::policy_denied(
+                "entry_state_unavailable",
+                "entry state directory is unavailable",
+            )
+        })?;
+        let path = entry.path();
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                JanusError::policy_denied(
+                    "entry_journal_invalid",
+                    "entry state contains an invalid name",
+                )
+            })?;
+        if let Some(operation_id) = file_name.strip_suffix(".lock") {
+            validate_operation_id(operation_id)?;
+            let _ = read_regular_bounded(&path, max_file_bytes, true)?;
+            continue;
+        }
+        let operation_id = file_name.strip_suffix(".json").ok_or_else(|| {
+            JanusError::policy_denied(
+                "entry_journal_invalid",
+                "entry state contains an unsupported entry",
+            )
+        })?;
+        validate_operation_id(operation_id)?;
+        if summaries.len() >= max_entries {
+            return Err(JanusError::policy_denied(
+                "entry_journal_limit_exceeded",
+                "entry journal count exceeds the reporting limit",
+            )
+            .into());
+        }
+        let bytes = read_regular_bounded(&path, max_file_bytes, true)?;
+        let journal: EntryJournal = serde_json::from_slice(&bytes).map_err(|_| {
+            JanusError::policy_denied("entry_journal_invalid", "entry journal is invalid")
+        })?;
+        verify_journal(&journal)?;
+        if journal.schema_version != JOURNAL_SCHEMA_VERSION
+            || journal.operation_id != operation_id
+            || !matches!(journal.mode.as_str(), "generated" | "import")
+        {
+            return Err(JanusError::policy_denied(
+                "entry_journal_binding_mismatch",
+                "entry journal binding is invalid",
+            )
+            .into());
+        }
+        SafeLabel::new(journal.reason_code.clone())?;
+        summaries.push(EntryJournalSummary {
+            operation_id: journal.operation_id,
+            secret_ref: SecretRef::new(journal.secret_ref)?,
+            phase: journal.phase.as_str().to_string(),
+            reason_code: journal.reason_code,
+            preflighted_at_unix_secs: journal.preflighted_at_unix_secs,
+            release_matches: journal.release_fingerprint == expected_release,
+        });
+    }
+    summaries.sort_by(|left, right| {
+        left.secret_ref
+            .as_str()
+            .cmp(right.secret_ref.as_str())
+            .then_with(|| {
+                left.preflighted_at_unix_secs
+                    .cmp(&right.preflighted_at_unix_secs)
+            })
+            .then_with(|| left.operation_id.cmp(&right.operation_id))
+    });
+    Ok(summaries)
 }
 
 fn hash_file(path: &Path) -> Result<String> {
