@@ -104,7 +104,7 @@ env = "PHAROS_TOKEN"
 output = "${env_file}"
 
 [env_files.hash_sidecar]
-format = "pharos-beacon-token-hashes-v1"
+format = "pharos-beacon-token-generation-v2"
 subject = "${host}"
 output = "${hash_file}"
 
@@ -137,8 +137,35 @@ EOF
 
 chmod 600 "${manifest}" "${metadata}" "${profiles}" "${intent}"
 printf 'PHAROS_TOKEN=%s\n' "${fixture_value}" >"${env_file}"
-printf '{"schema":"inspr.pharos.beacon-token-hashes.v1","hosts":{}}\n' >"${hash_file}"
-chmod 600 "${env_file}" "${hash_file}"
+token_sha256="$(printf '%s' "${fixture_value}" | sha256sum | awk '{ print $1 }')"
+generation="$({
+	HOST_NAME="${host}" TOKEN_SHA256="${token_sha256}" python3 - <<'PY'
+import hashlib
+import os
+import struct
+
+host = os.environ["HOST_NAME"].encode()
+token_hash = os.environ["TOKEN_SHA256"].encode()
+digest = hashlib.sha256()
+digest.update(b"inspr.pharos.beacon-token-generation.v2\0")
+digest.update(struct.pack(">Q", len(host)))
+digest.update(host)
+digest.update(token_hash)
+print(digest.hexdigest())
+PY
+})"
+jq -n --arg host "${host}" --arg token_sha256 "${token_sha256}" \
+	'{schema:"inspr.pharos.beacon-token-entry.v2",host:{name:$host,token_sha256:$token_sha256}}' \
+	>"${hash_file}"
+jq -n --arg generation "${generation}" --arg host "${host}" --arg token_sha256 "${token_sha256}" \
+	'{schema:"inspr.pharos.beacon-token-generation.v2",generation:$generation,hosts:[{name:$host,token_sha256:$token_sha256}]}' \
+	>"${hash_dir}/generation-${generation}.json"
+printf '%s\n' "${generation}" >"${hash_dir}/current"
+chmod 600 \
+	"${env_file}" \
+	"${hash_file}" \
+	"${hash_dir}/current" \
+	"${hash_dir}/generation-${generation}.json"
 
 age-keygen -o "${identity}" >"${keygen_log}.stdout" 2>"${keygen_log}"
 recipient="$(sed -n 's/^Public key: //p' "${keygen_log}")"

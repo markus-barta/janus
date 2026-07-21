@@ -36,6 +36,10 @@ logs, or application code.
   tombstones, finalization, and reconciliation remain value-free.
 - **Pharos retirement** - a declared host-retirement flow disables approved
   use, quarantines generated outputs, and records durable evidence.
+- **Pharos verifier generations** - every beacon-token render publishes a
+  value-free, immutable generation plus an atomic `current` pointer; concurrent
+  renders are serialized and retirement publishes host removal before it can
+  complete.
 - **Backend portability** - the core contract is provider-neutral; the current
   self-hosted path uses native age encryption and secretspec allowlists.
 - **Split process planes** - `janusd-use` can consume permits but cannot
@@ -319,6 +323,13 @@ janusd-admin pharos-beacon retire \
 Use `janusd-admin pharos-beacon reconcile` with the same host, disposition, intent,
 metadata, profile-manifest, and state-directory controls to inspect interrupted
 or drifted retirements without reading secret material.
+
+Pharos beacon-token profiles use the
+`pharos-beacon-token-generation-v2` hash-sidecar format. Janus writes a
+per-host value-free entry, updates the immutable generation under an exclusive
+lock, and advances `current` only after the generation is durable. Consumers
+must read the pointed generation as one snapshot and fail closed when the
+pointer, payload, schema, or generation digest is invalid.
 
 ## Contributing
 

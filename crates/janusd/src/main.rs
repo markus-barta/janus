@@ -2639,7 +2639,9 @@ fn parse_env_file_consumer_kind(value: &str) -> Result<ConsumerKind> {
 
 fn parse_env_file_hash_sidecar_format(value: &str) -> Result<EnvFileHashSidecarFormat> {
     match value {
-        "pharos-beacon-token-hashes-v1" => Ok(EnvFileHashSidecarFormat::PharosBeaconTokenHashesV1),
+        "pharos-beacon-token-generation-v2" => {
+            Ok(EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2)
+        }
         _ => anyhow::bail!("unsupported env-file hash sidecar format"),
     }
 }
@@ -6050,7 +6052,7 @@ mod tests {
                 output = {}
 
                 [env_files.hash_sidecar]
-                format = "pharos-beacon-token-hashes-v1"
+                format = "pharos-beacon-token-generation-v2"
                 subject = "ares"
                 output = {}
 
@@ -6134,7 +6136,7 @@ mod tests {
 
         assert_eq!(
             sidecar.format(),
-            EnvFileHashSidecarFormat::PharosBeaconTokenHashesV1
+            EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2
         );
         assert_eq!(sidecar.subject().as_str(), "ares");
         assert_eq!(sidecar.output_path(), hash_output_path.as_path());
@@ -8090,16 +8092,33 @@ mod tests {
             outcome.hash_output_path.as_deref(),
             Some(hash_output_path.as_path())
         );
-        assert_eq!(outcome.hash_format, Some("pharos-beacon-token-hashes-v1"));
+        assert_eq!(
+            outcome.hash_format,
+            Some("pharos-beacon-token-generation-v2")
+        );
         assert!(!outcome.value_returned);
         assert_eq!(
             std::fs::read_to_string(&outcome.output_path).unwrap(),
             "SERVICE_TOKEN=expected-canary\n"
         );
         let sidecar = std::fs::read_to_string(hash_output_path).unwrap();
-        assert!(sidecar.contains("\"schema\": \"inspr.pharos.beacon-token-hashes.v1\""));
-        assert!(sidecar.contains("\"name\": \"ares\""));
+        assert!(sidecar.contains("\"schema\":\"inspr.pharos.beacon-token-entry.v2\""));
+        assert!(sidecar.contains("\"name\":\"ares\""));
         assert!(!sidecar.contains("expected-canary"));
+        let generation = std::fs::read_to_string(output_dir.path().join("current"))
+            .expect("generation pointer exists")
+            .trim()
+            .to_string();
+        let generation_payload = std::fs::read_to_string(
+            output_dir
+                .path()
+                .join(format!("generation-{generation}.json")),
+        )
+        .expect("immutable generation exists");
+        assert!(
+            generation_payload.contains("\"schema\":\"inspr.pharos.beacon-token-generation.v2\"")
+        );
+        assert!(!generation_payload.contains("expected-canary"));
         let metadata = std::fs::symlink_metadata(hash_output_path).unwrap();
         assert!(metadata.file_type().is_file());
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
@@ -8146,7 +8165,10 @@ mod tests {
             outcome.hash_output_path.as_deref(),
             Some(hash_output_path.as_path())
         );
-        assert_eq!(outcome.hash_format, Some("pharos-beacon-token-hashes-v1"));
+        assert_eq!(
+            outcome.hash_format,
+            Some("pharos-beacon-token-generation-v2")
+        );
         assert!(!outcome.value_returned);
         assert!(!outcome.output_path.exists());
         assert!(!hash_output_path.exists());
