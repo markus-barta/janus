@@ -11,7 +11,8 @@
     "audit-integrity",
     "warden-abuse",
     "permit-execution",
-    "rotation-failure"
+    "rotation-failure",
+    "sealed-recovery"
   ],
   "registered_reason_codes": [
     "migration_manifest_invalid",
@@ -46,7 +47,13 @@
     "denied_unreviewed_command_args",
     "validation_failed",
     "reload_failed",
-    "commit_failed"
+    "commit_failed",
+    "recovery_manifest_invalid",
+    "recovery_postflight_ok",
+    "recovery_bundle_tampered",
+    "recovery_source_not_offline",
+    "recovery_rollback_ok",
+    "recovery_evidence_stale"
   ],
   "required_scenario_ids": [
     "approval-manifest-malformed",
@@ -92,7 +99,14 @@
     "rotation-validation-rollback",
     "rotation-reload-rollback",
     "rotation-commit-rollback",
-    "rotation-audit-failure"
+    "rotation-audit-failure",
+    "recovery-manifest-malformed",
+    "recovery-clean-round-trip",
+    "recovery-mixed-authority-state",
+    "recovery-bundle-tampered",
+    "recovery-source-audit-incomplete",
+    "recovery-interrupted-rollback",
+    "recovery-freshness-stale"
   ],
   "scenarios": [
     {
@@ -619,6 +633,90 @@
       "test_name": "tests::audit_failure_blocks_before_prepare",
       "attack_phase": "rotation-audit",
       "expected_reason_code": "audit_sink_unavailable",
+      "expected_terminal_state": "blocked",
+      "audit_expectation": "unavailable",
+      "value_returned": false
+    },
+    {
+      "id": "recovery-manifest-malformed",
+      "family": "sealed-recovery",
+      "package": "janus-core",
+      "test_binary": null,
+      "test_name": "recovery::tests::strict_manifest_requires_closed_components_and_private_paths",
+      "attack_phase": "manifest-parse",
+      "expected_reason_code": "recovery_manifest_invalid",
+      "expected_terminal_state": "denied",
+      "audit_expectation": "unavailable",
+      "value_returned": false
+    },
+    {
+      "id": "recovery-clean-round-trip",
+      "family": "sealed-recovery",
+      "package": "janus-local",
+      "test_binary": null,
+      "test_name": "recovery::tests::clean_state_round_trip_excludes_permits_continues_audit_and_rolls_back",
+      "attack_phase": "clean-target-restore",
+      "expected_reason_code": "recovery_postflight_ok",
+      "expected_terminal_state": "completed",
+      "audit_expectation": "required",
+      "value_returned": false
+    },
+    {
+      "id": "recovery-mixed-authority-state",
+      "family": "sealed-recovery",
+      "package": "janus-local",
+      "test_binary": null,
+      "test_name": "recovery::tests::mixed_authority_lifecycle_and_tombstone_state_survives_production_parsers",
+      "attack_phase": "production-parser-postflight",
+      "expected_reason_code": "recovery_postflight_ok",
+      "expected_terminal_state": "completed",
+      "audit_expectation": "required",
+      "value_returned": false
+    },
+    {
+      "id": "recovery-bundle-tampered",
+      "family": "sealed-recovery",
+      "package": "janus-local",
+      "test_binary": null,
+      "test_name": "recovery::tests::bundle_tamper_and_non_terminal_admin_state_fail_closed_without_echo",
+      "attack_phase": "sealed-inventory-check",
+      "expected_reason_code": "recovery_bundle_tampered",
+      "expected_terminal_state": "denied",
+      "audit_expectation": "required",
+      "value_returned": false
+    },
+    {
+      "id": "recovery-source-audit-incomplete",
+      "family": "sealed-recovery",
+      "package": "janus-local",
+      "test_binary": null,
+      "test_name": "recovery::tests::incomplete_source_audit_is_rejected_without_mutating_the_live_log",
+      "attack_phase": "source-audit-lock",
+      "expected_reason_code": "recovery_source_not_offline",
+      "expected_terminal_state": "denied",
+      "audit_expectation": "unavailable",
+      "value_returned": false
+    },
+    {
+      "id": "recovery-interrupted-rollback",
+      "family": "sealed-recovery",
+      "package": "janus-local",
+      "test_binary": null,
+      "test_name": "recovery::tests::orphan_snapshot_work_is_retry_safe_and_interrupted_restore_rolls_back",
+      "attack_phase": "interrupted-mutating-phase",
+      "expected_reason_code": "recovery_rollback_ok",
+      "expected_terminal_state": "rolled-back",
+      "audit_expectation": "required",
+      "value_returned": false
+    },
+    {
+      "id": "recovery-freshness-stale",
+      "family": "sealed-recovery",
+      "package": "janus-local",
+      "test_binary": null,
+      "test_name": "recovery::tests::completed_evidence_enforces_current_config_scope_release_and_freshness",
+      "attack_phase": "runtime-startup-freshness",
+      "expected_reason_code": "recovery_evidence_stale",
       "expected_terminal_state": "blocked",
       "audit_expectation": "unavailable",
       "value_returned": false

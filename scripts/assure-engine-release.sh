@@ -42,6 +42,12 @@ JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-migrat
 echo "==> janus engine release assurance: local janusd-admin scope-transfer smoke"
 JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-scope-transfer.sh
 
+echo "==> janus engine release assurance: sealed clean-state recovery-drill smoke"
+JANUSD_USE_BIN="${repo}/target/debug/janusd-use" \
+  JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" \
+  JANUS_WARDEN_BIN="${repo}/target/debug/janus-warden" \
+  scripts/smoke-janusd-recovery-drill.sh
+
 echo "==> janus engine release assurance: local janusd-admin lifecycle-entry smoke"
 JANUSD_ADMIN_BIN="${repo}/target/debug/janusd-admin" scripts/smoke-janusd-lifecycle-entry.sh
 

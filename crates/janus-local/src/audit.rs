@@ -39,6 +39,34 @@ pub struct JsonlAuditSink {
     poisoned: bool,
 }
 
+/// Exclusive read-only verification lock used while snapshotting an offline log.
+pub(crate) struct VerifiedAuditLock {
+    _file: File,
+}
+
+/// Lock and verify a complete private audit chain without recovering or mutating it.
+pub(crate) fn lock_verified_audit_for_snapshot(path: &Path) -> JanusResult<VerifiedAuditLock> {
+    reject_symlink(path)?;
+    if !path.exists() {
+        return Err(audit_unavailable("audit log is unavailable"));
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|_| audit_unavailable("audit log is unavailable"))?;
+    fs2::FileExt::try_lock_exclusive(&file)
+        .map_err(|_| audit_unavailable("audit log is already in use"))?;
+    ensure_private_regular_file(path, true)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| audit_unavailable("audit log verification read failed"))?;
+    if bytes.last().is_some_and(|byte| *byte != b'\n') {
+        return Err(audit_unavailable("audit log has an incomplete record"));
+    }
+    verify_complete_records(&bytes)?;
+    Ok(VerifiedAuditLock { _file: file })
+}
+
 impl JsonlAuditSink {
     /// Open or create a private JSONL log and recover its verified chain head.
     pub fn open(path: impl Into<PathBuf>) -> JanusResult<Self> {

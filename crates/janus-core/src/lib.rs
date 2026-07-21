@@ -18,6 +18,7 @@ pub mod migration;
 pub mod plane;
 pub mod policy;
 pub mod principal;
+pub mod recovery;
 pub mod refs;
 pub mod release;
 pub mod rotation;
@@ -59,6 +60,10 @@ pub use policy::{
     TrustLevel, UsePermit, UsePermitSnapshot, UseProfile, UseRequest,
 };
 pub use principal::{Principal, PrincipalChain, PrincipalId, PrincipalKind};
+pub use recovery::{
+    RecoveryComponentKind, RecoveryComponentSource, RecoveryConfigBinding,
+    RecoveryDrillEvidenceInput, RecoveryDrillEvidenceV1, RecoveryDrillManifest,
+};
 pub use refs::{
     ConsumerRef, Destination, ExecutorRef, ProjectId, SafeLabel, SecretName, SecretRef,
 };

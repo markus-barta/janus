@@ -11,6 +11,7 @@
 mod audit;
 mod delegation;
 mod migration;
+mod recovery;
 mod release;
 mod transfer;
 
@@ -20,6 +21,10 @@ pub use delegation::{
     NoopDelegationRegistry,
 };
 pub use migration::{enforce_migration_ready_from_env, ApprovalMigrationRunner, MigrationStatus};
+pub use recovery::{
+    enforce_recovery_drill_freshness, enforce_recovery_drill_freshness_from_env,
+    RecoveryDrillRunner, RecoveryDrillStatus, RecoveryPostflightTarget,
+};
 pub use release::{
     audit_release_admission, enforce_release_admission_from_env, load_release_admission,
 };

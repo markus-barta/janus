@@ -3,8 +3,8 @@ use std::env;
 use std::fmt;
 
 use janus_core::{
-    MigrationManifest, ReleaseAdmissionReceipt, ReleaseChannelPolicy, ScopePathV1,
-    ScopeTransferManifest, SecretMetadataOverlay,
+    MigrationManifest, RecoveryComponentKind, RecoveryDrillManifest, ReleaseAdmissionReceipt,
+    ReleaseChannelPolicy, ScopePathV1, ScopeTransferManifest, SecretMetadataOverlay,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{FileFailurePersistence, RngAlgorithm, TestRng, TestRunner};
@@ -113,31 +113,73 @@ fn valid_metadata() -> String {
     .to_string()
 }
 
+fn valid_recovery() -> String {
+    let scope = ScopePathV1::for_repository("fixture-org", "janus", "janus", "property")
+        .unwrap()
+        .scope_ref();
+    let components = RecoveryComponentKind::ALL
+        .iter()
+        .map(|kind| {
+            serde_json::json!({
+                "kind": kind.as_str(),
+                "source_path": format!("/tmp/janus-property-source/{}", kind.as_str()),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema_version": 1,
+        "operation_id": "property-recovery",
+        "scope_ref": scope.as_str(),
+        "release_artifact": "not_required:self_hosted",
+        "expected_bundle_fingerprint": format!("sha256:{}", "a".repeat(64)),
+        "components": components,
+        "config_bindings": [{
+            "name": "secretspec",
+            "path": "/tmp/janus-property-secretspec.toml",
+            "expected_fingerprint": format!("sha256:{}", "b".repeat(64)),
+        }],
+        "permit_source_path": "/tmp/janus-property-permits",
+        "bundle_root": "/tmp/janus-property-bundle",
+        "target_root": "/tmp/janus-property-target",
+        "state_root": "/tmp/janus-property-state",
+        "operation_audit_path": "/tmp/janus-property-audit.jsonl",
+        "evidence_path": "/tmp/janus-property-evidence.json",
+        "minimum_free_bytes": 1,
+        "maximum_bundle_bytes": 1048576,
+        "maximum_bundle_files": 1024,
+        "preflight_max_age_seconds": 60,
+        "evidence_max_age_seconds": 86400,
+    })
+    .to_string()
+}
+
 fn parser_accepts(kind: u8, contents: &str) -> bool {
-    match kind % 6 {
+    match kind % 7 {
         0 => ReleaseChannelPolicy::parse_json(contents).is_ok(),
         1 => ReleaseAdmissionReceipt::parse_json(contents).is_ok(),
         2 => MigrationManifest::parse_json(contents).is_ok(),
         3 => ScopeTransferManifest::parse_json(contents).is_ok(),
         4 => ScopePathV1::parse_json(contents).is_ok(),
+        5 => RecoveryDrillManifest::parse_json(contents).is_ok(),
         _ => SecretMetadataOverlay::parse_toml(contents).is_ok(),
     }
 }
 
 fn valid_document(kind: u8) -> String {
-    match kind % 6 {
+    match kind % 7 {
         0 => POLICY.to_string(),
         1 => RECEIPT.to_string(),
         2 => valid_migration(),
         3 => valid_transfer(),
         4 => valid_scope(),
+        5 => valid_recovery(),
         _ => valid_metadata(),
     }
 }
 
 fn structured_invalid(kind: u8, mutation: u8, split: usize) -> String {
     let valid = valid_document(kind);
-    if kind % 6 == 5 {
+    if kind % 7 == 6 {
         return match mutation % 5 {
             0 => format!("{}\n[", &valid[..split % valid.len()]),
             1 => format!("{valid}\nSENSITIVE_TRAILING_CANARY"),

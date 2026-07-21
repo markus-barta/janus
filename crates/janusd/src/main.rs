@@ -14,6 +14,8 @@ mod lifecycle_queue;
 mod migration;
 #[path = "pharos_retirement.rs"]
 mod pharos_retirement;
+#[path = "recovery.rs"]
+mod recovery;
 #[path = "scope_transfer.rs"]
 mod scope_transfer;
 
@@ -50,8 +52,8 @@ use janus_forge::{
     RotationApproval,
 };
 use janus_local::{
-    enforce_migration_ready_from_env, enforce_release_admission_from_env,
-    enforce_scope_transfer_ready_from_env, ApprovalListEntry,
+    enforce_migration_ready_from_env, enforce_recovery_drill_freshness_from_env,
+    enforce_release_admission_from_env, enforce_scope_transfer_ready_from_env, ApprovalListEntry,
     ApprovalRegistry as SharedApprovalRegistry, DelegationRegistry, FileApprovalRegistry,
     FileDelegationRegistry, FileLifecycleEvidenceRegistry, FilePermitRegistry,
     FileTombstoneRegistry, JsonlAuditSink,
@@ -108,6 +110,11 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
             .context("release admission denied janusd-admin scope transfer")?;
         return scope_transfer::run(&args, release);
     }
+    if recovery::is_recovery_drill_command(&args) {
+        let release = enforce_release_admission_from_env(&principal)
+            .context("release admission denied janusd-admin recovery drill")?;
+        return recovery::run(&args, release).await;
+    }
     if lifecycle_entry::is_lifecycle_entry_command(&args) {
         let release = enforce_release_admission_from_env(&principal)
             .context("release admission denied janusd-admin lifecycle entry")?;
@@ -128,11 +135,13 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
     let command = parse_args(args)?;
     debug_assert_eq!(command.runtime_action(), action);
     if !matches!(&command, Command::Help) {
-        enforce_release_admission_from_env(&principal)
+        let release = enforce_release_admission_from_env(&principal)
             .context("release admission denied split runtime startup")?;
         enforce_migration_ready_from_env().context("migration state denied runtime startup")?;
         enforce_scope_transfer_ready_from_env()
             .context("scope transfer state denied runtime startup")?;
+        enforce_recovery_drill_freshness_from_env(&release, &principal.scope)
+            .context("recovery drill freshness denied runtime startup")?;
     }
     match command {
         Command::Help => {
@@ -2853,6 +2862,7 @@ fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
     let action = match args {
         [migrate, ..] if migrate == "migrate" => RuntimeAction::Migration,
         [scope_transfer, ..] if scope_transfer == "scope-transfer" => RuntimeAction::ScopeTransfer,
+        [recovery_drill, ..] if recovery_drill == "recovery-drill" => RuntimeAction::RecoveryDrill,
         [lifecycle_entry, ..] if lifecycle_entry == "lifecycle-entry" => {
             RuntimeAction::LifecycleEntry
         }
@@ -4549,6 +4559,7 @@ Administration commands:
     [--missing-evidence-after-days N] [--output PATH]
   migrate preflight|apply|postflight|rollback|status --manifest PATH
   scope-transfer preflight|apply|postflight|rollback|status --manifest PATH
+  recovery-drill snapshot|preflight|restore|postflight|rollback|status --manifest PATH
   pharos-beacon retire --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH [--retain-for-days N]
   pharos-beacon reconcile --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH
 
@@ -4564,7 +4575,7 @@ fn print_usage(selected_plane: Option<RuntimePlane>) {
             "janusd\n\nThe mixed Janus runtime entry point is retired and performs no operational command.\nUse 'janusd-use --help' for permit-bound use or 'janusd-admin --help' for administration.\nreason_code=legacy_mixed_entrypoint_retired value_returned=false"
         ),
         Some(RuntimePlane::Use) => eprintln!(
-            "janusd-use\n\nPermit-bound use commands:\n  run preflight --profile PROFILE -- ARG...\n  run --profile PROFILE --permit use_... -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE --permit use_...\n\nThis process cannot issue approvals, change lifecycle state, rotate, migrate, transfer scope, or retire hosts.\nManaged-command preflight validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read.\nEnv-file preflight checks the reviewed profile and target path without a permit, backend, or secret read.\nAll non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."
+            "janusd-use\n\nPermit-bound use commands:\n  run preflight --profile PROFILE -- ARG...\n  run --profile PROFILE --permit use_... -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE --permit use_...\n\nThis process cannot issue approvals, change lifecycle state, rotate, migrate, transfer scope, run recovery drills, or retire hosts.\nManaged-command preflight validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read.\nEnv-file preflight checks the reviewed profile and target path without a permit, backend, or secret read.\nAll non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."
         ),
         Some(RuntimePlane::Admin) => eprintln!("{ADMIN_USAGE}"),
     }
@@ -4642,6 +4653,7 @@ mod tests {
             ]),
             Just(vec![RedactedCliArg("migrate".to_string())]),
             Just(vec![RedactedCliArg("scope-transfer".to_string())]),
+            Just(vec![RedactedCliArg("recovery-drill".to_string())]),
         ];
         let suffixes = proptest::collection::vec(
             "[A-Za-z0-9_./:=+-]{0,96}"
@@ -4735,6 +4747,7 @@ mod tests {
             ),
             (&["migrate"][..], RuntimeAction::Migration),
             (&["scope-transfer"][..], RuntimeAction::ScopeTransfer),
+            (&["recovery-drill"][..], RuntimeAction::RecoveryDrill),
             (
                 &["pharos-beacon", "retire"][..],
                 RuntimeAction::PharosRetire,
