@@ -10,7 +10,6 @@
     gh
     gitleaks
     go_1_26
-    govulncheck
     gotools
     rustc
     rustfmt

@@ -206,7 +206,10 @@ shell), exact numeric non-root identity, four installed static binaries,
 read-only/capability-free/no-new-privileges/network-isolated execution, and
 value-free Warden MCP behavior. The security gate adds pinned Cargo Audit,
 Gitleaks, staticcheck, govulncheck, immutable-base verification, and Trivy. The
-behavioral assurance script is intentionally not presented as the complete
+gate probes the actual local scanner invocations and fails before scanning when
+any binary version differs from the reviewed policy. CI repeats that check on
+every runner that installs a scanner, including fresh release-image runners.
+The behavioral assurance script is intentionally not presented as the complete
 release gate; formatting, strict Clippy, container, and scanner checks remain
 separate commands above and are combined by release CI.
 
