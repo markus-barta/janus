@@ -54,7 +54,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -87,7 +87,7 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ github.repository }}/janus-engine
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: verify release tag matches workspace version
         run: scripts/check-engine-release-tag.sh "${{ github.event.release.tag_name }}"
       - uses: docker/setup-qemu-action@v3
