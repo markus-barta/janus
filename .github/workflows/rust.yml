@@ -20,25 +20,9 @@ on:
       - 'Dockerfile.engine'
       - 'Dockerfile.engine.dockerignore'
       - '.github/workflows/rust.yml'
+  # Always report the branch-required Rust check on pull requests. Pushes keep
+  # the path filter above so documentation-only merges do not rebuild main.
   pull_request:
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'devenv.nix'
-      - 'flake.nix'
-      - 'flake.lock'
-      - 'examples/**'
-      - 'config/assurance/**'
-      - 'config/release-channels/**'
-      - 'config/migrations/**'
-      - 'fixtures/release-admission/**'
-      - 'fixtures/migrations/**'
-      - 'scripts/**'
-      - 'Dockerfile.engine'
-      - 'Dockerfile.engine.dockerignore'
-      - '.github/workflows/rust.yml'
   # Release the Rust engine image by publishing a tag like `rust-engine-v0.1.0`.
   release:
     types: [published]
