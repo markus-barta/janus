@@ -7,6 +7,7 @@ import argparse
 import copy
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 from typing import Any
@@ -73,8 +74,13 @@ def validate_tool_reports(policy: dict[str, Any], reports: dict[str, str]) -> No
         reports["cargo-audit"].strip().split()[-1] == versions["cargo-audit"],
         "installed cargo-audit version drifted",
     )
+    gitleaks_lines = reports["gitleaks"].splitlines()
+    gitleaks_module = (
+        f"\tmod\tgithub.com/zricethezav/gitleaks/v8\tv{versions['gitleaks']}\t"
+    )
     require(
-        reports["gitleaks"].strip() == versions["gitleaks"],
+        versions["gitleaks"] in gitleaks_lines
+        or any(line.startswith(gitleaks_module) for line in gitleaks_lines),
         "installed Gitleaks version drifted",
     )
     require(
@@ -96,7 +102,6 @@ def collect_tool_reports(policy: dict[str, Any]) -> dict[str, str]:
     versions = {lane["id"]: lane["version"] for lane in policy["lanes"]}
     commands = {
         "cargo-audit": (["cargo", "audit", "--version"], ROOT),
-        "gitleaks": (["gitleaks", "version"], ROOT),
         "govulncheck": (
             [
                 "go",
@@ -130,6 +135,31 @@ def collect_tool_reports(policy: dict[str, Any]) -> dict[str, str]:
         except (OSError, subprocess.SubprocessError) as error:
             raise GateError(f"{tool} version probe failed") from error
         reports[tool] = result.stdout + result.stderr
+    gitleaks = shutil.which("gitleaks")
+    require(gitleaks is not None, "gitleaks version probe failed")
+    try:
+        version_result = subprocess.run(
+            [gitleaks, "version"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        module_result = subprocess.run(
+            ["go", "version", "-m", gitleaks],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise GateError("gitleaks version probe failed") from error
+    reports["gitleaks"] = (
+        version_result.stdout
+        + version_result.stderr
+        + module_result.stdout
+        + module_result.stderr
+    )
     return reports
 
 
@@ -182,7 +212,10 @@ def self_test(policy: dict[str, Any]) -> None:
     versions = {lane["id"]: lane["version"] for lane in policy["lanes"]}
     reports = {
         "cargo-audit": f"cargo-audit {versions['cargo-audit']}\n",
-        "gitleaks": f"{versions['gitleaks']}\n",
+        "gitleaks": (
+            "version is set by build process\n"
+            f"\tmod\tgithub.com/zricethezav/gitleaks/v8\tv{versions['gitleaks']}\tfixture\n"
+        ),
         "govulncheck": f"Scanner: govulncheck@v{versions['govulncheck']}\n",
         "staticcheck": f"staticcheck release (v{versions['staticcheck']})\n",
         "trivy": f"Version: {versions['trivy']}\n",
