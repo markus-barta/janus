@@ -19,6 +19,6 @@ jobs:
         with:
           go-version: '1.26'
       - name: install Gitleaks
-        run: go install github.com/gitleaks/gitleaks/v8@v8.30.1
+        run: go install github.com/zricethezav/gitleaks/v8@v8.30.1
       - name: scan history and prove the negative fixture
         run: GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" ./scripts/test-gitleaks.sh
