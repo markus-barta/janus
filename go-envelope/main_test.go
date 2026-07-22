@@ -2562,11 +2562,11 @@ func TestRolePolicyReadinessDistinguishesBootstrapAndExplicitLanes(t *testing.T)
 }
 
 func TestBuildProvenanceReceiptDistinguishesBoundAndUnknownBuilds(t *testing.T) {
-	bound := buildProvenanceFor("golang:1.26.3-alpine", "barta.cm/janus", "go1.26.3", "c3384ed9abc123456", "2026-05-31T15:42:00Z")
+	bound := buildProvenanceFor(supplyChainBuilderImage, "barta.cm/janus", "go1.26.5", "c3384ed9abc123456", "2026-05-31T15:42:00Z")
 	if bound.Status != "bound" || !bound.CommitBound || !bound.BuildTimeBound || bound.CommitShort != "c3384ed9abc1" {
 		t.Fatalf("bound build receipt should expose copy-safe build identity: %#v", bound)
 	}
-	if bound.Builder != "golang:1.26.3-alpine" || bound.ModulePath != "barta.cm/janus" || bound.GoVersion != "go1.26.3" || bound.EvidenceSignal != "copy_safe_build_provenance_receipt" {
+	if bound.Builder != supplyChainBuilderImage || bound.ModulePath != "barta.cm/janus" || bound.GoVersion != "go1.26.5" || bound.EvidenceSignal != "copy_safe_build_provenance_receipt" {
 		t.Fatalf("bound build receipt should include builder/module/runtime evidence: %#v", bound)
 	}
 	if bound.ArtifactReturned || bound.SBOMReturned || bound.ScannerOutputReturned || bound.EnvReturned || bound.BackendPathReturned || bound.SecretValueReturned || bound.ValueReturned {
@@ -4117,6 +4117,34 @@ func TestDockerfileHealthcheckUsesReadyz(t *testing.T) {
 	for _, want := range []string{"HEALTHCHECK", "/readyz", `"ready":true`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Dockerfile healthcheck should include %q: %s", want, body)
+		}
+	}
+}
+
+func TestDockerfileBuilderMatchesBuildReceipt(t *testing.T) {
+	raw, err := os.ReadFile("Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "FROM " + supplyChainBuilderImage + " AS build"
+	if !strings.Contains(string(raw), want) {
+		t.Fatalf("Dockerfile builder and build receipt drifted; expected %q", want)
+	}
+}
+
+func TestGoToolchainSurfacesPinReviewedPatch(t *testing.T) {
+	for path, want := range map[string]string{
+		"go.mod":                               "toolchain go1.26.5",
+		"../devenv.nix":                        "go_1_26",
+		"../.github/workflows/go-envelope.yml": "go-version: '1.26.5'",
+		"../.github/workflows/security.yml":    "go-version: '1.26.5'",
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("%s must contain reviewed toolchain pin %q", path, want)
 		}
 	}
 }

@@ -7,7 +7,7 @@
     clippy
     cosign
     gh
-    go
+    go_1_26
     gotools
     rustc
     rustfmt

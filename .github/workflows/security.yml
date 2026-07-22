@@ -27,7 +27,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          go-version: '1.26.5'
           cache: false
       - name: install Gitleaks
         run: go install github.com/zricethezav/gitleaks/v8@v8.30.1

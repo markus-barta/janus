@@ -2,6 +2,8 @@ module barta.cm/janus
 
 go 1.25.0
 
+toolchain go1.26.5
+
 require (
 	github.com/coreos/go-oidc/v3 v3.18.0
 	golang.org/x/oauth2 v0.36.0
