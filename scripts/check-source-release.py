@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import datetime
 import json
 import pathlib
 import re
@@ -30,7 +31,14 @@ def require(condition: bool, message: str) -> None:
 def validate_policy(policy: dict[str, Any]) -> None:
     require(policy.get("schema_version") == 1, "unsupported source-signing schema")
     require(policy.get("owner") == "JANUS-324", "source-signing owner changed")
-    require(policy.get("effective_on") == "2026-07-22", "effective date changed")
+    require("effective_on" not in policy, "ambiguous date-only source-signing cutoff returned")
+    effective_from = datetime.datetime.fromisoformat(
+        policy.get("effective_from", "").replace("Z", "+00:00")
+    )
+    require(
+        effective_from == datetime.datetime(2026, 7, 22, 14, 0, 17, tzinfo=datetime.timezone.utc),
+        "source-signing cutoff changed",
+    )
     require(policy.get("repository") == "markus-barta/janus", "repository changed")
     subset = policy.get("signed_subset")
     require(isinstance(subset, list) and len(subset) == 2, "released-source subset must be exact")
@@ -41,6 +49,31 @@ def validate_policy(policy: dict[str, Any]) -> None:
     require(method.get("issuer") == "https://token.actions.githubusercontent.com", "OIDC issuer changed")
     require(method.get("artifact") == "source-release.json", "source artifact name changed")
     require(method.get("bundle") == "source-release.sigstore.json", "source bundle name changed")
+    grandfathered = policy.get("grandfathered_releases")
+    require(
+        grandfathered
+        == [
+            {
+                "tag": "go-envelope-v1.162",
+                "commit": "d64b23933580c1e1541baec19dc7817c8464cf96",
+                "published_at": "2026-07-22T12:48:31Z",
+            }
+        ],
+        "released-source grandfather set changed",
+    )
+    for release in grandfathered:
+        published_at = datetime.datetime.fromisoformat(
+            release["published_at"].replace("Z", "+00:00")
+        )
+        require(published_at < effective_from, "grandfathered release is not before cutoff")
+        require(
+            re.fullmatch(r"[0-9a-f]{40}", release["commit"]) is not None,
+            "grandfathered release commit is invalid",
+        )
+        require(
+            sum(release["tag"].startswith(item["tag_prefix"]) for item in subset) == 1,
+            "grandfathered tag is outside the released-source subset",
+        )
     require(bool(policy.get("recovery")) and bool(policy.get("history")), "recovery/history policy is incomplete")
 
 
@@ -74,6 +107,22 @@ def validate_manifest(policy: dict[str, Any], manifest: dict[str, Any], bundle: 
 
 def self_test(policy: dict[str, Any]) -> None:
     validate_policy(copy.deepcopy(policy))
+    ambiguous = copy.deepcopy(policy)
+    ambiguous["effective_on"] = "2026-07-22"
+    try:
+        validate_policy(ambiguous)
+    except SourcePolicyError:
+        pass
+    else:
+        raise SourcePolicyError("date-only cutoff fixture passed")
+    late_grandfather = copy.deepcopy(policy)
+    late_grandfather["grandfathered_releases"][0]["published_at"] = policy["effective_from"]
+    try:
+        validate_policy(late_grandfather)
+    except SourcePolicyError:
+        pass
+    else:
+        raise SourcePolicyError("post-cutoff grandfather fixture passed")
     manifest = {
         "schema_version": 1,
         "repository": "markus-barta/janus",

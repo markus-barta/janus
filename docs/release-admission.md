@@ -41,8 +41,10 @@ repository, tag, commit, workflow, image name, and exact image digest; the
 second is its keyless GitHub OIDC Sigstore bundle. Release CI verifies the exact
 issuer and workflow identity before publishing either asset. This policy covers
 `rust-engine-v*` and `go-envelope-v*` releases, not every development commit or
-merge. Existing releases before 2026-07-22 are retained without rewriting
-history. If GitHub workflow identity changes, release signing pauses until the
+merge. The exact `2026-07-22T14:00:17Z` cutoff and sole grandfathered
+`go-envelope-v1.162` tag, commit, and publication time are machine-checked;
+date-only grandfathering is invalid. Existing history is retained without
+rewriting. If GitHub workflow identity changes, release signing pauses until the
 versioned source-signing policy is reviewed; otherwise recovery reruns the
 unchanged tag and commit.
 
