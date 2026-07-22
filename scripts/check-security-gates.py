@@ -89,7 +89,10 @@ def validate_tool_reports(policy: dict[str, Any], reports: dict[str, str]) -> No
         "invoked govulncheck version drifted",
     )
     require(
-        reports["staticcheck"].strip().endswith(f"(v{versions['staticcheck']})"),
+        any(
+            line.strip().endswith(f"(v{versions['staticcheck']})")
+            for line in reports["staticcheck"].splitlines()
+        ),
         "invoked Staticcheck version drifted",
     )
     require(
@@ -217,7 +220,10 @@ def self_test(policy: dict[str, Any]) -> None:
             f"\tmod\tgithub.com/zricethezav/gitleaks/v8\tv{versions['gitleaks']}\tfixture\n"
         ),
         "govulncheck": f"Scanner: govulncheck@v{versions['govulncheck']}\n",
-        "staticcheck": f"staticcheck release (v{versions['staticcheck']})\n",
+        "staticcheck": (
+            f"staticcheck release (v{versions['staticcheck']})\n"
+            "go: downloading transitive fixture\n"
+        ),
         "trivy": f"Version: {versions['trivy']}\n",
     }
     validate_tool_reports(policy, reports)
