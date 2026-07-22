@@ -9,6 +9,16 @@ permissions:
   contents: read
 
 jobs:
+  base-images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: verify immutable base manifests and platforms
+        run: |
+          docker buildx version
+          python3 scripts/test-docker-base-pins.py
+          python3 scripts/check-docker-base-pins.py --verify-remote
+
   gitleaks:
     runs-on: ubuntu-latest
     steps:

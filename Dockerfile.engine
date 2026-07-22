@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM rust:1-bookworm AS build
+FROM --platform=$BUILDPLATFORM rust:1.97.1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS build
 
 WORKDIR /src
 ARG BUILDARCH
@@ -35,12 +35,14 @@ RUN set -eux; \
     cp "target/${rust_target}/release/janusd-admin" /out/janusd-admin; \
     cp "target/${rust_target}/release/janus-warden" /out/janus-warden
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-20260713-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 LABEL org.opencontainers.image.title="Janus Rust engine"
 LABEL org.opencontainers.image.description="Janus secret-handling engine binaries with split use and administration planes"
 LABEL org.opencontainers.image.source="https://github.com/markus-barta/janus"
 LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
+LABEL org.opencontainers.image.base.name="docker.io/library/debian:bookworm-20260713-slim"
+LABEL org.opencontainers.image.base.digest="sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \

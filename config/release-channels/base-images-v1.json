@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-07-22",
+  "update_policy": {
+    "source": "Docker Official Images",
+    "trigger": "Open a reviewed change when an upstream patch release, base distribution update, tag movement, or vulnerability finding changes the selected artifact.",
+    "validation": "Update the explicit tag and digest together, run remote platform verification, rebuild both Janus images, scan the exact outputs, and repeat release admission before deployment."
+  },
+  "images": [
+    {
+      "id": "go-builder",
+      "dockerfile": "go-envelope/Dockerfile",
+      "stage": "build",
+      "name": "golang",
+      "tag": "1.26.5-alpine3.24",
+      "digest": "sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2",
+      "required_platforms": ["linux/amd64"]
+    },
+    {
+      "id": "go-runtime",
+      "dockerfile": "go-envelope/Dockerfile",
+      "stage": "runtime",
+      "name": "alpine",
+      "tag": "3.22.5",
+      "digest": "sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce",
+      "required_platforms": ["linux/amd64"]
+    },
+    {
+      "id": "rust-builder",
+      "dockerfile": "Dockerfile.engine",
+      "stage": "build",
+      "name": "rust",
+      "tag": "1.97.1-bookworm",
+      "digest": "sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
+      "required_platforms": ["linux/amd64", "linux/arm64"]
+    },
+    {
+      "id": "rust-runtime",
+      "dockerfile": "Dockerfile.engine",
+      "stage": "runtime",
+      "name": "debian",
+      "tag": "bookworm-20260713-slim",
+      "digest": "sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
+      "required_platforms": ["linux/amd64", "linux/arm64"]
+    }
+  ]
+}
