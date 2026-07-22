@@ -92,6 +92,8 @@ jobs:
       - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514
         with:
           version: v0.72.0
+      - name: verify installed scanner versions
+        run: python3 scripts/check-security-gates.py --check-installed-tools
       - name: build and smoke exact local candidate image
         run: scripts/smoke-engine-container.sh
       - name: scan candidate image and emit value-free summary

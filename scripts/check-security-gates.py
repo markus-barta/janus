@@ -7,6 +7,7 @@ import argparse
 import copy
 import json
 import pathlib
+import subprocess
 import sys
 from typing import Any
 
@@ -53,14 +54,83 @@ def validate_policy(policy: dict[str, Any]) -> None:
 def validate_workflows() -> None:
     rust = (ROOT / ".github/workflows/rust.yml").read_text()
     go = (ROOT / ".github/workflows/go-envelope.yml").read_text()
+    local = (ROOT / "scripts/run-security-gates.sh").read_text()
     for workflow in (rust, go):
         require("scripts/test-gitleaks.sh" in workflow, "release workflow lacks Gitleaks")
         require("0.72.0" in workflow, "release workflow lacks pinned Trivy")
         require('steps.build.outputs.digest' in workflow, "release workflow does not scan exact digest")
         require("scripts/check-security-gates.py" in workflow, "scanner-policy gate is not wired")
     require("scripts/check-rust-audit.py" in rust and "0.22.2" in rust, "Rust audit gate is not wired")
+    require("--check-installed-tools" in rust, "Rust CI does not verify scanner binaries")
     require("staticcheck@v0.7.0" in go, "staticcheck pin is not wired")
     require("govulncheck@v1.6.0" in go, "govulncheck pin is not wired")
+    require("--check-installed-tools" in local, "local scanner-version gate is not wired")
+
+
+def validate_tool_reports(policy: dict[str, Any], reports: dict[str, str]) -> None:
+    versions = {lane["id"]: lane["version"] for lane in policy["lanes"]}
+    require(
+        reports["cargo-audit"].strip().split()[-1] == versions["cargo-audit"],
+        "installed cargo-audit version drifted",
+    )
+    require(
+        reports["gitleaks"].strip() == versions["gitleaks"],
+        "installed Gitleaks version drifted",
+    )
+    require(
+        f"Scanner: govulncheck@v{versions['govulncheck']}"
+        in reports["govulncheck"].splitlines(),
+        "invoked govulncheck version drifted",
+    )
+    require(
+        reports["staticcheck"].strip().endswith(f"(v{versions['staticcheck']})"),
+        "invoked Staticcheck version drifted",
+    )
+    require(
+        reports["trivy"].splitlines()[0].strip() == f"Version: {versions['trivy']}",
+        "installed Trivy version drifted",
+    )
+
+
+def collect_tool_reports(policy: dict[str, Any]) -> dict[str, str]:
+    versions = {lane["id"]: lane["version"] for lane in policy["lanes"]}
+    commands = {
+        "cargo-audit": (["cargo", "audit", "--version"], ROOT),
+        "gitleaks": (["gitleaks", "version"], ROOT),
+        "govulncheck": (
+            [
+                "go",
+                "run",
+                f"golang.org/x/vuln/cmd/govulncheck@v{versions['govulncheck']}",
+                "-version",
+            ],
+            ROOT / "go-envelope",
+        ),
+        "staticcheck": (
+            [
+                "go",
+                "run",
+                f"honnef.co/go/tools/cmd/staticcheck@v{versions['staticcheck']}",
+                "-version",
+            ],
+            ROOT / "go-envelope",
+        ),
+        "trivy": (["trivy", "--version"], ROOT),
+    }
+    reports = {}
+    for tool, (command, cwd) in commands.items():
+        try:
+            result = subprocess.run(
+                command,
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise GateError(f"{tool} version probe failed") from error
+        reports[tool] = result.stdout + result.stderr
+    return reports
 
 
 def summarize_trivy(report: dict[str, Any]) -> dict[str, Any]:
@@ -109,10 +179,29 @@ def self_test(policy: dict[str, Any]) -> None:
     else:
         raise GateError("Trivy finding fixture passed")
 
+    versions = {lane["id"]: lane["version"] for lane in policy["lanes"]}
+    reports = {
+        "cargo-audit": f"cargo-audit {versions['cargo-audit']}\n",
+        "gitleaks": f"{versions['gitleaks']}\n",
+        "govulncheck": f"Scanner: govulncheck@v{versions['govulncheck']}\n",
+        "staticcheck": f"staticcheck release (v{versions['staticcheck']})\n",
+        "trivy": f"Version: {versions['trivy']}\n",
+    }
+    validate_tool_reports(policy, reports)
+    for tool, version in versions.items():
+        candidate = copy.deepcopy(reports)
+        candidate[tool] = candidate[tool].replace(version, "0.0.0")
+        try:
+            validate_tool_reports(policy, candidate)
+        except GateError:
+            continue
+        raise GateError(f"scanner version-drift fixture passed: {tool}")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--check-installed-tools", action="store_true")
     parser.add_argument("--trivy-report", type=pathlib.Path)
     parser.add_argument("--summary", type=pathlib.Path)
     args = parser.parse_args()
@@ -122,12 +211,14 @@ def main() -> int:
         validate_workflows()
         if args.self_test:
             self_test(policy)
+        if args.check_installed_tools:
+            validate_tool_reports(policy, collect_tool_reports(policy))
         if args.trivy_report:
             require(args.summary is not None, "--summary is required with --trivy-report")
             summary = summarize_trivy(json.loads(args.trivy_report.read_text()))
             args.summary.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
             require(summary["passed"], f"candidate image has blocking findings: {summary['counts']}")
-    except (OSError, ValueError, KeyError, GateError) as error:
+    except (OSError, ValueError, KeyError, IndexError, GateError) as error:
         print(f"security scanner gate failed: {error}", file=sys.stderr)
         return 1
     print("security scanner gate passed: five blocking lanes, exact pins, negative fixtures")
