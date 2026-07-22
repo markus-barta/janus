@@ -1,0 +1,11 @@
+# Synthetic historical test fixtures reviewed under JANUS-321.
+# Owner: Janus maintainers. Review by: 2026-10-22.
+# Scope: exact commit/path/rule/line fingerprints only; do not broaden.
+ba07499ed09f1a65f43bf64be65cbdd1d49337ee:go-envelope/vault_ui_test.go:generic-api-key:302
+7271e7b58485893ab18711f516cb82f7ff2e9418:crates/janus-provider-age/src/lib.rs:private-key:515
+197842efe99923a274afe3817b2fbfcf4590984b:main_test.go:generic-api-key:676
+
+# Current tracked-tree positions for the same required synthetic fixtures.
+go-envelope/vault_ui_test.go:generic-api-key:480
+crates/janus-provider-age/src/lib.rs:private-key:1264
+go-envelope/main_test.go:generic-api-key:743
