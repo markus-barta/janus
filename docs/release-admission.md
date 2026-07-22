@@ -17,13 +17,14 @@ repository changes and increment `policy_version` when their meaning changes.
 Admission runs outside the image being admitted:
 
 ```bash
+JANUS_ENGINE_RELEASE_TAG="rust-engine-v0.1.9" # replace with the reviewed release
 scripts/admit-engine-release.sh \
   --policy config/release-channels/v1.json \
   --channel stable \
   --mode enterprise \
   --previous-mode enterprise \
   --image ghcr.io/markus-barta/janus/janus-engine \
-  --tag rust-engine-v0.1.6 \
+  --tag "${JANUS_ENGINE_RELEASE_TAG}" \
   --digest sha256:... \
   --output /run/janus/release-admission.json
 ```

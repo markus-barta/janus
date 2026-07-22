@@ -12,10 +12,10 @@ agents - without making raw credentials part of prompts, command arguments,
 logs, or application code.
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
-[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.6-cb7c28.svg)](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.6)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.9-cb7c28.svg)](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.9)
 
 [Product site](https://janus.inspr.at) ·
-[Rust engine v0.1.6](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.6) ·
+[Rust engine v0.1.9](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.9) ·
 [INSPR](https://www.inspr.at)
 
 ## What Janus does
@@ -75,7 +75,7 @@ Janus has two layers with different histories:
 
 | Layer | Role | Language | Status |
 |---|---|---|---|
-| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.6`. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.9`. |
 | **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
 The Rust engine is no longer a skeleton. Core execution paths ship with unit,
@@ -170,14 +170,11 @@ legacy helper cannot run either plane's commands.
 
 ### Release assurance
 
-Run the complete local gate with:
+Run the Rust behavioral and process-plane assurance with:
 
 ```bash
 devenv shell -- ./scripts/assure-engine-release.sh
 ```
-
-The complete gate requires a working Docker CLI and daemon in addition to the
-tools supplied by the development shell.
 
 It exercises:
 
@@ -190,8 +187,22 @@ It exercises:
 - the versioned approval-registry migration and rollback flow;
 - the exact-scope recovery and explicit boundary-transfer flow;
 - the exact, single-use break-glass lifecycle and independent review flow;
-- the Pharos beacon retirement flow; and
-- the engine container with the same value-free MCP assertions.
+- the Pharos beacon retirement flow.
+
+That script does not run formatting, strict Clippy, or a Docker image build.
+Run the complete local release-candidate gate with:
+
+```bash
+devenv shell -- cargo fmt --all -- --check
+devenv shell -- cargo clippy --all-targets --all-features -- -D warnings
+devenv shell -- ./scripts/assure-engine-release.sh
+devenv shell -- ./scripts/smoke-engine-container.sh
+```
+
+The container smoke builds the engine image and requires a working Docker CLI
+and daemon. It verifies the image metadata, non-root filesystem posture, four
+installed binaries, network-isolated execution, and value-free Warden MCP
+behavior. Release CI separately verifies and smokes the exact published digest.
 
 Rust engine releases publish a GHCR image, SPDX SBOM, build provenance, and a
 keyless cosign signature. Release CI verifies and smokes the exact digest it
