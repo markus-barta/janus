@@ -33,3 +33,5 @@ jobs:
         run: go install github.com/zricethezav/gitleaks/v8@v8.30.1
       - name: scan history and prove the negative fixture
         run: GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" ./scripts/test-gitleaks.sh
+      - name: verify installed scanner version
+        run: GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" python3 scripts/check-security-gates.py --check-installed-tools --tool gitleaks
