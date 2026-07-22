@@ -35,6 +35,7 @@ def main() -> int:
         version = cargo["workspace"]["package"]["version"]
         tag = f"rust-engine-v{version}"
         readme = (ROOT / "README.md").read_text()
+        normalized_readme = " ".join(readme.split())
         admission = (ROOT / "docs/release-admission.md").read_text()
         smoke = (ROOT / "scripts/smoke-published-engine.sh").read_text()
         rust_workflow = (ROOT / ".github/workflows/rust.yml").read_text()
@@ -49,7 +50,7 @@ def main() -> int:
             "scratch filesystem",
             "scripts/run-security-gates.sh",
         ):
-            if required not in readme:
+            if required not in normalized_readme:
                 fail(f"README assurance contract is missing: {required}")
         for asset in ("source-release.json", "source-release.sigstore.json", "rust-trivy-summary.json"):
             if asset not in rust_workflow:
