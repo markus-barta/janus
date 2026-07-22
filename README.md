@@ -12,10 +12,10 @@ agents - without making raw credentials part of prompts, command arguments,
 logs, or application code.
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
-[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.9-cb7c28.svg)](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.9)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.10-cb7c28.svg)](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.10)
 
 [Product site](https://janus.inspr.at) ·
-[Rust engine v0.1.9](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.9) ·
+[Rust engine v0.1.10](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.10) ·
 [INSPR](https://www.inspr.at)
 
 ## What Janus does
@@ -75,7 +75,7 @@ Janus has two layers with different histories:
 
 | Layer | Role | Language | Status |
 |---|---|---|---|
-| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.9`. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.10`. |
 | **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
 The Rust engine is no longer a skeleton. Core execution paths ship with unit,
@@ -197,16 +197,26 @@ devenv shell -- cargo fmt --all -- --check
 devenv shell -- cargo clippy --all-targets --all-features -- -D warnings
 devenv shell -- ./scripts/assure-engine-release.sh
 devenv shell -- ./scripts/smoke-engine-container.sh
+devenv shell -- env JANUS_SECURITY_IMAGE=janus-engine:smoke ./scripts/run-security-gates.sh
 ```
 
 The container smoke builds the engine image and requires a working Docker CLI
-and daemon. It verifies the image metadata, non-root filesystem posture, four
-installed binaries, network-isolated execution, and value-free Warden MCP
-behavior. Release CI separately verifies and smokes the exact published digest.
+and daemon. It verifies the scratch filesystem (no runtime package database or
+shell), exact numeric non-root identity, four installed static binaries,
+read-only/capability-free/no-new-privileges/network-isolated execution, and
+value-free Warden MCP behavior. The security gate adds pinned Cargo Audit,
+Gitleaks, staticcheck, govulncheck, immutable-base verification, and Trivy. The
+behavioral assurance script is intentionally not presented as the complete
+release gate; formatting, strict Clippy, container, and scanner checks remain
+separate commands above and are combined by release CI.
 
-Rust engine releases publish a GHCR image, SPDX SBOM, build provenance, and a
-keyless cosign signature. Release CI verifies and smokes the exact digest it
-publishes. Production and enterprise deployment admission is documented in
+Rust engine releases publish a GHCR image, SPDX SBOM, build provenance, a
+keyless image signature, and a second keyless signature over a deterministic
+source/tag/commit/image-digest manifest. Direct and merge commits are not
+individually signed: the defined signed-source subset is the two released tag
+families, with pre-policy releases grandfathered and no history rewrite.
+Release CI scans, verifies, and smokes the exact digest it publishes.
+Production and enterprise deployment admission is documented in
 [Trusted release admission](docs/release-admission.md).
 The reviewed offline schema upgrade is documented in the
 [approval registry migration runbook](docs/migration-runbook.md).

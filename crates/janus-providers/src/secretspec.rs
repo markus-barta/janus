@@ -1,25 +1,109 @@
-//! Wrapped `secretspec` adapter for JANUS-14.
+//! Secretspec-compatible manifest adapter with an explicit dotenv backend.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use janus_core::{
-    HealthStatus, JanusError, JanusResult, ManifestCatalog, ProfileId, ProjectId, RotationOutcome,
-    RotationSpec, RotationStrategy, SafeLabel, ScopeRef, SecretDescriptor, SecretMeta,
-    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretValue, StoreCapabilities,
-    TrustLevel,
+    load_secretspec_manifest_catalog, HealthStatus, JanusError, JanusResult, ManifestCatalog,
+    RotationOutcome, RotationSpec, RotationStrategy, ScopeRef, SecretDescriptor, SecretMeta,
+    SecretMetadataOverlay, SecretName, SecretStore, SecretValue, StoreCapabilities,
 };
 use secrecy::{ExposeSecret, SecretString};
-use secretspec as secretspec_crate;
 
-/// `secretspec`-backed Janus store.
-///
-/// Only this crate touches secretspec types. `janus-core` sees the stable
-/// Janus `SecretStore` contract and opaque refs.
+struct DotenvProvider {
+    path: PathBuf,
+    values: BTreeMap<String, SecretString>,
+}
+
+impl DotenvProvider {
+    fn load(uri: &str) -> JanusResult<Self> {
+        let path = uri
+            .strip_prefix("dotenv:")
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| JanusError::StoreUnavailable {
+                detail: "only an explicit dotenv provider URI is supported".to_string(),
+            })?;
+        let path = PathBuf::from(path);
+        let mut values = BTreeMap::new();
+        let entries = dotenvy::from_path_iter(&path).map_err(|_| JanusError::StoreUnavailable {
+            detail: "dotenv provider could not be read".to_string(),
+        })?;
+        for entry in entries {
+            let (name, value) = entry.map_err(|_| JanusError::StoreUnavailable {
+                detail: "dotenv provider schema is invalid".to_string(),
+            })?;
+            values.insert(name, SecretString::new(value.into()));
+        }
+        Ok(Self { path, values })
+    }
+
+    fn get(&self, name: &str) -> Option<&SecretString> {
+        self.values.get(name)
+    }
+
+    fn set(&mut self, name: &str, value: SecretString) -> JanusResult<()> {
+        self.values.insert(name.to_string(), value);
+        self.persist()
+    }
+
+    fn persist(&self) -> JanusResult<()> {
+        let parent = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| JanusError::StoreUnavailable {
+                detail: "dotenv provider clock is invalid".to_string(),
+            })?
+            .as_nanos();
+        let temporary = parent.join(format!(".janus-dotenv-{}-{nonce}.tmp", std::process::id()));
+        let result = (|| -> std::io::Result<()> {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary)?;
+            for (name, value) in &self.values {
+                writeln!(
+                    file,
+                    "{name}=\"{}\"",
+                    encode_dotenv_value(value.expose_secret())
+                )?;
+            }
+            file.sync_all()?;
+            fs::rename(&temporary, &self.path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result.map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("dotenv provider write failed: {}", err.kind()),
+        })
+    }
+}
+
+fn encode_dotenv_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+/// Janus store using the reviewed Secretspec manifest subset and dotenv values.
 pub struct SecretspecStore {
-    project: ProjectId,
-    profile: String,
-    provider: Box<dyn secretspec_crate::Provider>,
+    provider: DotenvProvider,
     catalog: ManifestCatalog,
 }
 
@@ -44,81 +128,15 @@ impl SecretspecStore {
         metadata: Option<&SecretMetadataOverlay>,
     ) -> JanusResult<Self> {
         let profile = profile.into();
-        let config = secretspec_crate::Config::try_from(config_path.as_ref()).map_err(|err| {
-            JanusError::StoreUnavailable {
-                detail: format!("secretspec config load failed: {err}"),
-            }
-        })?;
-        config
-            .validate()
-            .map_err(|err| JanusError::StoreUnavailable {
-                detail: format!("secretspec config validation failed: {err}"),
-            })?;
+        let (_, catalog) =
+            load_secretspec_manifest_catalog(config_path, &profile, &scope, metadata)?;
+        let provider = DotenvProvider::load(&provider_uri.into())?;
 
-        let project = ProjectId::new(config.project.name.clone())?;
-        let profile_config =
-            config
-                .get_profile(&profile)
-                .ok_or_else(|| JanusError::InvalidManifest {
-                    detail: format!("missing secretspec profile {profile}"),
-                })?;
-
-        let mut entries = Vec::new();
-        for (name, secret) in profile_config.iter() {
-            let name = SecretName::new(name.clone())?;
-            let required = secret
-                .required
-                .or_else(|| {
-                    profile_config
-                        .defaults
-                        .as_ref()
-                        .and_then(|defaults| defaults.required)
-                })
-                .unwrap_or(true);
-            entries.push(SecretMeta {
-                secret_ref: SecretRef::for_manifest_entry(&scope, &name),
-                name: name.clone(),
-                label: SafeLabel::new(
-                    secret
-                        .description
-                        .clone()
-                        .unwrap_or_else(|| "Manifest-declared secret".to_string()),
-                )?,
-                scope: scope.clone(),
-                owner: None,
-                classification: None,
-                lifecycle: janus_core::SecretLifecycle::Active,
-                required,
-                trust_level: TrustLevel::L1,
-                allowed_uses: vec![ProfileId::new(format!("profile.{}", name.as_str()))?],
-            });
-        }
-        if let Some(metadata) = metadata {
-            metadata.apply_to_entries(&mut entries)?;
-        }
-
-        let provider_uri = provider_uri.into();
-        let provider = Box::<dyn secretspec_crate::Provider>::try_from(provider_uri.as_str())
-            .map_err(|err| JanusError::StoreUnavailable {
-                detail: format!("secretspec provider load failed: {err}"),
-            })?;
-
-        Ok(Self {
-            project,
-            profile,
-            provider,
-            catalog: ManifestCatalog::new(entries)?,
-        })
+        Ok(Self { provider, catalog })
     }
 
     fn ensure_manifest(&self, name: &SecretName) -> JanusResult<&SecretMeta> {
         self.catalog.meta_by_name(name)
-    }
-
-    fn map_provider_error(err: secretspec_crate::SecretSpecError) -> JanusError {
-        JanusError::StoreUnavailable {
-            detail: format!("secretspec provider operation failed: {err}"),
-        }
     }
 }
 
@@ -126,9 +144,9 @@ impl SecretspecStore {
 impl SecretStore for SecretspecStore {
     fn capabilities(&self) -> StoreCapabilities {
         StoreCapabilities {
-            write: self.provider.allows_set(),
+            write: true,
             delete: false,
-            generated_rotate: self.provider.allows_set(),
+            generated_rotate: true,
             rotate_native: false,
             versioning: false,
             leasing: false,
@@ -139,20 +157,16 @@ impl SecretStore for SecretspecStore {
 
     async fn health(&self) -> JanusResult<HealthStatus> {
         Ok(HealthStatus {
-            backend: self.provider.name(),
+            backend: "dotenv",
             ok: true,
-            detail: "secretspec provider configured".to_string(),
+            detail: "reviewed manifest and dotenv provider configured".to_string(),
         })
     }
 
     async fn list(&self) -> JanusResult<Vec<SecretDescriptor>> {
         let mut descriptors = Vec::new();
         for meta in self.catalog.entries() {
-            let present = self
-                .provider
-                .get(self.project.as_str(), meta.name.as_str(), &self.profile)
-                .map_err(Self::map_provider_error)?
-                .is_some();
+            let present = self.provider.get(meta.name.as_str()).is_some();
             descriptors.push(meta.descriptor(present));
         }
         Ok(descriptors)
@@ -162,8 +176,7 @@ impl SecretStore for SecretspecStore {
         self.ensure_manifest(name)?;
         let value = self
             .provider
-            .get(self.project.as_str(), name.as_str(), &self.profile)
-            .map_err(Self::map_provider_error)?
+            .get(name.as_str())
             .ok_or_else(|| JanusError::NotFound {
                 name: name.as_str().to_string(),
             })?;
@@ -172,22 +185,13 @@ impl SecretStore for SecretspecStore {
 
     async fn set(&mut self, name: &SecretName, value: SecretValue) -> JanusResult<()> {
         self.ensure_manifest(name)?;
-        if !self.provider.allows_set() {
-            return Err(JanusError::Unsupported { capability: "set" });
-        }
         let value = std::str::from_utf8(value.expose_bytes()).map_err(|_| {
             JanusError::StoreUnavailable {
                 detail: "secretspec provider values must be utf-8".to_string(),
             }
         })?;
         self.provider
-            .set(
-                self.project.as_str(),
-                name.as_str(),
-                &SecretString::new(value.to_string().into()),
-                &self.profile,
-            )
-            .map_err(Self::map_provider_error)
+            .set(name.as_str(), SecretString::new(value.to_string().into()))
     }
 
     async fn rotate(
@@ -227,7 +231,7 @@ mod tests {
     use janus_core::{
         AuditAction, AuditOutcome, AuditWrite, Destination, EgressMode, ExecutorRef, Principal,
         PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose, ScopePathV1,
-        SecretBroker, UseProfile, UseRequest,
+        SecretBroker, TrustLevel, UseProfile, UseRequest,
     };
     use proptest::prelude::*;
     use std::fmt;

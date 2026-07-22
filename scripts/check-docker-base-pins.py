@@ -89,6 +89,8 @@ def dockerfile_references(files: set[str]) -> dict[tuple[str, str], str]:
             if index >= len(parts):
                 fail(f"malformed FROM line in {relative}")
             reference = parts[index]
+            if reference == "scratch":
+                continue
             stage = "runtime"
             if index + 2 < len(parts) and parts[index + 1].upper() == "AS":
                 stage = parts[index + 2]

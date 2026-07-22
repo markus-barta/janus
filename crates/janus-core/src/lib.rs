@@ -57,7 +57,7 @@ pub use delegation::{
     DelegationRevocation, DelegationRevocationSnapshotV1, DelegationScope, DelegationStatus,
 };
 pub use error::{JanusError, JanusResult};
-pub use manifest::ManifestCatalog;
+pub use manifest::{load_secretspec_manifest_catalog, ManifestCatalog};
 pub use metadata::{SecretMetadataOverlay, SecretMetadataPatch};
 pub use migration::{MigrationCompatibility, MigrationManifest, MigrationPhase, MigrationRisk};
 pub use minimization::{

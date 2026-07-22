@@ -14,12 +14,12 @@ use age::{Decryptor, Encryptor};
 use async_trait::async_trait;
 use fs2::FileExt;
 use janus_core::{
-    AuditAction, AuditEvent, AuditOutcome, AuditSink, HealthStatus, JanusError, JanusResult,
-    ManifestCatalog, PrincipalChain, ProfileId, ProjectId, RotationOutcome, RotationSpec,
-    RotationStrategy, SafeLabel, ScopeRef, SecretDescriptor, SecretMeta, SecretMetadataOverlay,
-    SecretName, SecretRef, SecretStore, SecretValue, Severity, StoreCapabilities, TrustLevel,
+    load_secretspec_manifest_catalog, AuditAction, AuditEvent, AuditOutcome, AuditSink,
+    HealthStatus, JanusError, JanusResult, ManifestCatalog, PrincipalChain, ProjectId,
+    RotationOutcome, RotationSpec, RotationStrategy, ScopeRef, SecretDescriptor, SecretMeta,
+    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretValue, Severity,
+    StoreCapabilities,
 };
-use secretspec as secretspec_crate;
 use zeroize::Zeroize;
 
 /// Native age-backed store.
@@ -199,64 +199,14 @@ impl AgeSecretStore {
         metadata: Option<&SecretMetadataOverlay>,
     ) -> JanusResult<Self> {
         let profile = profile.into();
-        let config = secretspec_crate::Config::try_from(config_path.as_ref()).map_err(|err| {
-            JanusError::StoreUnavailable {
-                detail: format!("secretspec manifest load failed: {err}"),
-            }
-        })?;
-        config
-            .validate()
-            .map_err(|err| JanusError::InvalidManifest {
-                detail: format!("secretspec manifest validation failed: {err}"),
-            })?;
-
-        let project = ProjectId::new(config.project.name.clone())?;
-        let profile_config =
-            config
-                .get_profile(&profile)
-                .ok_or_else(|| JanusError::InvalidManifest {
-                    detail: format!("missing secretspec profile {profile}"),
-                })?;
-
-        let mut entries = Vec::new();
-        for (name, secret) in profile_config.iter() {
-            let name = SecretName::new(name.clone())?;
-            let required = secret
-                .required
-                .or_else(|| {
-                    profile_config
-                        .defaults
-                        .as_ref()
-                        .and_then(|defaults| defaults.required)
-                })
-                .unwrap_or(true);
-            entries.push(SecretMeta {
-                secret_ref: janus_core::SecretRef::for_manifest_entry(&scope, &name),
-                name: name.clone(),
-                label: SafeLabel::new(
-                    secret
-                        .description
-                        .clone()
-                        .unwrap_or_else(|| "Manifest-declared secret".to_string()),
-                )?,
-                scope: scope.clone(),
-                owner: None,
-                classification: None,
-                lifecycle: janus_core::SecretLifecycle::Active,
-                required,
-                trust_level: TrustLevel::L1,
-                allowed_uses: vec![ProfileId::new(format!("profile.{}", name.as_str()))?],
-            });
-        }
-        if let Some(metadata) = metadata {
-            metadata.apply_to_entries(&mut entries)?;
-        }
+        let (project, catalog) =
+            load_secretspec_manifest_catalog(config_path, &profile, &scope, metadata)?;
 
         Self::from_catalog(
             project,
             profile,
             root_dir,
-            ManifestCatalog::new(entries)?,
+            catalog,
             identity_files,
             recipients,
         )
@@ -1006,9 +956,23 @@ fn parse_recipients(values: &[String]) -> JanusResult<Vec<Box<dyn age::Recipient
             recipients.push(Box::new(recipient));
             continue;
         }
+        if !trimmed.starts_with("ssh-ed25519 ") {
+            return Err(JanusError::StoreUnavailable {
+                detail: "only native age and ssh-ed25519 recipients are supported".to_string(),
+            });
+        }
         if let Ok(recipient) = trimmed.parse::<age::ssh::Recipient>() {
-            recipients.push(Box::new(recipient));
-            continue;
+            match recipient {
+                age::ssh::Recipient::SshEd25519(_, _) => {
+                    recipients.push(Box::new(recipient));
+                    continue;
+                }
+                age::ssh::Recipient::SshRsa(_, _) => {
+                    return Err(JanusError::StoreUnavailable {
+                        detail: "ssh-rsa recipients are not supported".to_string(),
+                    });
+                }
+            }
         }
         return Err(JanusError::StoreUnavailable {
             detail: "invalid age recipient".to_string(),
@@ -1051,6 +1015,7 @@ fn parse_identity_files(paths: &[PathBuf]) -> JanusResult<Vec<Box<dyn age::Ident
             identities.push(Box::new(identity));
             continue;
         }
+        ensure_ssh_ed25519_identity(trimmed)?;
         let reader = BufReader::new(contents.as_bytes());
         let identity = age::ssh::Identity::from_buffer(reader, None).map_err(|_| {
             JanusError::StoreUnavailable {
@@ -1065,6 +1030,25 @@ fn parse_identity_files(paths: &[PathBuf]) -> JanusResult<Vec<Box<dyn age::Ident
         });
     }
     Ok(identities)
+}
+
+fn ensure_ssh_ed25519_identity(contents: &str) -> JanusResult<()> {
+    if contents.contains("BEGIN RSA PRIVATE KEY") {
+        return Err(JanusError::StoreUnavailable {
+            detail: "ssh-rsa identities are not supported".to_string(),
+        });
+    }
+    let identity = ssh_key::PrivateKey::from_openssh(contents.as_bytes()).map_err(|_| {
+        JanusError::StoreUnavailable {
+            detail: "age ssh identity could not be parsed".to_string(),
+        }
+    })?;
+    if identity.algorithm() != ssh_key::Algorithm::Ed25519 {
+        return Err(JanusError::StoreUnavailable {
+            detail: "only ssh-ed25519 identities are supported".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn write_atomically(path: &Path, scope_dir: &Path, bytes: &[u8]) -> JanusResult<()> {
@@ -1249,8 +1233,8 @@ mod tests {
     use super::*;
     use age::secrecy::ExposeSecret;
     use janus_core::{
-        AuditWrite, ManifestCatalog, OwnerRef, Principal, PrincipalId, PrincipalKind, ScopePathV1,
-        SecretClass, SecretLifecycle, SecretRef,
+        AuditWrite, ManifestCatalog, OwnerRef, Principal, PrincipalId, PrincipalKind, ProfileId,
+        SafeLabel, ScopePathV1, SecretClass, SecretLifecycle, SecretMeta, SecretRef, TrustLevel,
     };
     use tempfile::TempDir;
 
@@ -1268,6 +1252,33 @@ agAAAAtzc2gtZWQyNTUxOQAAACB7Ci6nqZYaVvrjm8+XbzII89TsXzP111AflR7WeorBjQ
 AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
 1OxfM/XXUB+VHtZ6isGNAAAADHN0cjRkQGNhcmJvbgE=
 -----END OPENSSH PRIVATE KEY-----";
+
+    #[test]
+    fn supported_ssh_key_policy_accepts_only_ed25519() {
+        ensure_ssh_ed25519_identity(TEST_SSH_ED25519_SK).unwrap();
+        assert_eq!(
+            parse_recipients(&[TEST_SSH_ED25519_PK.to_string()])
+                .unwrap()
+                .len(),
+            1
+        );
+
+        for unsupported in [
+            "ssh-rsa SYNTHETIC_NON_KEY",
+            "ecdsa-sha2-nistp256 SYNTHETIC_NON_KEY",
+        ] {
+            assert!(matches!(
+                parse_recipients(&[unsupported.to_string()]),
+                Err(JanusError::StoreUnavailable { .. })
+            ));
+        }
+        assert!(matches!(
+            ensure_ssh_ed25519_identity(
+                "-----BEGIN RSA PRIVATE KEY-----\nSYNTHETIC_NON_KEY\n-----END RSA PRIVATE KEY-----"
+            ),
+            Err(JanusError::StoreUnavailable { .. })
+        ));
+    }
 
     struct Fixture {
         _tmp: TempDir,

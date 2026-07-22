@@ -13,9 +13,9 @@ workspace = true
 
 [dependencies]
 async-trait = "0.1"
+dotenvy = "=0.15.7"
 janus-core = { path = "../janus-core" }
 secrecy = "0.10.3"
-secretspec = { version = "=0.11.0", default-features = false }
 
 [dev-dependencies]
 janus-conformance = { path = "../janus-conformance" }

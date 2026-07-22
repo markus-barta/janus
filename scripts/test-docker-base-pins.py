@@ -40,7 +40,13 @@ class DockerBasePinTests(unittest.TestCase):
 
     def test_reviewed_inventory_matches_every_dockerfile(self) -> None:
         data = CHECKER.load_inventory()
-        self.assertEqual(len(CHECKER.verify_local(data)), 4)
+        self.assertEqual(len(CHECKER.verify_local(data)), 3)
+
+    def test_canonical_scratch_runtime_requires_no_external_pin(self) -> None:
+        data = CHECKER.load_inventory()
+        references = CHECKER.dockerfile_references({"Dockerfile.engine"})
+        self.assertNotIn(("Dockerfile.engine", "runtime"), references)
+        self.assertEqual(len(CHECKER.verify_local(data)), 3)
 
     def test_new_dockerfile_must_be_inventoried(self) -> None:
         (self.repo / "nested").mkdir()

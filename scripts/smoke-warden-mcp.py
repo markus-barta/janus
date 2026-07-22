@@ -125,7 +125,7 @@ def smoke_env(fixture: Path, *, container: bool = False) -> dict[str, str]:
 
 
 def prepare_container_mount(fixture: Path, permit_dir: Path) -> None:
-    # The engine image runs as the unprivileged `janus` user. The smoke fixture
+    # The engine image runs as unprivileged uid/gid 65532. The smoke fixture
     # is temporary test data, so make it readable and the permit directory
     # writable across host/container uid boundaries.
     fixture.chmod(0o755)
@@ -143,8 +143,19 @@ def warden_command(repo: Path, fixture: Path, args: argparse.Namespace) -> list[
             "-i",
             "--network",
             "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--user",
+            "65532:65532",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700",
+            "--tmpfs",
+            "/run/janus/permits:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700",
             "--entrypoint",
-            "janus-warden",
+            "/usr/local/bin/janus-warden",
             "--mount",
             f"type=bind,source={fixture.resolve()},target={CONTAINER_FIXTURE_DIR}",
         ]

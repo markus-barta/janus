@@ -28,7 +28,7 @@ path = "src/bin/janusd-admin.rs"
 test = false
 
 [dependencies]
-anyhow = "1"
+anyhow = "=1.0.103"
 async-trait = "0.1"
 base64 = "0.21"
 fs2 = "0.4"

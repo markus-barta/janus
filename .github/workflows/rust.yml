@@ -55,6 +55,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+          cache: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -62,6 +68,17 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - name: install smoke dependencies
         run: sudo apt-get update && sudo apt-get install -y age
+      - name: install pinned security tools
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+      - name: release security policy and negative fixtures
+        run: |
+          python3 scripts/check-release-docs.py
+          python3 scripts/check-security-gates.py --self-test
+          scripts/check-source-release.py --self-test
+          scripts/check-rust-audit.py --self-test
+          GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" scripts/test-gitleaks.sh
       - name: format
         run: cargo fmt --all -- --check
       - name: clippy
@@ -72,6 +89,21 @@ jobs:
         run: nix build .#janus-engine
       - name: engine release assurance gate
         run: scripts/assure-engine-release.sh
+      - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514
+        with:
+          version: v0.72.0
+      - name: build and smoke exact local candidate image
+        run: scripts/smoke-engine-container.sh
+      - name: scan candidate image and emit value-free summary
+        run: |
+          trivy image --scanners vuln --format json --output rust-trivy.json janus-engine:smoke
+          python3 scripts/check-security-gates.py --trivy-report rust-trivy.json --summary rust-trivy-summary.json
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: rust-candidate-security-summary
+          path: rust-trivy-summary.json
+          if-no-files-found: error
 
   image:
     # Only on a published GitHub Release whose tag starts with rust-engine-v.
@@ -88,6 +120,8 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository }}/janus-engine
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: verify release tag matches workspace version
         run: scripts/check-engine-release-tag.sh "${{ github.event.release.tag_name }}"
       - uses: docker/setup-qemu-action@v3
@@ -113,7 +147,31 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514
+        with:
+          version: v0.72.0
+      - name: scan exact published candidate digest
+        run: |
+          trivy image --scanners vuln --format json --output rust-trivy.json "${IMAGE}@${{ steps.build.outputs.digest }}"
+          python3 scripts/check-security-gates.py --trivy-report rust-trivy.json --summary rust-trivy-summary.json
       - uses: sigstore/cosign-installer@v3
+      - name: sign and verify released source binding
+        run: |
+          python3 scripts/create-source-release-manifest.py \
+            --repository "${{ github.repository }}" \
+            --tag "${{ github.event.release.tag_name }}" \
+            --commit "${{ github.sha }}" \
+            --workflow ".github/workflows/rust.yml" \
+            --image "${IMAGE}" \
+            --image-digest "${{ steps.build.outputs.digest }}" \
+            --output source-release.json
+          cosign sign-blob --yes --bundle source-release.sigstore.json source-release.json
+          scripts/check-source-release.py --manifest source-release.json --bundle source-release.sigstore.json
+          cosign verify-blob \
+            --bundle source-release.sigstore.json \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/rust.yml@refs/tags/${{ github.event.release.tag_name }}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            source-release.json
       - name: cosign sign (keyless)
         run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
       - name: SBOM (SPDX)
@@ -125,7 +183,13 @@ jobs:
       - name: upload SBOM release asset
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" rust-engine-sbom.spdx.json --clobber
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            rust-engine-sbom.spdx.json \
+            source-release.json \
+            source-release.sigstore.json \
+            rust-trivy-summary.json \
+            --clobber
       - name: build provenance attestation
         uses: actions/attest@v4
         with:

@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "owner": "JANUS-319",
+  "reviewed_on": "2026-07-22",
+  "database_max_age_days": 7,
+  "lanes": [
+    {
+      "id": "cargo-audit",
+      "version": "0.22.2",
+      "category": "rust_dependencies",
+      "blocking": true,
+      "exception_policy": "config/assurance/rust-advisory-exceptions-v1.json"
+    },
+    {
+      "id": "gitleaks",
+      "version": "8.30.1",
+      "category": "source_history_secrets",
+      "blocking": true,
+      "exception_policy": ".gitleaksignore"
+    },
+    {
+      "id": "govulncheck",
+      "version": "1.6.0",
+      "category": "go_dependencies",
+      "blocking": true,
+      "exception_policy": null
+    },
+    {
+      "id": "staticcheck",
+      "version": "0.7.0",
+      "category": "go_static_analysis",
+      "blocking": true,
+      "exception_policy": null
+    },
+    {
+      "id": "trivy",
+      "version": "0.72.0",
+      "category": "candidate_container",
+      "blocking": true,
+      "exception_policy": null,
+      "severities": ["CRITICAL", "HIGH"],
+      "reference_policy": "exact_release_digest"
+    }
+  ]
+}

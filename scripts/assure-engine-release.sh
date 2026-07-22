@@ -4,6 +4,9 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo}"
 
+echo "==> janus engine release assurance: release documentation contract"
+python3 scripts/check-release-docs.py
+
 echo "==> janus engine release assurance: trusted release admission fixtures"
 scripts/test-release-admission.sh
 

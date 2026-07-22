@@ -9,9 +9,9 @@ name: go-envelope
 on:
   push:
     branches: [main]
-    paths: ['go-envelope/**', 'config/assurance/minimization-proof-v1.json', 'scripts/run-minimization-proof.py', '.github/workflows/go-envelope.yml']
+    paths: ['go-envelope/**', 'config/assurance/**', 'config/release-channels/**', 'scripts/**', '.github/workflows/go-envelope.yml']
   pull_request:
-    paths: ['go-envelope/**', 'config/assurance/minimization-proof-v1.json', 'scripts/run-minimization-proof.py', '.github/workflows/go-envelope.yml']
+    paths: ['go-envelope/**', 'config/assurance/**', 'config/release-channels/**', 'scripts/**', '.github/workflows/go-envelope.yml']
   # Release the envelope image by pushing a tag like `go-envelope-v1.144`.
   release:
     types: [published]
@@ -27,6 +27,8 @@ jobs:
         working-directory: go-envelope
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26.5'
@@ -38,6 +40,29 @@ jobs:
       - run: go test ./...
       - name: cross-surface Go minimization proof
         run: python3 ../scripts/run-minimization-proof.py --stack go
+      - name: Gitleaks history and negative fixture
+        working-directory: .
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" scripts/test-gitleaks.sh
+      - name: scanner policy and negative fixtures
+        working-directory: .
+        run: python3 scripts/check-security-gates.py --self-test
+      - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514
+        with:
+          version: v0.72.0
+      - name: build and scan local candidate image
+        working-directory: .
+        run: |
+          docker build -t janus-envelope:security go-envelope
+          trivy image --scanners vuln --format json --output go-trivy.json janus-envelope:security
+          python3 scripts/check-security-gates.py --trivy-report go-trivy.json --summary go-trivy-summary.json
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: go-candidate-security-summary
+          path: go-trivy-summary.json
+          if-no-files-found: error
 
   image:
     # Only on a published GitHub Release whose tag starts with go-envelope-v.
@@ -53,6 +78,8 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository }}/janus-envelope
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -76,7 +103,33 @@ jobs:
           build-args: |
             JANUS_BUILD_COMMIT=${{ github.sha }}
             JANUS_BUILD_TIME=${{ github.event.release.published_at }}
+      - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514
+        with:
+          version: v0.72.0
+      - name: scan exact published candidate digest
+        working-directory: .
+        run: |
+          trivy image --scanners vuln --format json --output go-trivy.json "${IMAGE}@${{ steps.build.outputs.digest }}"
+          python3 scripts/check-security-gates.py --trivy-report go-trivy.json --summary go-trivy-summary.json
       - uses: sigstore/cosign-installer@v3
+      - name: sign and verify released source binding
+        working-directory: .
+        run: |
+          python3 scripts/create-source-release-manifest.py \
+            --repository "${{ github.repository }}" \
+            --tag "${{ github.event.release.tag_name }}" \
+            --commit "${{ github.sha }}" \
+            --workflow ".github/workflows/go-envelope.yml" \
+            --image "${IMAGE}" \
+            --image-digest "${{ steps.build.outputs.digest }}" \
+            --output source-release.json
+          cosign sign-blob --yes --bundle source-release.sigstore.json source-release.json
+          scripts/check-source-release.py --manifest source-release.json --bundle source-release.sigstore.json
+          cosign verify-blob \
+            --bundle source-release.sigstore.json \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/go-envelope.yml@refs/tags/${{ github.event.release.tag_name }}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            source-release.json
       - name: cosign sign (keyless)
         run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
       - name: SBOM (SPDX)
@@ -88,7 +141,13 @@ jobs:
       - name: upload SBOM release asset
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" sbom.spdx.json --clobber
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            sbom.spdx.json \
+            source-release.json \
+            source-release.sigstore.json \
+            go-trivy-summary.json \
+            --clobber
       - name: build provenance attestation
         uses: actions/attest-build-provenance@v1
         with:

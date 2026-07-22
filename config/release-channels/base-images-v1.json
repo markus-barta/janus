@@ -30,17 +30,8 @@
       "dockerfile": "Dockerfile.engine",
       "stage": "build",
       "name": "rust",
-      "tag": "1.97.1-bookworm",
-      "digest": "sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
-      "required_platforms": ["linux/amd64", "linux/arm64"]
-    },
-    {
-      "id": "rust-runtime",
-      "dockerfile": "Dockerfile.engine",
-      "stage": "runtime",
-      "name": "debian",
-      "tag": "bookworm-20260713-slim",
-      "digest": "sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
+      "tag": "1.97.1-alpine3.23",
+      "digest": "sha256:c4a364ddbf684fe038e6fa6a4f25b30c8dc85247423e0e660676ece0d17be4a2",
       "required_platforms": ["linux/amd64", "linux/arm64"]
     }
   ]

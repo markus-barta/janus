@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "owner": "JANUS-324",
+  "effective_on": "2026-07-22",
+  "repository": "markus-barta/janus",
+  "signed_subset": [
+    {
+      "tag_prefix": "go-envelope-v",
+      "workflow": ".github/workflows/go-envelope.yml",
+      "image": "ghcr.io/markus-barta/janus/janus-envelope"
+    },
+    {
+      "tag_prefix": "rust-engine-v",
+      "workflow": ".github/workflows/rust.yml",
+      "image": "ghcr.io/markus-barta/janus/janus-engine"
+    }
+  ],
+  "method": {
+    "tool": "cosign",
+    "mode": "keyless_oidc",
+    "issuer": "https://token.actions.githubusercontent.com",
+    "identity_prefix": "https://github.com/markus-barta/janus/",
+    "artifact": "source-release.json",
+    "bundle": "source-release.sigstore.json"
+  },
+  "recovery": "Rerun the release workflow only for the unchanged reviewed tag and commit. A workflow identity or repository change requires a reviewed policy update before signing resumes.",
+  "history": "Existing releases before effective_on are grandfathered without rewriting commits or tags; every release on or after effective_on must carry the source bundle while image signing remains mandatory."
+}

@@ -16,7 +16,7 @@ name = "janus-warden"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
+anyhow = "=1.0.103"
 async-trait = "0.1"
 janus-core = { path = "../janus-core" }
 janus-local = { path = "../janus-local" }

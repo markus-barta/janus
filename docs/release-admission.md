@@ -17,7 +17,7 @@ repository changes and increment `policy_version` when their meaning changes.
 Admission runs outside the image being admitted:
 
 ```bash
-JANUS_ENGINE_RELEASE_TAG="rust-engine-v0.1.9" # replace with the reviewed release
+JANUS_ENGINE_RELEASE_TAG="rust-engine-v0.1.10" # replace with the reviewed release
 scripts/admit-engine-release.sh \
   --policy config/release-channels/v1.json \
   --channel stable \
@@ -34,6 +34,17 @@ and SPDX SBOM attestations against the policy, rejects development tags and
 revoked digests, and writes the receipt atomically with read-only permissions.
 The deployment layer must supply the digest independently to the runtime; a
 receipt cannot authorize a different configured digest.
+
+The release also carries `source-release.json` and
+`source-release.sigstore.json`. The first deterministically binds the released
+repository, tag, commit, workflow, image name, and exact image digest; the
+second is its keyless GitHub OIDC Sigstore bundle. Release CI verifies the exact
+issuer and workflow identity before publishing either asset. This policy covers
+`rust-engine-v*` and `go-envelope-v*` releases, not every development commit or
+merge. Existing releases before 2026-07-22 are retained without rewriting
+history. If GitHub workflow identity changes, release signing pauses until the
+versioned source-signing policy is reviewed; otherwise recovery reruns the
+unchanged tag and commit.
 
 ## Runtime configuration
 

@@ -1,8 +1,134 @@
 //! Manifest-derived allowlist catalog.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::path::Path;
 
-use crate::{JanusError, JanusResult, SecretDescriptor, SecretMeta, SecretName, SecretRef};
+use serde::Deserialize;
+
+use crate::{
+    JanusError, JanusResult, ProfileId, ProjectId, SafeLabel, ScopeRef, SecretDescriptor,
+    SecretLifecycle, SecretMeta, SecretMetadataOverlay, SecretName, SecretRef, TrustLevel,
+};
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretspecManifestToml {
+    project: SecretspecProjectToml,
+    profiles: BTreeMap<String, SecretspecProfileToml>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretspecProjectToml {
+    name: String,
+    revision: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SecretspecProfileToml {
+    #[serde(default)]
+    defaults: SecretspecDefaultsToml,
+    #[serde(flatten)]
+    secrets: BTreeMap<String, SecretspecSecretToml>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretspecDefaultsToml {
+    required: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretspecSecretToml {
+    description: Option<String>,
+    required: Option<bool>,
+}
+
+/// Load the strict Secretspec manifest subset that Janus uses as its allowlist.
+///
+/// Janus intentionally parses only project identity, named profiles, descriptions,
+/// and required flags. Provider construction and secret generation stay outside
+/// this parser, so an unused RSA generator cannot enter the production graph.
+pub fn load_secretspec_manifest_catalog(
+    path: impl AsRef<Path>,
+    profile: &str,
+    scope: &ScopeRef,
+    metadata: Option<&SecretMetadataOverlay>,
+) -> JanusResult<(ProjectId, ManifestCatalog)> {
+    let content = fs::read_to_string(path).map_err(|err| JanusError::StoreUnavailable {
+        detail: format!("secretspec manifest could not be read: {}", err.kind()),
+    })?;
+    parse_secretspec_manifest_catalog(&content, profile, scope, metadata)
+}
+
+fn parse_secretspec_manifest_catalog(
+    content: &str,
+    profile: &str,
+    scope: &ScopeRef,
+    metadata: Option<&SecretMetadataOverlay>,
+) -> JanusResult<(ProjectId, ManifestCatalog)> {
+    if profile.is_empty() || profile.trim() != profile {
+        return Err(JanusError::InvalidManifest {
+            detail: "secretspec profile is invalid".to_string(),
+        });
+    }
+    let parsed: SecretspecManifestToml =
+        toml::from_str(content).map_err(|_| JanusError::InvalidManifest {
+            detail: "secretspec manifest schema is invalid".to_string(),
+        })?;
+    if parsed.project.name.is_empty()
+        || parsed.project.name.trim() != parsed.project.name
+        || parsed.project.revision.is_empty()
+        || parsed.project.revision.trim() != parsed.project.revision
+    {
+        return Err(JanusError::InvalidManifest {
+            detail: "secretspec project identity is invalid".to_string(),
+        });
+    }
+    let profile = parsed
+        .profiles
+        .get(profile)
+        .ok_or_else(|| JanusError::InvalidManifest {
+            detail: format!("missing secretspec profile {profile}"),
+        })?;
+    if profile.secrets.is_empty() {
+        return Err(JanusError::InvalidManifest {
+            detail: "secretspec profile has no declared secrets".to_string(),
+        });
+    }
+
+    let project = ProjectId::new(parsed.project.name)?;
+    let mut entries = Vec::with_capacity(profile.secrets.len());
+    for (name, secret) in &profile.secrets {
+        let name = SecretName::new(name.clone())?;
+        entries.push(SecretMeta {
+            secret_ref: SecretRef::for_manifest_entry(scope, &name),
+            name: name.clone(),
+            label: SafeLabel::new(
+                secret
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| "Manifest-declared secret".to_string()),
+            )?,
+            scope: scope.clone(),
+            owner: None,
+            classification: None,
+            lifecycle: SecretLifecycle::Active,
+            required: secret
+                .required
+                .or(profile.defaults.required)
+                .unwrap_or(true),
+            trust_level: TrustLevel::L1,
+            allowed_uses: vec![ProfileId::new(format!("profile.{}", name.as_str()))?],
+        });
+    }
+    if let Some(metadata) = metadata {
+        metadata.apply_to_entries(&mut entries)?;
+    }
+    Ok((project, ManifestCatalog::new(entries)?))
+}
 
 /// Manifest allowlist with stable name-to-ref mapping.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,5 +226,59 @@ mod tests {
     fn catalog_rejects_duplicate_names() {
         let err = ManifestCatalog::new(vec![meta("CANARY"), meta("CANARY")]).unwrap_err();
         assert!(matches!(err, JanusError::InvalidManifest { .. }));
+    }
+
+    #[test]
+    fn strict_secretspec_subset_builds_a_deterministic_catalog() {
+        let scope = crate::test_scope("dev");
+        let (project, catalog) = parse_secretspec_manifest_catalog(
+            r#"
+            [project]
+            name = "janus"
+            revision = "1.0"
+
+            [profiles.default]
+            defaults = { required = false }
+            OPTIONAL = { description = "Optional fixture" }
+            REQUIRED = { description = "Required fixture", required = true }
+            "#,
+            "default",
+            &scope,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(project.as_str(), "janus");
+        assert_eq!(catalog.entries().len(), 2);
+        assert_eq!(catalog.entries()[0].name.as_str(), "OPTIONAL");
+        assert!(!catalog.entries()[0].required);
+        assert_eq!(catalog.entries()[1].name.as_str(), "REQUIRED");
+        assert!(catalog.entries()[1].required);
+    }
+
+    #[test]
+    fn strict_secretspec_subset_rejects_generator_and_provider_expansion() {
+        let scope = crate::test_scope("dev");
+        for unsupported in [
+            r#"
+            [project]
+            name = "janus"
+            revision = "1.0"
+            provider = "dotenv:.env"
+            [profiles.default]
+            CANARY = { description = "Canary" }
+            "#,
+            r#"
+            [project]
+            name = "janus"
+            revision = "1.0"
+            [profiles.default]
+            CANARY = { description = "Canary", generate = "rsa_private_key" }
+            "#,
+        ] {
+            let err = parse_secretspec_manifest_catalog(unsupported, "default", &scope, None)
+                .unwrap_err();
+            assert!(matches!(err, JanusError::InvalidManifest { .. }));
+        }
     }
 }

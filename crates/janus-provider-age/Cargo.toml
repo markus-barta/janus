@@ -12,11 +12,11 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-age = { version = "=0.11.3", default-features = false, features = ["ssh"] }
+age = { version = "=0.12.1", default-features = false, features = ["ssh"] }
 async-trait = "0.1"
 fs2 = "0.4"
 janus-core = { path = "../janus-core" }
-secretspec = { version = "=0.11.0", default-features = false }
+ssh-key = { version = "=0.6.7", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["rt"] }
 zeroize = "1"
 

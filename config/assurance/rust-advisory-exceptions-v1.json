@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "owner": "JANUS-317",
+  "created_on": "2026-07-22",
+  "reviewed_on": "2026-07-22",
+  "expires_on": "2026-10-20",
+  "review_cadence_days": 30,
+  "runtime_restrictions": [
+    "age encryption accepts only native age and ssh-ed25519 key material",
+    "ssh-rsa recipients and identities are rejected before age parsing",
+    "the Rust engine exposes no network listener and its staged container has network disabled"
+  ],
+  "exceptions": [
+    {
+      "package": "rsa",
+      "version": "0.9.10",
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2023-0071",
+      "dependency_paths": [
+        ["rsa", "age", "janus-provider-age"],
+        ["rsa", "ssh-key", "janus-provider-age"]
+      ],
+      "rationale": "age 0.12.1 compiles RSA as part of SSH support and unifies that feature onto Janus's algorithm-inspection use of ssh-key, but Janus accepts only ssh-ed25519 and native age material; the vulnerable RSA operation is unreachable and no remote timing oracle exists.",
+      "upstream": "https://github.com/RustCrypto/RSA/issues/626"
+    },
+    {
+      "package": "proc-macro-error2",
+      "version": "2.0.1",
+      "kind": "unmaintained",
+      "advisory": "RUSTSEC-2026-0173",
+      "dependency_paths": [
+        ["proc-macro-error2", "i18n-embed-fl", "age", "janus-provider-age"]
+      ],
+      "rationale": "This compile-time-only macro is retained by age 0.12.1 through i18n-embed-fl and is absent from the runtime image as a library or executable.",
+      "upstream": "https://github.com/GnomedDev/proc-macro-error-2/issues/17"
+    },
+    {
+      "package": "spin",
+      "version": "0.9.8",
+      "kind": "yanked",
+      "advisory": null,
+      "dependency_paths": [
+        ["spin", "lazy_static", "age", "janus-provider-age"],
+        ["spin", "lazy_static", "num-bigint-dig", "rsa", "age", "janus-provider-age"]
+      ],
+      "rationale": "The yanked version is selected only by age's RSA dependency graph; it has no RustSec vulnerability and remains bounded by the same unreachable-RSA restrictions.",
+      "upstream": "https://github.com/str4d/rage/issues"
+    }
+  ]
+}

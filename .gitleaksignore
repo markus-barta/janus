@@ -7,5 +7,5 @@ ba07499ed09f1a65f43bf64be65cbdd1d49337ee:go-envelope/vault_ui_test.go:generic-ap
 
 # Current tracked-tree positions for the same required synthetic fixtures.
 go-envelope/vault_ui_test.go:generic-api-key:480
-crates/janus-provider-age/src/lib.rs:private-key:1264
+crates/janus-provider-age/src/lib.rs:private-key:1248
 go-envelope/main_test.go:generic-api-key:743
