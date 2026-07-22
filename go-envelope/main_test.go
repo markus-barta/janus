@@ -3843,8 +3843,11 @@ func hasTestRole(roles []string, want string) bool {
 
 func TestRateLimiterBlocksBurst(t *testing.T) {
 	limiter := NewRateLimiter(2, time.Minute)
-	if !limiter.Allow("test") || !limiter.Allow("test") {
-		t.Fatal("expected first two requests to pass")
+	if !limiter.Allow("test") {
+		t.Fatal("expected first request to pass")
+	}
+	if !limiter.Allow("test") {
+		t.Fatal("expected second request to pass")
 	}
 	if limiter.Allow("test") {
 		t.Fatal("expected third request to be limited")
