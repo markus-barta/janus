@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Temporary command-injection fixture for the JANUS-340 ruleset proof."""
+"""Temporary remote-command-injection fixture for the JANUS-340 ruleset proof."""
 
 from __future__ import annotations
 
 import subprocess
-import sys
+
+from flask import Flask, request
 
 
-def main() -> int:
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: janus-340-codeql-proof.py COMMAND")
-    subprocess.run(sys.argv[1], check=True, shell=True)
-    return 0
+app = Flask(__name__)
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+@app.get("/proof")
+def proof() -> str:
+    command = request.args.get("command", "")
+    return subprocess.check_output(command, shell=True, text=True)
