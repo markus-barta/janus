@@ -8,7 +8,7 @@ COPY config/release-channels/v1.json ./config/release-channels/v1.json
 COPY config/authorization/role-matrix-v1.json ./config/authorization/role-matrix-v1.json
 RUN set -eux; \
     case "${TARGETARCH}" in amd64|arm64) ;; *) echo "unsupported target arch: ${TARGETARCH}" >&2; exit 1 ;; esac; \
-    cargo build --locked --release -p janusd -p janus-warden --bins; \
+    cargo build --locked --release -p janusd -p janus-host -p janus-warden --bins; \
     mkdir -p \
       /out/rootfs/etc/janus \
       /out/rootfs/etc/ssl/certs \
@@ -21,6 +21,7 @@ RUN set -eux; \
     cp target/release/janusd-use /out/rootfs/usr/local/bin/janusd-use; \
     cp target/release/janusd-admin /out/rootfs/usr/local/bin/janusd-admin; \
     cp target/release/janusd-web-transactiond /out/rootfs/usr/local/bin/janusd-web-transactiond; \
+    cp target/release/janus-host-executor /out/rootfs/usr/local/bin/janus-host-executor; \
     cp target/release/janus-warden /out/rootfs/usr/local/bin/janus-warden; \
     cp config/release-channels/v1.json /out/rootfs/etc/janus/release-channels-v1.json; \
     cp /etc/ssl/certs/ca-certificates.crt /out/rootfs/etc/ssl/certs/ca-certificates.crt

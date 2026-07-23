@@ -11,6 +11,7 @@ members = [
     "crates/janus-local",
     "crates/janus-warden",
     "crates/janus-forge",
+    "crates/janus-host",
     "crates/janus-mock",
     "crates/janus-providers",
     "crates/janusd",

@@ -1,0 +1,32 @@
+[package]
+name = "janus-host"
+description = "Host-bound encrypted cache and private runtime materializer for Janus."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "janus-host-executor"
+path = "src/bin/janus-host-executor.rs"
+test = false
+
+[dependencies]
+age = { version = "=0.12.1", default-features = false, features = ["ssh"] }
+base64 = "0.21"
+ed25519-dalek = "2"
+fs2 = "0.4"
+janus-core = { path = "../janus-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ssh-key = { version = "=0.6.7", default-features = false, features = ["std"] }
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
