@@ -33,11 +33,18 @@ fn env_usize(name: &str, fallback: usize) -> usize {
         .unwrap_or(fallback)
 }
 
+fn property_cases(local_cases: u32) -> u32 {
+    if env::var("JANUS_PROPERTY_REPLAY_ONLY").as_deref() == Ok("1") {
+        return 0;
+    }
+    env_usize("JANUS_PROPERTY_CASES", local_cases as usize)
+        .try_into()
+        .unwrap_or(u32::MAX)
+}
+
 fn property_config(local_cases: u32) -> ProptestConfig {
     ProptestConfig {
-        cases: env_usize("JANUS_PROPERTY_CASES", local_cases as usize)
-            .try_into()
-            .unwrap_or(u32::MAX),
+        cases: property_cases(local_cases),
         max_shrink_iters: env_usize("JANUS_PROPERTY_MAX_SHRINK_ITERATIONS", 4096)
             .try_into()
             .unwrap_or(u32::MAX),

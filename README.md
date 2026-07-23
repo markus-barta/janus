@@ -222,9 +222,12 @@ The behavioral assurance script is intentionally not presented as the complete
 release gate; formatting, strict Clippy, container, and scanner checks remain
 separate commands above and are combined by release CI.
 
-When a novel security property fails, CI preserves a seven-day replay artifact
-containing only its reviewed target, bounded budget, opaque RNG seed, and
-derived replay identity. Download it with
+When one or more novel security properties fail in a target, CI preserves a
+seven-day replay artifact containing only its reviewed target, bounded budget,
+opaque RNG seeds, and derived replay identity. Replay first proves the
+zero-case target baseline, then tests saved seeds one at a time with novel case
+generation disabled until a failure is reproduced; timeouts and baseline
+failures are never reported as a reproduction. Download the artifact with
 `gh run download RUN_ID --name rust-property-replay --dir .tmp`, then run
 `python3 scripts/run-security-properties.py --replay
 .tmp/janus-property-replay.json`. The full handling contract lives in PPM
