@@ -42,7 +42,7 @@ try:
 finally:
     subprocess.run(["docker", "rm", "-f", container], check=False, capture_output=True)
 
-for binary in ("janusd", "janusd-use", "janusd-admin", "janusd-web-transactiond", "janus-warden"):
+for binary in ("janusd", "janusd-use", "janusd-admin", "janusd-web-transactiond", "janus-host-executor", "janus-warden"):
     path = f"/usr/local/bin/{binary}"
     member = members.get(path)
     if member is None or not member.isfile() or member.mode & 0o111 == 0:
@@ -60,7 +60,7 @@ policy = members.get("/etc/janus/release-channels-v1.json")
 if policy is None or not policy.isfile() or policy.mode & 0o022:
     raise SystemExit("release policy is absent or group/world writable")
 
-print("engine image filesystem ok user=65532:65532 binaries=5 runtime_packages=0 shell=none")
+print("engine image filesystem ok user=65532:65532 binaries=6 runtime_packages=0 shell=none")
 PY
 
 runtime=(
@@ -81,6 +81,11 @@ done
 if "${runtime[@]}" --entrypoint /usr/local/bin/janusd-web-transactiond \
   "${image}" --help >/dev/null 2>&1; then
   echo "janusd-web-transactiond unexpectedly accepted argv" >&2
+  exit 1
+fi
+if "${runtime[@]}" --entrypoint /usr/local/bin/janus-host-executor \
+  "${image}" --help >/dev/null 2>&1; then
+  echo "janus-host-executor unexpectedly accepted an unreviewed action" >&2
   exit 1
 fi
 

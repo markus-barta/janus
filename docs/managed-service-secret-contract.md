@@ -106,6 +106,47 @@ The executor is bound to one enrolled host and reviewed service/slot profiles.
 It may not choose paths, commands, secret refs, destinations, or health rules.
 Copying an operation or encrypted envelope to another host must fail.
 
+`janus-host-executor` accepts only `install`, `restore`, `commit`, `rollback`,
+and `status`. Install reads one bounded signed packet from standard input;
+commit and rollback read one strict value-free control document. The
+root-owned configuration fixes the host, scope, Janus producer verification
+keys, revocation epoch, declared slots, declaration fingerprints, generation
+floors, and rollback windows. Runtime paths are derived as
+`/run/janus-managed/<service_ref>/<slot_ref>.env`; neither a browser nor a
+Pharos request can select a path.
+
+Every packet is Ed25519-signed by a pinned Janus producer over the exact Age
+ciphertext, then Age-encrypted to exactly one host recipient. Recipient
+encryption alone is not treated as producer authentication. The encrypted
+payload binds envelope, operation, host, service, slot, secret, scope,
+declaration, generation, revocation epoch, issue time, and expiry. Copying the
+packet to a host with a different identity fails decryption; encrypting a fake
+packet to a public host recipient fails the Janus signature check.
+
+Only the signed packet and a value-free integrity state are stored under
+`/var/lib/janus-host-executor`, with private directories, regular single-link
+files, atomic replacement, directory sync, and a per-slot lock. Plaintext is
+written atomically as a mode-0400 runtime file under `/run`; it never enters
+the cache, argv, environment, Nix store, Git, Pharos, status, or errors.
+Symlinked, hard-linked, partial, oversized, stale, downgraded, revoked,
+expired, cross-host, cross-scope, cross-slot, and declaration-drift inputs fail
+closed.
+
+The current ciphertext restores the runtime file after reboot without central
+Janus. Replacement retains exactly one previous signed ciphertext for a
+bounded rollback window. Commit removes it; rollback expiry blocks unsafe
+startup rather than silently accepting either generation. An interrupted
+atomic replacement is reconciled only when the old state and both signed
+packets prove the exact before/after relationship. A corrupt state or partial
+file is rejected.
+
+Host-key rotation requires a newly signed envelope for the new recipient
+before the old identity is removed. Raising the declarative revocation epoch
+rejects all older packets. A retired host removes known runtime files and
+refuses restore/install. A lost or compromised host cannot be remotely erased:
+operators must retire its identity, raise the epoch, and replace every secret
+it could legitimately consume.
+
 ### nixcfg and Nix
 
 nixcfg declares value-free service slots and fixed profile references. Secret
@@ -147,7 +188,8 @@ the duration and blast radius; they do not erase this boundary.
 
 Authority uses domain-separated opaque refs (`host_`, `svc_`, `slot_`,
 `delivery_`, `reload_`, `health_`, `intent_`, `hsn_`, `sys_`, `nonce_`,
-`op_`, `sec_`, `gen_`, `evt_`, `decl_`) rather than raw names, paths, or URLs.
+`op_`, `sec_`, `gen_`, `env_`, `key_`, `evt_`, `decl_`) rather than raw names,
+paths, or URLs.
 Safe display labels are bounded, trimmed, and reject control, bidirectional,
 zero-width, and non-ordinary whitespace characters, but are never authority.
 Reason codes use a closed lowercase vocabulary.
