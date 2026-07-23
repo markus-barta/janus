@@ -100,6 +100,14 @@ def validate_workflows() -> None:
         "python3 scripts/check-action-pins.py --self-test" in local,
         "local release-security gate does not enforce immutable GitHub Action pins",
     )
+    require(
+        "python3 scripts/smoke-warden-mcp.py --self-test" in security,
+        "required security CI does not test Warden smoke status output",
+    )
+    require(
+        "python3 scripts/smoke-warden-mcp.py --self-test" in local,
+        "local release-security gate does not test Warden smoke status output",
+    )
     require("--check-installed-tools" in local, "local scanner-version gate is not wired")
 
 
