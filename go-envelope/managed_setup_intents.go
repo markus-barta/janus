@@ -557,6 +557,11 @@ type managedAcceptedIntent struct {
 	OperationRef string
 }
 
+type managedSetupIntentAuthority interface {
+	Inspect(context.Context, string, string) (managedSetupIntent, error)
+	Consume(context.Context, string, string) (managedAcceptedIntent, error)
+}
+
 type managedSetupIntentConsumer struct {
 	fetcher     managedIntentFetcher
 	keyring     managedIntentKeyring
@@ -567,40 +572,49 @@ type managedSetupIntentConsumer struct {
 	now         func() time.Time
 }
 
-func (consumer *managedSetupIntentConsumer) Consume(ctx context.Context, intentRef, humanSessionRef string) (managedAcceptedIntent, error) {
+func (consumer *managedSetupIntentConsumer) Inspect(ctx context.Context, intentRef, humanSessionRef string) (managedSetupIntent, error) {
 	if !validManagedRef("intent_", intentRef) || !validManagedRef("hsn_", humanSessionRef) {
-		return managedAcceptedIntent{}, managedIntentError("managed_intent_invalid_request")
+		return managedSetupIntent{}, managedIntentError("managed_intent_invalid_request")
 	}
 	envelope, err := consumer.fetcher.Fetch(ctx, intentRef)
 	if err != nil {
-		return managedAcceptedIntent{}, normalizeManagedIntentError(err)
+		return managedSetupIntent{}, normalizeManagedIntentError(err)
 	}
 	intent, err := verifyManagedSetupIntent(envelope, consumer.keyring)
+	if err != nil {
+		return managedSetupIntent{}, err
+	}
+	now := consumer.now().Unix()
+	if intent.IntentRef != intentRef {
+		return managedSetupIntent{}, managedIntentError("managed_intent_reference_mismatch")
+	}
+	if intent.IssuerRef != consumer.issuerRef {
+		return managedSetupIntent{}, managedIntentError("managed_intent_wrong_issuer")
+	}
+	if intent.AudienceRef != consumer.audienceRef {
+		return managedSetupIntent{}, managedIntentError("managed_intent_wrong_audience")
+	}
+	if intent.HumanSessionRef != humanSessionRef {
+		return managedSetupIntent{}, managedIntentError("managed_intent_wrong_user")
+	}
+	if intent.IssuedAtUnixSeconds > now+managedIntentClockSkewSeconds {
+		return managedSetupIntent{}, managedIntentError("managed_intent_not_yet_valid")
+	}
+	if now >= intent.ExpiresAtUnixSeconds {
+		return managedSetupIntent{}, managedIntentError("managed_intent_expired")
+	}
+	if err := consumer.declaration.Matches(intent); err != nil {
+		return managedSetupIntent{}, normalizeManagedIntentError(err)
+	}
+	return intent, nil
+}
+
+func (consumer *managedSetupIntentConsumer) Consume(ctx context.Context, intentRef, humanSessionRef string) (managedAcceptedIntent, error) {
+	intent, err := consumer.Inspect(ctx, intentRef, humanSessionRef)
 	if err != nil {
 		return managedAcceptedIntent{}, err
 	}
 	now := consumer.now().Unix()
-	if intent.IntentRef != intentRef {
-		return managedAcceptedIntent{}, managedIntentError("managed_intent_reference_mismatch")
-	}
-	if intent.IssuerRef != consumer.issuerRef {
-		return managedAcceptedIntent{}, managedIntentError("managed_intent_wrong_issuer")
-	}
-	if intent.AudienceRef != consumer.audienceRef {
-		return managedAcceptedIntent{}, managedIntentError("managed_intent_wrong_audience")
-	}
-	if intent.HumanSessionRef != humanSessionRef {
-		return managedAcceptedIntent{}, managedIntentError("managed_intent_wrong_user")
-	}
-	if intent.IssuedAtUnixSeconds > now+managedIntentClockSkewSeconds {
-		return managedAcceptedIntent{}, managedIntentError("managed_intent_not_yet_valid")
-	}
-	if now >= intent.ExpiresAtUnixSeconds {
-		return managedAcceptedIntent{}, managedIntentError("managed_intent_expired")
-	}
-	if err := consumer.declaration.Matches(intent); err != nil {
-		return managedAcceptedIntent{}, normalizeManagedIntentError(err)
-	}
 	operationRef, err := consumer.replays.consume(intent, now)
 	if err != nil {
 		return managedAcceptedIntent{}, normalizeManagedIntentError(err)

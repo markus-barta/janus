@@ -116,6 +116,31 @@ func TestManagedIntentConsumesOnceAndSupportsSafeKeyRotation(t *testing.T) {
 	}
 }
 
+func TestManagedIntentInspectionIsValueFreeAndDoesNotConsumeReplayBudget(t *testing.T) {
+	now := int64(1_784_833_200)
+	intent := managedTestIntent(now)
+	envelope, key := signManagedTestIntent(t, 7, "key_primary0001", intent)
+	consumer := managedTestConsumer(
+		t,
+		envelope,
+		managedIntentKeyring{"key_primary0001": key},
+		now+1,
+	)
+	for attempt := 0; attempt < 2; attempt++ {
+		inspected, err := consumer.Inspect(context.Background(), intent.IntentRef, intent.HumanSessionRef)
+		if err != nil || inspected != intent {
+			t.Fatalf("inspection %d failed: inspected=%#v err=%v", attempt, inspected, err)
+		}
+	}
+	accepted, err := consumer.Consume(context.Background(), intent.IntentRef, intent.HumanSessionRef)
+	if err != nil || accepted.Intent != intent || !validManagedRef("op_", accepted.OperationRef) {
+		t.Fatalf("inspection consumed or changed the intent: accepted=%#v err=%v", accepted, err)
+	}
+	if _, err := consumer.Consume(context.Background(), intent.IntentRef, intent.HumanSessionRef); err == nil || err.Error() != "managed_intent_replayed" {
+		t.Fatalf("only the committed consume should spend replay budget: %v", err)
+	}
+}
+
 func TestManagedIntentRejectsIdentityTimeAudienceDriftAndTampering(t *testing.T) {
 	now := int64(1_784_833_200)
 	tests := []struct {

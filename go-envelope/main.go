@@ -27,22 +27,28 @@ import (
 )
 
 const (
-	sessionCookie     = "janus_session"
-	hostSessionCookie = "__Host-janus_session"
-	stateCookie       = "janus_oidc_state"
-	hostStateCookie   = "__Host-janus_oidc_state"
-	nonceCookie       = "janus_oidc_nonce"
-	hostNonceCookie   = "__Host-janus_oidc_nonce"
-	pkceCookie        = "janus_oidc_pkce"
-	hostPKCECookie    = "__Host-janus_oidc_pkce"
-	returnCookie      = "janus_oidc_return"
-	hostReturnCookie  = "__Host-janus_oidc_return"
-	attemptCookie     = "janus_oidc_attempt"
-	hostAttemptCookie = "__Host-janus_oidc_attempt"
-	defaultSessionTTL = 12 * time.Hour
-	loginAttemptTTL   = 10 * time.Minute
-	maxLoginAttempts  = 3
-	maxRequestBody    = int64(4096)
+	sessionCookie          = "janus_session"
+	hostSessionCookie      = "__Host-janus_session"
+	stateCookie            = "janus_oidc_state"
+	hostStateCookie        = "__Host-janus_oidc_state"
+	nonceCookie            = "janus_oidc_nonce"
+	hostNonceCookie        = "__Host-janus_oidc_nonce"
+	pkceCookie             = "janus_oidc_pkce"
+	hostPKCECookie         = "__Host-janus_oidc_pkce"
+	returnCookie           = "janus_oidc_return"
+	hostReturnCookie       = "__Host-janus_oidc_return"
+	attemptCookie          = "janus_oidc_attempt"
+	hostAttemptCookie      = "__Host-janus_oidc_attempt"
+	stepUpFlowCookie       = "janus_managed_stepup_flow"
+	hostStepUpFlowCookie   = "__Host-janus_managed_stepup_flow"
+	stepUpProofCookie      = "janus_managed_stepup_proof"
+	hostStepUpProofCookie  = "__Host-janus_managed_stepup_proof"
+	managedLoginCookie     = "janus_managed_login_intent"
+	hostManagedLoginCookie = "__Host-janus_managed_login_intent"
+	defaultSessionTTL      = 12 * time.Hour
+	loginAttemptTTL        = 10 * time.Minute
+	maxLoginAttempts       = 3
+	maxRequestBody         = int64(4096)
 )
 
 type Config struct {
@@ -111,6 +117,27 @@ func (c Config) AttemptCookieName() string {
 		return hostAttemptCookie
 	}
 	return attemptCookie
+}
+
+func (c Config) StepUpFlowCookieName() string {
+	if c.SecureCookies() {
+		return hostStepUpFlowCookie
+	}
+	return stepUpFlowCookie
+}
+
+func (c Config) StepUpProofCookieName() string {
+	if c.SecureCookies() {
+		return hostStepUpProofCookie
+	}
+	return stepUpProofCookie
+}
+
+func (c Config) ManagedLoginCookieName() string {
+	if c.SecureCookies() {
+		return hostManagedLoginCookie
+	}
+	return managedLoginCookie
 }
 
 type SecretDescriptor struct {
@@ -326,8 +353,8 @@ type App struct {
 	oauth        *oauth2.Config
 	verifier     *oidc.IDTokenVerifier
 	templates    *template.Template
-	managedSetup *managedSetupIntentConsumer
-	managedTxn   *managedTransactionClient
+	managedSetup managedSetupIntentAuthority
+	managedTxn   managedTransactionExecutor
 }
 
 type Session struct {
@@ -589,6 +616,9 @@ func (app *App) routeSpecs() []routeSpec {
 		{pattern: "GET /login", permission: PermissionHealthRead, handler: app.handleLogin},
 		{pattern: "GET /auth/reset", permission: PermissionHealthRead, handler: app.handleAuthReset},
 		{pattern: "GET /oidc/callback", permission: PermissionHealthRead, handler: app.handleCallback},
+		{pattern: "GET /managed-service/setup", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetup},
+		{pattern: "POST /managed-service/setup/step-up", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetupStepUp},
+		{pattern: "POST /managed-service/setup/execute", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetupExecute},
 		{pattern: "POST /logout", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleLogout},
 		{pattern: "GET /auth/smoke", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleAuthSmokePage},
 		{pattern: "GET /session-witness", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleSessionWitnessPage},
@@ -650,13 +680,13 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/access", "/requests", "/ledger", "/assurance", "/settings", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/access", "/requests", "/ledger", "/assurance", "/settings", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/managed-service/setup", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
 	case "/session-witness/verify-current":
 		return []string{http.MethodPost}, true
-	case "/logout", "/api/warden/resolve", "/api/permits", "/ui/warden/resolve", "/ui/permits":
+	case "/logout", "/managed-service/setup/step-up", "/managed-service/setup/execute", "/api/warden/resolve", "/api/permits", "/ui/warden/resolve", "/ui/permits":
 		return []string{http.MethodPost}, true
 	case "/api/auth/session-witness/verify":
 		return []string{http.MethodPost}, true
@@ -817,6 +847,13 @@ func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				if r.URL.Path == "/managed-service/setup" {
+					if intentRef, valid := exactManagedIntentQuery(r.URL); valid {
+						app.writeManagedLoginIntent(w, intentRef)
+						app.renderLoginLanding(w, r)
+						return
+					}
+				}
 				if _, safe := safeLoginReturnPath(r.URL.RequestURI()); safe {
 					app.renderLoginLanding(w, r)
 					return
@@ -1727,6 +1764,21 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		app.renderSetup(w, r)
 		return
 	}
+	if _, err := firstCookie(
+		r,
+		app.cfg.StepUpFlowCookieName(),
+		stepUpFlowCookie,
+		app.cfg.StepUpProofCookieName(),
+		stepUpProofCookie,
+	); err == nil {
+		app.clearManagedStepUpCookies(w)
+	}
+	managedLogin := r.URL.Query().Get("managed") == "1"
+	_, managedLoginValid := app.readManagedLoginIntent(r)
+	_, managedLoginPresentErr := firstCookie(r, app.cfg.ManagedLoginCookieName(), managedLoginCookie)
+	if managedLoginPresentErr == nil && (!managedLogin || !managedLoginValid) {
+		app.clearManagedLoginIntentCookies(w)
+	}
 	if r.URL.Query().Get("reset") == "1" {
 		app.handleAuthReset(w, r)
 		return
@@ -1751,33 +1803,9 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	state := randomToken(32)
 	nonce := randomToken(32)
 	verifier := oauth2.GenerateVerifier()
-	http.SetCookie(w, &http.Cookie{
-		Name:     app.cfg.StateCookieName(),
-		Value:    state,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   app.cfg.SecureCookies(),
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   300,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     app.cfg.NonceCookieName(),
-		Value:    nonce,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   app.cfg.SecureCookies(),
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   300,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     app.cfg.PKCECookieName(),
-		Value:    verifier,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   app.cfg.SecureCookies(),
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   300,
-	})
+	app.writeOIDCEphemeralCookie(w, app.cfg.StateCookieName(), state)
+	app.writeOIDCEphemeralCookie(w, app.cfg.NonceCookieName(), nonce)
+	app.writeOIDCEphemeralCookie(w, app.cfg.PKCECookieName(), verifier)
 	app.audit(r, "auth.login.start", "allowed", "", "")
 	http.Redirect(w, r, app.oauth.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce), oauth2.S256ChallengeOption(verifier)), http.StatusFound)
 }
@@ -1799,13 +1827,19 @@ func (app *App) handleAuthReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) renderLoginLanding(w http.ResponseWriter, r *http.Request) {
+	startHref := loginRedirectTarget(r)
+	if r.URL.Path == "/managed-service/setup" {
+		if _, ok := exactManagedIntentQuery(r.URL); ok {
+			startHref = "/login?managed=1"
+		}
+	}
 	renderTemplateStatus(w, app.templates, "login_landing", http.StatusOK, map[string]any{
 		"Title":         "Janus login",
 		"CSPNonce":      cspNonceFromContext(r.Context()),
 		"Mode":          app.cfg.ProductMode,
 		"Session":       Session{},
 		"AuthScreen":    true,
-		"StartHref":     loginRedirectTarget(r),
+		"StartHref":     startHref,
 		"ValueReturned": false,
 	})
 }
@@ -1826,6 +1860,14 @@ func (app *App) renderNoAccess(w http.ResponseWriter, r *http.Request) {
 func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if !app.cfg.OIDCConfigured() || app.oauth == nil || app.verifier == nil {
 		app.renderSetup(w, r)
+		return
+	}
+	stepUpFlow, stepUpExpected, stepUpFlowErr := app.readManagedStepUpFlow(r)
+	if stepUpFlowErr != nil {
+		app.clearOIDCLoginCookies(w)
+		app.clearManagedStepUpProofCookies(w)
+		app.audit(r, "managed_secret.step_up.complete", "denied", "", "step-up flow invalid")
+		app.renderAuthError(w, r, http.StatusBadRequest, "passwordless_step_up_failed", "A fresh passwordless passkey confirmation is required for this secret change.")
 		return
 	}
 	if r.URL.Query().Get("error") != "" {
@@ -1890,12 +1932,14 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var claims struct {
-		Subject string   `json:"sub"`
-		Email   string   `json:"email"`
-		Name    string   `json:"name"`
-		Nonce   string   `json:"nonce"`
-		Groups  []string `json:"groups"`
-		Roles   []string `json:"roles"`
+		Subject  string   `json:"sub"`
+		Email    string   `json:"email"`
+		Name     string   `json:"name"`
+		Nonce    string   `json:"nonce"`
+		Groups   []string `json:"groups"`
+		Roles    []string `json:"roles"`
+		AuthTime int64    `json:"auth_time"`
+		AMR      []string `json:"amr"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		app.clearOIDCLoginCookies(w)
@@ -1949,12 +1993,27 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Roles:   projectedRoles,
 		Expiry:  time.Now().UTC().Add(defaultSessionTTL),
 	}
+	if stepUpExpected {
+		app.completeManagedStepUpCallback(
+			w,
+			r,
+			session,
+			stepUpFlow,
+			state.Value,
+			claims.AuthTime,
+			claims.AMR,
+		)
+		return
+	}
 	app.writeSession(w, session)
-	returnPath, ok := app.readOIDCLoginReturnPath(r)
-	if !ok {
-		returnPath = "/"
+	returnPath := "/"
+	if managedIntentRef, managedLogin := app.readManagedLoginIntent(r); managedLogin {
+		returnPath = "/managed-service/setup?intent=" + url.QueryEscape(managedIntentRef)
+	} else if regularReturn, ok := app.readOIDCLoginReturnPath(r); ok {
+		returnPath = regularReturn
 	}
 	app.clearOIDCLoginCookies(w)
+	app.clearManagedLoginIntentCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
 	app.audit(r, "auth.login.complete", "allowed", session.Subject, "")
 	http.Redirect(w, r, returnPath, http.StatusFound)
@@ -1970,6 +2029,8 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	app.audit(r, "auth.logout", "allowed", session.Subject, "")
 	app.clearSessionCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
+	app.clearManagedStepUpCookies(w)
+	app.clearManagedLoginIntentCookies(w)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -2031,6 +2092,8 @@ func authErrorCopy(reasonCode string) (string, string) {
 		return "Identity response needs review", "Try again once. If it repeats, use the request id for server-side audit lookup."
 	case "login_integrity_check_failed", "logout_integrity_check_failed":
 		return "Login integrity check failed", "Reload Janus and start again so state, nonce, PKCE, and CSRF checks are fresh."
+	case "passwordless_step_up_failed":
+		return "Passkey confirmation needed", "Return to the secret setup page and confirm again with a passwordless passkey."
 	default:
 		return "Login needs a fresh start", "Start a clean login from Janus."
 	}
@@ -2235,6 +2298,7 @@ func (app *App) clearOIDCLoginCookies(w http.ResponseWriter) {
 		app.clearCookie(w, pkceCookie)
 	}
 	app.clearOIDCLoginReturnCookie(w)
+	app.clearManagedStepUpFlowCookies(w)
 }
 
 func (app *App) clearSessionCookies(w http.ResponseWriter) {
@@ -2248,6 +2312,8 @@ func (app *App) clearAllAuthCookies(w http.ResponseWriter) {
 	app.clearSessionCookies(w)
 	app.clearOIDCLoginCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
+	app.clearManagedStepUpProofCookies(w)
+	app.clearManagedLoginIntentCookies(w)
 }
 
 func (app *App) clearOIDCLoginReturnCookie(w http.ResponseWriter) {
@@ -3086,7 +3152,9 @@ func renderTemplate(w http.ResponseWriter, templates *template.Template, name st
 }
 
 func renderTemplateStatus(w http.ResponseWriter, templates *template.Template, name string, status int, data any) {
-	w.Header().Set("Cache-Control", "no-store")
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	if err := templates.ExecuteTemplate(w, name, data); err != nil {

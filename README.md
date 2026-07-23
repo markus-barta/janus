@@ -353,6 +353,18 @@ references in arbitrary tools. See
 [`docs/claude-code-hooks.md`](docs/claude-code-hooks.md) for installation,
 verification, and rollback.
 
+### Managed-service web ingress
+
+Pharos can issue a short-lived, signed intent for one nixcfg-declared
+host/service/slot. Janus then requires the `lifecycle.entry` permission, exact
+same-origin CSRF checks, and a fresh ZITADEL passwordless passkey assertion
+before it generates or accepts one bounded value. The value is handed once to
+the typed local transaction boundary and is never rendered back or added to an
+ordinary API. See the
+[`managed-service contract`](docs/managed-service-secret-contract.md),
+[`web ingress boundary`](docs/managed-secret-ingress.md), and
+[`typed transaction protocol`](docs/managed-web-transaction.md).
+
 ### Service env file
 
 Preflight the reviewed destination:

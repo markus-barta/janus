@@ -59,6 +59,10 @@ type managedTransactionClient struct {
 	now        func() time.Time
 }
 
+type managedTransactionExecutor interface {
+	Execute(context.Context, managedAcceptedIntent, []byte) (managedTransactionResult, error)
+}
+
 func newManagedTransactionClient(socketPath string) *managedTransactionClient {
 	dialer := &net.Dialer{Timeout: managedTransactionDialTimeout}
 	return &managedTransactionClient{
@@ -136,7 +140,7 @@ func validateManagedTransactionRequest(request managedTransactionRequest, import
 		!validManagedRef("svc_", request.ServiceRef) ||
 		!validManagedRef("slot_", request.SlotRef) ||
 		!validManagedRef("decl_", request.DeclarationFingerprint) ||
-		request.OperationKind != "create" ||
+		(request.OperationKind != "create" && request.OperationKind != "replace") ||
 		(request.Source != "generated" && request.Source != "import") {
 		return managedTransactionError("web_transaction_request_invalid")
 	}

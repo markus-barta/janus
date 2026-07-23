@@ -147,6 +147,80 @@ func TestManagedTransactionRejectsValueBeforeGeneratedDial(t *testing.T) {
 	}
 }
 
+func TestManagedTransactionBoundaryAdmitsReviewedReplaceIntent(t *testing.T) {
+	accepted := managedTransactionAccepted("import")
+	accepted.Intent.OperationKind = "replace"
+	request := managedTransactionRequest{
+		Schema:                 managedTransactionRequestSchema,
+		SchemaVersion:          managedTransactionSchemaVersion,
+		OperationRef:           accepted.OperationRef,
+		OperationKind:          accepted.Intent.OperationKind,
+		Source:                 accepted.Intent.Source,
+		HostRef:                accepted.Intent.HostRef,
+		ServiceRef:             accepted.Intent.ServiceRef,
+		SlotRef:                accepted.Intent.SlotRef,
+		DeclarationFingerprint: accepted.Intent.DeclarationFingerprint,
+	}
+	if err := validateManagedTransactionRequest(request, []byte("synthetic-replacement")); err != nil {
+		t.Fatalf("typed client should admit a signed reviewed replacement intent: %v", err)
+	}
+	request.OperationKind = "edit"
+	if err := validateManagedTransactionRequest(request, []byte("synthetic-replacement")); err == nil {
+		t.Fatal("typed client must reject arbitrary edit operations")
+	}
+}
+
+func TestManagedTransactionReplaceFailsClosedAtCurrentDownstreamBoundary(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	client := newManagedTransactionClient("/run/janus/managed-transaction.sock")
+	client.dial = func(context.Context, string, string) (net.Conn, error) {
+		return clientConn, nil
+	}
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		defer serverConn.Close()
+		rawRequest, err := readManagedTransactionFrame(serverConn)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if strings.Contains(string(rawRequest), managedTransactionCanary) {
+			t.Error("replacement value crossed the value-free request frame")
+			return
+		}
+		var request managedTransactionRequest
+		if err := decodeStrictJSON(rawRequest, &request); err != nil {
+			t.Error(err)
+			return
+		}
+		if request.OperationKind != "replace" {
+			t.Errorf("expected replace operation, got %q", request.OperationKind)
+			return
+		}
+		writeManagedTestResponse(
+			t,
+			serverConn,
+			managedResponse(request, "denied", "web_transaction_request_invalid", false),
+		)
+	}()
+
+	accepted := managedTransactionAccepted("import")
+	accepted.Intent.OperationKind = "replace"
+	_, err := client.Execute(
+		context.Background(),
+		accepted,
+		[]byte(managedTransactionCanary),
+	)
+	if err == nil ||
+		err.Error() != "web_transaction_request_invalid" ||
+		strings.Contains(err.Error(), managedTransactionCanary) {
+		t.Fatalf("current downstream replacement denial must be stable and value-free: %v", err)
+	}
+	<-serverDone
+}
+
 func TestManagedTransactionDenialCannotEchoValue(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()

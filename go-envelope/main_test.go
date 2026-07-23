@@ -1451,7 +1451,7 @@ func TestAuthResetClearsAllJanusCookiesAndRendersValueFreeRecovery(t *testing.T)
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/reset", nil)
 	req.Header.Set("X-Request-Id", "auth-reset-123")
-	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie} {
+	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie, hostStepUpFlowCookie, stepUpFlowCookie, hostStepUpProofCookie, stepUpProofCookie, hostManagedLoginCookie, managedLoginCookie} {
 		req.AddCookie(&http.Cookie{Name: name, Value: name + "-secret-cookie-secret"})
 	}
 	out := httptest.NewRecorder()
@@ -1479,7 +1479,7 @@ func TestAuthResetClearsAllJanusCookiesAndRendersValueFreeRecovery(t *testing.T)
 			t.Fatalf("auth reset clearing cookie should not carry a value: %#v", cookie)
 		}
 	}
-	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie} {
+	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie, hostStepUpFlowCookie, stepUpFlowCookie, hostStepUpProofCookie, stepUpProofCookie, hostManagedLoginCookie, managedLoginCookie} {
 		if !cleared[name] {
 			t.Fatalf("expected auth reset to clear %s; cleared=%#v cookies=%#v", name, cleared, out.Result().Cookies())
 		}
@@ -3302,6 +3302,9 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 				req.AddCookie(&http.Cookie{Name: hostPKCECookie, Value: "JANUS_AUTH_COOKIE_CANARY_296"})
 			},
 		},
+		{name: "managed secret setup unavailable", pattern: "GET /managed-service/setup", method: http.MethodGet, path: "/managed-service/setup?intent=intent_0123456789abcdef", status: http.StatusForbidden},
+		{name: "managed secret step-up unavailable", pattern: "POST /managed-service/setup/step-up", method: http.MethodPost, path: "/managed-service/setup/step-up", status: http.StatusServiceUnavailable},
+		{name: "managed secret execute unavailable", pattern: "POST /managed-service/setup/execute", method: http.MethodPost, path: "/managed-service/setup/execute", status: http.StatusServiceUnavailable},
 		{name: "browser missing", method: http.MethodGet, path: "/missing?ref=secret-cookie-secret", status: http.StatusNotFound},
 		{name: "api missing", method: http.MethodGet, path: "/api/missing?ref=raw-secret-value", status: http.StatusNotFound},
 		{name: "api method", method: http.MethodDelete, path: "/api/posture", status: http.StatusMethodNotAllowed},
