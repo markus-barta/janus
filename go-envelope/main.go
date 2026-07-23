@@ -46,18 +46,19 @@ const (
 )
 
 type Config struct {
-	Listen       string
-	PublicURL    string
-	ProductMode  string
-	DataDir      string
-	CatalogFile  string
-	RequireAuth  bool
-	OIDCIssuer   string
-	OIDCClientID string
-	OIDCSecret   string
-	CookieKey    []byte
-	RolePolicy   RolePolicy
-	ScopePolicy  ScopePolicy
+	Listen        string
+	PublicURL     string
+	ProductMode   string
+	DataDir       string
+	CatalogFile   string
+	RequireAuth   bool
+	OIDCIssuer    string
+	OIDCClientID  string
+	OIDCSecret    string
+	OIDCProjectID string
+	CookieKey     []byte
+	RolePolicy    RolePolicy
+	ScopePolicy   ScopePolicy
 }
 
 func (c Config) OIDCConfigured() bool {
@@ -421,6 +422,17 @@ type AuthResetView struct {
 	AuthScreen    bool
 }
 
+type NoAccessView struct {
+	Title         string
+	CSPNonce      string
+	Mode          string
+	Session       Session
+	CSRF          string
+	RequestID     string
+	ValueReturned bool
+	AuthScreen    bool
+}
+
 type SafeFailureView struct {
 	Title          string
 	CSPNonce       string
@@ -491,6 +503,7 @@ func loadConfig() (Config, error) {
 	}
 	cfg.OIDCClientID = os.Getenv("OIDC_CLIENT_ID")
 	cfg.OIDCSecret = os.Getenv("OIDC_CLIENT_SECRET")
+	cfg.OIDCProjectID = strings.TrimSpace(os.Getenv("OIDC_PROJECT_ID"))
 
 	cookieKey := os.Getenv("COOKIE_KEY")
 	if cookieKey != "" {
@@ -794,6 +807,15 @@ func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 				}
 			}
 			http.Redirect(w, r, loginRedirectTarget(r), http.StatusFound)
+			return
+		}
+		if len(session.Roles) == 0 {
+			app.audit(r, "auth.authorization", "denied", session.Subject, "no role binding")
+			if isAPIRequest(r) {
+				writeJSONError(w, r, http.StatusForbidden, "access_not_granted", "Janus access has not been granted")
+				return
+			}
+			app.renderNoAccess(w, r)
 			return
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, session)))
@@ -1772,6 +1794,19 @@ func (app *App) renderLoginLanding(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (app *App) renderNoAccess(w http.ResponseWriter, r *http.Request) {
+	renderTemplateStatus(w, app.templates, "no_access", http.StatusForbidden, NoAccessView{
+		Title:         "Janus access",
+		CSPNonce:      cspNonceFromContext(r.Context()),
+		Mode:          app.cfg.ProductMode,
+		Session:       Session{},
+		CSRF:          "",
+		RequestID:     requestID(r),
+		ValueReturned: false,
+		AuthScreen:    true,
+	})
+}
+
 func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if !app.cfg.OIDCConfigured() || app.oauth == nil || app.verifier == nil {
 		app.renderSetup(w, r)
@@ -1839,18 +1874,31 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var claims struct {
-		Subject      string         `json:"sub"`
-		Email        string         `json:"email"`
-		Name         string         `json:"name"`
-		Nonce        string         `json:"nonce"`
-		Groups       []string       `json:"groups"`
-		Roles        []string       `json:"roles"`
-		ProjectRoles map[string]any `json:"urn:zitadel:iam:org:project:roles"`
+		Subject string   `json:"sub"`
+		Email   string   `json:"email"`
+		Name    string   `json:"name"`
+		Nonce   string   `json:"nonce"`
+		Groups  []string `json:"groups"`
+		Roles   []string `json:"roles"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "claims failed")
 		app.renderAuthError(w, r, http.StatusBadGateway, "identity_response_failed", "Zitadel login could not be read safely.")
+		return
+	}
+	var rawClaims map[string]json.RawMessage
+	if err := idToken.Claims(&rawClaims); err != nil {
+		app.clearOIDCLoginCookies(w)
+		app.audit(r, "auth.login.callback", "denied", "", "claims failed")
+		app.renderAuthError(w, r, http.StatusBadGateway, "identity_response_failed", "Zitadel login could not be read safely.")
+		return
+	}
+	projectRoles, err := ZitadelProjectRoles(rawClaims, app.cfg.OIDCProjectID)
+	if err != nil {
+		app.clearOIDCLoginCookies(w)
+		app.audit(r, "auth.login.callback", "denied", "", "project role claims failed")
+		app.renderAuthError(w, r, http.StatusForbidden, "role_mapping_denied", "Zitadel role mappings are ambiguous or invalid.")
 		return
 	}
 	if !validOIDCNonce(nonce.Value, claims.Nonce) {
@@ -1869,7 +1917,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	projectedRoles, err := DeriveRolesChecked(
 		claims.Subject,
 		claims.Email,
-		ClaimRoleInputs(claims.Groups, claims.Roles, claims.ProjectRoles),
+		ClaimRoleInputs(claims.Groups, claims.Roles, projectRoles),
 		app.cfg.RolePolicy,
 	)
 	if err != nil {
@@ -2013,6 +2061,9 @@ func (app *App) readSession(r *http.Request) (Session, bool) {
 			return Session{}, false
 		}
 		session.Roles = roles
+	}
+	if len(session.Roles) == 0 {
+		return session, true
 	}
 	if !validateSessionRoles(session.Roles) {
 		return Session{}, false
@@ -4543,6 +4594,30 @@ func mustTemplates() *template.Template {
       <span><i aria-hidden="true"></i>Janus never asks for or displays a secret value.</span>
       <span><i aria-hidden="true"></i>Identity values stay out of the access and evidence pages.</span>
       <span><i aria-hidden="true"></i><code>value_returned=false</code></span>
+    </div>
+  </div>
+</section>
+{{ template "base_bottom" . }}
+{{- end }}
+
+	{{ define "no_access" -}}
+{{ template "base_top" . }}
+<section class="auth-landing" id="command-center">
+  <div class="auth-card">
+    <div class="intro-copy">
+      <div class="eyebrow">{{ .Mode }} · signed in with Zitadel</div>
+      <h1>No Janus access yet</h1>
+      <p>Your Zitadel sign-in worked, but this account does not have a Janus role.</p>
+      <p>Ask the operator to grant Janus access, then sign in again.</p>
+    </div>
+    <div class="toolbar">
+      <a class="button primary" href="/auth/reset">Sign out</a>
+    </div>
+    <div class="auth-trust" aria-label="Access boundary">
+      <span><i aria-hidden="true"></i>Janus stayed locked and returned no catalog or secret metadata.</span>
+      <span><i aria-hidden="true"></i>Your identity values are not displayed on this page.</span>
+      <span><i aria-hidden="true"></i><code>value_returned=false</code></span>
+      <span class="mono">request_id={{ .RequestID }}</span>
     </div>
   </div>
 </section>

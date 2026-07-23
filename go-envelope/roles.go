@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -16,9 +17,14 @@ const (
 	RoleBreakGlassAdmin = "break_glass_admin"
 	RoleServiceAdmin    = "service_admin"
 	RoleWorkloadAdmin   = "workload_admin"
+
+	zitadelProjectRolesClaim       = "urn:zitadel:iam:org:project:roles"
+	zitadelProjectRolesClaimPrefix = "urn:zitadel:iam:org:project:"
+	zitadelProjectRolesClaimSuffix = ":roles"
 )
 
 type RolePolicy struct {
+	ViewerSubjects          map[string]bool
 	OwnerSubjects           map[string]bool
 	ApproverSubjects        map[string]bool
 	AuditorSubjects         map[string]bool
@@ -27,6 +33,7 @@ type RolePolicy struct {
 	BreakGlassAdminSubjects map[string]bool
 	ServiceAdminSubjects    map[string]bool
 	WorkloadAdminSubjects   map[string]bool
+	ViewerGroups            map[string]bool
 	OwnerGroups             map[string]bool
 	ApproverGroups          map[string]bool
 	AuditorGroups           map[string]bool
@@ -260,6 +267,7 @@ type SessionRoleGateSignal struct {
 
 func LoadRolePolicyFromEnv() RolePolicy {
 	return RolePolicy{
+		ViewerSubjects:          splitSet(envDefault("JANUS_VIEWER_SUBJECTS", "")),
 		OwnerSubjects:           splitSet(envDefault("JANUS_OWNER_SUBJECTS", "")),
 		ApproverSubjects:        splitSet(envDefault("JANUS_APPROVER_SUBJECTS", "")),
 		AuditorSubjects:         splitSet(envDefault("JANUS_AUDITOR_SUBJECTS", "")),
@@ -268,6 +276,7 @@ func LoadRolePolicyFromEnv() RolePolicy {
 		BreakGlassAdminSubjects: splitSet(envDefault("JANUS_BREAK_GLASS_ADMIN_SUBJECTS", "")),
 		ServiceAdminSubjects:    splitSet(envDefault("JANUS_SERVICE_ADMIN_SUBJECTS", "")),
 		WorkloadAdminSubjects:   splitSet(envDefault("JANUS_WORKLOAD_ADMIN_SUBJECTS", "")),
+		ViewerGroups:            splitSet(envDefault("JANUS_VIEWER_GROUPS", "")),
 		OwnerGroups:             splitSet(envDefault("JANUS_OWNER_GROUPS", "")),
 		ApproverGroups:          splitSet(envDefault("JANUS_APPROVER_GROUPS", "")),
 		AuditorGroups:           splitSet(envDefault("JANUS_AUDITOR_GROUPS", "")),
@@ -287,31 +296,30 @@ func (p RolePolicy) Configured() bool {
 func DeriveRoles(subject, email string, claimValues []string, policy RolePolicy) []string {
 	roles, err := DeriveRolesChecked(subject, email, claimValues, policy)
 	if err != nil {
-		if strings.TrimSpace(subject) == "" {
-			return nil
-		}
-		return []string{RoleViewer}
+		return nil
 	}
 	return roles
 }
 
 // DeriveRolesChecked projects only exact reviewed subject/email and group
-// bindings. Duplicate claims and a single identity value mapped to multiple
-// elevated roles are ambiguous and fail closed without returning the value.
+// bindings. An identity with no binding receives no role. Any explicit role
+// match carries the viewer baseline, while duplicate claims and a single
+// identity value mapped to multiple elevated roles fail closed without
+// returning the value.
 func DeriveRolesChecked(subject, email string, claimValues []string, policy RolePolicy) ([]string, error) {
 	if strings.TrimSpace(subject) == "" {
 		return nil, nil
 	}
 
-	roles := map[string]bool{RoleViewer: true}
+	roles := map[string]bool{}
 	identityKeys := []string{normalizeRoleToken(subject)}
 	if emailKey := normalizeRoleToken(email); emailKey != "" && emailKey != identityKeys[0] {
 		identityKeys = append(identityKeys, emailKey)
 	}
 	for _, key := range identityKeys {
 		matches := matchingRoles(key, policy, false)
-		if len(matches) > 1 {
-			return []string{RoleViewer}, fmt.Errorf("ambiguous exact subject role binding")
+		if ambiguousRoleMatches(matches) {
+			return nil, fmt.Errorf("ambiguous exact subject role binding")
 		}
 		for _, role := range matches {
 			roles[role] = true
@@ -325,16 +333,19 @@ func DeriveRolesChecked(subject, email string, claimValues []string, policy Role
 			continue
 		}
 		if seenClaims[key] {
-			return []string{RoleViewer}, fmt.Errorf("duplicate role claim")
+			return nil, fmt.Errorf("duplicate role claim")
 		}
 		seenClaims[key] = true
 		matches := matchingRoles(key, policy, true)
-		if len(matches) > 1 {
-			return []string{RoleViewer}, fmt.Errorf("ambiguous exact group role binding")
+		if ambiguousRoleMatches(matches) {
+			return nil, fmt.Errorf("ambiguous exact group role binding")
 		}
 		for _, role := range matches {
 			roles[role] = true
 		}
+	}
+	if len(roles) > 0 {
+		roles[RoleViewer] = true
 	}
 	return sortedRoles(roles), nil
 }
@@ -364,7 +375,7 @@ func AllRoles() []string {
 
 func matchingRoles(key string, policy RolePolicy, groups bool) []string {
 	matches := []string{}
-	for _, role := range AllRoles()[1:] {
+	for _, role := range AllRoles() {
 		bindings := roleSubjects(policy, role)
 		if groups {
 			bindings = roleGroups(policy, role)
@@ -376,8 +387,20 @@ func matchingRoles(key string, policy RolePolicy, groups bool) []string {
 	return matches
 }
 
+func ambiguousRoleMatches(matches []string) bool {
+	elevated := 0
+	for _, role := range matches {
+		if role != RoleViewer {
+			elevated++
+		}
+	}
+	return elevated > 1
+}
+
 func roleSubjects(policy RolePolicy, role string) map[string]bool {
 	switch role {
+	case RoleViewer:
+		return policy.ViewerSubjects
 	case RoleOwner:
 		return policy.OwnerSubjects
 	case RoleApprover:
@@ -401,6 +424,8 @@ func roleSubjects(policy RolePolicy, role string) map[string]bool {
 
 func roleGroups(policy RolePolicy, role string) map[string]bool {
 	switch role {
+	case RoleViewer:
+		return policy.ViewerGroups
 	case RoleOwner:
 		return policy.OwnerGroups
 	case RoleApprover:
@@ -452,7 +477,7 @@ func AccessPostureFor(policy RolePolicy) AccessPosture {
 		ImplicitElevatedClaims: false,
 		SubjectBindingCount:    subjectCount,
 		GroupBindingCount:      groupCount,
-		ElevatedBindingCount:   subjectCount + groupCount,
+		ElevatedBindingCount:   elevatedRoleSubjectBindingCount(policy) + elevatedRoleGroupBindingCount(policy),
 		BindingSources:         RoleBindingSourcesFor(policy),
 		RequiredRoles:          requiredRoles,
 		RoleDutyMatrix:         true,
@@ -813,13 +838,29 @@ func laneSetupTone(missing int) string {
 
 func roleSubjectBindingCount(policy RolePolicy) int {
 	count := 0
-	for _, role := range AllRoles()[1:] {
+	for _, role := range AllRoles() {
 		count += len(roleSubjects(policy, role))
 	}
 	return count
 }
 
 func roleGroupBindingCount(policy RolePolicy) int {
+	count := 0
+	for _, role := range AllRoles() {
+		count += len(roleGroups(policy, role))
+	}
+	return count
+}
+
+func elevatedRoleSubjectBindingCount(policy RolePolicy) int {
+	count := 0
+	for _, role := range AllRoles()[1:] {
+		count += len(roleSubjects(policy, role))
+	}
+	return count
+}
+
+func elevatedRoleGroupBindingCount(policy RolePolicy) int {
 	count := 0
 	for _, role := range AllRoles()[1:] {
 		count += len(roleGroups(policy, role))
@@ -1278,11 +1319,62 @@ func ClaimRoleInputs(groups, roles []string, projectRoles map[string]any) []stri
 	values := make([]string, 0, len(groups)+len(roles)+len(projectRoles))
 	values = append(values, groups...)
 	values = append(values, roles...)
-	for key, value := range projectRoles {
+	for key := range projectRoles {
 		values = append(values, key)
-		values = appendClaimValue(values, value)
 	}
 	return values
+}
+
+// ZitadelProjectRoles selects the project-specific roles claim for the
+// configured Janus project. ZITADEL also emits a legacy unscoped alias, which
+// remains a fallback for compatibility. Claim values are decoded but never
+// returned in errors.
+func ZitadelProjectRoles(rawClaims map[string]json.RawMessage, projectID string) (map[string]any, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID != "" {
+		for _, char := range projectID {
+			if char < '0' || char > '9' {
+				return nil, fmt.Errorf("invalid Zitadel project id")
+			}
+		}
+		exact := zitadelProjectRolesClaimPrefix + projectID + zitadelProjectRolesClaimSuffix
+		if raw, ok := rawClaims[exact]; ok {
+			return decodeZitadelProjectRoles(raw)
+		}
+		return nil, nil
+	}
+
+	var selected json.RawMessage
+	for key, raw := range rawClaims {
+		if !strings.HasPrefix(key, zitadelProjectRolesClaimPrefix) ||
+			!strings.HasSuffix(key, zitadelProjectRolesClaimSuffix) ||
+			key == zitadelProjectRolesClaim {
+			continue
+		}
+		project := strings.TrimSuffix(strings.TrimPrefix(key, zitadelProjectRolesClaimPrefix), zitadelProjectRolesClaimSuffix)
+		if project == "" {
+			continue
+		}
+		if selected != nil {
+			return nil, fmt.Errorf("ambiguous Zitadel project role claims")
+		}
+		selected = raw
+	}
+	if selected != nil {
+		return decodeZitadelProjectRoles(selected)
+	}
+	return decodeZitadelProjectRoles(rawClaims[zitadelProjectRolesClaim])
+}
+
+func decodeZitadelProjectRoles(raw json.RawMessage) (map[string]any, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var roles map[string]any
+	if err := json.Unmarshal(raw, &roles); err != nil {
+		return nil, fmt.Errorf("invalid Zitadel project role claim")
+	}
+	return roles, nil
 }
 
 func splitSet(raw string) map[string]bool {
@@ -1306,21 +1398,4 @@ func sortedRoles(roles map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func appendClaimValue(values []string, value any) []string {
-	switch typed := value.(type) {
-	case string:
-		return append(values, typed)
-	case []any:
-		for _, item := range typed {
-			values = appendClaimValue(values, item)
-		}
-	case map[string]any:
-		for key, item := range typed {
-			values = append(values, key)
-			values = appendClaimValue(values, item)
-		}
-	}
-	return values
 }

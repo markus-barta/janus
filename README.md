@@ -83,6 +83,47 @@ conformance, MCP, operator-flow, and container smoke tests. The project is
 still pre-1.0: interfaces and deployment contracts may evolve as the Rust
 engine absorbs the remaining envelope responsibilities.
 
+## Human sign-in and grants
+
+The production Go envelope uses Zitadel OIDC at `https://auth.inspr.at`.
+The OIDC project, its role keys, and the `janus-vault-barta-cm` application are
+declaratively owned by `inspr-services/services/zitadel`; the deployed issuer,
+exact project ID, and exact role-claim mappings are owned by the csb1
+configuration in `nixcfg`. Client credentials remain in the encrypted
+deployment pipeline.
+
+Janus has no local-password route. Browser sign-in uses the OIDC authorization
+code flow with a nonce and S256 PKCE. Break-glass recovery remains out of band
+and does not create a second human login surface.
+
+A valid Zitadel identity receives no Janus access until one exact reviewed
+subject or role claim matches policy. An unbound user keeps a signed-in session
+only long enough to receive the friendly `No Janus access yet` page; API
+requests receive a value-free `403 access_not_granted`. Janus does not expose
+catalog metadata, identity claim values, tokens, or cookies on either path.
+Janus reads only the project-ID-specific Zitadel role claim when the deployment
+sets `OIDC_PROJECT_ID`. The legacy unscoped claim is a migration fallback only
+for environments that have not yet configured an exact project ID.
+
+The deployment maps these Zitadel project-role keys:
+
+| Zitadel role key | Janus role |
+| --- | --- |
+| `janus:viewer` | viewer |
+| `janus:operator` | operator + viewer baseline |
+| `janus:admin` | owner + viewer baseline |
+| `janus:approver` | approver + viewer baseline |
+| `janus:auditor` | auditor + viewer baseline |
+| `janus:security_admin` | security admin + viewer baseline |
+| `janus:break_glass_admin` | break-glass eligibility + viewer baseline |
+| `janus:service_admin` | service admin + viewer baseline |
+| `janus:workload_admin` | workload admin + viewer baseline |
+
+For the current operator flow, open Zitadel Console, select the **Janus**
+project, and add or remove one role assignment for the user. The user then
+signs out and back in so the new ID-token claim replaces the signed session.
+INSPR-220 will wrap that same assignment in the suite-wide invite/grant flow.
+
 ## Architecture
 
 ```text
