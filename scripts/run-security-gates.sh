@@ -5,6 +5,7 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo}"
 
 python3 scripts/check-action-pins.py --self-test
+python3 scripts/smoke-warden-mcp.py --self-test
 python3 scripts/check-security-gates.py --self-test
 python3 scripts/check-security-gates.py --check-installed-tools
 python3 scripts/test-docker-base-pins.py

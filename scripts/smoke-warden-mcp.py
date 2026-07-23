@@ -24,6 +24,10 @@ CONTAINER_FIXTURE_DIR = "/tmp/janus-warden-smoke"
 
 def main() -> int:
     args = parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+
     repo = Path(__file__).resolve().parents[1]
     temp_parent = None
     if args.image:
@@ -99,6 +103,11 @@ def parse_args() -> argparse.Namespace:
         "--bin",
         default=os.environ.get("JANUS_WARDEN_BIN"),
         help="Run this janus-warden binary instead of cargo.",
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Verify that the success status cannot include sensitive fields.",
     )
     return parser.parse_args()
 
@@ -366,18 +375,55 @@ def run_smoke(smoke: McpSmoke) -> None:
     assert_equal(permit["result"]["secret_ref"], secret["secret_ref"], "permit secret_ref")
     assert_true(permit["result"]["permit_id"].startswith("use_"), "permit id shape")
 
-    rendered = "\n".join(smoke.transcript)
-    for canary in [CANARY_VALUE, REQUEST_BODY_CANARY]:
-        if canary in rendered:
-            raise AssertionError(f"MCP transcript leaked canary material: {canary}")
+    assert_no_canary_material("\n".join(smoke.transcript), "MCP transcript")
+    status = success_status(len(tool_names))
+    assert_safe_status(status)
+    print(status)
 
-    print(
+
+def success_status(tool_count: int) -> str:
+    return (
         "janus-warden MCP smoke ok "
-        f"backend={health['result']['backend']} "
-        f"tools={len(tool_names)} "
-        f"secret_ref={secret['secret_ref']} "
-        "value_returned=false"
+        f"backend=dotenv tools={tool_count} value_returned=false"
     )
+
+
+def assert_no_canary_material(output: str, label: str) -> None:
+    for canary in [CANARY_VALUE, REQUEST_BODY_CANARY]:
+        if canary in output:
+            raise AssertionError(f"{label} leaked canary material: {canary}")
+
+
+def assert_safe_status(status: str) -> None:
+    assert_no_canary_material(status, "MCP success status")
+    if "secret_ref=" in status:
+        raise AssertionError("MCP success status exposed a secret reference")
+
+
+def self_test() -> None:
+    status = success_status(4)
+    assert_equal(
+        status,
+        (
+            "janus-warden MCP smoke ok "
+            "backend=dotenv tools=4 value_returned=false"
+        ),
+        "safe success status",
+    )
+    assert_safe_status(status)
+
+    for name, marker in [
+        ("secret reference", " secret_ref=sec_fixture"),
+        ("value canary", f" value={CANARY_VALUE}"),
+        ("request canary", f" request={REQUEST_BODY_CANARY}"),
+    ]:
+        try:
+            assert_safe_status(status + marker)
+        except AssertionError:
+            continue
+        raise AssertionError(f"unsafe {name} fixture passed")
+
+    print("ok: janus-warden MCP success status excludes sensitive fields")
 
 
 def structured(call_result: dict[str, Any]) -> dict[str, Any]:
