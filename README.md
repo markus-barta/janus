@@ -209,6 +209,10 @@ Gitleaks, staticcheck, govulncheck, immutable-base verification, and Trivy. The
 gate probes the actual local scanner invocations and fails before scanning when
 any binary version differs from the reviewed policy. CI repeats that check on
 every runner that installs a scanner, including fresh release-image runners.
+Every external GitHub Action, including GitHub-owned Actions, is pinned to a
+full commit SHA with its reviewed release beside it. The required security job
+rejects mutable, shortened, dynamic, or undocumented Action references, and
+weekly Dependabot pull requests provide the reviewed update path.
 The behavioral assurance script is intentionally not presented as the complete
 release gate; formatting, strict Clippy, container, and scanner checks remain
 separate commands above and are combined by release CI.
