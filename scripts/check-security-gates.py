@@ -92,6 +92,14 @@ def validate_workflows() -> None:
         in security,
         "Gitleaks CI does not verify the binary it scans with",
     )
+    require(
+        "python3 scripts/check-action-pins.py --self-test" in security,
+        "required security CI does not enforce immutable GitHub Action pins",
+    )
+    require(
+        "python3 scripts/check-action-pins.py --self-test" in local,
+        "local release-security gate does not enforce immutable GitHub Action pins",
+    )
     require("--check-installed-tools" in local, "local scanner-version gate is not wired")
 
 
