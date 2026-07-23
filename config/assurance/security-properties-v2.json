@@ -1,0 +1,50 @@
+{
+  "schema_version": 2,
+  "release": {
+    "cases": 256,
+    "max_input_bytes": 8192,
+    "max_collection_items": 64,
+    "max_depth": 8,
+    "max_shrink_iterations": 4096,
+    "max_flat_map_regenerations": 100000,
+    "target_timeout_seconds": 240
+  },
+  "targets": [
+    {
+      "id": "core-security-contracts",
+      "package": "janus-core",
+      "test": "security_properties",
+      "persistence": "crates/janus-core/proptest-regressions/security_properties.txt"
+    },
+    {
+      "id": "conformance-boundaries",
+      "package": "janus-conformance",
+      "test": "property_conformance",
+      "persistence": "crates/janus-conformance/proptest-regressions/property_conformance.txt"
+    },
+    {
+      "id": "warden-tool-boundary",
+      "package": "janus-warden",
+      "filter": "security_property_warden_tools",
+      "persistence": "crates/janus-warden/proptest-regressions/lib.txt"
+    },
+    {
+      "id": "provider-allowlist",
+      "package": "janus-providers",
+      "filter": "security_property_provider_allowlist",
+      "persistence": "crates/janus-providers/proptest-regressions/secretspec.txt"
+    },
+    {
+      "id": "audit-jsonl-boundary",
+      "package": "janus-local",
+      "filter": "security_property_audit_jsonl",
+      "persistence": "crates/janus-local/proptest-regressions/audit.txt"
+    },
+    {
+      "id": "cli-argv-boundary",
+      "package": "janusd",
+      "filter": "security_property_cli_argv",
+      "persistence": "crates/janusd/proptest-regressions/main.txt"
+    }
+  ]
+}

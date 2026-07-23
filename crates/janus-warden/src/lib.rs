@@ -953,6 +953,7 @@ mod tests {
     };
     use janus_mock::MockStore;
     use proptest::prelude::*;
+    use proptest::test_runner::FileFailurePersistence;
     use serde_json::json;
 
     use super::*;
@@ -1145,6 +1146,10 @@ mod tests {
         ProptestConfig {
             cases,
             max_shrink_iters,
+            failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/proptest-regressions/lib.txt"
+            )))),
             ..ProptestConfig::default()
         }
     }

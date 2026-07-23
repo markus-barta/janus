@@ -181,6 +181,7 @@ It exercises:
 - the locked Rust workspace test suite;
 - the strict cross-surface minimization contract, bounded runner, and
   synthetic-canary diagnostics;
+- the bounded security-property gate and its value-free property replay receipt;
 - a real reference-only Warden MCP session;
 - the hard use/admin process boundary and retired mixed entry point;
 - the approval-to-env-file operator flow;
@@ -220,6 +221,15 @@ independently of the required CodeQL status checks.
 The behavioral assurance script is intentionally not presented as the complete
 release gate; formatting, strict Clippy, container, and scanner checks remain
 separate commands above and are combined by release CI.
+
+When a novel security property fails, CI preserves a seven-day replay artifact
+containing only its reviewed target, bounded budget, opaque RNG seed, and
+derived replay identity. Download it with
+`gh run download RUN_ID --name rust-property-replay --dir .tmp`, then run
+`python3 scripts/run-security-properties.py --replay
+.tmp/janus-property-replay.json`. The full handling contract lives in PPM
+Knowledge at `runbook/security-property-replay`; do not copy raw generated test
+diagnostics into logs or tickets.
 
 Rust engine releases publish a GHCR image, SPDX SBOM, build provenance, a
 keyless image signature, and a second keyless signature over a deterministic

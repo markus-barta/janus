@@ -49,12 +49,26 @@ def main() -> int:
             "source/tag/commit/image-digest manifest",
             "scratch filesystem",
             "scripts/run-security-gates.sh",
+            "property replay receipt",
         ):
             if required not in normalized_readme:
                 fail(f"README assurance contract is missing: {required}")
-        for asset in ("source-release.json", "source-release.sigstore.json", "rust-trivy-summary.json"):
+        for asset in (
+            "source-release.json",
+            "source-release.sigstore.json",
+            "rust-trivy-summary.json",
+            "janus-property-replay.json",
+        ):
             if asset not in rust_workflow:
                 fail(f"Rust release workflow does not publish {asset}")
+        for replay_contract in (
+            "name: rust-property-replay",
+            "if-no-files-found: ignore",
+            "include-hidden-files: true",
+            "retention-days: 7",
+        ):
+            if replay_contract not in rust_workflow:
+                fail("Rust release workflow does not preserve bounded property replay")
         dockerfile = (ROOT / "Dockerfile.engine").read_text()
         if "FROM scratch" not in dockerfile or "USER 65532:65532" not in dockerfile:
             fail("documented minimal runtime posture is not implemented")
