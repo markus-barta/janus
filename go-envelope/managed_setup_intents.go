@@ -54,22 +54,22 @@ type managedSignedIntent struct {
 }
 
 type managedSetupIntent struct {
-	Schema                 string `json:"schema"`
-	SchemaVersion          int    `json:"schema_version"`
-	IntentRef              string `json:"intent_ref"`
-	OperationKind          string `json:"operation_kind"`
-	Source                 string `json:"source"`
-	HostRef                string `json:"host_ref"`
-	ServiceRef             string `json:"service_ref"`
-	SlotRef                string `json:"slot_ref"`
-	HumanSessionRef        string `json:"human_session_ref"`
-	IssuerRef              string `json:"issuer_ref"`
-	AudienceRef            string `json:"audience_ref"`
-	NonceRef               string `json:"nonce_ref"`
-	DeclarationFingerprint string `json:"declaration_fingerprint"`
-	IssuedAtUnixSeconds    int64  `json:"issued_at_unix_secs"`
-	ExpiresAtUnixSeconds   int64  `json:"expires_at_unix_secs"`
-	ReturnTarget           string `json:"return_target"`
+	Schema                 string   `json:"schema"`
+	SchemaVersion          int      `json:"schema_version"`
+	IntentRef              string   `json:"intent_ref"`
+	OperationKind          string   `json:"operation_kind"`
+	AllowedSources         []string `json:"allowed_sources"`
+	HostRef                string   `json:"host_ref"`
+	ServiceRef             string   `json:"service_ref"`
+	SlotRef                string   `json:"slot_ref"`
+	HumanSessionRef        string   `json:"human_session_ref"`
+	IssuerRef              string   `json:"issuer_ref"`
+	AudienceRef            string   `json:"audience_ref"`
+	NonceRef               string   `json:"nonce_ref"`
+	DeclarationFingerprint string   `json:"declaration_fingerprint"`
+	IssuedAtUnixSeconds    int64    `json:"issued_at_unix_secs"`
+	ExpiresAtUnixSeconds   int64    `json:"expires_at_unix_secs"`
+	ReturnTarget           string   `json:"return_target"`
 }
 
 type managedVerificationKeyDocument struct {
@@ -284,59 +284,74 @@ func (fetcher *managedHTTPIntentFetcher) Fetch(ctx context.Context, intentRef st
 	return envelope, nil
 }
 
+type managedDeclarationContext struct {
+	ServiceLabel   string
+	SlotLabel      string
+	ConsumerKind   string
+	DeliveryKind   string
+	AllowedSources []string
+}
+
 type managedDeclarationResolver interface {
-	Matches(managedSetupIntent) error
+	Resolve(managedSetupIntent) (managedDeclarationContext, error)
 }
 
 type managedManifestResolver struct {
 	paths []string
 }
 
-func (resolver managedManifestResolver) Matches(intent managedSetupIntent) error {
+func (resolver managedManifestResolver) Resolve(intent managedSetupIntent) (managedDeclarationContext, error) {
 	if len(resolver.paths) == 0 {
-		return managedIntentError("managed_intent_declaration_unavailable")
+		return managedDeclarationContext{}, managedIntentError("managed_intent_declaration_unavailable")
 	}
-	found := false
+	var found *managedDeclarationContext
 	seenHosts := map[string]bool{}
 	seenServices := map[string]bool{}
 	seenSlots := map[string]bool{}
 	for _, path := range resolver.paths {
 		raw, err := readBoundedFile(path, managedManifestMaxBytes)
 		if err != nil {
-			return managedIntentError("managed_intent_declaration_unavailable")
+			return managedDeclarationContext{}, managedIntentError("managed_intent_declaration_unavailable")
 		}
 		var manifest managedManifest
 		if err := decodeStrictJSON(raw, &manifest); err != nil || validateManagedManifest(manifest) != nil {
-			return managedIntentError("managed_intent_declaration_unavailable")
+			return managedDeclarationContext{}, managedIntentError("managed_intent_declaration_unavailable")
 		}
 		if seenHosts[manifest.HostRef] {
-			return managedIntentError("managed_intent_declaration_unavailable")
+			return managedDeclarationContext{}, managedIntentError("managed_intent_declaration_unavailable")
 		}
 		seenHosts[manifest.HostRef] = true
 		for _, service := range manifest.Services {
 			if seenServices[service.ServiceRef] {
-				return managedIntentError("managed_intent_declaration_unavailable")
+				return managedDeclarationContext{}, managedIntentError("managed_intent_declaration_unavailable")
 			}
 			seenServices[service.ServiceRef] = true
 			for _, slot := range service.Slots {
 				if seenSlots[slot.SlotRef] {
-					return managedIntentError("managed_intent_declaration_unavailable")
+					return managedDeclarationContext{}, managedIntentError("managed_intent_declaration_unavailable")
 				}
 				seenSlots[slot.SlotRef] = true
 				if manifest.HostRef == intent.HostRef &&
 					service.ServiceRef == intent.ServiceRef &&
 					slot.SlotRef == intent.SlotRef &&
 					manifest.DeclarationFingerprint == intent.DeclarationFingerprint &&
-					containsManagedSource(slot.AllowedSources, intent.Source) {
-					found = true
+					equalManagedSources(slot.AllowedSources, intent.AllowedSources) {
+					context := managedDeclarationContext{
+						ServiceLabel:   service.SafeLabel,
+						SlotLabel:      slot.SafeLabel,
+						ConsumerKind:   slot.ConsumerKind,
+						DeliveryKind:   slot.Delivery.Kind,
+						AllowedSources: append([]string(nil), slot.AllowedSources...),
+					}
+					found = &context
 				}
 			}
 		}
 	}
-	if !found {
-		return managedIntentError("managed_intent_declaration_drift")
+	if found == nil {
+		return managedDeclarationContext{}, managedIntentError("managed_intent_declaration_drift")
 	}
-	return nil
+	return *found, nil
 }
 
 type managedManifest struct {
@@ -554,12 +569,18 @@ func (store *managedReplayStore) consume(intent managedSetupIntent, now int64) (
 
 type managedAcceptedIntent struct {
 	Intent       managedSetupIntent
+	Source       string
 	OperationRef string
 }
 
+type managedSetupInspection struct {
+	Intent  managedSetupIntent
+	Context managedDeclarationContext
+}
+
 type managedSetupIntentAuthority interface {
-	Inspect(context.Context, string, string) (managedSetupIntent, error)
-	Consume(context.Context, string, string) (managedAcceptedIntent, error)
+	Inspect(context.Context, string, string) (managedSetupInspection, error)
+	Consume(context.Context, string, string, string) (managedAcceptedIntent, error)
 }
 
 type managedSetupIntentConsumer struct {
@@ -572,54 +593,69 @@ type managedSetupIntentConsumer struct {
 	now         func() time.Time
 }
 
-func (consumer *managedSetupIntentConsumer) Inspect(ctx context.Context, intentRef, humanSessionRef string) (managedSetupIntent, error) {
+func (consumer *managedSetupIntentConsumer) Inspect(ctx context.Context, intentRef, humanSessionRef string) (managedSetupInspection, error) {
 	if !validManagedRef("intent_", intentRef) || !validManagedRef("hsn_", humanSessionRef) {
-		return managedSetupIntent{}, managedIntentError("managed_intent_invalid_request")
+		return managedSetupInspection{}, managedIntentError("managed_intent_invalid_request")
 	}
 	envelope, err := consumer.fetcher.Fetch(ctx, intentRef)
 	if err != nil {
-		return managedSetupIntent{}, normalizeManagedIntentError(err)
+		return managedSetupInspection{}, normalizeManagedIntentError(err)
 	}
 	intent, err := verifyManagedSetupIntent(envelope, consumer.keyring)
 	if err != nil {
-		return managedSetupIntent{}, err
+		return managedSetupInspection{}, err
 	}
 	now := consumer.now().Unix()
 	if intent.IntentRef != intentRef {
-		return managedSetupIntent{}, managedIntentError("managed_intent_reference_mismatch")
+		return managedSetupInspection{}, managedIntentError("managed_intent_reference_mismatch")
 	}
 	if intent.IssuerRef != consumer.issuerRef {
-		return managedSetupIntent{}, managedIntentError("managed_intent_wrong_issuer")
+		return managedSetupInspection{}, managedIntentError("managed_intent_wrong_issuer")
 	}
 	if intent.AudienceRef != consumer.audienceRef {
-		return managedSetupIntent{}, managedIntentError("managed_intent_wrong_audience")
+		return managedSetupInspection{}, managedIntentError("managed_intent_wrong_audience")
 	}
 	if intent.HumanSessionRef != humanSessionRef {
-		return managedSetupIntent{}, managedIntentError("managed_intent_wrong_user")
+		return managedSetupInspection{}, managedIntentError("managed_intent_wrong_user")
 	}
 	if intent.IssuedAtUnixSeconds > now+managedIntentClockSkewSeconds {
-		return managedSetupIntent{}, managedIntentError("managed_intent_not_yet_valid")
+		return managedSetupInspection{}, managedIntentError("managed_intent_not_yet_valid")
 	}
 	if now >= intent.ExpiresAtUnixSeconds {
-		return managedSetupIntent{}, managedIntentError("managed_intent_expired")
+		return managedSetupInspection{}, managedIntentError("managed_intent_expired")
 	}
-	if err := consumer.declaration.Matches(intent); err != nil {
-		return managedSetupIntent{}, normalizeManagedIntentError(err)
+	declarationContext, err := consumer.declaration.Resolve(intent)
+	if err != nil {
+		return managedSetupInspection{}, normalizeManagedIntentError(err)
 	}
-	return intent, nil
+	if !validManagedSafeLabel(declarationContext.ServiceLabel) ||
+		!validManagedSafeLabel(declarationContext.SlotLabel) ||
+		declarationContext.ConsumerKind != "managed_service" ||
+		declarationContext.DeliveryKind != "private_env_file" ||
+		!equalManagedSources(declarationContext.AllowedSources, intent.AllowedSources) {
+		return managedSetupInspection{}, managedIntentError("managed_intent_declaration_drift")
+	}
+	return managedSetupInspection{Intent: intent, Context: declarationContext}, nil
 }
 
-func (consumer *managedSetupIntentConsumer) Consume(ctx context.Context, intentRef, humanSessionRef string) (managedAcceptedIntent, error) {
-	intent, err := consumer.Inspect(ctx, intentRef, humanSessionRef)
+func (consumer *managedSetupIntentConsumer) Consume(ctx context.Context, intentRef, humanSessionRef, source string) (managedAcceptedIntent, error) {
+	inspection, err := consumer.Inspect(ctx, intentRef, humanSessionRef)
 	if err != nil {
 		return managedAcceptedIntent{}, err
 	}
+	if !containsManagedSource(inspection.Intent.AllowedSources, source) {
+		return managedAcceptedIntent{}, managedIntentError("managed_intent_source_denied")
+	}
 	now := consumer.now().Unix()
-	operationRef, err := consumer.replays.consume(intent, now)
+	operationRef, err := consumer.replays.consume(inspection.Intent, now)
 	if err != nil {
 		return managedAcceptedIntent{}, normalizeManagedIntentError(err)
 	}
-	return managedAcceptedIntent{Intent: intent, OperationRef: operationRef}, nil
+	return managedAcceptedIntent{
+		Intent:       inspection.Intent,
+		Source:       source,
+		OperationRef: operationRef,
+	}, nil
 }
 
 func verifyManagedSetupIntent(envelope managedSignedIntent, keyring managedIntentKeyring) (managedSetupIntent, error) {
@@ -662,7 +698,7 @@ func validateManagedSetupIntent(intent managedSetupIntent) error {
 		!validManagedRef("nonce_", intent.NonceRef) ||
 		!validManagedRef("decl_", intent.DeclarationFingerprint) ||
 		(intent.OperationKind != "create" && intent.OperationKind != "replace") ||
-		(intent.Source != "generated" && intent.Source != "import") ||
+		!validManagedSourcePolicy(intent.AllowedSources) ||
 		intent.ReturnTarget != "pharos_service" ||
 		intent.IssuedAtUnixSeconds <= 0 ||
 		ttl <= 0 ||
@@ -785,6 +821,22 @@ func containsManagedSource(sources []string, expected string) bool {
 		}
 	}
 	return false
+}
+
+func validManagedSource(source string) bool {
+	return source == "generated" || source == "import"
+}
+
+func equalManagedSources(first, second []string) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func parseManagedOrigin(value string) (*url.URL, error) {

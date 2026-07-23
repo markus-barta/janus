@@ -169,7 +169,7 @@
             ·
             <a {{ if eq .View "list" }}class="on" {{ end }}href="/?q={{ .Query | urlquery }}&amp;provider={{ .FilterProvider | urlquery }}&amp;state={{ .FilterState | urlquery }}&amp;view=list#vault">list</a>
           </span>
-          <a class="btn newbtn" href="/vault/new">Set up service secret</a>
+          <a class="btn newbtn" href="/vault/new">Advanced manual setup</a>
         </form>
         {{ if .Descriptors }}
         {{ if eq .View "list" }}
@@ -178,13 +178,13 @@
             <tr><th>secret</th><th>host</th><th>backend</th><th>class</th><th>state</th><th>rotates</th><th>last checked</th><th></th></tr>
             {{ range .Descriptors }}
             <tr>
-              <td class="mono" data-label="secret">{{ .ID }}</td>
-              <td data-label="host">{{ .Scope }}</td>
+              <td class="mono" data-label="secret">{{ .ID }}{{ if eq .RecordType "service_secret" }}<br><span class="state ok">Service secret</span>{{ end }}</td>
+              <td data-label="host">{{ if and (eq .RecordType "service_secret") .Host }}{{ .Host }}{{ else }}{{ .Scope }}{{ end }}{{ if and (eq .RecordType "service_secret") .Consumer }}<br><small>{{ .Consumer }}</small>{{ end }}</td>
               <td data-label="backend">{{ .Provider }}</td>
               <td data-label="class">{{ .Classification }}</td>
               <td data-label="state">{{ if eq .Lifecycle "active" }}<span class="state ok">active</span>{{ else if eq .Lifecycle "rotating" }}<span class="state warn">rotating</span>{{ else }}<span class="state bad">{{ .Lifecycle }}</span>{{ end }}</td>
-              <td data-label="rotates">{{ .RotationDays }}d</td>
-              <td data-label="last checked">{{ since .LastCheckedAt }}</td>
+              <td data-label="rotates">{{ if and (eq .RecordType "service_secret") .RotationPosture }}{{ .RotationPosture }} · {{ end }}{{ .RotationDays }}d</td>
+              <td data-label="last checked">{{ since .LastCheckedAt }}{{ if and (eq .RecordType "service_secret") .Health }}<br><small>health: {{ .Health }}</small>{{ end }}</td>
               <td data-label=""><a href="/?ref={{ .ID }}#focus">View details →</a></td>
             </tr>
             {{ end }}
@@ -194,9 +194,10 @@
         <div class="cards">
           {{ range .Descriptors }}
           <div class="card {{ if ne .Lifecycle "active" }}attention{{ end }}">
-            <div class="name"><span>{{ .DisplayName }}</span>{{ if .RevealAllowed }}<span class="key" title="reveal permitted">⚿</span>{{ end }}</div>
-            <div class="owner">{{ .Owner }}{{ if .Scope }} · {{ .Scope }}{{ end }}</div>
+            <div class="name"><span>{{ .DisplayName }}</span>{{ if and .RevealAllowed (ne .RecordType "service_secret") }}<span class="key" title="reveal permitted">⚿</span>{{ end }}</div>
+            <div class="owner">{{ if eq .RecordType "service_secret" }}{{ if .Consumer }}{{ .Consumer }}{{ else }}Declared service{{ end }}{{ if .Host }} · {{ .Host }}{{ end }}{{ else }}{{ .Owner }}{{ if .Scope }} · {{ .Scope }}{{ end }}{{ end }}</div>
             <div class="chips">
+              {{ if eq .RecordType "service_secret" }}<span class="chip teal">Service secret</span>{{ end }}
               <span class="chip">{{ .Provider }}</span>
               <span class="chip">{{ .Classification }}</span>
               {{ if eq .Lifecycle "active" }}<span class="chip teal">active</span>
@@ -204,8 +205,13 @@
               {{ else }}<span class="chip danger">{{ .Lifecycle }}</span>{{ end }}
             </div>
             <div class="meta">
+              {{ if eq .RecordType "service_secret" }}
+              <span>rotation <b>{{ if .RotationPosture }}{{ .RotationPosture }}{{ else }}not reported{{ end }}</b> · every <b>{{ .RotationDays }}d</b></span>
+              <span>health <b>{{ if .Health }}{{ .Health }}{{ else }}not reported{{ end }}</b> · checked <b>{{ since .LastCheckedAt }}</b></span>
+              {{ else }}
               <span>rotates every <b>{{ .RotationDays }}d</b> · <b>{{ .ConsumerCount }}</b> consumer{{ if ne .ConsumerCount 1 }}s{{ end }}</span>
               <span>last checked <b>{{ since .LastCheckedAt }}</b></span>
+              {{ end }}
             </div>
             <div class="foot">
               <span class="mono">{{ .ID }}</span>
@@ -219,7 +225,7 @@
         {{ else if .TotalCount }}
         <div class="empty">Nothing matches these filters. <a href="/#vault">Clear them</a> to see all {{ .TotalCount }} secrets.</div>
         {{ else }}
-        <div class="empty">No secrets in the catalog yet. <a href="/vault/new">Set up the first service secret</a> — Janus will walk you through it.</div>
+        <div class="empty">No secrets in the catalog yet. Managed service secrets start from the service in Pharos. <a href="/vault/new">Advanced manual setup</a> remains available as a fallback.</div>
         {{ end }}
       </section>
 
@@ -236,15 +242,29 @@
           <b class="mono">{{ .Focus.Descriptor.ID }}</b>
         </div>
         <h3>{{ .Focus.Descriptor.DisplayName }}</h3>
+        {{ if eq .Focus.Descriptor.RecordType "service_secret" }}
+        <div class="chips">
+          <span class="chip teal">Service secret</span>
+          <span class="chip">no reveal</span>
+        </div>
+        <dl class="kv">
+          <span>Consumer</span><b>{{ if .Focus.Descriptor.Consumer }}{{ .Focus.Descriptor.Consumer }}{{ else }}Declared service{{ end }}</b>
+          <span>Host</span><b>{{ if .Focus.Descriptor.Host }}{{ .Focus.Descriptor.Host }}{{ else }}{{ .Focus.Descriptor.Scope }}{{ end }}</b>
+          <span>Lifecycle</span><b>{{ .Focus.Lifecycle }}</b>
+          <span>Age</span><b>{{ since .Focus.Descriptor.LastCheckedAt }}</b>
+          <span>Rotation</span><b>{{ if .Focus.Descriptor.RotationPosture }}{{ .Focus.Descriptor.RotationPosture }}{{ else }}not reported{{ end }} · {{ .Focus.Descriptor.RotationDays }}d</b>
+          <span>Health</span><b>{{ if .Focus.Descriptor.Health }}{{ .Focus.Descriptor.Health }}{{ else }}not reported{{ end }}</b>
+        </dl>
+        {{ end }}
         <p class="lead">{{ .Focus.Descriptor.Classification }} · lifecycle {{ .Focus.Lifecycle }} · owner {{ .Focus.Descriptor.Owner }}</p>
         {{ if .Focus.NormalUseBlocked }}<p class="lead"><span class="state warn">blocked</span> {{ .Focus.NormalUseReason }}</p>{{ end }}
         {{ range .Focus.Gates }}<p class="lead"><span class="state {{ if eq .Severity "error" }}bad{{ else }}warn{{ end }}">{{ .Code }}</span> {{ .Message }}</p>{{ end }}
         {{ if not .Focus.Gates }}<p class="lead"><span class="state ok">clear</span> no catalog gates on this descriptor.</p>{{ end }}
 
         <div class="rail-section service-setup-callout">
-          <strong>Need to create a new service secret?</strong>
-          <p class="lead">Create a reviewed setup guide for a new service-and-machine pairing. Janus never asks for the value.</p>
-          <a class="btn quiet" href="/vault/new">Set up service secret</a>
+          <strong>Managed service secrets start in Pharos</strong>
+          <p class="lead">Open the service in Pharos to use its locked host, service, and secret slot. This manual configuration guide is only the advanced fallback.</p>
+          <a class="btn quiet" href="/vault/new">Advanced manual setup</a>
         </div>
 
         {{ if .CanOperate }}

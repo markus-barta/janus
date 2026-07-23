@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -30,8 +31,14 @@ type managedTestDeclaration struct {
 	err error
 }
 
-func (declaration managedTestDeclaration) Matches(managedSetupIntent) error {
-	return declaration.err
+func (declaration managedTestDeclaration) Resolve(intent managedSetupIntent) (managedDeclarationContext, error) {
+	return managedDeclarationContext{
+		ServiceLabel:   "Canary service",
+		SlotLabel:      "Admin password",
+		ConsumerKind:   "managed_service",
+		DeliveryKind:   "private_env_file",
+		AllowedSources: append([]string(nil), intent.AllowedSources...),
+	}, declaration.err
 }
 
 func managedTestIntent(now int64) managedSetupIntent {
@@ -40,7 +47,7 @@ func managedTestIntent(now int64) managedSetupIntent {
 		SchemaVersion:          managedIntentContractVersion,
 		IntentRef:              "intent_0f92b78c3d16",
 		OperationKind:          "create",
-		Source:                 "generated",
+		AllowedSources:         []string{"generated", "import"},
 		HostRef:                "host_7f94a1c8e912",
 		ServiceRef:             "svc_24b7c8f0aa19",
 		SlotRef:                "slot_d5019e2a7b11",
@@ -103,14 +110,16 @@ func TestManagedIntentConsumesOnceAndSupportsSafeKeyRotation(t *testing.T) {
 		"key_rotation0001": rotationKey,
 	}, now+1)
 
-	accepted, err := consumer.Consume(context.Background(), intent.IntentRef, intent.HumanSessionRef)
+	accepted, err := consumer.Consume(context.Background(), intent.IntentRef, intent.HumanSessionRef, "generated")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !validManagedRef("op_", accepted.OperationRef) || accepted.Intent != intent {
+	if !validManagedRef("op_", accepted.OperationRef) ||
+		accepted.Source != "generated" ||
+		!reflect.DeepEqual(accepted.Intent, intent) {
 		t.Fatalf("unexpected accepted intent: %#v", accepted)
 	}
-	_, err = consumer.Consume(context.Background(), intent.IntentRef, intent.HumanSessionRef)
+	_, err = consumer.Consume(context.Background(), intent.IntentRef, intent.HumanSessionRef, "generated")
 	if err == nil || err.Error() != "managed_intent_replayed" {
 		t.Fatalf("replay should be rejected, got %v", err)
 	}
@@ -128,16 +137,40 @@ func TestManagedIntentInspectionIsValueFreeAndDoesNotConsumeReplayBudget(t *test
 	)
 	for attempt := 0; attempt < 2; attempt++ {
 		inspected, err := consumer.Inspect(context.Background(), intent.IntentRef, intent.HumanSessionRef)
-		if err != nil || inspected != intent {
+		if err != nil || !reflect.DeepEqual(inspected.Intent, intent) {
 			t.Fatalf("inspection %d failed: inspected=%#v err=%v", attempt, inspected, err)
 		}
 	}
-	accepted, err := consumer.Consume(context.Background(), intent.IntentRef, intent.HumanSessionRef)
-	if err != nil || accepted.Intent != intent || !validManagedRef("op_", accepted.OperationRef) {
+	accepted, err := consumer.Consume(context.Background(), intent.IntentRef, intent.HumanSessionRef, "import")
+	if err != nil || !reflect.DeepEqual(accepted.Intent, intent) ||
+		accepted.Source != "import" ||
+		!validManagedRef("op_", accepted.OperationRef) {
 		t.Fatalf("inspection consumed or changed the intent: accepted=%#v err=%v", accepted, err)
 	}
-	if _, err := consumer.Consume(context.Background(), intent.IntentRef, intent.HumanSessionRef); err == nil || err.Error() != "managed_intent_replayed" {
+	if _, err := consumer.Consume(context.Background(), intent.IntentRef, intent.HumanSessionRef, "import"); err == nil || err.Error() != "managed_intent_replayed" {
 		t.Fatalf("only the committed consume should spend replay budget: %v", err)
+	}
+}
+
+func TestManagedIntentRejectsSourceOutsideSignedDeclarationBeforeReplayConsume(t *testing.T) {
+	now := int64(1_784_833_200)
+	intent := managedTestIntent(now)
+	intent.AllowedSources = []string{"generated"}
+	envelope, key := signManagedTestIntent(t, 7, "key_primary0001", intent)
+	consumer := managedTestConsumer(
+		t,
+		envelope,
+		managedIntentKeyring{"key_primary0001": key},
+		now+1,
+	)
+	consumer.declaration = managedTestDeclaration{}
+
+	if _, err := consumer.Consume(context.Background(), intent.IntentRef, intent.HumanSessionRef, "import"); err == nil || err.Error() != "managed_intent_source_denied" {
+		t.Fatalf("unsigned source choice should be denied, got %v", err)
+	}
+	accepted, err := consumer.Consume(context.Background(), intent.IntentRef, intent.HumanSessionRef, "generated")
+	if err != nil || accepted.Source != "generated" {
+		t.Fatalf("source denial should not consume replay budget: accepted=%#v err=%v", accepted, err)
 	}
 }
 
@@ -238,7 +271,7 @@ func TestManagedIntentRejectsIdentityTimeAudienceDriftAndTampering(t *testing.T)
 			if humanRef == "" {
 				humanRef = intent.HumanSessionRef
 			}
-			_, err := consumer.Consume(context.Background(), requestRef, humanRef)
+			_, err := consumer.Consume(context.Background(), requestRef, humanRef, "generated")
 			if err == nil || err.Error() != test.want {
 				t.Fatalf("got %v, want %s", err, test.want)
 			}
@@ -274,11 +307,11 @@ func TestManagedIntentCrossLanguageFixtureValues(t *testing.T) {
 	if got := base64.RawURLEncoding.EncodeToString(publicKey); got != "_RckOFqgx1tk-3jNYC-h2ZH96_drE8WO1wLqyDXp9hg" {
 		t.Fatalf("public key drifted: %s", got)
 	}
-	if envelope.PayloadBase64URL != "eyJzY2hlbWEiOiJpbnNwci5qYW51cy5tYW5hZ2VkLXNlcnZpY2Utc2V0dXAtaW50ZW50LnYxIiwic2NoZW1hX3ZlcnNpb24iOjEsImludGVudF9yZWYiOiJpbnRlbnRfMGY5MmI3OGMzZDE2Iiwib3BlcmF0aW9uX2tpbmQiOiJjcmVhdGUiLCJzb3VyY2UiOiJnZW5lcmF0ZWQiLCJob3N0X3JlZiI6Imhvc3RfN2Y5NGExYzhlOTEyIiwic2VydmljZV9yZWYiOiJzdmNfMjRiN2M4ZjBhYTE5Iiwic2xvdF9yZWYiOiJzbG90X2Q1MDE5ZTJhN2IxMSIsImh1bWFuX3Nlc3Npb25fcmVmIjoiaHNuXzQ4OWUxMjZhNzBiZiIsImlzc3Vlcl9yZWYiOiJzeXNfcGhhcm9zX2NvbnRyb2xfcGxhbmVfdjEiLCJhdWRpZW5jZV9yZWYiOiJzeXNfamFudXNfc2VjcmV0X2N1c3RvZHlfdjEiLCJub25jZV9yZWYiOiJub25jZV9hMjgwZmQ2MWI5Y2UiLCJkZWNsYXJhdGlvbl9maW5nZXJwcmludCI6ImRlY2xfNDEyNjhlMmI3NzJhIiwiaXNzdWVkX2F0X3VuaXhfc2VjcyI6MTc4NDgzMzIwMCwiZXhwaXJlc19hdF91bml4X3NlY3MiOjE3ODQ4MzM1MDAsInJldHVybl90YXJnZXQiOiJwaGFyb3Nfc2VydmljZSJ9" {
-		t.Fatal("cross-language payload serialization drifted")
+	if envelope.PayloadBase64URL != "eyJzY2hlbWEiOiJpbnNwci5qYW51cy5tYW5hZ2VkLXNlcnZpY2Utc2V0dXAtaW50ZW50LnYxIiwic2NoZW1hX3ZlcnNpb24iOjEsImludGVudF9yZWYiOiJpbnRlbnRfMGY5MmI3OGMzZDE2Iiwib3BlcmF0aW9uX2tpbmQiOiJjcmVhdGUiLCJhbGxvd2VkX3NvdXJjZXMiOlsiZ2VuZXJhdGVkIiwiaW1wb3J0Il0sImhvc3RfcmVmIjoiaG9zdF83Zjk0YTFjOGU5MTIiLCJzZXJ2aWNlX3JlZiI6InN2Y18yNGI3YzhmMGFhMTkiLCJzbG90X3JlZiI6InNsb3RfZDUwMTllMmE3YjExIiwiaHVtYW5fc2Vzc2lvbl9yZWYiOiJoc25fNDg5ZTEyNmE3MGJmIiwiaXNzdWVyX3JlZiI6InN5c19waGFyb3NfY29udHJvbF9wbGFuZV92MSIsImF1ZGllbmNlX3JlZiI6InN5c19qYW51c19zZWNyZXRfY3VzdG9keV92MSIsIm5vbmNlX3JlZiI6Im5vbmNlX2EyODBmZDYxYjljZSIsImRlY2xhcmF0aW9uX2ZpbmdlcnByaW50IjoiZGVjbF80MTI2OGUyYjc3MmEiLCJpc3N1ZWRfYXRfdW5peF9zZWNzIjoxNzg0ODMzMjAwLCJleHBpcmVzX2F0X3VuaXhfc2VjcyI6MTc4NDgzMzUwMCwicmV0dXJuX3RhcmdldCI6InBoYXJvc19zZXJ2aWNlIn0" {
+		t.Fatalf("cross-language payload serialization drifted: %s", envelope.PayloadBase64URL)
 	}
-	if envelope.SignatureBase64URL != "HzAdIgR9Tu2uRIjXeSXVuUKI2Qz_iRaNc8jLspprckTvx-XGRFFwaYT8D1ntisizZ1dIIDBsXQ5XD0-s3GBkAg" {
-		t.Fatal("cross-language signature drifted")
+	if envelope.SignatureBase64URL != "3ThLNIbJ9GUo-deWwOxn8na6tuFhNwPaMo7QY4M1g4CE81TFYBzv8lBbHjCSkqKq2pRJhcUkaogKMye59SxcBg" {
+		t.Fatalf("cross-language signature drifted: %s", envelope.SignatureBase64URL)
 	}
 }
 
@@ -413,7 +446,7 @@ func TestManagedManifestResolverRecomputesFingerprintAndFailsClosed(t *testing.T
 	intent := managedTestIntent(1_784_833_200)
 	intent.DeclarationFingerprint = manifest.DeclarationFingerprint
 	resolver := managedManifestResolver{paths: []string{path}}
-	if err := resolver.Matches(intent); err != nil {
+	if _, err := resolver.Resolve(intent); err != nil {
 		t.Fatal(err)
 	}
 
@@ -422,7 +455,7 @@ func TestManagedManifestResolverRecomputesFingerprintAndFailsClosed(t *testing.T
 	if err := os.WriteFile(path, tampered, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := resolver.Matches(intent); err == nil || err.Error() != "managed_intent_declaration_unavailable" {
+	if _, err := resolver.Resolve(intent); err == nil || err.Error() != "managed_intent_declaration_unavailable" {
 		t.Fatalf("fingerprint drift must fail closed, got %v", err)
 	}
 }

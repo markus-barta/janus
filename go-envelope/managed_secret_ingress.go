@@ -34,6 +34,7 @@ const (
 type managedStepUpFlow struct {
 	Schema          string `json:"schema"`
 	IntentRef       string `json:"intent_ref"`
+	Source          string `json:"source"`
 	HumanSessionRef string `json:"human_session_ref"`
 	StateHash       string `json:"state_hash"`
 	IssuedAt        int64  `json:"issued_at"`
@@ -43,6 +44,7 @@ type managedStepUpFlow struct {
 type managedStepUpProof struct {
 	Schema          string `json:"schema"`
 	IntentRef       string `json:"intent_ref"`
+	Source          string `json:"source"`
 	HumanSessionRef string `json:"human_session_ref"`
 	AuthenticatedAt int64  `json:"authenticated_at"`
 	ExpiresAt       int64  `json:"expires_at"`
@@ -65,7 +67,16 @@ type managedSetupPageData struct {
 	CSRF             string
 	IntentRef        string
 	OperationKind    string
-	Source           string
+	SelectedSource   string
+	AllowGenerated   bool
+	AllowImport      bool
+	HostRef          string
+	ServiceRef       string
+	SlotRef          string
+	ServiceLabel     string
+	SlotLabel        string
+	ConsumerLabel    string
+	DeliveryLabel    string
 	StepUpReady      bool
 	RequestID        string
 }
@@ -79,7 +90,7 @@ func (app *App) handleManagedSetup(w http.ResponseWriter, r *http.Request) {
 		app.renderSafeFailure(w, r, http.StatusBadRequest, "setup_link_invalid", "This setup link is not valid. Start again from Pharos.", nil)
 		return
 	}
-	intent, err := app.inspectManagedSetupIntent(r.Context(), session, intentRef)
+	inspection, err := app.inspectManagedSetupIntent(r.Context(), session, intentRef)
 	if err != nil {
 		app.audit(r, "managed_secret.setup.view", "denied", session.Subject, "intent unavailable")
 		app.renderSafeFailure(w, r, managedIntentHTTPStatus(err), "setup_link_unavailable", "This setup request is unavailable or expired. Start again from Pharos.", nil)
@@ -88,7 +99,12 @@ func (app *App) handleManagedSetup(w http.ResponseWriter, r *http.Request) {
 	proof, proofOK := app.readManagedStepUpProof(r)
 	stepUpReady := proofOK &&
 		proof.IntentRef == intentRef &&
-		proof.HumanSessionRef == managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject)
+		proof.HumanSessionRef == managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject) &&
+		containsManagedSource(inspection.Intent.AllowedSources, proof.Source)
+	selectedSource := proof.Source
+	if !stepUpReady {
+		selectedSource = preferredManagedSource(inspection.Intent.AllowedSources)
+	}
 	app.audit(r, "managed_secret.setup.view", "allowed", session.Subject, "value-free setup context")
 	renderTemplateStatus(w, app.templates, "managed_secret_setup", http.StatusOK, managedSetupPageData{
 		Title:            "Janus — Service secret",
@@ -98,9 +114,18 @@ func (app *App) handleManagedSetup(w http.ResponseWriter, r *http.Request) {
 		Session:          session,
 		SessionRoleBadge: SessionRoleBadge(session),
 		CSRF:             app.csrfToken(session),
-		IntentRef:        intent.IntentRef,
-		OperationKind:    intent.OperationKind,
-		Source:           intent.Source,
+		IntentRef:        inspection.Intent.IntentRef,
+		OperationKind:    inspection.Intent.OperationKind,
+		SelectedSource:   selectedSource,
+		AllowGenerated:   containsManagedSource(inspection.Intent.AllowedSources, "generated"),
+		AllowImport:      containsManagedSource(inspection.Intent.AllowedSources, "import"),
+		HostRef:          inspection.Intent.HostRef,
+		ServiceRef:       inspection.Intent.ServiceRef,
+		SlotRef:          inspection.Intent.SlotRef,
+		ServiceLabel:     inspection.Context.ServiceLabel,
+		SlotLabel:        inspection.Context.SlotLabel,
+		ConsumerLabel:    managedConsumerLabel(inspection.Context.ConsumerKind),
+		DeliveryLabel:    managedDeliveryLabel(inspection.Context.DeliveryKind),
 		StepUpReady:      stepUpReady,
 		RequestID:        requestID(r),
 	})
@@ -118,16 +143,23 @@ func (app *App) handleManagedSetupStepUp(w http.ResponseWriter, r *http.Request)
 		!strictFormRequest(r, false) ||
 		r.URL.RawQuery != "" ||
 		r.ParseForm() != nil ||
-		!exactFormKeys(r.PostForm, "csrf_token", "intent_ref") ||
+		!exactFormKeys(r.PostForm, "csrf_token", "intent_ref", "source") ||
 		!hmac.Equal([]byte(app.csrfToken(session)), []byte(r.PostForm.Get("csrf_token"))) {
 		app.audit(r, "managed_secret.step_up.start", "denied", session.Subject, "request integrity failed")
 		app.renderSafeFailure(w, r, http.StatusForbidden, "request_integrity_failed", "Reload the setup page and try again.", nil)
 		return
 	}
 	intentRef := r.PostForm.Get("intent_ref")
-	if _, err := app.inspectManagedSetupIntent(r.Context(), session, intentRef); err != nil {
+	source := r.PostForm.Get("source")
+	inspection, err := app.inspectManagedSetupIntent(r.Context(), session, intentRef)
+	if err != nil {
 		app.audit(r, "managed_secret.step_up.start", "denied", session.Subject, "intent unavailable")
 		app.renderSafeFailure(w, r, managedIntentHTTPStatus(err), "setup_link_unavailable", "This setup request is unavailable or expired. Start again from Pharos.", nil)
+		return
+	}
+	if !containsManagedSource(inspection.Intent.AllowedSources, source) {
+		app.audit(r, "managed_secret.step_up.start", "denied", session.Subject, "source unavailable")
+		app.renderSafeFailure(w, r, http.StatusForbidden, "source_not_allowed", "That setup choice is not allowed for this service. Start again from Pharos.", nil)
 		return
 	}
 
@@ -138,6 +170,7 @@ func (app *App) handleManagedSetupStepUp(w http.ResponseWriter, r *http.Request)
 	flow := managedStepUpFlow{
 		Schema:          managedStepUpFlowDomain,
 		IntentRef:       intentRef,
+		Source:          source,
 		HumanSessionRef: managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject),
 		StateHash:       managedStateHash(state),
 		IssuedAt:        now.Unix(),
@@ -191,7 +224,7 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer zeroizeBytes(prefix)
-	if !validateManagedSecretFormPrefix(prefix, app.csrfToken(session), proof.IntentRef) {
+	if !validateManagedSecretFormPrefix(prefix, app.csrfToken(session), proof.IntentRef, proof.Source) {
 		app.audit(r, "managed_secret.execute", "denied", session.Subject, "request integrity failed")
 		app.renderSafeFailure(w, r, http.StatusForbidden, "request_integrity_failed", "Reload the setup page and try again.", nil)
 		return
@@ -201,7 +234,7 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 	// intentional security-over-availability choice: an incomplete upload burns
 	// the intent and must restart in Pharos, but no retry can replay a pasted
 	// value after Janus has admitted it into memory.
-	accepted, err := app.managedSetup.Consume(r.Context(), proof.IntentRef, humanSessionRef)
+	accepted, err := app.managedSetup.Consume(r.Context(), proof.IntentRef, humanSessionRef, proof.Source)
 	if err != nil {
 		app.clearManagedStepUpProofCookies(w)
 		app.audit(r, "managed_secret.execute", "denied", session.Subject, "intent rejected")
@@ -226,8 +259,8 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 	}
 	importedValue, err := decodeManagedFormValueInPlace(rawValue)
 	if err != nil ||
-		accepted.Intent.Source == "import" && len(importedValue) == 0 ||
-		accepted.Intent.Source == "generated" && len(importedValue) != 0 {
+		accepted.Source == "import" && len(importedValue) == 0 ||
+		accepted.Source == "generated" && len(importedValue) != 0 {
 		app.clearManagedStepUpProofCookies(w)
 		app.audit(r, "managed_secret.execute", "denied", session.Subject, "value shape rejected")
 		app.renderSafeFailure(w, r, http.StatusBadRequest, "value_not_accepted", "The value could not be accepted. Start again from Pharos.", nil)
@@ -253,9 +286,9 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 	http.Redirect(w, r, returnURL, http.StatusSeeOther)
 }
 
-func (app *App) inspectManagedSetupIntent(ctx context.Context, session Session, intentRef string) (managedSetupIntent, error) {
+func (app *App) inspectManagedSetupIntent(ctx context.Context, session Session, intentRef string) (managedSetupInspection, error) {
 	if !app.managedSetupEnabled() || !validManagedRef("intent_", intentRef) {
-		return managedSetupIntent{}, managedIntentError("managed_intent_invalid_request")
+		return managedSetupInspection{}, managedIntentError("managed_intent_invalid_request")
 	}
 	return app.managedSetup.Inspect(ctx, intentRef, managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject))
 }
@@ -357,20 +390,26 @@ func readManagedSecretFormPrefix(reader io.Reader) ([]byte, error) {
 	return nil, errors.New("managed secret form prefix oversized")
 }
 
-func validateManagedSecretFormPrefix(prefix []byte, csrfToken, intentRef string) bool {
+func validateManagedSecretFormPrefix(prefix []byte, csrfToken, intentRef, source string) bool {
 	const csrfPrefix = "csrf_token="
 	const intentSeparator = "&intent_ref="
+	const sourceSeparator = "&source="
 	const secretSuffix = "&secret_value="
 	if !bytes.HasPrefix(prefix, []byte(csrfPrefix)) || !bytes.HasSuffix(prefix, []byte(secretSuffix)) {
 		return false
 	}
 	body := prefix[len(csrfPrefix) : len(prefix)-len(secretSuffix)]
-	csrf, encodedIntent, ok := bytes.Cut(body, []byte(intentSeparator))
-	if !ok || bytes.Contains(encodedIntent, []byte{'&'}) {
+	csrf, rest, ok := bytes.Cut(body, []byte(intentSeparator))
+	if !ok {
+		return false
+	}
+	encodedIntent, encodedSource, ok := bytes.Cut(rest, []byte(sourceSeparator))
+	if !ok || bytes.Contains(encodedIntent, []byte{'&'}) || bytes.Contains(encodedSource, []byte{'&'}) {
 		return false
 	}
 	return hmac.Equal(csrf, []byte(csrfToken)) &&
-		hmac.Equal(encodedIntent, []byte(intentRef))
+		hmac.Equal(encodedIntent, []byte(intentRef)) &&
+		hmac.Equal(encodedSource, []byte(source))
 }
 
 func decodeManagedFormValueInPlace(raw []byte) ([]byte, error) {
@@ -428,14 +467,40 @@ func zeroizeBytes(value []byte) {
 	runtime.KeepAlive(value)
 }
 
+func preferredManagedSource(sources []string) string {
+	if containsManagedSource(sources, "generated") {
+		return "generated"
+	}
+	if containsManagedSource(sources, "import") {
+		return "import"
+	}
+	return ""
+}
+
+func managedConsumerLabel(kind string) string {
+	if kind == "managed_service" {
+		return "Managed service"
+	}
+	return "Declared consumer"
+}
+
+func managedDeliveryLabel(kind string) string {
+	if kind == "private_env_file" {
+		return "Private environment file"
+	}
+	return "Managed delivery"
+}
+
 func managedIntentHTTPStatus(err error) int {
 	var managed managedIntentError
 	if errors.As(err, &managed) {
 		switch managed {
 		case "managed_intent_unknown":
 			return http.StatusNotFound
-		case "managed_intent_expired", "managed_intent_replayed":
+		case "managed_intent_expired", "managed_intent_replayed", "managed_intent_cancelled", "managed_intent_declaration_drift":
 			return http.StatusConflict
+		case "managed_intent_pharos_unavailable", "managed_intent_declaration_unavailable", "managed_intent_replay_store_unavailable":
+			return http.StatusServiceUnavailable
 		}
 	}
 	return http.StatusForbidden
@@ -507,6 +572,7 @@ func (app *App) readManagedStepUpFlow(r *http.Request) (managedStepUpFlow, bool,
 	if !app.decodeManagedSignedCookie(cookie.Value, managedStepUpFlowDomain, &flow) ||
 		flow.Schema != managedStepUpFlowDomain ||
 		!validManagedRef("intent_", flow.IntentRef) ||
+		!validManagedSource(flow.Source) ||
 		!validManagedRef("hsn_", flow.HumanSessionRef) ||
 		!isLowerHexString(flow.StateHash, sha256.Size*2) ||
 		!validManagedStepUpTimes(flow.IssuedAt, flow.ExpiresAt, managedStepUpFlowTTL, time.Now().UTC()) {
@@ -524,6 +590,7 @@ func (app *App) readManagedStepUpProof(r *http.Request) (managedStepUpProof, boo
 	if !app.decodeManagedSignedCookie(cookie.Value, managedStepUpProofDomain, &proof) ||
 		proof.Schema != managedStepUpProofDomain ||
 		!validManagedRef("intent_", proof.IntentRef) ||
+		!validManagedSource(proof.Source) ||
 		!validManagedRef("hsn_", proof.HumanSessionRef) ||
 		!validManagedStepUpTimes(proof.AuthenticatedAt, proof.ExpiresAt, managedStepUpProofTTL, time.Now().UTC()) {
 		return managedStepUpProof{}, false
@@ -615,6 +682,7 @@ func (app *App) completeManagedStepUpCallback(
 	proof := managedStepUpProof{
 		Schema:          managedStepUpProofDomain,
 		IntentRef:       flow.IntentRef,
+		Source:          flow.Source,
 		HumanSessionRef: humanSessionRef,
 		AuthenticatedAt: authTime,
 		ExpiresAt:       time.Unix(authTime, 0).UTC().Add(managedStepUpProofTTL).Unix(),

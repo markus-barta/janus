@@ -119,11 +119,14 @@ clients. They receive no value-bearing method and cannot select a destination.
 
 ### Replay
 
-Setup intents are single-use, nonce-bound, action-bound, source-bound, tied to
-one human session and declaration fingerprint, and accepted only when the
-request event is inside the intent's half-open validity window. Operation refs
-make exact retries idempotent; changing any binding under the same intent or
-operation ref fails closed. Late evidence cannot advance a terminal operation.
+Setup intents are single-use, nonce-bound, action-bound, bound to the
+declaration's complete reviewed source policy, tied to one human session and
+declaration fingerprint, and accepted only when the request event is inside the
+intent's half-open validity window. Janus binds the exact human-selected source
+to the fresh passkey proof before consumption. Operation refs make exact
+retries idempotent; changing that source or any other binding under the same
+intent or operation ref fails closed. Late evidence cannot advance a terminal
+operation.
 
 ### Logging and observability
 
@@ -150,9 +153,12 @@ zero-width, and non-ordinary whitespace characters, but are never authority.
 Reason codes use a closed lowercase vocabulary.
 
 The setup intent names an allowlisted return target, not a callback URL. It
-binds exact action and source mode as well as host, service, slot, human
-session, issuer, audience, nonce, declaration fingerprint, and a maximum
-five-minute lifetime. Create and replace require a source; remove forbids one.
+binds the exact action and complete reviewed source policy as well as host,
+service, slot, human session, issuer, audience, nonce, declaration fingerprint,
+and a maximum five-minute lifetime. Create and replace require one or more
+canonical allowed sources; remove forbids them. The exact create/replace source
+is selected in Janus, bound to fresh passwordless proof, and then copied into
+the operation.
 
 An operation binds the exact setup intent, declaration fingerprint, secret ref,
 source mode, and delivery generation in addition to its host, service, and slot
