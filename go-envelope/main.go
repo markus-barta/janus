@@ -59,6 +59,7 @@ type Config struct {
 	CookieKey     []byte
 	RolePolicy    RolePolicy
 	ScopePolicy   ScopePolicy
+	ManagedSetup  *managedSetupRuntimeConfig
 }
 
 func (c Config) OIDCConfigured() bool {
@@ -317,14 +318,15 @@ type AuditEntry struct {
 }
 
 type App struct {
-	cfg       Config
-	store     *Store
-	broker    *Broker
-	permits   *PermitStore
-	limiter   *RateLimiter
-	oauth     *oauth2.Config
-	verifier  *oidc.IDTokenVerifier
-	templates *template.Template
+	cfg          Config
+	store        *Store
+	broker       *Broker
+	permits      *PermitStore
+	limiter      *RateLimiter
+	oauth        *oauth2.Config
+	verifier     *oidc.IDTokenVerifier
+	templates    *template.Template
+	managedSetup *managedSetupIntentConsumer
 }
 
 type Session struct {
@@ -515,6 +517,11 @@ func loadConfig() (Config, error) {
 	}
 	cfg.RolePolicy = LoadRolePolicyFromEnv()
 	cfg.ScopePolicy = LoadScopePolicyFromEnv()
+	managedSetup, err := loadManagedSetupRuntimeConfigFromEnv()
+	if err != nil {
+		return cfg, err
+	}
+	cfg.ManagedSetup = managedSetup
 
 	if _, err := url.ParseRequestURI(cfg.PublicURL); err != nil {
 		return cfg, fmt.Errorf("JANUS_PUBLIC_URL is invalid: %w", err)
@@ -537,6 +544,13 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 		permits:   permitStore,
 		limiter:   NewRateLimiter(180, time.Minute),
 		templates: mustTemplates(),
+	}
+	if cfg.ManagedSetup != nil {
+		managedSetup, err := newManagedSetupIntentConsumer(*cfg.ManagedSetup, cfg.DataDir)
+		if err != nil {
+			return nil, fmt.Errorf("managed setup intent consumer: %w", err)
+		}
+		app.managedSetup = managedSetup
 	}
 
 	if cfg.OIDCConfigured() {
