@@ -193,6 +193,14 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
     }
 }
 
+/// Run the private, fixed-protocol managed-service transaction boundary.
+///
+/// This entry point intentionally bypasses the general CLI dispatcher: the
+/// resulting binary has no admin or use subcommands and accepts no argv.
+pub async fn run_web_transaction_service() -> Result<()> {
+    lifecycle_entry::web_transaction::run_from_env().await
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Command {
     Help,

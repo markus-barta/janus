@@ -51,7 +51,8 @@ otherwise recovery reruns the unchanged tag and commit.
 
 ## Runtime configuration
 
-Set these variables for `janus-warden`, `janusd-use`, and `janusd-admin`:
+Set these variables for `janus-warden`, `janusd-use`, `janusd-admin`, and
+`janusd-web-transactiond`:
 
 | Variable | Meaning |
 | --- | --- |

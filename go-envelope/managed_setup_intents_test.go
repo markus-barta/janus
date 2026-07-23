@@ -429,6 +429,7 @@ func TestManagedSetupRuntimeConfigIsAllOrNothingAndLoadsRotatingKeys(t *testing.
 		"JANUS_MANAGED_SETUP_INTERNAL_TOKEN_FILE",
 		"JANUS_MANAGED_SETUP_VERIFICATION_KEYS_FILE",
 		"JANUS_MANAGED_SETUP_MANIFEST_PATHS",
+		"JANUS_MANAGED_WEB_TRANSACTION_SOCKET",
 	} {
 		t.Setenv(name, "")
 	}
@@ -467,13 +468,15 @@ func TestManagedSetupRuntimeConfigIsAllOrNothingAndLoadsRotatingKeys(t *testing.
 	t.Setenv("JANUS_MANAGED_SETUP_INTERNAL_TOKEN_FILE", tokenPath)
 	t.Setenv("JANUS_MANAGED_SETUP_VERIFICATION_KEYS_FILE", keysPath)
 	t.Setenv("JANUS_MANAGED_SETUP_MANIFEST_PATHS", "/managed/one.json,/managed/two.json")
+	t.Setenv("JANUS_MANAGED_WEB_TRANSACTION_SOCKET", "/run/janus/managed-transaction.sock")
 	config, err := loadManagedSetupRuntimeConfigFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if config.PharosReturnOrigin != "https://pharos.example.test" ||
 		len(config.Keyring) != 1 ||
-		len(config.ManifestPaths) != 2 {
+		len(config.ManifestPaths) != 2 ||
+		config.TransactionSocket != "/run/janus/managed-transaction.sock" {
 		t.Fatalf("unexpected runtime config: %#v", config)
 	}
 	if err := os.Chmod(tokenPath, 0644); err != nil {

@@ -205,8 +205,10 @@ On a supported Linux system, build the native Nix package:
 nix build .#janus-engine
 ```
 
-The package installs `janusd-use`, `janusd-admin`, `janus-warden`, and the
-non-operational `janusd` migration helper for supported Linux systems. The
+The package installs `janusd-use`, `janusd-admin`,
+`janusd-web-transactiond`, `janus-warden`, and the non-operational `janusd`
+migration helper for supported Linux systems. The private transaction daemon
+has no CLI operations and accepts only the reviewed local socket protocol; the
 legacy helper cannot run either plane's commands.
 
 ### Release assurance
@@ -226,6 +228,8 @@ It exercises:
 - a real reference-only Warden MCP session;
 - the hard use/admin process boundary and retired mixed entry point;
 - the approval-to-env-file operator flow;
+- the private web-to-Rust lifecycle transaction, crash reconciliation, and
+  value-free protocol flow;
 - the versioned approval-registry migration and rollback flow;
 - the exact-scope recovery and explicit boundary-transfer flow;
 - the exact, single-use break-glass lifecycle and independent review flow;

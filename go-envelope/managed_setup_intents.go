@@ -91,6 +91,7 @@ type managedSetupRuntimeConfig struct {
 	InternalToken      string
 	Keyring            managedIntentKeyring
 	ManifestPaths      []string
+	TransactionSocket  string
 }
 
 func loadManagedSetupRuntimeConfigFromEnv() (*managedSetupRuntimeConfig, error) {
@@ -99,10 +100,11 @@ func loadManagedSetupRuntimeConfigFromEnv() (*managedSetupRuntimeConfig, error) 
 	tokenFile := strings.TrimSpace(os.Getenv("JANUS_MANAGED_SETUP_INTERNAL_TOKEN_FILE"))
 	keyFile := strings.TrimSpace(os.Getenv("JANUS_MANAGED_SETUP_VERIFICATION_KEYS_FILE"))
 	manifestRaw := strings.TrimSpace(os.Getenv("JANUS_MANAGED_SETUP_MANIFEST_PATHS"))
-	if pharosOrigin == "" && returnOrigin == "" && tokenFile == "" && keyFile == "" && manifestRaw == "" {
+	transactionSocket := strings.TrimSpace(os.Getenv("JANUS_MANAGED_WEB_TRANSACTION_SOCKET"))
+	if pharosOrigin == "" && returnOrigin == "" && tokenFile == "" && keyFile == "" && manifestRaw == "" && transactionSocket == "" {
 		return nil, nil
 	}
-	if pharosOrigin == "" || tokenFile == "" || keyFile == "" || manifestRaw == "" {
+	if pharosOrigin == "" || tokenFile == "" || keyFile == "" || manifestRaw == "" || transactionSocket == "" {
 		return nil, errors.New("managed setup configuration is partial")
 	}
 	if returnOrigin == "" {
@@ -139,12 +141,16 @@ func loadManagedSetupRuntimeConfigFromEnv() (*managedSetupRuntimeConfig, error) 
 	if len(manifestPaths) == 0 || len(manifestPaths) > 64 {
 		return nil, errors.New("managed setup manifest path contract is invalid")
 	}
+	if !filepath.IsAbs(transactionSocket) || filepath.Clean(transactionSocket) != transactionSocket {
+		return nil, errors.New("managed setup transaction socket contract is invalid")
+	}
 	return &managedSetupRuntimeConfig{
 		PharosOrigin:       pharosOrigin,
 		PharosReturnOrigin: returnOrigin,
 		InternalToken:      token,
 		Keyring:            keyring,
 		ManifestPaths:      manifestPaths,
+		TransactionSocket:  transactionSocket,
 	}, nil
 }
 

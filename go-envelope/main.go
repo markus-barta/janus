@@ -327,6 +327,7 @@ type App struct {
 	verifier     *oidc.IDTokenVerifier
 	templates    *template.Template
 	managedSetup *managedSetupIntentConsumer
+	managedTxn   *managedTransactionClient
 }
 
 type Session struct {
@@ -551,6 +552,7 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 			return nil, fmt.Errorf("managed setup intent consumer: %w", err)
 		}
 		app.managedSetup = managedSetup
+		app.managedTxn = newManagedTransactionClient(cfg.ManagedSetup.TransactionSocket)
 	}
 
 	if cfg.OIDCConfigured() {

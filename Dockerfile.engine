@@ -20,6 +20,7 @@ RUN set -eux; \
     cp target/release/janusd /out/rootfs/usr/local/bin/janusd; \
     cp target/release/janusd-use /out/rootfs/usr/local/bin/janusd-use; \
     cp target/release/janusd-admin /out/rootfs/usr/local/bin/janusd-admin; \
+    cp target/release/janusd-web-transactiond /out/rootfs/usr/local/bin/janusd-web-transactiond; \
     cp target/release/janus-warden /out/rootfs/usr/local/bin/janus-warden; \
     cp config/release-channels/v1.json /out/rootfs/etc/janus/release-channels-v1.json; \
     cp /etc/ssl/certs/ca-certificates.crt /out/rootfs/etc/ssl/certs/ca-certificates.crt

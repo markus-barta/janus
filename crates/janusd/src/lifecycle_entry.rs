@@ -26,6 +26,9 @@ const MAX_BINDING_FILE_BYTES: usize = 1024 * 1024;
 const MAX_IMPORT_BYTES: usize = 64 * 1024;
 const MAX_REVIEW_AGE: Duration = Duration::from_secs(366 * 24 * 60 * 60);
 
+#[path = "lifecycle_entry/web_transaction.rs"]
+pub(super) mod web_transaction;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EntryOperation {
     Preflight,
@@ -55,7 +58,7 @@ struct EntryCommand {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct EntryPlanFile {
+pub(super) struct EntryPlanFile {
     schema_version: u8,
     operation_id: String,
     secret_ref: String,
@@ -86,13 +89,13 @@ struct EntryPlanFile {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-enum EntrySource {
+pub(super) enum EntrySource {
     Generated { alphabet: String, length: usize },
     Import,
 }
 
 impl EntrySource {
-    fn mode(&self) -> &'static str {
+    pub(super) fn mode(&self) -> &'static str {
         match self {
             Self::Generated { .. } => "generated",
             Self::Import => "import",
@@ -101,14 +104,14 @@ impl EntrySource {
 }
 
 #[derive(Clone, Debug)]
-struct EntryPlan {
+pub(super) struct EntryPlan {
     file: EntryPlanFile,
     fingerprint: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum EntryPhase {
+pub(super) enum EntryPhase {
     Preflighted,
     Applying,
     Stored,
@@ -121,7 +124,7 @@ enum EntryPhase {
 }
 
 impl EntryPhase {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Preflighted => "preflighted",
             Self::Applying => "applying",
@@ -154,13 +157,13 @@ struct EntryJournal {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct EntryStatus {
-    operation_id: String,
-    secret_ref: String,
-    mode: String,
-    phase: EntryPhase,
-    reason_code: String,
-    value_returned: bool,
+pub(super) struct EntryStatus {
+    pub(super) operation_id: String,
+    pub(super) secret_ref: String,
+    pub(super) mode: String,
+    pub(super) phase: EntryPhase,
+    pub(super) reason_code: String,
+    pub(super) value_returned: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,7 +176,7 @@ pub(super) struct EntryJournalSummary {
     pub release_matches: bool,
 }
 
-struct EntryTransaction {
+pub(super) struct EntryTransaction {
     plan: EntryPlan,
     release: ReleaseAdmission,
     principal: PrincipalChain,
@@ -250,7 +253,7 @@ async fn run_inner(args: &[String], release: ReleaseAdmission) -> Result<()> {
     Ok(())
 }
 
-fn stable_error_reason(error: &anyhow::Error) -> &'static str {
+pub(super) fn stable_error_reason(error: &anyhow::Error) -> &'static str {
     for cause in error.chain() {
         if let Some(error) = cause.downcast_ref::<JanusError>() {
             return match error {
@@ -341,7 +344,11 @@ impl EntryTransaction {
         Self::new(load_plan(path)?, release, principal)
     }
 
-    fn new(plan: EntryPlan, release: ReleaseAdmission, principal: PrincipalChain) -> Result<Self> {
+    pub(super) fn new(
+        plan: EntryPlan,
+        release: ReleaseAdmission,
+        principal: PrincipalChain,
+    ) -> Result<Self> {
         let expected_scope = ScopeRef::from_opaque(plan.file.expected_scope_ref.clone())?;
         if expected_scope != principal.scope {
             return Err(JanusError::policy_denied(
@@ -364,7 +371,7 @@ impl EntryTransaction {
         })
     }
 
-    async fn preflight(&self, now: SystemTime) -> Result<EntryStatus> {
+    pub(super) async fn preflight(&self, now: SystemTime) -> Result<EntryStatus> {
         let _lock = self.lock()?;
         if self.journal_path().exists() {
             anyhow::bail!(
@@ -399,7 +406,7 @@ impl EntryTransaction {
         Ok(status_from_journal(&journal))
     }
 
-    async fn apply_generated(&self, now: SystemTime) -> Result<EntryStatus> {
+    pub(super) async fn apply_generated(&self, now: SystemTime) -> Result<EntryStatus> {
         let EntrySource::Generated { alphabet, length } = &self.plan.file.source else {
             anyhow::bail!("entry source mode mismatch");
         };
@@ -408,7 +415,11 @@ impl EntryTransaction {
             .await
     }
 
-    async fn apply_import<R>(&self, reader: &mut R, now: SystemTime) -> Result<EntryStatus>
+    pub(super) async fn apply_import<R>(
+        &self,
+        reader: &mut R,
+        now: SystemTime,
+    ) -> Result<EntryStatus>
     where
         R: Read,
     {
@@ -419,6 +430,32 @@ impl EntryTransaction {
             read_import_value(reader, self.plan.file.input_max_bytes)
         })
         .await
+    }
+
+    pub(super) async fn apply_import_value(
+        &self,
+        value: SecretValue,
+        now: SystemTime,
+    ) -> Result<EntryStatus> {
+        if !matches!(self.plan.file.source, EntrySource::Import) {
+            anyhow::bail!("entry source mode mismatch");
+        }
+        if value.expose_bytes().is_empty() {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_import_empty value_returned=false"
+            );
+        }
+        if value.expose_bytes().len() > self.plan.file.input_max_bytes {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_import_oversize value_returned=false"
+            );
+        }
+        if matches!(value.expose_bytes().last(), Some(b'\n' | b'\r')) {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_import_trailing_data value_returned=false"
+            );
+        }
+        self.apply_value_after_preflight(now, || Ok(value)).await
     }
 
     async fn apply_value_after_preflight<F>(
@@ -548,7 +585,7 @@ impl EntryTransaction {
         Ok(status_from_journal(&journal))
     }
 
-    async fn activate(&self, now: SystemTime) -> Result<EntryStatus> {
+    pub(super) async fn activate(&self, now: SystemTime) -> Result<EntryStatus> {
         let _lock = self.lock()?;
         let mut journal = self.read_bound_journal()?;
         if journal.phase != EntryPhase::Validated {
@@ -652,7 +689,7 @@ impl EntryTransaction {
         Ok(status_from_journal(&journal))
     }
 
-    async fn rollback(&self) -> Result<EntryStatus> {
+    pub(super) async fn rollback(&self) -> Result<EntryStatus> {
         let _lock = self.lock()?;
         let mut journal = self.read_bound_journal()?;
         if journal.phase == EntryPhase::RolledBack {
@@ -676,7 +713,7 @@ impl EntryTransaction {
         Ok(status_from_journal(&journal))
     }
 
-    async fn status(&self) -> Result<EntryStatus> {
+    pub(super) async fn status(&self) -> Result<EntryStatus> {
         let _lock = self.lock()?;
         let journal = self.read_bound_journal()?;
         let (presence, lifecycles) = match journal.phase {
@@ -1147,6 +1184,7 @@ fn load_plan(path: &Path) -> Result<EntryPlan> {
     let bytes = read_regular_bounded(path, MAX_PLAN_BYTES, false)?;
     let file: EntryPlanFile = serde_json::from_slice(&bytes)
         .map_err(|_| JanusError::policy_denied("entry_plan_invalid", "entry plan is invalid"))?;
+    validate_cli_operation_namespace(&file.operation_id)?;
     validate_plan(&file, SystemTime::now())?;
     Ok(EntryPlan {
         file,
@@ -1154,7 +1192,16 @@ fn load_plan(path: &Path) -> Result<EntryPlan> {
     })
 }
 
-fn validate_plan(plan: &EntryPlanFile, now: SystemTime) -> Result<()> {
+fn validate_cli_operation_namespace(operation_id: &str) -> Result<()> {
+    if operation_id.starts_with("webtx_") {
+        anyhow::bail!(
+            "lifecycle entry denied reason_code=entry_operation_namespace_reserved value_returned=false"
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn validate_plan(plan: &EntryPlanFile, now: SystemTime) -> Result<()> {
     if plan.schema_version != PLAN_SCHEMA_VERSION {
         anyhow::bail!("unsupported lifecycle entry plan version");
     }
@@ -1630,7 +1677,7 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    fn sample_plan() -> EntryPlanFile {
+    pub(super) fn sample_plan() -> EntryPlanFile {
         EntryPlanFile {
             schema_version: PLAN_SCHEMA_VERSION,
             operation_id: "entry-fixture".to_string(),
@@ -1795,6 +1842,8 @@ mod tests {
             assert!(validate_operation_id(invalid).is_err());
         }
         validate_operation_id("entry-fixture_1").unwrap();
+        assert!(validate_cli_operation_namespace("webtx_0123456789").is_err());
+        validate_cli_operation_namespace("entry-fixture_1").unwrap();
     }
 
     #[test]
