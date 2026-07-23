@@ -518,7 +518,7 @@ pub enum ManagedReturnTarget {
 pub struct ManagedSetupIntentV1 {
     intent_ref: ManagedSetupIntentRef,
     operation_kind: ManagedSecretOperationKind,
-    source: Option<ManagedSecretSource>,
+    allowed_sources: Vec<ManagedSecretSource>,
     host_ref: ManagedHostRef,
     service_ref: ManagedServiceRef,
     slot_ref: ManagedSecretSlotRef,
@@ -539,7 +539,7 @@ impl ManagedSetupIntentV1 {
         Self::from_wire(wire)
     }
 
-    fn from_wire(wire: SetupIntentWire) -> JanusResult<Self> {
+    fn from_wire(mut wire: SetupIntentWire) -> JanusResult<Self> {
         if wire.schema != MANAGED_SERVICE_SETUP_INTENT_SCHEMA
             || wire.schema_version != MANAGED_SERVICE_CONTRACT_VERSION
         {
@@ -556,11 +556,11 @@ impl ManagedSetupIntentV1 {
                 "managed setup intent time window is invalid",
             ));
         }
-        ensure_kind_source(wire.operation_kind, wire.source)?;
+        validate_intent_sources(wire.operation_kind, &mut wire.allowed_sources)?;
         Ok(Self {
             intent_ref: ManagedSetupIntentRef::new(wire.intent_ref)?,
             operation_kind: wire.operation_kind,
-            source: wire.source,
+            allowed_sources: wire.allowed_sources,
             host_ref: ManagedHostRef::new(wire.host_ref)?,
             service_ref: ManagedServiceRef::new(wire.service_ref)?,
             slot_ref: ManagedSecretSlotRef::new(wire.slot_ref)?,
@@ -590,8 +590,8 @@ impl ManagedSetupIntentV1 {
         self.operation_kind
     }
 
-    pub fn source(&self) -> Option<ManagedSecretSource> {
-        self.source
+    pub fn allowed_sources(&self) -> &[ManagedSecretSource] {
+        &self.allowed_sources
     }
 
     pub fn target(&self) -> (&ManagedHostRef, &ManagedServiceRef, &ManagedSecretSlotRef) {
@@ -1102,6 +1102,33 @@ fn ensure_kind_source(
     }
 }
 
+fn validate_intent_sources(
+    kind: ManagedSecretOperationKind,
+    sources: &mut [ManagedSecretSource],
+) -> JanusResult<()> {
+    match kind {
+        ManagedSecretOperationKind::Create | ManagedSecretOperationKind::Replace => {
+            if sources.is_empty() || sources.len() > 2 {
+                return Err(invalid_contract(
+                    "managed setup intent source policy is invalid",
+                ));
+            }
+            let mut unique = BTreeSet::new();
+            if sources.iter().any(|source| !unique.insert(*source)) {
+                return Err(invalid_contract(
+                    "managed setup intent source policy is invalid",
+                ));
+            }
+            sources.sort_unstable();
+            Ok(())
+        }
+        ManagedSecretOperationKind::Remove if sources.is_empty() => Ok(()),
+        ManagedSecretOperationKind::Remove => Err(invalid_contract(
+            "managed setup intent source policy is invalid",
+        )),
+    }
+}
+
 fn phase_requires_generation(phase: ManagedSecretPhase) -> bool {
     matches!(
         phase,
@@ -1262,7 +1289,7 @@ struct SetupIntentWire {
     schema_version: u16,
     intent_ref: String,
     operation_kind: ManagedSecretOperationKind,
-    source: Option<ManagedSecretSource>,
+    allowed_sources: Vec<ManagedSecretSource>,
     host_ref: String,
     service_ref: String,
     slot_ref: String,
@@ -1283,7 +1310,7 @@ impl From<&ManagedSetupIntentV1> for SetupIntentWire {
             schema_version: MANAGED_SERVICE_CONTRACT_VERSION,
             intent_ref: value.intent_ref.as_str().to_string(),
             operation_kind: value.operation_kind,
-            source: value.source,
+            allowed_sources: value.allowed_sources.clone(),
             host_ref: value.host_ref.as_str().to_string(),
             service_ref: value.service_ref.as_str().to_string(),
             slot_ref: value.slot_ref.as_str().to_string(),
@@ -1444,15 +1471,19 @@ pub fn parse_managed_service_contract_fixture(
         )
         || operation.intent_ref() != intent.intent_ref()
         || operation.kind() != intent.operation_kind()
-        || operation.source() != intent.source()
+        || operation.source().is_some_and(|source| {
+            !intent.allowed_sources().contains(&source)
+                || !declared_slot.allowed_sources().contains(&source)
+        })
         || intent.declaration_fingerprint() != declaration.declaration_fingerprint()
         || operation.declaration_fingerprint() != declaration.declaration_fingerprint()
         || operation.host_ref != declaration.host_ref
         || operation.service_ref != declaration.service_ref
         || operation.slot_ref != *declared_slot.slot_ref()
-        || operation
-            .source()
-            .is_some_and(|source| !declared_slot.allowed_sources().contains(&source))
+        || intent
+            .allowed_sources()
+            .iter()
+            .any(|source| !declared_slot.allowed_sources().contains(source))
     {
         return Err(invalid_contract(
             "managed service contract fixture bindings do not match",
@@ -1554,6 +1585,10 @@ mod tests {
         assert_eq!(
             intent.target().2,
             declaration.slots().first().unwrap().slot_ref()
+        );
+        assert_eq!(
+            intent.allowed_sources(),
+            &[ManagedSecretSource::Generated, ManagedSecretSource::Import]
         );
         assert_eq!(operation.kind(), ManagedSecretOperationKind::Create);
         assert_eq!(operation.phase(), ManagedSecretPhase::Active);
@@ -1694,7 +1729,10 @@ mod tests {
             serde_json::json!(intent["issued_at_unix_secs"].as_u64().unwrap() + 300);
         let parsed = ManagedSetupIntentV1::parse_json(&intent.to_string()).unwrap();
         assert_eq!(parsed.operation_kind(), ManagedSecretOperationKind::Create);
-        assert_eq!(parsed.source(), Some(ManagedSecretSource::Generated));
+        assert_eq!(
+            parsed.allowed_sources(),
+            &[ManagedSecretSource::Generated, ManagedSecretSource::Import]
+        );
         assert!(!parsed.valid_at(parsed.issued_at_unix_secs() - 1));
         assert!(parsed.valid_at(parsed.issued_at_unix_secs()));
         assert!(parsed.valid_at(parsed.expires_at_unix_secs() - 1));
@@ -1713,13 +1751,17 @@ mod tests {
         assert!(ManagedSetupIntentV1::parse_json(&intent.to_string()).is_err());
 
         let mut intent = fixture_value()["setup_intent"].clone();
-        intent["source"] = serde_json::Value::Null;
+        intent["allowed_sources"] = serde_json::json!([]);
         assert!(ManagedSetupIntentV1::parse_json(&intent.to_string()).is_err());
 
         let mut intent = fixture_value()["setup_intent"].clone();
         intent["operation_kind"] = serde_json::json!("remove");
-        intent["source"] = serde_json::Value::Null;
+        intent["allowed_sources"] = serde_json::json!([]);
         assert!(ManagedSetupIntentV1::parse_json(&intent.to_string()).is_ok());
+
+        let mut intent = fixture_value()["setup_intent"].clone();
+        intent["allowed_sources"] = serde_json::json!(["generated", "generated"]);
+        assert!(ManagedSetupIntentV1::parse_json(&intent.to_string()).is_err());
     }
 
     #[test]
@@ -1863,7 +1905,7 @@ mod tests {
         assert!(parse_managed_service_contract_fixture(&fixture.to_string()).is_err());
 
         let mut fixture = fixture_value();
-        fixture["setup_intent"]["source"] = serde_json::json!("import");
+        fixture["setup_intent"]["allowed_sources"] = serde_json::json!(["import"]);
         assert!(parse_managed_service_contract_fixture(&fixture.to_string()).is_err());
 
         let mut fixture = fixture_value();

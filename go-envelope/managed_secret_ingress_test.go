@@ -37,18 +37,27 @@ type fakeManagedIntentAuthority struct {
 	replayAfterOne bool
 }
 
-func (fake *fakeManagedIntentAuthority) Inspect(_ context.Context, intentRef, humanSessionRef string) (managedSetupIntent, error) {
+func (fake *fakeManagedIntentAuthority) Inspect(_ context.Context, intentRef, humanSessionRef string) (managedSetupInspection, error) {
 	fake.inspectCount++
 	if fake.inspectErr != nil {
-		return managedSetupIntent{}, fake.inspectErr
+		return managedSetupInspection{}, fake.inspectErr
 	}
 	if intentRef != fake.intent.IntentRef || humanSessionRef != fake.intent.HumanSessionRef {
-		return managedSetupIntent{}, managedIntentError("managed_intent_wrong_user")
+		return managedSetupInspection{}, managedIntentError("managed_intent_wrong_user")
 	}
-	return fake.intent, nil
+	return managedSetupInspection{
+		Intent: fake.intent,
+		Context: managedDeclarationContext{
+			ServiceLabel:   "Canary service",
+			SlotLabel:      "Admin password",
+			ConsumerKind:   "managed_service",
+			DeliveryKind:   "private_env_file",
+			AllowedSources: append([]string(nil), fake.intent.AllowedSources...),
+		},
+	}, nil
 }
 
-func (fake *fakeManagedIntentAuthority) Consume(_ context.Context, intentRef, humanSessionRef string) (managedAcceptedIntent, error) {
+func (fake *fakeManagedIntentAuthority) Consume(_ context.Context, intentRef, humanSessionRef, source string) (managedAcceptedIntent, error) {
 	fake.consumeCount++
 	if fake.consumeErr != nil {
 		return managedAcceptedIntent{}, fake.consumeErr
@@ -59,7 +68,10 @@ func (fake *fakeManagedIntentAuthority) Consume(_ context.Context, intentRef, hu
 	if intentRef != fake.intent.IntentRef || humanSessionRef != fake.intent.HumanSessionRef {
 		return managedAcceptedIntent{}, managedIntentError("managed_intent_wrong_user")
 	}
-	return managedAcceptedIntent{Intent: fake.intent, OperationRef: managedTestOpRef}, nil
+	if !containsManagedSource(fake.intent.AllowedSources, source) {
+		return managedAcceptedIntent{}, managedIntentError("managed_intent_source_denied")
+	}
+	return managedAcceptedIntent{Intent: fake.intent, Source: source, OperationRef: managedTestOpRef}, nil
 }
 
 type fakeManagedTransactionExecutor struct {
@@ -121,7 +133,7 @@ func managedIngressFixture(t *testing.T, source string) (*App, *fakeManagedInten
 		SchemaVersion:          managedIntentContractVersion,
 		IntentRef:              managedTestIntentRef,
 		OperationKind:          "create",
-		Source:                 source,
+		AllowedSources:         []string{"generated", "import"},
 		HostRef:                "host_0123456789abcdef",
 		ServiceRef:             "svc_0123456789abcdef",
 		SlotRef:                "slot_0123456789abcdef",
@@ -154,6 +166,7 @@ func managedIngressFixture(t *testing.T, source string) (*App, *fakeManagedInten
 	app.writeManagedStepUpProof(proofWriter, managedStepUpProof{
 		Schema:          managedStepUpProofDomain,
 		IntentRef:       managedTestIntentRef,
+		Source:          source,
 		HumanSessionRef: intent.HumanSessionRef,
 		AuthenticatedAt: now.Unix(),
 		ExpiresAt:       now.Add(managedStepUpProofTTL).Unix(),
@@ -189,6 +202,11 @@ func TestManagedSetupPageRequiresPasskeyBeforeRenderingValueInput(t *testing.T) 
 	}
 	body := response.Body.String()
 	if !strings.Contains(body, "Continue with passkey") ||
+		!strings.Contains(body, `name="source"`) ||
+		!strings.Contains(body, "Generate a strong value") ||
+		!strings.Contains(body, "Paste a value I already have") ||
+		!strings.Contains(body, "Canary service") ||
+		!strings.Contains(body, "Admin password") ||
 		strings.Contains(body, `name="secret_value"`) ||
 		strings.Contains(body, `type="password"`) {
 		t.Fatalf("value input must remain absent before step-up: %s", body)
@@ -229,6 +247,37 @@ func TestManagedSetupPageRequiresPasskeyBeforeRenderingValueInput(t *testing.T) 
 		if got := response.Header().Get(header); !strings.Contains(got, expected) {
 			t.Fatalf("managed setup %s should contain %q, got %q", header, expected, got)
 		}
+	}
+}
+
+func TestManagedSetupFailureStatesStayPlainValueFreeAndRetryable(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{name: "expired intent", err: managedIntentError("managed_intent_expired"), status: http.StatusConflict},
+		{name: "stale declaration", err: managedIntentError("managed_intent_declaration_drift"), status: http.StatusConflict},
+		{name: "Pharos offline", err: managedIntentError("managed_intent_pharos_unavailable"), status: http.StatusServiceUnavailable},
+		{name: "declaration unavailable", err: managedIntentError("managed_intent_declaration_unavailable"), status: http.StatusServiceUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app, authority, _, _, sessionCookie, _ := managedIngressFixture(t, "generated")
+			authority.inspectErr = test.err
+			request := httptest.NewRequest(http.MethodGet, "/managed-service/setup?intent="+managedTestIntentRef, nil)
+			request.AddCookie(sessionCookie)
+			response := httptest.NewRecorder()
+			app.routes().ServeHTTP(response, request)
+			if response.Code != test.status ||
+				!strings.Contains(response.Body.String(), "Start again from Pharos") ||
+				strings.Contains(response.Body.String(), managedTestIntentRef) {
+				t.Fatalf("unsafe failure state: status=%d body=%s", response.Code, response.Body.String())
+			}
+			if got := response.Header().Get("Cache-Control"); got != "no-store, no-transform" {
+				t.Fatalf("failure response crossed managed cache boundary: %q", got)
+			}
+		})
 	}
 }
 
@@ -287,6 +336,7 @@ func TestManagedStepUpStartsFreshPasswordlessOIDCFlow(t *testing.T) {
 	form := url.Values{
 		"csrf_token": {app.csrfToken(session)},
 		"intent_ref": {managedTestIntentRef},
+		"source":     {"generated"},
 	}.Encode()
 	request := httptest.NewRequest(http.MethodPost, "/managed-service/setup/step-up", strings.NewReader(form))
 	request.Header.Set("Content-Type", managedSecretFormMediaType)
@@ -321,9 +371,35 @@ func TestManagedStepUpStartsFreshPasswordlessOIDCFlow(t *testing.T) {
 	flow, present, err := app.readManagedStepUpFlow(callback)
 	if err != nil || !present ||
 		flow.IntentRef != managedTestIntentRef ||
+		flow.Source != "generated" ||
 		flow.StateHash != managedStateHash(stateCookie.Value) ||
 		flow.HumanSessionRef != authority.intent.HumanSessionRef {
 		t.Fatalf("signed step-up flow is not bound: flow=%#v present=%v err=%v", flow, present, err)
+	}
+}
+
+func TestManagedStepUpRejectsSourceOutsideDeclaration(t *testing.T) {
+	app, authority, _, session, sessionCookie, _ := managedIngressFixture(t, "generated")
+	authority.intent.AllowedSources = []string{"generated"}
+	form := url.Values{
+		"csrf_token": {app.csrfToken(session)},
+		"intent_ref": {managedTestIntentRef},
+		"source":     {"import"},
+	}.Encode()
+	request := httptest.NewRequest(http.MethodPost, "/managed-service/setup/step-up", strings.NewReader(form))
+	request.Header.Set("Content-Type", managedSecretFormMediaType)
+	request.Header.Set("Origin", app.cfg.PublicURL)
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.AddCookie(sessionCookie)
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || response.Header().Get("Location") != "" {
+		t.Fatalf("unreviewed source must not reach OIDC: status=%d location=%q body=%s", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == hostStepUpFlowCookie && cookie.Value != "" {
+			t.Fatalf("unreviewed source minted a step-up flow: %#v", cookie)
+		}
 	}
 }
 
@@ -361,6 +437,7 @@ func TestManagedStepUpCompletionBindsSubjectStateRoleAndFreshAssertion(t *testin
 	flow := managedStepUpFlow{
 		Schema:          managedStepUpFlowDomain,
 		IntentRef:       managedTestIntentRef,
+		Source:          "generated",
 		HumanSessionRef: managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject),
 		StateHash:       managedStateHash(state),
 		IssuedAt:        now.Unix(),
@@ -461,6 +538,7 @@ func TestOIDCCallbackCompletesOnlyBoundPasswordlessStepUp(t *testing.T) {
 	app.writeManagedStepUpFlow(flowWriter, managedStepUpFlow{
 		Schema:          managedStepUpFlowDomain,
 		IntentRef:       managedTestIntentRef,
+		Source:          "generated",
 		HumanSessionRef: managedHumanSessionRef(app.cfg.OIDCIssuer, managedTestSubject),
 		StateHash:       managedStateHash(state),
 		IssuedAt:        now.Unix(),
@@ -483,6 +561,7 @@ func TestOIDCCallbackCompletesOnlyBoundPasswordlessStepUp(t *testing.T) {
 	proof, ok := app.readManagedStepUpProof(proofRequest)
 	if !ok ||
 		proof.IntentRef != managedTestIntentRef ||
+		proof.Source != "generated" ||
 		proof.HumanSessionRef != managedHumanSessionRef(app.cfg.OIDCIssuer, managedTestSubject) ||
 		proof.AuthenticatedAt != now.Unix() {
 		t.Fatalf("callback proof is not bound to the assertion: proof=%#v ok=%v", proof, ok)
@@ -520,7 +599,7 @@ func TestManagedImportConsumesIntentBeforeReadingAndZeroizesValue(t *testing.T) 
 	app, authority, executor, session, sessionCookie, proofCookie := managedIngressFixture(t, "import")
 	canary := []byte("JANUS_IMPORT_CANARY_357+value")
 	executor.expectedValue = canary
-	formPrefix := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&secret_value="
+	formPrefix := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&source=import&secret_value="
 	body := []byte(formPrefix + "JANUS_IMPORT_CANARY_357%2Bvalue")
 	consumed := false
 	spy := &managedReadOrderSpy{
@@ -556,12 +635,12 @@ type consumeWitnessAuthority struct {
 	consumed *bool
 }
 
-func (witness *consumeWitnessAuthority) Inspect(ctx context.Context, intentRef, humanSessionRef string) (managedSetupIntent, error) {
+func (witness *consumeWitnessAuthority) Inspect(ctx context.Context, intentRef, humanSessionRef string) (managedSetupInspection, error) {
 	return witness.delegate.Inspect(ctx, intentRef, humanSessionRef)
 }
 
-func (witness *consumeWitnessAuthority) Consume(ctx context.Context, intentRef, humanSessionRef string) (managedAcceptedIntent, error) {
-	accepted, err := witness.delegate.Consume(ctx, intentRef, humanSessionRef)
+func (witness *consumeWitnessAuthority) Consume(ctx context.Context, intentRef, humanSessionRef, source string) (managedAcceptedIntent, error) {
+	accepted, err := witness.delegate.Consume(ctx, intentRef, humanSessionRef, source)
 	if err == nil {
 		*witness.consumed = true
 	}
@@ -570,7 +649,7 @@ func (witness *consumeWitnessAuthority) Consume(ctx context.Context, intentRef, 
 
 func TestManagedGeneratedModeSendsNoValue(t *testing.T) {
 	app, authority, executor, session, sessionCookie, proofCookie := managedIngressFixture(t, "generated")
-	form := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&secret_value="
+	form := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&source=generated&secret_value="
 	request := managedRequest(t, app, session, sessionCookie, proofCookie, strings.NewReader(form), int64(len(form)))
 	response := httptest.NewRecorder()
 	app.routes().ServeHTTP(response, request)
@@ -581,6 +660,22 @@ func TestManagedGeneratedModeSendsNoValue(t *testing.T) {
 		len(executor.retainedBuffer) != 0 {
 		t.Fatalf("generated execution should contain no value: status=%d consume=%d execute=%d observed=%v len=%d body=%s", response.Code, authority.consumeCount, executor.count, executor.valueObserved, len(executor.retainedBuffer), response.Body.String())
 	}
+}
+
+func TestManagedOfflineTransactionStopsWithPlainRecoveryAndNoValueReturn(t *testing.T) {
+	app, authority, executor, session, sessionCookie, proofCookie := managedIngressFixture(t, "generated")
+	executor.err = managedTransactionError("web_transaction_unavailable")
+	form := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&source=generated&secret_value="
+	request := managedRequest(t, app, session, sessionCookie, proofCookie, strings.NewReader(form), int64(len(form)))
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable ||
+		authority.consumeCount != 1 ||
+		executor.count != 1 ||
+		!strings.Contains(response.Body.String(), "operation status in Pharos") {
+		t.Fatalf("offline transaction recovery is unsafe: status=%d consume=%d execute=%d body=%s", response.Code, authority.consumeCount, executor.count, response.Body.String())
+	}
+	assertManagedCanaryAbsent(t, app, response, managedTestIntentRef)
 }
 
 func TestManagedIngressRejectsIntegrityFailuresBeforeValueReadOrConsume(t *testing.T) {
@@ -607,7 +702,7 @@ func TestManagedIngressRejectsIntegrityFailuresBeforeValueReadOrConsume(t *testi
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			app, authority, executor, session, sessionCookie, proofCookie := managedIngressFixture(t, "import")
-			prefix := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&secret_value="
+			prefix := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&source=import&secret_value="
 			body := []byte(prefix + "JANUS_EARLY_READ_CANARY_357")
 			consumed := false
 			spy := &managedReadOrderSpy{body: body, secretOffset: len(prefix), intentConsumed: &consumed}
@@ -629,7 +724,7 @@ func TestManagedIngressRejectsIntegrityFailuresBeforeValueReadOrConsume(t *testi
 
 func TestManagedIngressRejectsBadCSRFBeforeReadingValue(t *testing.T) {
 	app, authority, executor, session, sessionCookie, proofCookie := managedIngressFixture(t, "import")
-	prefix := "csrf_token=wrong-token&intent_ref=" + managedTestIntentRef + "&secret_value="
+	prefix := "csrf_token=wrong-token&intent_ref=" + managedTestIntentRef + "&source=import&secret_value="
 	body := []byte(prefix + "JANUS_CSRF_CANARY_357")
 	consumed := false
 	spy := &managedReadOrderSpy{body: body, secretOffset: len(prefix), intentConsumed: &consumed}
@@ -646,9 +741,28 @@ func TestManagedIngressRejectsBadCSRFBeforeReadingValue(t *testing.T) {
 	assertManagedCanaryAbsent(t, app, response, "JANUS_CSRF_CANARY_357")
 }
 
+func TestManagedIngressRejectsSourceChangedAfterPasskeyBeforeReadingValue(t *testing.T) {
+	app, authority, executor, session, sessionCookie, proofCookie := managedIngressFixture(t, "generated")
+	prefix := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&source=import&secret_value="
+	body := []byte(prefix + "JANUS_SOURCE_SWAP_CANARY_358")
+	consumed := false
+	spy := &managedReadOrderSpy{body: body, secretOffset: len(prefix), intentConsumed: &consumed}
+	request := managedRequest(t, app, session, sessionCookie, proofCookie, spy, int64(len(body)))
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden ||
+		authority.consumeCount != 0 ||
+		executor.count != 0 ||
+		spy.earlyRead ||
+		spy.offset != len(prefix) {
+		t.Fatalf("source swap crossed value boundary: status=%d consume=%d execute=%d offset=%d early=%v", response.Code, authority.consumeCount, executor.count, spy.offset, spy.earlyRead)
+	}
+	assertManagedCanaryAbsent(t, app, response, "JANUS_SOURCE_SWAP_CANARY_358")
+}
+
 func TestManagedIncompleteBodyIntentionallyBurnsIntentBeforeValueAdmission(t *testing.T) {
 	app, authority, executor, session, sessionCookie, proofCookie := managedIngressFixture(t, "import")
-	form := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&secret_value=partial"
+	form := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&source=import&secret_value=partial"
 	request := managedRequest(
 		t,
 		app,
@@ -682,7 +796,7 @@ func TestManagedDuplicateSubmitCannotReplayImport(t *testing.T) {
 	app, authority, executor, session, sessionCookie, proofCookie := managedIngressFixture(t, "import")
 	authority.replayAfterOne = true
 	executor.expectedValue = []byte("one-time-value")
-	form := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&secret_value=one-time-value"
+	form := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&source=import&secret_value=one-time-value"
 
 	for attempt := 1; attempt <= 2; attempt++ {
 		request := managedRequest(t, app, session, sessionCookie, proofCookie, strings.NewReader(form), int64(len(form)))
@@ -736,6 +850,7 @@ func TestManagedStepUpCookieTamperAndExpiryFailClosed(t *testing.T) {
 	app.writeManagedStepUpProof(expiredWriter, managedStepUpProof{
 		Schema:          managedStepUpProofDomain,
 		IntentRef:       managedTestIntentRef,
+		Source:          "generated",
 		HumanSessionRef: managedHumanSessionRef(app.cfg.OIDCIssuer, managedTestSubject),
 		AuthenticatedAt: now.Add(-3 * time.Minute).Unix(),
 		ExpiresAt:       now.Add(-time.Minute).Unix(),

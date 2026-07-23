@@ -78,7 +78,7 @@ func (client *managedTransactionClient) Execute(ctx context.Context, accepted ma
 		SchemaVersion:          managedTransactionSchemaVersion,
 		OperationRef:           accepted.OperationRef,
 		OperationKind:          accepted.Intent.OperationKind,
-		Source:                 accepted.Intent.Source,
+		Source:                 accepted.Source,
 		HostRef:                accepted.Intent.HostRef,
 		ServiceRef:             accepted.Intent.ServiceRef,
 		SlotRef:                accepted.Intent.SlotRef,

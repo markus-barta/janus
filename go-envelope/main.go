@@ -141,58 +141,73 @@ func (c Config) ManagedLoginCookieName() string {
 }
 
 type SecretDescriptor struct {
-	ID             string    `json:"id"`
-	DisplayName    string    `json:"display_name"`
-	Provider       string    `json:"provider"`
-	Classification string    `json:"classification"`
-	Owner          string    `json:"owner"`
-	Scope          string    `json:"scope,omitempty"`
-	Source         string    `json:"source,omitempty"`
-	RotationDays   int       `json:"rotation_days"`
-	LastCheckedAt  time.Time `json:"last_checked_at"`
-	Lifecycle      string    `json:"lifecycle"`
-	Status         string    `json:"status"`
-	RevealAllowed  bool      `json:"reveal_allowed"`
-	UseEnabled     bool      `json:"use_enabled"`
-	ConsumerCount  int       `json:"consumer_count"`
-	EgressMode     string    `json:"egress_mode,omitempty"`
-	Tags           []string  `json:"tags"`
+	ID              string    `json:"id"`
+	DisplayName     string    `json:"display_name"`
+	RecordType      string    `json:"type,omitempty"`
+	Consumer        string    `json:"consumer,omitempty"`
+	Host            string    `json:"host,omitempty"`
+	Provider        string    `json:"provider"`
+	Classification  string    `json:"classification"`
+	Owner           string    `json:"owner"`
+	Scope           string    `json:"scope,omitempty"`
+	Source          string    `json:"source,omitempty"`
+	RotationDays    int       `json:"rotation_days"`
+	LastCheckedAt   time.Time `json:"last_checked_at"`
+	Lifecycle       string    `json:"lifecycle"`
+	Status          string    `json:"status"`
+	Health          string    `json:"health,omitempty"`
+	RotationPosture string    `json:"rotation_posture,omitempty"`
+	RevealAllowed   bool      `json:"reveal_allowed"`
+	UseEnabled      bool      `json:"use_enabled"`
+	ConsumerCount   int       `json:"consumer_count"`
+	EgressMode      string    `json:"egress_mode,omitempty"`
+	Tags            []string  `json:"tags"`
 }
 
 func (d SecretDescriptor) MarshalJSON() ([]byte, error) {
 	type publicDescriptor struct {
-		ID             string    `json:"id"`
-		DisplayName    string    `json:"display_name"`
-		Provider       string    `json:"provider"`
-		Classification string    `json:"classification"`
-		Owner          string    `json:"owner"`
-		Scope          string    `json:"scope,omitempty"`
-		RotationDays   int       `json:"rotation_days"`
-		LastCheckedAt  time.Time `json:"last_checked_at"`
-		Lifecycle      string    `json:"lifecycle"`
-		Status         string    `json:"status"`
-		RevealAllowed  bool      `json:"reveal_allowed"`
-		UseEnabled     bool      `json:"use_enabled"`
-		ConsumerCount  int       `json:"consumer_count"`
-		EgressMode     string    `json:"egress_mode,omitempty"`
-		Tags           []string  `json:"tags"`
+		ID              string    `json:"id"`
+		DisplayName     string    `json:"display_name"`
+		RecordType      string    `json:"type,omitempty"`
+		Consumer        string    `json:"consumer,omitempty"`
+		Host            string    `json:"host,omitempty"`
+		Provider        string    `json:"provider"`
+		Classification  string    `json:"classification"`
+		Owner           string    `json:"owner"`
+		Scope           string    `json:"scope,omitempty"`
+		RotationDays    int       `json:"rotation_days"`
+		LastCheckedAt   time.Time `json:"last_checked_at"`
+		Lifecycle       string    `json:"lifecycle"`
+		Status          string    `json:"status"`
+		Health          string    `json:"health,omitempty"`
+		RotationPosture string    `json:"rotation_posture,omitempty"`
+		RevealAllowed   bool      `json:"reveal_allowed"`
+		UseEnabled      bool      `json:"use_enabled"`
+		ConsumerCount   int       `json:"consumer_count"`
+		EgressMode      string    `json:"egress_mode,omitempty"`
+		Tags            []string  `json:"tags"`
 	}
 	return json.Marshal(publicDescriptor{
-		ID:             d.ID,
-		DisplayName:    d.DisplayName,
-		Provider:       d.Provider,
-		Classification: d.Classification,
-		Owner:          d.Owner,
-		Scope:          d.Scope,
-		RotationDays:   d.RotationDays,
-		LastCheckedAt:  d.LastCheckedAt,
-		Lifecycle:      d.Lifecycle,
-		Status:         d.Status,
-		RevealAllowed:  d.RevealAllowed,
-		UseEnabled:     d.UseEnabled,
-		ConsumerCount:  d.ConsumerCount,
-		EgressMode:     d.EgressMode,
-		Tags:           d.Tags,
+		ID:              d.ID,
+		DisplayName:     d.DisplayName,
+		RecordType:      d.RecordType,
+		Consumer:        d.Consumer,
+		Host:            d.Host,
+		Provider:        d.Provider,
+		Classification:  d.Classification,
+		Owner:           d.Owner,
+		Scope:           d.Scope,
+		RotationDays:    d.RotationDays,
+		LastCheckedAt:   d.LastCheckedAt,
+		Lifecycle:       d.Lifecycle,
+		Status:          d.Status,
+		Health:          d.Health,
+		RotationPosture: d.RotationPosture,
+		RevealAllowed:   d.RevealAllowed,
+		UseEnabled:      d.UseEnabled,
+		ConsumerCount:   d.ConsumerCount,
+		EgressMode:      d.EgressMode,
+		Tags:            d.Tags,
 	})
 }
 
@@ -262,6 +277,11 @@ func (s *Store) normalizeLocked() {
 		item := &s.items[i]
 		item.ID = strings.TrimSpace(item.ID)
 		item.DisplayName = strings.TrimSpace(item.DisplayName)
+		item.RecordType = strings.TrimSpace(item.RecordType)
+		item.Consumer = strings.TrimSpace(item.Consumer)
+		item.Host = strings.TrimSpace(item.Host)
+		item.Health = strings.TrimSpace(item.Health)
+		item.RotationPosture = strings.TrimSpace(item.RotationPosture)
 		if item.DisplayName == "" {
 			item.DisplayName = item.ID
 		}
@@ -289,6 +309,21 @@ func (s *Store) normalizeLocked() {
 		}
 		if item.EgressMode == "" {
 			item.EgressMode = "none"
+		}
+		if item.RecordType == "service_secret" {
+			if item.Host == "" {
+				item.Host = item.Scope
+			}
+			if item.Health == "" {
+				item.Health = "not_reported"
+			}
+			if item.RotationPosture == "" {
+				if item.Lifecycle == LifecycleActive {
+					item.RotationPosture = "current"
+				} else {
+					item.RotationPosture = "review_due"
+				}
+			}
 		}
 		item.RevealAllowed = false
 	}

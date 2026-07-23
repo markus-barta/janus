@@ -12,9 +12,9 @@ const managedTransactionCanary = "SENSITIVE_WEB_TRANSACTION_CANARY_9d3e"
 
 func managedTransactionAccepted(source string) managedAcceptedIntent {
 	intent := managedTestIntent(1_784_833_200)
-	intent.Source = source
 	return managedAcceptedIntent{
 		Intent:       intent,
+		Source:       source,
 		OperationRef: "op_0123456789abcdef",
 	}
 }
@@ -155,7 +155,7 @@ func TestManagedTransactionBoundaryAdmitsReviewedReplaceIntent(t *testing.T) {
 		SchemaVersion:          managedTransactionSchemaVersion,
 		OperationRef:           accepted.OperationRef,
 		OperationKind:          accepted.Intent.OperationKind,
-		Source:                 accepted.Intent.Source,
+		Source:                 accepted.Source,
 		HostRef:                accepted.Intent.HostRef,
 		ServiceRef:             accepted.Intent.ServiceRef,
 		SlotRef:                accepted.Intent.SlotRef,
