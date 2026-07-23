@@ -41,19 +41,25 @@ fn generated_canary() -> impl Strategy<Value = RedactedCanary> {
     "[A-Za-z0-9]{24,48}".prop_map(|suffix| RedactedCanary(format!("SENSITIVE_CANARY_{suffix}")))
 }
 
-fn property_config(local_cases: u32) -> ProptestConfig {
-    let cases = env::var("JANUS_PROPERTY_CASES")
+fn property_cases(local_cases: u32) -> u32 {
+    if env::var("JANUS_PROPERTY_REPLAY_ONLY").as_deref() == Ok("1") {
+        return 0;
+    }
+    env::var("JANUS_PROPERTY_CASES")
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(local_cases);
+        .unwrap_or(local_cases)
+}
+
+fn property_config(local_cases: u32) -> ProptestConfig {
     let max_shrink_iters = env::var("JANUS_PROPERTY_MAX_SHRINK_ITERATIONS")
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
         .unwrap_or(4096);
     ProptestConfig {
-        cases,
+        cases: property_cases(local_cases),
         max_shrink_iters,
         failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
             env!("CARGO_MANIFEST_DIR"),

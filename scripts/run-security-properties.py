@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -27,6 +27,7 @@ XS_SEED = re.compile(r"xs ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+)\Z")
 CC_SEED = re.compile(r"cc ([0-9a-f]{64})\Z")
 REPLAY_ID = re.compile(r"rpl_[0-9a-f]{24}\Z")
 MAX_U32 = (1 << 32) - 1
+MAX_RECEIPT_SEEDS = 256
 
 
 class ContractError(ValueError):
@@ -70,8 +71,9 @@ class Contract:
 
 @dataclass(frozen=True)
 class ReplayReceipt:
+    schema_version: int
     target: str
-    seed: str
+    seeds: tuple[str, ...]
     cases: int
     release: bool
     replay_id: str
@@ -224,11 +226,14 @@ def load_contract(path: Path) -> Contract:
     return Contract(budget=budget, targets=tuple(targets))
 
 
-def property_environment(budget: Budget, cases: int) -> dict[str, str]:
+def property_environment(
+    budget: Budget, cases: int, *, replay_only: bool = False
+) -> dict[str, str]:
     environment = os.environ.copy()
     environment.update(
         {
             "JANUS_PROPERTY_CASES": str(cases),
+            "JANUS_PROPERTY_REPLAY_ONLY": "1" if replay_only else "0",
             "JANUS_PROPERTY_MAX_INPUT_BYTES": str(budget.max_input_bytes),
             "JANUS_PROPERTY_MAX_COLLECTION_ITEMS": str(budget.max_collection_items),
             "JANUS_PROPERTY_MAX_DEPTH": str(budget.max_depth),
@@ -326,16 +331,46 @@ def _sanitize_new_seed_lines(path: Path, before: tuple[str, ...]) -> tuple[str, 
     return tuple(new)
 
 
+def _seed_tokens(values: Any) -> tuple[str, ...]:
+    if (
+        not isinstance(values, (list, tuple))
+        or not 1 <= len(values) <= MAX_RECEIPT_SEEDS
+    ):
+        raise ContractError(
+            f"property replay seeds must contain 1..={MAX_RECEIPT_SEEDS} tokens"
+        )
+    seeds = tuple(_seed_token(value) for value in values)
+    if len(set(seeds)) != len(seeds):
+        raise ContractError("property replay seeds must be unique")
+    return seeds
+
+
 def _receipt_payload(
-    target: str, seed: str, cases: int, release: bool
+    schema_version: int,
+    target: str,
+    seeds: tuple[str, ...],
+    cases: int,
+    release: bool,
 ) -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "target": target,
-        "seed": seed,
-        "cases": cases,
-        "release": release,
-    }
+    if schema_version == 1:
+        if len(seeds) != 1:
+            raise ContractError("legacy property replay receipt must contain one seed")
+        return {
+            "schema_version": 1,
+            "target": target,
+            "seed": seeds[0],
+            "cases": cases,
+            "release": release,
+        }
+    if schema_version == 2:
+        return {
+            "schema_version": 2,
+            "target": target,
+            "seeds": list(seeds),
+            "cases": cases,
+            "release": release,
+        }
+    raise ContractError("unsupported property replay receipt version")
 
 
 def _receipt_id(payload: dict[str, Any]) -> str:
@@ -346,12 +381,14 @@ def _receipt_id(payload: dict[str, Any]) -> str:
 
 
 def create_receipt(
-    target: Target, seed: str, cases: int, release: bool
+    target: Target, seeds: tuple[str, ...], cases: int, release: bool
 ) -> ReplayReceipt:
-    payload = _receipt_payload(target.id, _seed_token(seed), cases, release)
+    normalized = _seed_tokens(seeds)
+    payload = _receipt_payload(2, target.id, normalized, cases, release)
     return ReplayReceipt(
+        schema_version=2,
         target=target.id,
-        seed=payload["seed"],
+        seeds=normalized,
         cases=cases,
         release=release,
         replay_id=_receipt_id(payload),
@@ -360,7 +397,11 @@ def create_receipt(
 
 def _receipt_object(receipt: ReplayReceipt) -> dict[str, Any]:
     payload = _receipt_payload(
-        receipt.target, receipt.seed, receipt.cases, receipt.release
+        receipt.schema_version,
+        receipt.target,
+        receipt.seeds,
+        receipt.cases,
+        receipt.release,
     )
     return {**payload, "replay_id": receipt.replay_id}
 
@@ -377,17 +418,35 @@ def load_receipt(path: Path, contract: Contract) -> ReplayReceipt:
         root = json.loads(path.read_text(encoding="ascii"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ContractError("property replay receipt cannot be read") from error
-    root = _strict_object(
-        root,
-        {"schema_version", "target", "seed", "cases", "release", "replay_id"},
-        "property replay receipt",
-    )
-    if root["schema_version"] != 1:
+    if not isinstance(root, dict):
+        raise ContractError("property replay receipt has invalid fields")
+    schema_version = root.get("schema_version")
+    if schema_version == 1:
+        expected = {
+            "schema_version",
+            "target",
+            "seed",
+            "cases",
+            "release",
+            "replay_id",
+        }
+    elif schema_version == 2:
+        expected = {
+            "schema_version",
+            "target",
+            "seeds",
+            "cases",
+            "release",
+            "replay_id",
+        }
+    else:
         raise ContractError("unsupported property replay receipt version")
+    root = _strict_object(root, expected, "property replay receipt")
     target = _safe_id(root["target"], "property replay target")
     if target not in {candidate.id for candidate in contract.targets}:
         raise ContractError("property replay target is not reviewed")
-    seed = _seed_token(root["seed"])
+    raw_seeds = (root["seed"],) if schema_version == 1 else root["seeds"]
+    seeds = _seed_tokens(raw_seeds)
     cases = _positive_int(root["cases"], "property replay case budget", 1_000_000)
     release = root["release"]
     if not isinstance(release, bool):
@@ -395,7 +454,7 @@ def load_receipt(path: Path, contract: Contract) -> ReplayReceipt:
     if release and cases < contract.budget.cases:
         raise ContractError("property replay lowers the reviewed release case budget")
     replay_id = root["replay_id"]
-    payload = _receipt_payload(target, seed, cases, release)
+    payload = _receipt_payload(schema_version, target, seeds, cases, release)
     if (
         not isinstance(replay_id, str)
         or REPLAY_ID.fullmatch(replay_id) is None
@@ -403,8 +462,9 @@ def load_receipt(path: Path, contract: Contract) -> ReplayReceipt:
     ):
         raise ContractError("property replay receipt identity is invalid")
     return ReplayReceipt(
+        schema_version=schema_version,
         target=target,
-        seed=seed,
+        seeds=seeds,
         cases=cases,
         release=release,
         replay_id=replay_id,
@@ -433,13 +493,14 @@ def _execute_target(
     cases: int,
     *,
     command_override: list[str] | None = None,
+    replay_only: bool = False,
 ) -> str | None:
     command = command_override if command_override is not None else target.command()
     try:
         completed = subprocess.run(
             command,
             cwd=REPO,
-            env=property_environment(budget, cases),
+            env=property_environment(budget, cases, replay_only=replay_only),
             capture_output=True,
             text=False,
             timeout=budget.target_timeout_seconds,
@@ -481,13 +542,18 @@ def run_target(
     if reason is None:
         return None
     new_seeds = _sanitize_new_seed_lines(persistence, before)
-    if len(new_seeds) == 1:
-        receipt = create_receipt(target, new_seeds[0], cases, release)
+    if new_seeds:
+        receipt_seeds = new_seeds[:MAX_RECEIPT_SEEDS]
+        receipt = create_receipt(target, receipt_seeds, cases, release)
         write_receipt(receipt_path, receipt)
         return PublicFailure(
             target=target.id,
             replay=receipt.replay_id,
-            reason=reason,
+            reason=(
+                reason
+                if len(new_seeds) <= MAX_RECEIPT_SEEDS
+                else f"{reason}_replay_truncated"
+            ),
             rerun=_replay_command(),
         )
     return PublicFailure(
@@ -510,20 +576,57 @@ def replay_target(
     parent_existed = persistence.parent.exists()
     original = persistence.read_bytes() if persistence.exists() else None
     try:
-        existing = _read_persisted_seeds(persistence)
-        if receipt.seed not in existing:
-            prefix = original or b""
-            if prefix and not prefix.endswith(b"\n"):
-                prefix += b"\n"
-            _atomic_private_write(
-                persistence, prefix + receipt.seed.encode("ascii") + b"\n"
-            )
-        reason = _execute_target(
+        _atomic_private_write(persistence, b"")
+        baseline_reason = _execute_target(
             target,
             budget,
-            receipt.cases,
+            0,
             command_override=command_override,
+            replay_only=True,
         )
+        if baseline_reason is not None:
+            reason = (
+                "target_baseline_failure"
+                if baseline_reason == "property_failure"
+                else baseline_reason
+            )
+            return PublicFailure(
+                target=target.id,
+                replay=receipt.replay_id,
+                reason=reason,
+                rerun=_replay_command(),
+            )
+        for seed in receipt.seeds:
+            _atomic_private_write(persistence, seed.encode("ascii") + b"\n")
+            reason = _execute_target(
+                target,
+                budget,
+                0,
+                command_override=command_override,
+                replay_only=True,
+            )
+            if reason == "property_failure":
+                if _read_persisted_seeds(persistence) != (seed,):
+                    return PublicFailure(
+                        target=target.id,
+                        replay=receipt.replay_id,
+                        reason="replay_seed_state_changed",
+                        rerun=_replay_command(),
+                    )
+                return PublicFailure(
+                    target=target.id,
+                    replay=receipt.replay_id,
+                    reason="reproduced_failure",
+                    rerun=_replay_command(),
+                )
+            if reason is not None:
+                return PublicFailure(
+                    target=target.id,
+                    replay=receipt.replay_id,
+                    reason=reason,
+                    rerun=_replay_command(),
+                )
+        return None
     finally:
         if original is None:
             persistence.unlink(missing_ok=True)
@@ -534,20 +637,14 @@ def replay_target(
                     pass
         else:
             _atomic_private_write(persistence, original)
-    if reason is None:
-        return None
-    return PublicFailure(
-        target=target.id,
-        replay=receipt.replay_id,
-        reason="reproduced_failure",
-        rerun=_replay_command(),
-    )
 
 
 def self_test(contract: Contract) -> None:
     target = contract.targets[0]
     canary = "SENSITIVE_RUNNER_CANARY_MUST_NOT_ESCAPE"
     seed = "xs 1 2 3 4"
+    second_seed = "xs 5 6 7 8"
+    seeds = (seed, second_seed)
 
     def exercise(root: Path) -> tuple[PublicFailure, Path, Path]:
         persistence = root / "proptest-regressions" / "fixture.txt"
@@ -558,11 +655,12 @@ def self_test(contract: Contract) -> None:
             (
                 "from pathlib import Path; import sys; "
                 "path = Path(sys.argv[1]); path.parent.mkdir(parents=True, exist_ok=True); "
-                "path.open('a', encoding='utf-8').write(sys.argv[2] + ' # ' + sys.argv[3] + '\\n'); "
-                "print(sys.argv[3]); print(sys.argv[3], file=sys.stderr); sys.exit(7)"
+                "handle = path.open('a', encoding='utf-8'); "
+                "[handle.write(seed + ' # ' + sys.argv[-1] + '\\n') for seed in sys.argv[2:-1]]; "
+                "handle.close(); print(sys.argv[-1]); print(sys.argv[-1], file=sys.stderr); sys.exit(7)"
             ),
             str(persistence),
-            seed,
+            *seeds,
             canary,
         ]
         failure = run_target(
@@ -594,9 +692,13 @@ def self_test(contract: Contract) -> None:
                 raise RuntimeError("runner persisted generated diagnostic values")
             if path.stat().st_mode & 0o077:
                 raise RuntimeError("runner replay evidence is not private")
-        if first_persistence.read_text(encoding="utf-8") != seed + "\n":
-            raise RuntimeError("runner did not reduce persistence to a seed token")
+        if first_persistence.read_text(encoding="utf-8") != "".join(
+            f"{candidate}\n" for candidate in seeds
+        ):
+            raise RuntimeError("runner did not reduce persistence to seed tokens")
         receipt = load_receipt(first_receipt, contract)
+        if receipt.schema_version != 2 or receipt.seeds != seeds:
+            raise RuntimeError("runner did not preserve every novel seed")
 
         replay_persistence = root / "replay" / "proptest-regressions" / "fixture.txt"
         replay_probe = [
@@ -634,7 +736,8 @@ def self_test(contract: Contract) -> None:
 
         valid = _receipt_object(receipt)
         invalid_receipts = (
-            {**valid, "seed": f"{seed} # {canary}"},
+            {**valid, "seeds": [f"{seed} # {canary}"]},
+            {**valid, "seeds": [seed, seed]},
             {**valid, "unexpected": canary},
             {**valid, "replay_id": "rpl_" + "0" * 24},
         )
@@ -647,10 +750,156 @@ def self_test(contract: Contract) -> None:
                 continue
             raise RuntimeError("unsafe property replay receipt was accepted")
 
-    lowered = max(1, contract.budget.cases - 1)
-    effective = max(lowered, contract.budget.cases)
-    if effective != contract.budget.cases:
-        raise RuntimeError("release case budget was lowered")
+        legacy_payload = _receipt_payload(
+            1, target.id, (seed,), contract.budget.cases, True
+        )
+        legacy_path = root / "legacy-receipt.json"
+        legacy_path.write_text(
+            json.dumps(
+                {**legacy_payload, "replay_id": _receipt_id(legacy_payload)}
+            ),
+            encoding="ascii",
+        )
+        legacy = load_receipt(legacy_path, contract)
+        if legacy.schema_version != 1 or legacy.seeds != (seed,):
+            raise RuntimeError("legacy property replay receipt is no longer supported")
+        legacy_replay_persistence = root / "legacy-replay" / "fixture.txt"
+        legacy_probe = replay_probe.copy()
+        legacy_probe[3] = str(legacy_replay_persistence)
+        legacy_replay = replay_target(
+            target,
+            contract.budget,
+            legacy,
+            command_override=legacy_probe,
+            persistence_override=legacy_replay_persistence,
+        )
+        if legacy_replay is None or legacy_replay.reason != "reproduced_failure":
+            raise RuntimeError("legacy property replay receipt no longer replays")
+
+        novel_probe_persistence = root / "novel-probe" / "fixture.txt"
+        novel_probe = [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; import sys; "
+                "path = Path(sys.argv[1]); "
+                "seeds = path.read_text(encoding='utf-8').splitlines(); "
+                "path.open('a', encoding='utf-8').write(sys.argv[3] + '\\n') "
+                "if sys.argv[2] in seeds else None; "
+                "sys.exit(7 if sys.argv[2] in seeds else 0)"
+            ),
+            str(novel_probe_persistence),
+            seed,
+            second_seed,
+        ]
+        novel_failure = replay_target(
+            target,
+            contract.budget,
+            legacy,
+            command_override=novel_probe,
+            persistence_override=novel_probe_persistence,
+        )
+        if (
+            novel_failure is None
+            or novel_failure.reason != "replay_seed_state_changed"
+        ):
+            raise RuntimeError("novel replay case was mislabeled as reproduction")
+
+        baseline_failure = replay_target(
+            target,
+            contract.budget,
+            receipt,
+            command_override=[sys.executable, "-c", "raise SystemExit(7)"],
+            persistence_override=root / "baseline" / "fixture.txt",
+        )
+        if (
+            baseline_failure is None
+            or baseline_failure.reason != "target_baseline_failure"
+        ):
+            raise RuntimeError("unseeded target failure was mislabeled as reproduction")
+
+        unavailable = replay_target(
+            target,
+            contract.budget,
+            receipt,
+            command_override=["/janus-property-runner-command-does-not-exist"],
+            persistence_override=root / "unavailable" / "fixture.txt",
+        )
+        if unavailable is None or unavailable.reason != "target_unavailable":
+            raise RuntimeError("unavailable replay target was mislabeled")
+
+        timeout_budget = replace(contract.budget, target_timeout_seconds=1)
+        timeout = replay_target(
+            target,
+            timeout_budget,
+            receipt,
+            command_override=[
+                sys.executable,
+                "-c",
+                "import time; time.sleep(2)",
+            ],
+            persistence_override=root / "timeout" / "fixture.txt",
+        )
+        if timeout is None or timeout.reason != "target_timeout":
+            raise RuntimeError("timed-out replay target was mislabeled")
+
+    with tempfile.TemporaryDirectory(prefix="janus-proptest-replay-") as directory:
+        probe_target = Target(
+            id="property-replay-probe",
+            package="janus-core",
+            persistence=(
+                "crates/janus-core/proptest-regressions/property_replay_probe.txt"
+            ),
+            test="property_replay_probe",
+            filter=None,
+        )
+        probe_receipt = create_receipt(
+            probe_target, (seed,), contract.budget.cases, True
+        )
+        probe_persistence = Path(directory) / "proptest-regressions" / "probe.txt"
+        previous_probe = os.environ.get("JANUS_PROPERTY_REPLAY_PROBE")
+        previous_persistence = os.environ.get(
+            "JANUS_PROPERTY_REPLAY_PROBE_PERSISTENCE"
+        )
+        try:
+            os.environ["JANUS_PROPERTY_REPLAY_PROBE_PERSISTENCE"] = str(
+                probe_persistence
+            )
+            os.environ["JANUS_PROPERTY_REPLAY_PROBE"] = "pass-persisted"
+            if (
+                replay_target(
+                    probe_target,
+                    contract.budget,
+                    probe_receipt,
+                    persistence_override=probe_persistence,
+                )
+                is not None
+            ):
+                raise RuntimeError("replay continued into a novel Proptest case")
+
+            os.environ["JANUS_PROPERTY_REPLAY_PROBE"] = "fail-persisted"
+            reproduced = replay_target(
+                probe_target,
+                contract.budget,
+                probe_receipt,
+                persistence_override=probe_persistence,
+            )
+            if reproduced is None or reproduced.reason != "reproduced_failure":
+                raise RuntimeError("real Proptest seed failure was not reproduced")
+        finally:
+            if previous_probe is None:
+                os.environ.pop("JANUS_PROPERTY_REPLAY_PROBE", None)
+            else:
+                os.environ["JANUS_PROPERTY_REPLAY_PROBE"] = previous_probe
+            if previous_persistence is None:
+                os.environ.pop("JANUS_PROPERTY_REPLAY_PROBE_PERSISTENCE", None)
+            else:
+                os.environ["JANUS_PROPERTY_REPLAY_PROBE_PERSISTENCE"] = (
+                    previous_persistence
+                )
+
+        if probe_persistence.exists():
+            raise RuntimeError("real Proptest replay persistence was not restored")
 
 
 def parse_args() -> argparse.Namespace:
