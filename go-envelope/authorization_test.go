@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -111,6 +112,7 @@ func TestAuthorizationNegativeRoleBoundaries(t *testing.T) {
 
 func TestOIDCRoleProjectionIsExactAndRejectsAmbiguity(t *testing.T) {
 	policy := RolePolicy{
+		ViewerSubjects:        map[string]bool{"viewer-subject": true},
 		OwnerSubjects:         map[string]bool{"owner-subject": true},
 		OperatorGroups:        map[string]bool{"operator-group": true},
 		SecurityAdminSubjects: map[string]bool{"security-subject": true},
@@ -124,8 +126,11 @@ func TestOIDCRoleProjectionIsExactAndRejectsAmbiguity(t *testing.T) {
 			t.Fatalf("exact mapping omitted %q from %#v", role, roles)
 		}
 	}
-	if roles, err := DeriveRolesChecked("unknown-subject", "", []string{"unknown-group"}, policy); err != nil || !reflect.DeepEqual(roles, []string{RoleViewer}) {
-		t.Fatalf("unknown exact values should remain viewer-only, roles=%#v err=%v", roles, err)
+	if roles, err := DeriveRolesChecked("viewer-subject", "", nil, policy); err != nil || !reflect.DeepEqual(roles, []string{RoleViewer}) {
+		t.Fatalf("explicit viewer binding should grant only viewer, roles=%#v err=%v", roles, err)
+	}
+	if roles, err := DeriveRolesChecked("unknown-subject", "", []string{"unknown-group"}, policy); err != nil || len(roles) != 0 {
+		t.Fatalf("unknown exact values should receive no role, roles=%#v err=%v", roles, err)
 	}
 
 	canary := "identity-claim-canary-309"
@@ -141,14 +146,75 @@ func TestOIDCRoleProjectionIsExactAndRejectsAmbiguity(t *testing.T) {
 				claims = []string{canary}
 			}
 			roles, err := DeriveRolesChecked(subject, "", claims, ambiguous)
-			if err == nil || !reflect.DeepEqual(roles, []string{RoleViewer}) || strings.Contains(err.Error(), canary) {
+			if err == nil || len(roles) != 0 || strings.Contains(err.Error(), canary) {
 				t.Fatalf("ambiguous mapping must fail closed without values, roles=%#v err=%v", roles, err)
 			}
 		})
 	}
 	roles, err = DeriveRolesChecked("safe-subject", "", []string{canary, canary}, RolePolicy{OperatorGroups: map[string]bool{canary: true}})
-	if err == nil || !reflect.DeepEqual(roles, []string{RoleViewer}) || strings.Contains(err.Error(), canary) {
+	if err == nil || len(roles) != 0 || strings.Contains(err.Error(), canary) {
 		t.Fatalf("duplicate claims must fail closed without values, roles=%#v err=%v", roles, err)
+	}
+}
+
+func TestZitadelProjectRolesPreferConfiguredProjectAndIgnoreMetadata(t *testing.T) {
+	const projectID = "375139131258306571"
+	raw := map[string]json.RawMessage{
+		zitadelProjectRolesClaim: json.RawMessage(`{"janus:legacy":{"org-id":"org.example"}}`),
+		zitadelProjectRolesClaimPrefix + projectID + zitadelProjectRolesClaimSuffix: json.RawMessage(
+			`{"janus:viewer":{"org-id":"org.example"},"janus:operator":{"org-id":"org.example"}}`,
+		),
+		zitadelProjectRolesClaimPrefix + "999" + zitadelProjectRolesClaimSuffix: json.RawMessage(
+			`{"foreign-role":{"org-id":"foreign.example"}}`,
+		),
+	}
+	projectRoles, err := ZitadelProjectRoles(raw, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := ClaimRoleInputs(nil, nil, projectRoles)
+	sort.Strings(inputs)
+	if !reflect.DeepEqual(inputs, []string{"janus:operator", "janus:viewer"}) {
+		t.Fatalf("project role projection should return only exact role keys: %#v", inputs)
+	}
+	if roles, err := ZitadelProjectRoles(
+		map[string]json.RawMessage{
+			zitadelProjectRolesClaim: json.RawMessage(`{"janus:operator":{}}`),
+		},
+		projectID,
+	); err != nil || roles != nil {
+		t.Fatalf("configured project must not fall back to an unscoped claim, roles=%#v err=%v", roles, err)
+	}
+}
+
+func TestZitadelProjectRolesLegacyFallbackAndAmbiguityFailClosed(t *testing.T) {
+	legacy := map[string]json.RawMessage{
+		zitadelProjectRolesClaim: json.RawMessage(`{"janus:auditor":{"org-id":"org.example"}}`),
+	}
+	projectRoles, err := ZitadelProjectRoles(legacy, "")
+	if err != nil || !reflect.DeepEqual(ClaimRoleInputs(nil, nil, projectRoles), []string{"janus:auditor"}) {
+		t.Fatalf("legacy role claim should remain supported, roles=%#v err=%v", projectRoles, err)
+	}
+
+	canary := "role-claim-canary-267"
+	for name, claims := range map[string]map[string]json.RawMessage{
+		"multiple projects": {
+			zitadelProjectRolesClaimPrefix + "111" + zitadelProjectRolesClaimSuffix: json.RawMessage(`{"viewer":{}}`),
+			zitadelProjectRolesClaimPrefix + "222" + zitadelProjectRolesClaimSuffix: json.RawMessage(`{"operator":{}}`),
+		},
+		"malformed": {
+			zitadelProjectRolesClaim: json.RawMessage(`"` + canary + `"`),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			roles, err := ZitadelProjectRoles(claims, "")
+			if err == nil || roles != nil || strings.Contains(err.Error(), canary) {
+				t.Fatalf("invalid project role claims must fail closed without values, roles=%#v err=%v", roles, err)
+			}
+		})
+	}
+	if roles, err := ZitadelProjectRoles(legacy, "not-a-project-id"); err == nil || roles != nil {
+		t.Fatalf("invalid configured project id must fail closed, roles=%#v err=%v", roles, err)
 	}
 }
 

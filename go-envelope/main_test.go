@@ -1127,6 +1127,119 @@ func TestUnauthenticatedRootRendersBrandedLoginLanding(t *testing.T) {
 	assertRouteResponseValueFree(t, "unauthenticated branded landing", out)
 }
 
+func TestUnboundZitadelSessionRendersFriendlyNoAccessAndDeniesAPI(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RolePolicy = RolePolicy{
+		ViewerGroups: map[string]bool{"janus:viewer": true},
+	}
+
+	subjectCanary := "unbound-subject-canary-267"
+	emailCanary := "unbound-email-canary-267@example.test"
+	nameCanary := "Unbound Name Canary 267"
+	roles, err := DeriveRolesChecked(subjectCanary, emailCanary, []string{"unrelated-claim"}, app.cfg.RolePolicy)
+	if err != nil || len(roles) != 0 {
+		t.Fatalf("unbound identity should authenticate without receiving a role, roles=%#v err=%v", roles, err)
+	}
+	session := Session{
+		Subject: subjectCanary,
+		Email:   emailCanary,
+		Name:    nameCanary,
+		Roles:   roles,
+		Expiry:  time.Now().UTC().Add(time.Hour),
+	}
+	cookieWriter := httptest.NewRecorder()
+	app.writeSession(cookieWriter, session)
+	sessionCookie := cookieWriter.Result().Cookies()[0]
+
+	pageReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	pageReq.Header.Set("X-Request-Id", "unbound-page-267")
+	pageReq.AddCookie(sessionCookie)
+	pageOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(pageOut, pageReq)
+	if pageOut.Code != http.StatusForbidden || pageOut.Header().Get("Location") != "" {
+		t.Fatalf("unbound browser session should render a local 403 page, got %d location=%q body=%s", pageOut.Code, pageOut.Header().Get("Location"), pageOut.Body.String())
+	}
+	pageBody := pageOut.Body.String()
+	for _, want := range []string{
+		"No Janus access yet",
+		"Your Zitadel sign-in worked",
+		"Ask the operator to grant Janus access",
+		`href="/auth/reset"`,
+		"request_id=unbound-page-267",
+		"value_returned=false",
+	} {
+		if !strings.Contains(pageBody, want) {
+			t.Fatalf("unbound access page should include %q: %s", want, pageBody)
+		}
+	}
+	for _, forbidden := range []string{subjectCanary, emailCanary, nameCanary, "unrelated-claim"} {
+		if strings.Contains(pageBody, forbidden) {
+			t.Fatalf("unbound access page leaked identity value %q: %s", forbidden, pageBody)
+		}
+	}
+	assertStyleNonceMatchesCSP(t, pageOut)
+	assertRouteResponseValueFree(t, "unbound access page", pageOut)
+
+	apiReq := httptest.NewRequest(http.MethodGet, "/api/posture", nil)
+	apiReq.Header.Set("X-Request-Id", "unbound-api-267")
+	apiReq.AddCookie(sessionCookie)
+	apiOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(apiOut, apiReq)
+	if apiOut.Code != http.StatusForbidden {
+		t.Fatalf("unbound API session should be denied, got %d body=%s", apiOut.Code, apiOut.Body.String())
+	}
+	for _, want := range []string{`"error":"access_not_granted"`, `"redacted":true`, `"value_returned":false`, `"request_id":"unbound-api-267"`} {
+		if !strings.Contains(apiOut.Body.String(), want) {
+			t.Fatalf("unbound API denial should include %s: %s", want, apiOut.Body.String())
+		}
+	}
+	for _, forbidden := range []string{subjectCanary, emailCanary, nameCanary, "unrelated-claim"} {
+		if strings.Contains(apiOut.Body.String(), forbidden) {
+			t.Fatalf("unbound API denial leaked identity value %q: %s", forbidden, apiOut.Body.String())
+		}
+	}
+
+	recent := app.store.RecentAudit(2)
+	if len(recent) != 2 {
+		t.Fatalf("expected browser and API authorization denials, got %#v", recent)
+	}
+	for _, entry := range recent {
+		raw, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entry.Action != "auth.authorization" || entry.Outcome != "denied" || entry.ActorHash == "" || strings.Contains(string(raw), subjectCanary) || strings.Contains(string(raw), emailCanary) || strings.Contains(string(raw), nameCanary) {
+			t.Fatalf("unbound denial audit should be correlated and value-free: %s", raw)
+		}
+	}
+}
+
+func TestHumanLoginSurfaceHasNoPasswordPath(t *testing.T) {
+	app := newTestApp(t)
+	app.oauth = testOAuthConfig()
+
+	for _, route := range app.routeSpecs() {
+		if strings.Contains(strings.ToLower(route.pattern), "password") {
+			t.Fatalf("human login route must stay Zitadel-only: %s", route.pattern)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected login landing, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := strings.ToLower(out.Body.String())
+	for _, forbidden := range []string{`type="password"`, `name="password"`, "login with password", "sign in with password"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("human login surface exposed password path %q: %s", forbidden, body)
+		}
+	}
+	if !strings.Contains(body, "continue with zitadel") || strings.Count(body, `href="/login"`) != 1 {
+		t.Fatalf("human login surface should expose one Zitadel action: %s", body)
+	}
+}
+
 func TestUnauthenticatedRootHEADMatchesLandingAndAPIStaysJSON(t *testing.T) {
 	app := newTestApp(t)
 	app.oauth = testOAuthConfig()
@@ -1629,7 +1742,7 @@ func TestValidOIDCNonce(t *testing.T) {
 func TestLogoutRequiresCSRF(t *testing.T) {
 	app := newTestApp(t)
 	rr := httptest.NewRecorder()
-	app.writeSession(rr, Session{Subject: "user-1", Expiry: time.Now().UTC().Add(time.Hour)})
+	app.writeSession(rr, Session{Subject: "user-1", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)})
 	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
 	req.AddCookie(rr.Result().Cookies()[0])
 	req.Header.Set("X-Request-Id", "logout-test-123")
@@ -1649,7 +1762,7 @@ func TestLogoutRequiresCSRF(t *testing.T) {
 
 func TestWardenResolveReturnsHandleOnly(t *testing.T) {
 	app := newTestApp(t)
-	session := Session{Subject: "user-1", Expiry: time.Now().UTC().Add(time.Hour)}
+	session := Session{Subject: "user-1", Roles: []string{RoleViewer, RoleOperator}, Expiry: time.Now().UTC().Add(time.Hour)}
 	rr := httptest.NewRecorder()
 	app.writeSession(rr, session)
 
@@ -2470,8 +2583,8 @@ func TestRolePolicyMapsZitadelClaims(t *testing.T) {
 func TestRolePolicyRejectsUnconfiguredElevatedClaims(t *testing.T) {
 	for _, claim := range []string{"janus:admin", "janus_admin", "janus-admin", "janus:auditor", "janus:operator"} {
 		roles := DeriveRoles("user-1", "user@example.test", []string{claim}, RolePolicy{BootstrapOwner: false})
-		if !hasTestRole(roles, RoleViewer) || hasTestRole(roles, RoleSecurityAdmin) || hasTestRole(roles, RoleAuditor) || hasTestRole(roles, RoleOperator) {
-			t.Fatalf("unconfigured claim %q should only grant viewer, got %#v", claim, roles)
+		if len(roles) != 0 {
+			t.Fatalf("unconfigured claim %q should grant no role, got %#v", claim, roles)
 		}
 	}
 	posture := AccessPostureFor(RolePolicy{BootstrapOwner: false})
@@ -2482,7 +2595,7 @@ func TestRolePolicyRejectsUnconfiguredElevatedClaims(t *testing.T) {
 
 func TestRolePolicyLegacyBootstrapOwnerGrantsNoElevatedRoles(t *testing.T) {
 	roles := DeriveRoles("owner", "", nil, RolePolicy{BootstrapOwner: true})
-	if len(roles) != 1 || roles[0] != RoleViewer {
+	if len(roles) != 0 {
 		t.Fatalf("legacy bootstrap must be inert, got %#v", roles)
 	}
 }
