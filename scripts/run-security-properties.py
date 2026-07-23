@@ -280,7 +280,7 @@ def _read_persisted_seeds(path: Path) -> tuple[str, ...]:
     return tuple(seeds)
 
 
-def _atomic_write(path: Path, content: bytes, mode: int) -> None:
+def _atomic_private_write(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
@@ -291,7 +291,7 @@ def _atomic_write(path: Path, content: bytes, mode: int) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temporary, mode)
+        os.chmod(temporary, 0o600)
         os.replace(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)
@@ -322,7 +322,7 @@ def _sanitize_new_seed_lines(path: Path, before: tuple[str, ...]) -> tuple[str, 
         else:
             sanitized.append(raw_line)
     if changed:
-        _atomic_write(path, "".join(sanitized).encode("utf-8"), 0o644)
+        _atomic_private_write(path, "".join(sanitized).encode("utf-8"))
     return tuple(new)
 
 
@@ -369,7 +369,7 @@ def write_receipt(path: Path, receipt: ReplayReceipt) -> None:
     encoded = (
         json.dumps(_receipt_object(receipt), indent=2, sort_keys=True) + "\n"
     ).encode("ascii")
-    _atomic_write(path, encoded, 0o600)
+    _atomic_private_write(path, encoded)
 
 
 def load_receipt(path: Path, contract: Contract) -> ReplayReceipt:
@@ -515,8 +515,8 @@ def replay_target(
             prefix = original or b""
             if prefix and not prefix.endswith(b"\n"):
                 prefix += b"\n"
-            _atomic_write(
-                persistence, prefix + receipt.seed.encode("ascii") + b"\n", 0o644
+            _atomic_private_write(
+                persistence, prefix + receipt.seed.encode("ascii") + b"\n"
             )
         reason = _execute_target(
             target,
@@ -533,7 +533,7 @@ def replay_target(
                 except OSError:
                     pass
         else:
-            _atomic_write(persistence, original, 0o644)
+            _atomic_private_write(persistence, original)
     if reason is None:
         return None
     return PublicFailure(
@@ -592,6 +592,8 @@ def self_test(contract: Contract) -> None:
         ):
             if canary in path.read_text(encoding="utf-8"):
                 raise RuntimeError("runner persisted generated diagnostic values")
+            if path.stat().st_mode & 0o077:
+                raise RuntimeError("runner replay evidence is not private")
         if first_persistence.read_text(encoding="utf-8") != seed + "\n":
             raise RuntimeError("runner did not reduce persistence to a seed token")
         receipt = load_receipt(first_receipt, contract)
