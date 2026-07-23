@@ -181,7 +181,7 @@ It exercises:
 - the locked Rust workspace test suite;
 - the strict cross-surface minimization contract, bounded runner, and
   synthetic-canary diagnostics;
-- the bounded security-property gate and its value-free replay receipt;
+- the bounded security-property gate and its value-free property replay receipt;
 - a real reference-only Warden MCP session;
 - the hard use/admin process boundary and retired mixed entry point;
 - the approval-to-env-file operator flow;
