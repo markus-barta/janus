@@ -10,8 +10,9 @@ on:
   push:
     branches: [main]
     paths: ['go-envelope/**', 'config/assurance/**', 'config/release-channels/**', 'scripts/**', '.github/workflows/go-envelope.yml']
+  # Always report the branch-required Go check on pull requests. Pushes retain
+  # the focused path filter above.
   pull_request:
-    paths: ['go-envelope/**', 'config/assurance/**', 'config/release-channels/**', 'scripts/**', '.github/workflows/go-envelope.yml']
   # Release the envelope image by pushing a tag like `go-envelope-v1.144`.
   release:
     types: [published]
