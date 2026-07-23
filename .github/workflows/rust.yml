@@ -75,6 +75,15 @@ jobs:
         run: nix build .#janus-engine
       - name: engine release assurance gate
         run: scripts/assure-engine-release.sh
+      - name: preserve value-free property replay receipt
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: rust-property-replay
+          path: .tmp/janus-property-replay.json
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
       - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
         with:
           version: v0.72.0

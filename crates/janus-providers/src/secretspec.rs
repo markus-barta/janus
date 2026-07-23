@@ -234,6 +234,7 @@ mod tests {
         SecretBroker, TrustLevel, UseProfile, UseRequest,
     };
     use proptest::prelude::*;
+    use proptest::test_runner::FileFailurePersistence;
     use std::fmt;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -320,6 +321,10 @@ CANARY = { description = "Canary token", required = true }
         ProptestConfig {
             cases,
             max_shrink_iters,
+            failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/proptest-regressions/secretspec.txt"
+            )))),
             ..ProptestConfig::default()
         }
     }

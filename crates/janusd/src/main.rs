@@ -5137,6 +5137,7 @@ mod tests {
     #[cfg(unix)]
     use janus_mock::MockStore;
     use proptest::prelude::*;
+    use proptest::test_runner::FileFailurePersistence;
 
     use super::*;
 
@@ -5165,6 +5166,10 @@ mod tests {
             max_shrink_iters: property_env_usize("JANUS_PROPERTY_MAX_SHRINK_ITERATIONS", 4096)
                 .try_into()
                 .unwrap_or(u32::MAX),
+            failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/proptest-regressions/main.txt"
+            )))),
             ..ProptestConfig::default()
         }
     }

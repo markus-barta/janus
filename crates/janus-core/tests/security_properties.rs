@@ -316,14 +316,16 @@ proptest! {
     ) {
         let path = ScopePathV1::for_repository(&organization, &project, &repository, &environment).unwrap();
         let repeated = ScopePathV1::for_repository(&organization, &project, &repository, &environment).unwrap();
-        prop_assert_eq!(path.scope_ref(), repeated.scope_ref());
-        let rendered = format!("{:?}", path.scope_ref());
-        prop_assert!(!rendered.contains(&organization));
-        prop_assert!(!rendered.contains(&project));
-        prop_assert!(!rendered.contains(&repository));
+        let scope_ref = path.scope_ref();
+        prop_assert_eq!(&scope_ref, &repeated.scope_ref());
+        let opaque = scope_ref.as_str();
+        let suffix = opaque.strip_prefix("scp_").unwrap();
+        prop_assert_eq!(suffix.len(), 40);
+        prop_assert!(suffix.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        prop_assert_eq!(format!("{scope_ref:?}"), format!("ScopeRef({opaque:?})"));
         if environment != other_environment {
             let other = ScopePathV1::for_repository(&organization, &project, &repository, other_environment).unwrap();
-            prop_assert_ne!(path.scope_ref(), other.scope_ref());
+            prop_assert_ne!(scope_ref, other.scope_ref());
         }
     }
 }
