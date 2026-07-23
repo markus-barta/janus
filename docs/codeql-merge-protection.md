@@ -25,6 +25,20 @@ GitHub applies merge protection to findings whose identified code lines are in
 the pull request diff. The required language-specific CodeQL checks remain the
 fail-closed control for missing, cancelled, or failed analysis.
 
+## Enforcement proof
+
+Pull request `#14` introduced a temporary, never-executed Python command
+injection on head `b69483cc03cefad555834ef866de76d84faa7435`. All eight
+protected status checks passed, including all four language-specific CodeQL
+analysis jobs. CodeQL alert `#18` identified the added line as critical
+`py/command-line-injection`; the separate ruleset result failed and GitHub
+reported the otherwise mergeable pull request as blocked.
+
+The fixture was then removed from the same pull request and never merged.
+Fresh analysis fixed the alert, the ruleset result passed, and GitHub reported
+the corrected pull request as mergeable. The exact check and ruleset receipts
+are retained in PPM ticket `JANUS-340`.
+
 ## Preserved branch policy
 
 The ruleset does not replace or duplicate the protected status checks:
