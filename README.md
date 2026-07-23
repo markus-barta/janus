@@ -213,6 +213,10 @@ Every external GitHub Action, including GitHub-owned Actions, is pinned to a
 full commit SHA with its reviewed release beside it. The required security job
 rejects mutable, shortened, dynamic, or undocumented Action references, and
 weekly Dependabot pull requests provide the reviewed update path.
+The default branch also has
+[CodeQL merge protection](docs/codeql-merge-protection.md): security findings
+of medium severity or higher and non-security errors or warnings block merges
+independently of the required CodeQL status checks.
 The behavioral assurance script is intentionally not presented as the complete
 release gate; formatting, strict Clippy, container, and scanner checks remain
 separate commands above and are combined by release CI.
