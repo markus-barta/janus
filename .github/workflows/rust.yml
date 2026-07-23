@@ -73,10 +73,12 @@ jobs:
           cargo install cargo-audit --version 0.22.2 --locked
           go install github.com/zricethezav/gitleaks/v8@v8.30.1
       - name: release security policy and negative fixtures
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/check-release-docs.py
           python3 scripts/check-security-gates.py --self-test
-          scripts/check-source-release.py --self-test
+          scripts/check-source-release.py --self-test --verify-grandfathered
           scripts/check-rust-audit.py --self-test
           GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" scripts/test-gitleaks.sh
       - name: format

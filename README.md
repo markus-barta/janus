@@ -218,6 +218,11 @@ keyless image signature, and a second keyless signature over a deterministic
 source/tag/commit/image-digest manifest. Direct and merge commits are not
 individually signed: the defined signed-source subset is the two released tag
 families, with pre-policy releases grandfathered and no history rewrite.
+The machine-enforced cutoff is `2026-07-22T14:00:17Z`. The only unsigned
+pre-policy release that remains admissible is `go-envelope-v1.162` at its exact
+tag, commit, and publication timestamp. Earlier Go and Rust releases remain
+published history but are superseded and outside the admissible policy;
+date-only interpretation is rejected.
 Release CI scans, verifies, and smokes the exact digest it publishes.
 Production and enterprise deployment admission is documented in
 [Trusted release admission](docs/release-admission.md).

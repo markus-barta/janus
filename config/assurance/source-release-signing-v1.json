@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "owner": "JANUS-324",
-  "effective_on": "2026-07-22",
+  "effective_from": "2026-07-22T14:00:17Z",
   "repository": "markus-barta/janus",
   "signed_subset": [
     {
@@ -23,6 +23,14 @@
     "artifact": "source-release.json",
     "bundle": "source-release.sigstore.json"
   },
+  "grandfathered_releases": [
+    {
+      "tag": "go-envelope-v1.162",
+      "commit": "d64b23933580c1e1541baec19dc7817c8464cf96",
+      "published_at": "2026-07-22T12:48:31Z"
+    }
+  ],
+  "pre_policy_release_disposition": "deny_unlisted",
   "recovery": "Rerun the release workflow only for the unchanged reviewed tag and commit. A workflow identity or repository change requires a reviewed policy update before signing resumes.",
-  "history": "Existing releases before effective_on are grandfathered without rewriting commits or tags; every release on or after effective_on must carry the source bundle while image signing remains mandatory."
+  "history": "Only the exact entries in grandfathered_releases remain admissible without a source bundle. All other pre-policy releases are superseded and outside this policy without deleting or rewriting their history. Every release at or after effective_from must carry the source bundle while image signing remains mandatory."
 }

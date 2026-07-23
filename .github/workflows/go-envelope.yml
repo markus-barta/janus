@@ -47,7 +47,11 @@ jobs:
           GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" scripts/test-gitleaks.sh
       - name: scanner policy and negative fixtures
         working-directory: .
-        run: python3 scripts/check-security-gates.py --self-test
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/check-security-gates.py --self-test
+          scripts/check-source-release.py --self-test --verify-grandfathered
       - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514
         with:
           version: v0.72.0
