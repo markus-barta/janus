@@ -910,7 +910,7 @@ impl ManagedHostAgent {
     fn compose_up(&self, profile: &ManagedHostProfileV1) -> AgentResult<()> {
         let status = self
             .compose_command(profile)
-            .args(["up", "--detach", "--no-deps", &profile.compose_service])
+            .args(compose_up_arguments(&profile.compose_service))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -1141,6 +1141,10 @@ impl ManagedHostAgent {
         };
         read_http_response(response, maximum, content_type)
     }
+}
+
+fn compose_up_arguments(service: &str) -> [&str; 5] {
+    ["up", "--detach", "--no-deps", "--force-recreate", service]
 }
 
 struct HttpResponse {
@@ -1531,6 +1535,20 @@ mod tests {
         assert_eq!(
             validate_config(&fixture).expect_err("relative path denied"),
             ManagedHostAgentError::new("managed_host_agent_config_invalid")
+        );
+    }
+
+    #[test]
+    fn reload_always_recreates_the_exact_declared_service() {
+        assert_eq!(
+            compose_up_arguments("secret-canary"),
+            [
+                "up",
+                "--detach",
+                "--no-deps",
+                "--force-recreate",
+                "secret-canary",
+            ]
         );
     }
 
