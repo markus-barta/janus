@@ -3305,6 +3305,8 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "managed secret setup unavailable", pattern: "GET /managed-service/setup", method: http.MethodGet, path: "/managed-service/setup?intent=intent_0123456789abcdef", status: http.StatusForbidden},
 		{name: "managed secret step-up unavailable", pattern: "POST /managed-service/setup/step-up", method: http.MethodPost, path: "/managed-service/setup/step-up", status: http.StatusServiceUnavailable},
 		{name: "managed secret execute unavailable", pattern: "POST /managed-service/setup/execute", method: http.MethodPost, path: "/managed-service/setup/execute", status: http.StatusServiceUnavailable},
+		{name: "managed host envelope unavailable", pattern: "GET /internal/managed-service-host-envelopes/{hostRef}/{operationRef}", method: http.MethodGet, path: "/internal/managed-service-host-envelopes/host_0123456789abcdef/op_0123456789abcdef", status: http.StatusNotFound},
+		{name: "managed host reconcile unavailable", pattern: "POST /internal/managed-service-operations/{operationRef}/reconcile", method: http.MethodPost, path: "/internal/managed-service-operations/op_0123456789abcdef/reconcile", status: http.StatusBadRequest},
 		{name: "browser missing", method: http.MethodGet, path: "/missing?ref=secret-cookie-secret", status: http.StatusNotFound},
 		{name: "api missing", method: http.MethodGet, path: "/api/missing?ref=raw-secret-value", status: http.StatusNotFound},
 		{name: "api method", method: http.MethodDelete, path: "/api/posture", status: http.StatusMethodNotAllowed},

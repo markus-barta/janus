@@ -46,14 +46,17 @@ import_plan="${runtime}/import-plan.json"
 generated_plan="${runtime}/generated-plan.json"
 failure_plan="${runtime}/failure-plan.json"
 web_catalog="${runtime}/web-transaction-catalog.json"
+web_signing_key="${runtime}/web-signing-key.json"
+web_host_identity="${runtime}/web-host-ed25519"
+web_outbox="${runtime}/web-outbox"
 web_socket="${socket_root}/tx.sock"
 web_log="${runtime}/web-transaction.log"
 web_abort_ready="${runtime}/web-abort-ready"
 import_canary="janus-lifecycle-entry-import-canary"
 web_canary="SENSITIVE_WEB_TRANSACTION_CANARY_9d3e"
 
-mkdir -p "${runtime}" "${store_dir}" "${state_dir}" "${audit_dir}"
-chmod 700 "${runtime}" "${store_dir}" "${state_dir}" "${audit_dir}"
+mkdir -p "${runtime}" "${store_dir}" "${state_dir}" "${audit_dir}" "${web_outbox}"
+chmod 700 "${runtime}" "${store_dir}" "${state_dir}" "${audit_dir}" "${web_outbox}"
 : >"${log}"
 : >"${web_log}"
 chmod 600 "${log}" "${web_log}"
@@ -197,8 +200,11 @@ TOML
 age-keygen -o "${identity_file}" >"${recipient_log}.stdout" 2>"${recipient_log}"
 recipient="$(sed -n 's/^Public key: //p' "${recipient_log}")"
 [ -n "${recipient}" ] || fail "age-keygen did not produce a recipient"
+ssh-keygen -q -t ed25519 -N '' -f "${web_host_identity}"
+web_host_recipient="$(cat "${web_host_identity}.pub")"
+[ -n "${web_host_recipient}" ] || fail "ssh-keygen did not produce a host recipient"
 chmod 600 "${identity_file}" "${recipient_log}" "${recipient_log}.stdout" \
-  "${manifest}" "${metadata}" "${profiles}" "${hooks}"
+  "${manifest}" "${metadata}" "${profiles}" "${hooks}" "${web_host_identity}"
 
 reviewed_at="$(date +%s)"
 SCOPE_REF="${scope_ref}" IMPORT_REF="${import_ref}" GENERATED_REF="${generated_ref}" \
@@ -207,7 +213,8 @@ SCOPE_REF="${scope_ref}" IMPORT_REF="${import_ref}" GENERATED_REF="${generated_r
   PROFILES="${profiles}" HOOKS="${hooks}" STATE_DIR="${state_dir}" \
   AUDIT_PATH="${audit_path}" REVIEWED_AT="${reviewed_at}" \
   IMPORT_PLAN="${import_plan}" GENERATED_PLAN="${generated_plan}" FAILURE_PLAN="${failure_plan}" \
-  WEB_CATALOG="${web_catalog}" \
+  WEB_CATALOG="${web_catalog}" WEB_SIGNING_KEY="${web_signing_key}" \
+  WEB_HOST_RECIPIENT="${web_host_recipient}" WEB_OUTBOX="${web_outbox}" \
   python3 - <<'PY'
 import json
 import os
@@ -287,9 +294,18 @@ web_plan = common | {
     "validation_probes": ["entry-web-valid"],
     "source": {"mode": "import"},
 }
-catalog = {
-    "schema": "inspr.janus.managed-web-transaction-catalog.v1",
+signing_key = {
+    "schema": "inspr.janus.host-envelope-signing-key.v1",
     "schema_version": 1,
+    "key_id": "key_websmoke0001",
+    "private_key_base64": __import__("base64").b64encode(bytes(range(32))).decode().rstrip("="),
+}
+pathlib.Path(os.environ["WEB_SIGNING_KEY"]).write_text(
+    json.dumps(signing_key, indent=2) + "\n", encoding="utf-8"
+)
+catalog = {
+    "schema": "inspr.janus.managed-web-transaction-catalog.v2",
+    "schema_version": 2,
     "entries": [{
         "host_ref": "host_0123456789abcdef",
         "service_ref": "svc_0123456789abcdef",
@@ -297,13 +313,25 @@ catalog = {
         "declaration_fingerprint": "decl_0123456789abcdef",
         "operation_kind": "create",
         "plan": web_plan,
+        "delivery": {
+            "schema": "inspr.janus.managed-host-delivery-plan.v1",
+            "schema_version": 1,
+            "host_recipient": os.environ["WEB_HOST_RECIPIENT"],
+            "producer_key_id": "key_websmoke0001",
+            "producer_signing_key_file": os.environ["WEB_SIGNING_KEY"],
+            "outbox_dir": os.environ["WEB_OUTBOX"],
+            "generation": 1,
+            "revocation_epoch": 1,
+            "envelope_ttl_seconds": 900,
+        },
     }],
 }
 pathlib.Path(os.environ["WEB_CATALOG"]).write_text(
     json.dumps(catalog, indent=2) + "\n", encoding="utf-8"
 )
 PY
-chmod 600 "${import_plan}" "${generated_plan}" "${failure_plan}" "${web_catalog}"
+chmod 600 "${import_plan}" "${generated_plan}" "${failure_plan}" "${web_catalog}" \
+  "${web_signing_key}"
 
 if [ -z "${JANUSD_ADMIN_BIN:-}" ]; then
   cargo build --quiet --locked -p janusd
@@ -398,8 +426,9 @@ import struct
 import time
 
 request = {
-    "schema": "inspr.janus.managed-web-transaction-request.v1",
-    "schema_version": 1,
+    "schema": "inspr.janus.managed-web-transaction-request.v2",
+    "schema_version": 2,
+    "action": "prepare",
     "operation_ref": "op_webabort000001",
     "operation_kind": "create",
     "source": "import",
@@ -407,6 +436,7 @@ request = {
     "service_ref": "svc_0123456789abcdef",
     "slot_ref": "slot_0123456789abcdef",
     "declaration_fingerprint": "decl_0123456789abcdef",
+    "external_evidence": None,
 }
 body = json.dumps(request, separators=(",", ":")).encode()
 peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -448,7 +478,7 @@ jq -e '.phase == "rolled_back" and .created_by_operation == false' \
   "${state_dir}/webtx_webabort000001.json" >/dev/null ||
   fail "web daemon restart did not reconcile partial preflight"
 
-WEB_SOCKET="${web_socket}" WEB_CANARY="${web_canary}" python3 - <<'PY'
+WEB_SOCKET="${web_socket}" WEB_CANARY="${web_canary}" WEB_OUTBOX="${web_outbox}" python3 - <<'PY'
 import json
 import os
 import socket
@@ -476,8 +506,9 @@ def response(peer):
     return value
 
 request = {
-    "schema": "inspr.janus.managed-web-transaction-request.v1",
-    "schema_version": 1,
+    "schema": "inspr.janus.managed-web-transaction-request.v2",
+    "schema_version": 2,
+    "action": "prepare",
     "operation_ref": "op_websuccess0001",
     "operation_kind": "create",
     "source": "import",
@@ -485,6 +516,7 @@ request = {
     "service_ref": "svc_0123456789abcdef",
     "slot_ref": "slot_0123456789abcdef",
     "declaration_fingerprint": "decl_0123456789abcdef",
+    "external_evidence": None,
 }
 body = json.dumps(request, separators=(",", ":")).encode()
 peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -495,10 +527,41 @@ if preflight["phase"] != "preflighted" or not preflight["expects_value"]:
     raise SystemExit("web transaction did not gate import behind preflight")
 secret = os.environ["WEB_CANARY"].encode()
 frame(peer, secret)
-complete = response(peer)
-if complete["phase"] != "completed" or complete["expects_value"]:
-    raise SystemExit("web transaction did not complete")
+prepared = response(peer)
+if prepared["phase"] != "prepared" or prepared["expects_value"] or prepared["generation"] != 1:
+    raise SystemExit(
+        "web transaction did not prepare host delivery: "
+        + prepared.get("reason_code", "missing_reason")
+    )
 peer.close()
+
+outbox_path = os.path.join(os.environ["WEB_OUTBOX"], "op_websuccess0001.json")
+outbox = json.loads(open(outbox_path, encoding="utf-8").read())
+if outbox["value_returned"] is not False or os.environ["WEB_CANARY"] in json.dumps(outbox):
+    raise SystemExit("host outbox was not ciphertext-only")
+
+finalize = request | {
+    "action": "finalize",
+    "external_evidence": {
+        "generation": 1,
+        "materialized": True,
+        "process_state": "running",
+        "probe_state": "healthy",
+        "heartbeat_observed_at_unix_secs": outbox["prepared_at_unix_secs"],
+        "process_observed_at_unix_secs": outbox["prepared_at_unix_secs"],
+        "probe_observed_at_unix_secs": outbox["prepared_at_unix_secs"],
+    },
+}
+finalize_body = json.dumps(finalize, separators=(",", ":")).encode()
+finalizer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+finalizer.connect(os.environ["WEB_SOCKET"])
+frame(finalizer, finalize_body)
+complete = response(finalizer)
+if complete["phase"] != "completed" or complete["expects_value"] or complete["generation"] != 1:
+    raise SystemExit("web transaction did not finalize external activation")
+finalizer.close()
+if os.path.exists(outbox_path):
+    raise SystemExit("completed web transaction retained host outbox")
 
 duplicate = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 duplicate.connect(os.environ["WEB_SOCKET"])

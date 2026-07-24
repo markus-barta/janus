@@ -586,6 +586,21 @@ impl EntryTransaction {
     }
 
     pub(super) async fn activate(&self, now: SystemTime) -> Result<EntryStatus> {
+        self.activate_bound(now, true).await
+    }
+
+    /// Complete lifecycle activation after the fixed host delivery path has
+    /// already supplied fresh, current-generation reload and health evidence.
+    /// This deliberately skips the local consumer hook so a managed service is
+    /// never reloaded twice by two authorities.
+    pub(super) async fn activate_after_external_verification(
+        &self,
+        now: SystemTime,
+    ) -> Result<EntryStatus> {
+        self.activate_bound(now, false).await
+    }
+
+    async fn activate_bound(&self, now: SystemTime, run_local_reload: bool) -> Result<EntryStatus> {
         let _lock = self.lock()?;
         let mut journal = self.read_bound_journal()?;
         if journal.phase != EntryPhase::Validated {
@@ -630,7 +645,7 @@ impl EntryTransaction {
             return Err(error);
         }
 
-        let reload_result = if context.consumer.reload == ReloadMethod::None {
+        let reload_result = if !run_local_reload || context.consumer.reload == ReloadMethod::None {
             Ok(())
         } else {
             context
@@ -675,7 +690,12 @@ impl EntryTransaction {
         }
 
         journal.phase = EntryPhase::Completed;
-        journal.reason_code = "entry_activation_ok".to_string();
+        journal.reason_code = if run_local_reload {
+            "entry_activation_ok"
+        } else {
+            "entry_external_activation_ok"
+        }
+        .to_string();
         if let Err(error) = self.write_journal(journal.clone()) {
             self.rollback_created(
                 &mut context,
@@ -687,6 +707,37 @@ impl EntryTransaction {
             return Err(error);
         }
         Ok(status_from_journal(&journal))
+    }
+
+    /// Read the exact draft value only for the reviewed host-encryption
+    /// boundary. The caller receives a zeroizing `SecretValue`; no string,
+    /// debug, log, or response representation is created.
+    pub(super) async fn draft_value_for_host_delivery(&self) -> Result<janus_core::SecretValue> {
+        let _lock = self.lock()?;
+        let journal = self.read_bound_journal()?;
+        if journal.phase != EntryPhase::Validated {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_delivery_phase_invalid value_returned=false"
+            );
+        }
+        let context = self
+            .bound_context(ExpectedPresence::Present, &[SecretLifecycle::Draft])
+            .await?;
+        self.ensure_target_binding(&journal, &context)?;
+        let mut audit = self.audit()?;
+        self.audit_consumer(
+            &mut audit,
+            AuditAction::SecretUse,
+            AuditOutcome::Allowed,
+            "entry_host_delivery_read",
+            Severity::High,
+            &context.consumer.consumer_ref,
+        )?;
+        context
+            .store
+            .get(&context.descriptor.name)
+            .await
+            .context("entry host delivery read denied")
     }
 
     pub(super) async fn rollback(&self) -> Result<EntryStatus> {

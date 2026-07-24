@@ -270,7 +270,8 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 	result, err := app.managedTxn.Execute(r.Context(), accepted, importedValue)
 	app.clearManagedStepUpProofCookies(w)
 	w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
-	if err != nil || result.ValueReturned || result.Phase != "completed" ||
+	if err != nil || result.ValueReturned ||
+		(result.Phase != "registered" && result.Phase != "completed") ||
 		result.OperationRef != accepted.OperationRef {
 		app.audit(r, "managed_secret.execute", "denied", session.Subject, "transaction incomplete")
 		app.renderSafeFailure(w, r, http.StatusServiceUnavailable, "secret_change_incomplete", "Janus could not confirm completion. Use the operation status in Pharos before trying again.", nil)
@@ -282,7 +283,7 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 		app.renderSafeFailure(w, r, http.StatusServiceUnavailable, "return_target_unavailable", "The secret change completed, but Janus could not open its operation status.", nil)
 		return
 	}
-	app.auditWithRef(r, "managed_secret.execute", "allowed", session.Subject, result.SecretRef, "transaction completed without value return")
+	app.auditWithRef(r, "managed_secret.execute", "allowed", session.Subject, result.SecretRef, "operation registered without value return")
 	http.Redirect(w, r, returnURL, http.StatusSeeOther)
 }
 

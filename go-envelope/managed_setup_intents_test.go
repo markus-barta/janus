@@ -488,6 +488,8 @@ func TestManagedSetupRuntimeConfigIsAllOrNothingAndLoadsRotatingKeys(t *testing.
 		"JANUS_MANAGED_SETUP_VERIFICATION_KEYS_FILE",
 		"JANUS_MANAGED_SETUP_MANIFEST_PATHS",
 		"JANUS_MANAGED_WEB_TRANSACTION_SOCKET",
+		"JANUS_MANAGED_HOST_TOKEN_GENERATION_DIR",
+		"JANUS_MANAGED_HOST_ENVELOPE_OUTBOX_DIR",
 	} {
 		t.Setenv(name, "")
 	}
@@ -527,6 +529,16 @@ func TestManagedSetupRuntimeConfigIsAllOrNothingAndLoadsRotatingKeys(t *testing.
 	t.Setenv("JANUS_MANAGED_SETUP_VERIFICATION_KEYS_FILE", keysPath)
 	t.Setenv("JANUS_MANAGED_SETUP_MANIFEST_PATHS", "/managed/one.json,/managed/two.json")
 	t.Setenv("JANUS_MANAGED_WEB_TRANSACTION_SOCKET", "/run/janus/managed-transaction.sock")
+	tokenGenerationDirectory := filepath.Join(directory, "host-token-generations")
+	envelopeOutboxDirectory := filepath.Join(directory, "host-envelope-outbox")
+	if err := os.Mkdir(tokenGenerationDirectory, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(envelopeOutboxDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JANUS_MANAGED_HOST_TOKEN_GENERATION_DIR", tokenGenerationDirectory)
+	t.Setenv("JANUS_MANAGED_HOST_ENVELOPE_OUTBOX_DIR", envelopeOutboxDirectory)
 	config, err := loadManagedSetupRuntimeConfigFromEnv()
 	if err != nil {
 		t.Fatal(err)
@@ -534,7 +546,9 @@ func TestManagedSetupRuntimeConfigIsAllOrNothingAndLoadsRotatingKeys(t *testing.
 	if config.PharosReturnOrigin != "https://pharos.example.test" ||
 		len(config.Keyring) != 1 ||
 		len(config.ManifestPaths) != 2 ||
-		config.TransactionSocket != "/run/janus/managed-transaction.sock" {
+		config.TransactionSocket != "/run/janus/managed-transaction.sock" ||
+		config.HostTokenGenerationDir != tokenGenerationDirectory ||
+		config.HostEnvelopeOutboxDir != envelopeOutboxDirectory {
 		t.Fatalf("unexpected runtime config: %#v", config)
 	}
 	if err := os.Chmod(tokenPath, 0644); err != nil {

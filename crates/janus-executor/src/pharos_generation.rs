@@ -43,9 +43,10 @@ pub(crate) fn write_entry(
     subject: &SafeLabel,
     value: &[u8],
 ) -> JanusResult<String> {
-    if !valid_host_name(subject.as_str()) {
+    if !valid_token_subject(subject.as_str()) {
         return Err(JanusError::InvalidManifest {
-            detail: "Pharos token generation subject must be a canonical host name".to_string(),
+            detail: "Pharos token generation subject must be a canonical host or host reference"
+                .to_string(),
         });
     }
     let token_sha256 = sha256_hex(value);
@@ -71,7 +72,7 @@ pub(crate) fn publish_entry(
     subject: &SafeLabel,
     token_sha256: &str,
 ) -> JanusResult<String> {
-    if !valid_host_name(subject.as_str()) || !is_sha256_hex(token_sha256) {
+    if !valid_token_subject(subject.as_str()) || !is_sha256_hex(token_sha256) {
         return Err(JanusError::InvalidManifest {
             detail: "Pharos token generation entry is invalid".to_string(),
         });
@@ -94,9 +95,9 @@ pub fn publish_host(root: &Path, host: &str, token_sha256: &str) -> JanusResult<
 /// Remove one host from the immutable Pharos verifier generation and publish
 /// the new current pointer before retirement can progress.
 pub fn retire_host(root: &Path, host: &str) -> JanusResult<String> {
-    if !valid_host_name(host) {
+    if !valid_token_subject(host) {
         return Err(JanusError::InvalidManifest {
-            detail: "Pharos token retirement host must be canonical".to_string(),
+            detail: "Pharos token retirement subject must be canonical".to_string(),
         });
     }
     with_generation_lock(root, |mut hosts| {
@@ -162,7 +163,7 @@ fn parse_generation(bytes: &[u8], expected_id: &str) -> JanusResult<BTreeMap<Str
     }
     let mut hosts = BTreeMap::new();
     for host in payload.hosts {
-        if !valid_host_name(&host.name) || !is_sha256_hex(&host.token_sha256) {
+        if !valid_token_subject(&host.name) || !is_sha256_hex(&host.token_sha256) {
             return Err(generation_unavailable(
                 "current generation entry is invalid",
             ));
@@ -386,6 +387,16 @@ pub(crate) fn valid_host_name(value: &str) -> bool {
     })
 }
 
+pub(crate) fn valid_token_subject(value: &str) -> bool {
+    valid_host_name(value)
+        || (value.len() >= "host_".len() + 8
+            && value.len() <= 96
+            && value.starts_with("host_")
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'))
+}
+
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64
         && value
@@ -476,6 +487,18 @@ mod tests {
         assert!(!String::from_utf8(output)
             .expect("entry is utf8")
             .contains("fixture-secret"));
+    }
+
+    #[test]
+    fn managed_host_reference_is_a_valid_token_subject() {
+        let root = private_root("host-ref");
+        let host_ref = "host_58f36c72a91e";
+        let token_hash = sha256_hex(b"managed-agent-fixture");
+        publish_host(&root, host_ref, &token_hash).expect("publish managed host reference");
+        let hosts = load_current_generation(&root).expect("load host-ref generation");
+        assert_eq!(hosts.get(host_ref), Some(&token_hash));
+        assert!(!valid_host_name(host_ref));
+        assert!(valid_token_subject(host_ref));
     }
 
     #[test]

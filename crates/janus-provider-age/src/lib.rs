@@ -1011,6 +1011,17 @@ fn parse_identity_files(paths: &[PathBuf]) -> JanusResult<Vec<Box<dyn age::Ident
                 detail: "age identity file is empty".to_string(),
             });
         }
+        let identity_lines = contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect::<Vec<_>>();
+        if identity_lines.len() == 1 {
+            if let Ok(identity) = identity_lines[0].parse::<age::x25519::Identity>() {
+                identities.push(Box::new(identity));
+                continue;
+            }
+        }
         if let Ok(identity) = trimmed.parse::<age::x25519::Identity>() {
             identities.push(Box::new(identity));
             continue;
@@ -1364,6 +1375,23 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
         let identity_string = identity.to_string();
         fs::write(&identity_file, identity_string.expose_secret()).unwrap();
         (identity_file, identity.to_public().to_string())
+    }
+
+    #[test]
+    fn age_keygen_annotated_identity_file_is_accepted() {
+        let fixture = fixture();
+        let secret = fs::read_to_string(&fixture.identity_file).unwrap();
+        let annotated = fixture._tmp.path().join("annotated.identity");
+        fs::write(
+            &annotated,
+            format!(
+                "# created by age-keygen\n# public key: {}\n{}\n",
+                fixture.host_recipient,
+                secret.trim()
+            ),
+        )
+        .unwrap();
+        assert_eq!(parse_identity_files(&[annotated]).unwrap().len(), 1);
     }
 
     fn principal() -> PrincipalChain {

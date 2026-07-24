@@ -380,16 +380,17 @@ type AuditEntry struct {
 }
 
 type App struct {
-	cfg          Config
-	store        *Store
-	broker       *Broker
-	permits      *PermitStore
-	limiter      *RateLimiter
-	oauth        *oauth2.Config
-	verifier     *oidc.IDTokenVerifier
-	templates    *template.Template
-	managedSetup managedSetupIntentAuthority
-	managedTxn   managedTransactionExecutor
+	cfg           Config
+	store         *Store
+	broker        *Broker
+	permits       *PermitStore
+	limiter       *RateLimiter
+	oauth         *oauth2.Config
+	verifier      *oidc.IDTokenVerifier
+	templates     *template.Template
+	managedSetup  managedSetupIntentAuthority
+	managedTxn    managedTransactionExecutor
+	managedBridge *managedOperationBridge
 }
 
 type Session struct {
@@ -613,8 +614,15 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 		if err != nil {
 			return nil, fmt.Errorf("managed setup intent consumer: %w", err)
 		}
+		transaction := newManagedTransactionClient(cfg.ManagedSetup.TransactionSocket)
+		bridge, err := newManagedOperationBridge(*cfg.ManagedSetup, cfg.DataDir, transaction)
+		if err != nil {
+			return nil, fmt.Errorf("managed operation bridge: %w", err)
+		}
 		app.managedSetup = managedSetup
-		app.managedTxn = newManagedTransactionClient(cfg.ManagedSetup.TransactionSocket)
+		app.managedTxn = bridge
+		app.managedBridge = bridge
+		go bridge.Run(ctx)
 	}
 
 	if cfg.OIDCConfigured() {
@@ -654,6 +662,8 @@ func (app *App) routeSpecs() []routeSpec {
 		{pattern: "GET /managed-service/setup", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetup},
 		{pattern: "POST /managed-service/setup/step-up", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetupStepUp},
 		{pattern: "POST /managed-service/setup/execute", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetupExecute},
+		{pattern: "GET /internal/managed-service-host-envelopes/{hostRef}/{operationRef}", permission: PermissionLifecycleEntry, handler: app.handleManagedHostEnvelope},
+		{pattern: "POST /internal/managed-service-operations/{operationRef}/reconcile", permission: PermissionLifecycleEntry, handler: app.handleManagedHostReconcile},
 		{pattern: "POST /logout", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleLogout},
 		{pattern: "GET /auth/smoke", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleAuthSmokePage},
 		{pattern: "GET /session-witness", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleSessionWitnessPage},
@@ -732,6 +742,10 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 	case singleSegmentRunPath(path, "/api/permits/"):
 		return []string{http.MethodPost}, true
 	case singleSegmentRunPath(path, "/ui/permits/"):
+		return []string{http.MethodPost}, true
+	case managedHostEnvelopePath(path):
+		return []string{http.MethodGet}, true
+	case managedHostReconcilePath(path):
 		return []string{http.MethodPost}, true
 	default:
 		return nil, false

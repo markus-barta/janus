@@ -177,6 +177,26 @@ fn control(generation: u64) -> HostEnvelopeControlV1 {
 }
 
 #[test]
+fn first_boot_restore_reports_a_declared_missing_slot_without_blocking_install() {
+    let fixture = Fixture::new();
+    let outcomes = fixture
+        .executor
+        .restore_all(now())
+        .expect("missing restore");
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].phase, "missing");
+    assert_eq!(outcomes[0].reason_code, "host_envelope_missing");
+    assert!(!outcomes[0].value_returned);
+    assert!(!fixture.runtime_target().exists());
+
+    fixture
+        .executor
+        .install(&fixture.packet(1, b"first-boot-canary"), now())
+        .expect("first install after missing restore");
+    assert!(fixture.runtime_target().exists());
+}
+
+#[test]
 fn install_caches_only_ciphertext_and_materializes_private_runtime_value() {
     let fixture = Fixture::new();
     let canary = b"host-envelope-canary-not-for-cache";
@@ -200,8 +220,30 @@ fn install_caches_only_ciphertext_and_materializes_private_runtime_value() {
     assert_eq!(cache_metadata.mode() & 0o777, 0o600);
     assert_eq!(cache_metadata.nlink(), 1);
     let status = fixture.executor.status().expect("status");
+    assert_eq!(status[0].phase, "staged");
+    fixture.executor.commit(&control(1)).expect("commit");
+    let status = fixture.executor.status().expect("committed status");
     assert_eq!(status[0].phase, "active");
     assert_eq!(status[0].generation, Some(1));
+}
+
+#[test]
+fn failed_first_install_rolls_back_runtime_and_ciphertext_before_activation() {
+    let fixture = Fixture::new();
+    fixture
+        .executor
+        .install(&fixture.packet(1, b"create-that-fails-health"), now())
+        .expect("stage first generation");
+    let rollback = fixture
+        .executor
+        .rollback(&control(1), now() + Duration::from_secs(30))
+        .expect("rollback staged create");
+    assert_eq!(rollback.phase, "rolled_back");
+    assert!(!fixture.runtime_target().exists());
+    assert!(!fixture.slot_cache().join("current.envelope").exists());
+    assert!(!fixture.slot_cache().join("state.json").exists());
+    let status = fixture.executor.status().expect("missing status");
+    assert_eq!(status[0].phase, "missing");
 }
 
 #[test]
@@ -307,6 +349,7 @@ fn replacement_preserves_one_bounded_rollback_generation_then_commit_destroys_it
         .executor
         .install(&fixture.packet(1, b"first-generation"), now())
         .expect("first");
+    fixture.executor.commit(&control(1)).expect("commit first");
     fixture
         .executor
         .install(&fixture.packet(2, b"second-generation"), now())
@@ -339,6 +382,7 @@ fn rollback_and_offline_reboot_restore_the_exact_previous_generation() {
         .executor
         .install(&fixture.packet(1, b"stable-generation"), now())
         .expect("first");
+    fixture.executor.commit(&control(1)).expect("commit first");
     fixture
         .executor
         .install(&fixture.packet(2, b"failed-generation"), now())
@@ -371,6 +415,7 @@ fn interrupted_atomic_replace_is_reconciled_without_accepting_partial_bytes() {
         .executor
         .install(&fixture.packet(1, b"stable-before-crash"), now())
         .expect("first");
+    fixture.executor.commit(&control(1)).expect("commit first");
     let current = fixture.slot_cache().join("current.envelope");
     let previous = fixture.slot_cache().join("previous.envelope");
 
@@ -423,6 +468,7 @@ fn expired_envelopes_and_expired_rollback_windows_fail_closed() {
         .executor
         .install(&fixture.packet(1, b"stable"), now())
         .expect("first");
+    fixture.executor.commit(&control(1)).expect("commit first");
     fixture
         .executor
         .install(&fixture.packet(2, b"staged"), now())

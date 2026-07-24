@@ -22,12 +22,18 @@ func managedTransactionAccepted(source string) managedAcceptedIntent {
 func managedResponse(request managedTransactionRequest, phase, reason string, expects bool) managedTransactionResponse {
 	secretRef := "sec_" + "0123456789abcdef"
 	mode := request.Source
+	var generation *uint64
+	if phase == "prepared" || phase == "completed" || phase == "rolled_back" {
+		value := uint64(1)
+		generation = &value
+	}
 	return managedTransactionResponse{
 		Schema:        managedTransactionResponseSchema,
 		SchemaVersion: managedTransactionSchemaVersion,
 		OperationRef:  &request.OperationRef,
 		SecretRef:     &secretRef,
 		Mode:          &mode,
+		Generation:    generation,
 		Phase:         phase,
 		ReasonCode:    reason,
 		ExpectsValue:  expects,
@@ -85,7 +91,7 @@ func TestManagedTransactionImportWaitsForValueFreePreflight(t *testing.T) {
 			t.Error("import value did not use the single raw frame")
 			return
 		}
-		writeManagedTestResponse(t, serverConn, managedResponse(request, "completed", "entry_activation_ok", false))
+		writeManagedTestResponse(t, serverConn, managedResponse(request, "prepared", "entry_delivery_prepared", false))
 	}()
 
 	result, err := client.Execute(
@@ -96,7 +102,7 @@ func TestManagedTransactionImportWaitsForValueFreePreflight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Phase != "completed" || result.ValueReturned {
+	if result.Phase != "prepared" || result.Generation != 1 || result.ValueReturned {
 		t.Fatalf("unexpected safe result: %#v", result)
 	}
 	<-serverDone
@@ -122,10 +128,10 @@ func TestManagedTransactionGeneratedSendsNoValueFrame(t *testing.T) {
 			return
 		}
 		writeManagedTestResponse(t, serverConn, managedResponse(request, "preflighted", "entry_preflight_ok", false))
-		writeManagedTestResponse(t, serverConn, managedResponse(request, "completed", "entry_activation_ok", false))
+		writeManagedTestResponse(t, serverConn, managedResponse(request, "prepared", "entry_delivery_prepared", false))
 	}()
 	result, err := client.Execute(context.Background(), managedTransactionAccepted("generated"), nil)
-	if err != nil || result.Phase != "completed" {
+	if err != nil || result.Phase != "prepared" || result.Generation != 1 {
 		t.Fatalf("generated transaction failed safely: result=%#v err=%v", result, err)
 	}
 }
@@ -153,6 +159,7 @@ func TestManagedTransactionBoundaryAdmitsReviewedReplaceIntent(t *testing.T) {
 	request := managedTransactionRequest{
 		Schema:                 managedTransactionRequestSchema,
 		SchemaVersion:          managedTransactionSchemaVersion,
+		Action:                 "prepare",
 		OperationRef:           accepted.OperationRef,
 		OperationKind:          accepted.Intent.OperationKind,
 		Source:                 accepted.Source,

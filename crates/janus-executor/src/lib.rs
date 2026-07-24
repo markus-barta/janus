@@ -226,7 +226,7 @@ impl EnvFileProfile {
                     });
                 }
                 if sidecar.format == EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2
-                    && !pharos_generation::valid_host_name(sidecar.subject.as_str())
+                    && !pharos_generation::valid_token_subject(sidecar.subject.as_str())
                 {
                     return Err(JanusError::InvalidManifest {
                         detail: "Pharos hash sidecar subject must be a canonical host name"

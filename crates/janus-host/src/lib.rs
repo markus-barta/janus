@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -391,9 +393,10 @@ impl HostExecutor {
         }
         self.materialize(slot, &decrypted.value)?;
         let now_secs = unix_seconds(now)?;
-        let rollback_deadline = previous
-            .as_ref()
-            .map(|_| now_secs.saturating_add(slot.rollback_window_seconds));
+        // Every newly installed generation stays staged until exact
+        // post-reload health is verified. This includes the first generation:
+        // a failed create must be removable without ever becoming active.
+        let rollback_deadline = Some(now_secs.saturating_add(slot.rollback_window_seconds));
         let state = HostSlotStateV1 {
             schema: STATE_SCHEMA.to_string(),
             schema_version: SCHEMA_VERSION,
@@ -403,7 +406,7 @@ impl HostExecutor {
             current: cached,
             previous,
             rollback_deadline_unix_secs: rollback_deadline,
-            committed: rollback_deadline.is_none(),
+            committed: false,
             integrity_hash: String::new(),
         };
         write_state(&state_path, state, self.config.owner_uid)?;
@@ -497,10 +500,39 @@ impl HostExecutor {
         if unix_seconds(now)? >= deadline {
             return Err(HostEnvelopeError::new("host_envelope_rollback_expired"));
         }
-        let previous_record = state
-            .previous
-            .clone()
-            .ok_or_else(|| HostEnvelopeError::new("host_envelope_rollback_not_available"))?;
+        let Some(previous_record) = state.previous.clone() else {
+            let current_path = slot_dir.join("current.envelope");
+            validate_private_regular_metadata(
+                &current_path,
+                self.config.owner_uid,
+                "host_cache_current_unavailable",
+            )?;
+            let runtime_target = self
+                .paths
+                .runtime_root
+                .join(&slot.service_ref)
+                .join(format!("{}.env", slot.slot_ref));
+            if entry_exists(&runtime_target, "host_runtime_target_unsafe")? {
+                validate_private_regular_metadata(
+                    &runtime_target,
+                    self.config.owner_uid,
+                    "host_runtime_target_unsafe",
+                )?;
+                fs::remove_file(&runtime_target)
+                    .map_err(|_| HostEnvelopeError::new("host_runtime_remove_failed"))?;
+            }
+            fs::remove_file(&current_path)
+                .map_err(|_| HostEnvelopeError::new("host_cache_current_unavailable"))?;
+            fs::remove_file(&state_path)
+                .map_err(|_| HostEnvelopeError::new("host_cache_state_unavailable"))?;
+            sync_dir(&slot_dir, "host_cache_sync_failed")?;
+            return Ok(outcome_from_control(
+                "rollback",
+                request,
+                "rolled_back",
+                "host_envelope_create_rolled_back",
+            ));
+        };
         let previous_path = slot_dir.join("previous.envelope");
         let previous_packet = read_private_regular(
             &previous_path,
@@ -604,7 +636,20 @@ impl HostExecutor {
         let _lock = lock_slot(&slot_dir, self.config.owner_uid)?;
         self.reconcile_interrupted_install(slot, now)?;
         reject_partial_files(&slot_dir, self.config.owner_uid)?;
-        let state = load_required_state(&slot_dir.join("state.json"), self.config.owner_uid)?;
+        let Some(state) = load_optional_state(&slot_dir.join("state.json"), self.config.owner_uid)?
+        else {
+            return Ok(HostExecutorOutcome {
+                action: "restore".to_string(),
+                host_ref: self.config.host_ref.clone(),
+                service_ref: Some(slot.service_ref.clone()),
+                slot_ref: Some(slot.slot_ref.clone()),
+                operation_ref: None,
+                generation: None,
+                phase: "missing".to_string(),
+                reason_code: "host_envelope_missing".to_string(),
+                value_returned: false,
+            });
+        };
         validate_state_binding(&state, &self.config.host_ref, slot)?;
         if !state.committed
             && state
@@ -804,8 +849,10 @@ impl HostExecutor {
                     slot_ref: slot.slot_ref.clone(),
                     current: cached_generation(&opened.binding, &opened.packet_sha256),
                     previous: None,
-                    rollback_deadline_unix_secs: None,
-                    committed: true,
+                    rollback_deadline_unix_secs: Some(
+                        unix_seconds(now)?.saturating_add(slot.rollback_window_seconds),
+                    ),
+                    committed: false,
                     integrity_hash: String::new(),
                 },
                 self.config.owner_uid,
@@ -998,8 +1045,7 @@ fn validate_state_binding(
                 || previous.generation >= state.current.generation
                 || previous.revocation_epoch > state.current.revocation_epoch
         })
-        || !state.committed
-            && (state.previous.is_none() || state.rollback_deadline_unix_secs.is_none())
+        || !state.committed && state.rollback_deadline_unix_secs.is_none()
         || state.committed
             && (state.previous.is_some() || state.rollback_deadline_unix_secs.is_some())
     {

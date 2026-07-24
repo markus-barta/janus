@@ -86,12 +86,14 @@ type managedVerificationKey struct {
 type managedIntentKeyring map[string]ed25519.PublicKey
 
 type managedSetupRuntimeConfig struct {
-	PharosOrigin       string
-	PharosReturnOrigin string
-	InternalToken      string
-	Keyring            managedIntentKeyring
-	ManifestPaths      []string
-	TransactionSocket  string
+	PharosOrigin           string
+	PharosReturnOrigin     string
+	InternalToken          string
+	Keyring                managedIntentKeyring
+	ManifestPaths          []string
+	TransactionSocket      string
+	HostTokenGenerationDir string
+	HostEnvelopeOutboxDir  string
 }
 
 func loadManagedSetupRuntimeConfigFromEnv() (*managedSetupRuntimeConfig, error) {
@@ -101,10 +103,12 @@ func loadManagedSetupRuntimeConfigFromEnv() (*managedSetupRuntimeConfig, error) 
 	keyFile := strings.TrimSpace(os.Getenv("JANUS_MANAGED_SETUP_VERIFICATION_KEYS_FILE"))
 	manifestRaw := strings.TrimSpace(os.Getenv("JANUS_MANAGED_SETUP_MANIFEST_PATHS"))
 	transactionSocket := strings.TrimSpace(os.Getenv("JANUS_MANAGED_WEB_TRANSACTION_SOCKET"))
-	if pharosOrigin == "" && returnOrigin == "" && tokenFile == "" && keyFile == "" && manifestRaw == "" && transactionSocket == "" {
+	hostTokenGenerationDir := strings.TrimSpace(os.Getenv("JANUS_MANAGED_HOST_TOKEN_GENERATION_DIR"))
+	hostEnvelopeOutboxDir := strings.TrimSpace(os.Getenv("JANUS_MANAGED_HOST_ENVELOPE_OUTBOX_DIR"))
+	if pharosOrigin == "" && returnOrigin == "" && tokenFile == "" && keyFile == "" && manifestRaw == "" && transactionSocket == "" && hostTokenGenerationDir == "" && hostEnvelopeOutboxDir == "" {
 		return nil, nil
 	}
-	if pharosOrigin == "" || tokenFile == "" || keyFile == "" || manifestRaw == "" || transactionSocket == "" {
+	if pharosOrigin == "" || tokenFile == "" || keyFile == "" || manifestRaw == "" || transactionSocket == "" || hostTokenGenerationDir == "" || hostEnvelopeOutboxDir == "" {
 		return nil, errors.New("managed setup configuration is partial")
 	}
 	if returnOrigin == "" {
@@ -144,13 +148,19 @@ func loadManagedSetupRuntimeConfigFromEnv() (*managedSetupRuntimeConfig, error) 
 	if !filepath.IsAbs(transactionSocket) || filepath.Clean(transactionSocket) != transactionSocket {
 		return nil, errors.New("managed setup transaction socket contract is invalid")
 	}
+	if !filepath.IsAbs(hostTokenGenerationDir) || filepath.Clean(hostTokenGenerationDir) != hostTokenGenerationDir ||
+		!filepath.IsAbs(hostEnvelopeOutboxDir) || filepath.Clean(hostEnvelopeOutboxDir) != hostEnvelopeOutboxDir {
+		return nil, errors.New("managed setup host delivery path contract is invalid")
+	}
 	return &managedSetupRuntimeConfig{
-		PharosOrigin:       pharosOrigin,
-		PharosReturnOrigin: returnOrigin,
-		InternalToken:      token,
-		Keyring:            keyring,
-		ManifestPaths:      manifestPaths,
-		TransactionSocket:  transactionSocket,
+		PharosOrigin:           pharosOrigin,
+		PharosReturnOrigin:     returnOrigin,
+		InternalToken:          token,
+		Keyring:                keyring,
+		ManifestPaths:          manifestPaths,
+		TransactionSocket:      transactionSocket,
+		HostTokenGenerationDir: hostTokenGenerationDir,
+		HostEnvelopeOutboxDir:  hostEnvelopeOutboxDir,
 	}, nil
 }
 
@@ -285,11 +295,14 @@ func (fetcher *managedHTTPIntentFetcher) Fetch(ctx context.Context, intentRef st
 }
 
 type managedDeclarationContext struct {
-	ServiceLabel   string
-	SlotLabel      string
-	ConsumerKind   string
-	DeliveryKind   string
-	AllowedSources []string
+	ServiceLabel       string
+	SlotLabel          string
+	ConsumerKind       string
+	DeliveryKind       string
+	DeliveryProfileRef string
+	ReloadProfileRef   string
+	HealthProfileRef   string
+	AllowedSources     []string
 }
 
 type managedDeclarationResolver interface {
@@ -337,11 +350,14 @@ func (resolver managedManifestResolver) Resolve(intent managedSetupIntent) (mana
 					manifest.DeclarationFingerprint == intent.DeclarationFingerprint &&
 					equalManagedSources(slot.AllowedSources, intent.AllowedSources) {
 					context := managedDeclarationContext{
-						ServiceLabel:   service.SafeLabel,
-						SlotLabel:      slot.SafeLabel,
-						ConsumerKind:   slot.ConsumerKind,
-						DeliveryKind:   slot.Delivery.Kind,
-						AllowedSources: append([]string(nil), slot.AllowedSources...),
+						ServiceLabel:       service.SafeLabel,
+						SlotLabel:          slot.SafeLabel,
+						ConsumerKind:       slot.ConsumerKind,
+						DeliveryKind:       slot.Delivery.Kind,
+						DeliveryProfileRef: slot.Delivery.ProfileRef,
+						ReloadProfileRef:   slot.Reload.ProfileRef,
+						HealthProfileRef:   slot.Health.ProfileRef,
+						AllowedSources:     append([]string(nil), slot.AllowedSources...),
 					}
 					found = &context
 				}
@@ -569,6 +585,7 @@ func (store *managedReplayStore) consume(intent managedSetupIntent, now int64) (
 
 type managedAcceptedIntent struct {
 	Intent       managedSetupIntent
+	Context      managedDeclarationContext
 	Source       string
 	OperationRef string
 }
@@ -653,6 +670,7 @@ func (consumer *managedSetupIntentConsumer) Consume(ctx context.Context, intentR
 	}
 	return managedAcceptedIntent{
 		Intent:       inspection.Intent,
+		Context:      inspection.Context,
 		Source:       source,
 		OperationRef: operationRef,
 	}, nil

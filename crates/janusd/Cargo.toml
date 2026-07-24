@@ -36,11 +36,13 @@ test = false
 anyhow = "=1.0.103"
 async-trait = "0.1"
 base64 = "0.21"
+ed25519-dalek = "2"
 fs2 = "0.4"
 hex = "0.4"
 janus-core = { path = "../janus-core" }
 janus-executor = { path = "../janus-executor" }
 janus-forge = { path = "../janus-forge" }
+janus-host = { path = "../janus-host" }
 janus-local = { path = "../janus-local" }
 janus-provider-age = { path = "../janus-provider-age" }
 janus-warden = { path = "../janus-warden" }

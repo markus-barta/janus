@@ -48,11 +48,14 @@ func (fake *fakeManagedIntentAuthority) Inspect(_ context.Context, intentRef, hu
 	return managedSetupInspection{
 		Intent: fake.intent,
 		Context: managedDeclarationContext{
-			ServiceLabel:   "Canary service",
-			SlotLabel:      "Admin password",
-			ConsumerKind:   "managed_service",
-			DeliveryKind:   "private_env_file",
-			AllowedSources: append([]string(nil), fake.intent.AllowedSources...),
+			ServiceLabel:       "Canary service",
+			SlotLabel:          "Admin password",
+			ConsumerKind:       "managed_service",
+			DeliveryKind:       "private_env_file",
+			DeliveryProfileRef: "delivery_2d7a0f63c951",
+			ReloadProfileRef:   "reload_65bc19f3a087",
+			HealthProfileRef:   "health_918d0ce7b4a2",
+			AllowedSources:     append([]string(nil), fake.intent.AllowedSources...),
 		},
 	}, nil
 }
@@ -71,7 +74,21 @@ func (fake *fakeManagedIntentAuthority) Consume(_ context.Context, intentRef, hu
 	if !containsManagedSource(fake.intent.AllowedSources, source) {
 		return managedAcceptedIntent{}, managedIntentError("managed_intent_source_denied")
 	}
-	return managedAcceptedIntent{Intent: fake.intent, Source: source, OperationRef: managedTestOpRef}, nil
+	return managedAcceptedIntent{
+		Intent:       fake.intent,
+		Source:       source,
+		OperationRef: managedTestOpRef,
+		Context: managedDeclarationContext{
+			ServiceLabel:       "Canary service",
+			SlotLabel:          "Admin password",
+			ConsumerKind:       "managed_service",
+			DeliveryKind:       "private_env_file",
+			DeliveryProfileRef: "delivery_2d7a0f63c951",
+			ReloadProfileRef:   "reload_65bc19f3a087",
+			HealthProfileRef:   "health_918d0ce7b4a2",
+			AllowedSources:     append([]string(nil), fake.intent.AllowedSources...),
+		},
+	}, nil
 }
 
 type fakeManagedTransactionExecutor struct {
@@ -151,8 +168,9 @@ func managedIngressFixture(t *testing.T, source string) (*App, *fakeManagedInten
 		OperationRef:  managedTestOpRef,
 		SecretRef:     managedTestSecretRef,
 		Mode:          source,
-		Phase:         "completed",
-		ReasonCode:    "entry_activation_ok",
+		Generation:    1,
+		Phase:         "registered",
+		ReasonCode:    "managed_operation_registered",
 		ValueReturned: false,
 	}}
 	app.managedSetup = authority
