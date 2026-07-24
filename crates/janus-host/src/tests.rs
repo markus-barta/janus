@@ -176,6 +176,19 @@ fn control(generation: u64) -> HostEnvelopeControlV1 {
     }
 }
 
+fn quarantine_control(generation: u64) -> HostEnvelopeQuarantineControlV1 {
+    HostEnvelopeQuarantineControlV1 {
+        schema: QUARANTINE_CONTROL_SCHEMA.to_string(),
+        schema_version: SCHEMA_VERSION,
+        operation_ref: "op_remove00000001".to_string(),
+        host_ref: HOST_REF.to_string(),
+        service_ref: SERVICE_REF.to_string(),
+        slot_ref: SLOT_REF.to_string(),
+        generation,
+        purge_not_before_unix_secs: NOW + 300,
+    }
+}
+
 #[test]
 fn first_boot_restore_reports_a_declared_missing_slot_without_blocking_install() {
     let fixture = Fixture::new();
@@ -372,6 +385,115 @@ fn replacement_preserves_one_bounded_rollback_generation_then_commit_destroys_it
     assert_eq!(
         fixture.executor.rollback(&control(2), now()).unwrap_err(),
         HostEnvelopeError::new("host_envelope_rollback_not_available")
+    );
+}
+
+#[test]
+fn quarantine_recovers_interrupted_write_restores_and_purges_only_when_due() {
+    let fixture = Fixture::new();
+    let canary = b"host-quarantine-plaintext-canary";
+    fixture
+        .executor
+        .install(&fixture.packet(1, canary), now())
+        .expect("install");
+    fixture.executor.commit(&control(1)).expect("commit");
+    let request = quarantine_control(1);
+
+    // Simulate a crash after the encrypted packet copy but before the
+    // quarantine state and active-cache removal. The same bound request must
+    // finish, without accepting different bytes.
+    let quarantine_root = fixture.cache_root.join(".quarantine");
+    private_dir(&quarantine_root);
+    let quarantine_slot = quarantine_root.join(SLOT_REF);
+    private_dir(&quarantine_slot);
+    let quarantine_dir = quarantine_slot.join(&request.operation_ref);
+    private_dir(&quarantine_dir);
+    let quarantine_packet = quarantine_dir.join("current.envelope");
+    fs::copy(
+        fixture.slot_cache().join("current.envelope"),
+        &quarantine_packet,
+    )
+    .expect("interrupted packet copy");
+    fs::set_permissions(&quarantine_packet, fs::Permissions::from_mode(0o600))
+        .expect("quarantine packet mode");
+
+    let outcome = fixture
+        .executor
+        .quarantine(&request)
+        .expect("resume quarantine");
+    assert_eq!(outcome.phase, "quarantined");
+    assert!(!outcome.value_returned);
+    assert!(!fixture.runtime_target().exists());
+    assert!(!fixture.slot_cache().join("current.envelope").exists());
+    assert!(!fixture.slot_cache().join("state.json").exists());
+    assert!(!fs::read(&quarantine_packet)
+        .expect("quarantine ciphertext")
+        .windows(canary.len())
+        .any(|window| window == canary));
+    let status = fixture.executor.status().expect("restart-safe status");
+    assert_eq!(status[0].phase, "quarantined");
+    assert_eq!(
+        status[0].operation_ref.as_deref(),
+        Some("op_remove00000001")
+    );
+    assert_eq!(
+        fixture
+            .executor
+            .quarantine(&request)
+            .expect("idempotent quarantine")
+            .phase,
+        "quarantined"
+    );
+
+    let mut wrong_deadline = request.clone();
+    wrong_deadline.purge_not_before_unix_secs += 1;
+    assert_eq!(
+        fixture.executor.quarantine(&wrong_deadline).unwrap_err(),
+        HostEnvelopeError::new("host_quarantine_state_mismatch")
+    );
+    assert_eq!(
+        fixture
+            .executor
+            .purge_quarantine(&request, now() + Duration::from_secs(299))
+            .unwrap_err(),
+        HostEnvelopeError::new("host_quarantine_not_due")
+    );
+
+    let restored = fixture
+        .executor
+        .restore_quarantine(&request, now() + Duration::from_secs(10))
+        .expect("restore inside recovery window");
+    assert_eq!(restored.phase, "active");
+    assert_eq!(
+        fs::read(fixture.runtime_target()).expect("restored runtime"),
+        canary
+    );
+    assert_eq!(
+        fixture.executor.status().expect("active status")[0].phase,
+        "active"
+    );
+
+    fixture
+        .executor
+        .quarantine(&request)
+        .expect("quarantine again for purge");
+    let purged = fixture
+        .executor
+        .purge_quarantine(&request, now() + Duration::from_secs(300))
+        .expect("purge at boundary");
+    assert_eq!(purged.phase, "destroyed");
+    assert!(!purged.value_returned);
+    assert_eq!(
+        fixture.executor.status().expect("missing status")[0].phase,
+        "missing"
+    );
+    assert_eq!(
+        fixture
+            .executor
+            .purge_quarantine(&request, now() + Duration::from_secs(301))
+            .expect("idempotent purge")
+            .reason_code,
+        "host_envelope_quarantine_purge_idempotent"
     );
 }
 

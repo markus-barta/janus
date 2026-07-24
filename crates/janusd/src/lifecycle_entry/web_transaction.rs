@@ -112,6 +112,18 @@ struct ExternalActivationEvidence {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct ExternalRemovalEvidence {
+    generation: u64,
+    runtime_absent: bool,
+    process_state: String,
+    cache_state: String,
+    heartbeat_observed_at_unix_secs: u64,
+    process_observed_at_unix_secs: u64,
+    cache_observed_at_unix_secs: u64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct HostEnvelopeOutboxRecord {
     schema: String,
     schema_version: u8,
@@ -146,7 +158,11 @@ struct TransactionRequest {
     service_ref: String,
     slot_ref: String,
     declaration_fingerprint: String,
+    #[serde(default)]
+    purge_not_before_unix_secs: u64,
     external_evidence: Option<ExternalActivationEvidence>,
+    #[serde(default)]
+    external_removal_evidence: Option<ExternalRemovalEvidence>,
 }
 
 #[derive(Clone, Serialize)]
@@ -309,12 +325,30 @@ async fn handle_connection(
     };
 
     if request.action == "finalize" {
-        let response =
-            finalize_prepared_operation(&transaction, entry, &request, SystemTime::now())
-                .await
-                .unwrap_or_else(|error| {
-                    denied_response(operation_ref, stable_web_error_reason(&error))
-                });
+        let response = if request.operation_kind == "remove" {
+            finalize_prepared_removal(&transaction, &request, SystemTime::now()).await
+        } else {
+            finalize_prepared_operation(&transaction, entry, &request, SystemTime::now()).await
+        }
+        .unwrap_or_else(|error| denied_response(operation_ref, stable_web_error_reason(&error)));
+        let _ = write_response(&mut stream, &response).await;
+        return;
+    }
+    if request.action == "purge" {
+        let response = transaction
+            .purge_removal(SystemTime::now())
+            .await
+            .map(|status| {
+                response_from_status(
+                    &request.operation_ref,
+                    &status,
+                    false,
+                    Some(status.generation),
+                )
+            })
+            .unwrap_or_else(|error| {
+                denied_response(operation_ref, stable_web_error_reason(&error))
+            });
         let _ = write_response(&mut stream, &response).await;
         return;
     }
@@ -324,6 +358,37 @@ async fn handle_connection(
             .unwrap_or_else(|error| {
                 denied_response(operation_ref, stable_web_error_reason(&error))
             });
+        let _ = write_response(&mut stream, &response).await;
+        return;
+    }
+
+    if request.operation_kind == "remove" {
+        let response = match transaction.status().await {
+            Ok(status) if status.phase == EntryPhase::Validated => {
+                prepared_removal_response(&request, &status)
+            }
+            Ok(status)
+                if matches!(
+                    status.phase,
+                    EntryPhase::Completed | EntryPhase::Destroyed | EntryPhase::RolledBack
+                ) =>
+            {
+                response_from_status(
+                    &request.operation_ref,
+                    &status,
+                    false,
+                    Some(status.generation),
+                )
+            }
+            Ok(_) => denied_response(operation_ref, "web_transaction_removal_incomplete"),
+            Err(_) => transaction
+                .prepare_removal(SystemTime::now(), request.purge_not_before_unix_secs)
+                .await
+                .map(|status| prepared_removal_response(&request, &status))
+                .unwrap_or_else(|error| {
+                    denied_response(operation_ref, stable_web_error_reason(&error))
+                }),
+        };
         let _ = write_response(&mut stream, &response).await;
         return;
     }
@@ -440,6 +505,9 @@ async fn handle_connection(
                 .apply_import_value(value.into_secret_value(), SystemTime::now())
                 .await
         }
+        EntrySource::Remove => {
+            Err(WebTransactionError("web_transaction_removal_value_denied").into())
+        }
     };
     if let Err(error) = applied {
         let _ = transaction.rollback().await;
@@ -468,17 +536,45 @@ impl ReviewedCatalog {
     ) -> std::result::Result<&TransactionCatalogEntry, &'static str> {
         if request.schema != REQUEST_SCHEMA
             || request.schema_version != SCHEMA_VERSION
-            || !matches!(request.action.as_str(), "prepare" | "finalize" | "rollback")
+            || !matches!(
+                request.action.as_str(),
+                "prepare" | "finalize" | "rollback" | "purge"
+            )
             || !valid_ref("op_", &request.operation_ref)
             || !valid_ref("host_", &request.host_ref)
             || !valid_ref("svc_", &request.service_ref)
             || !valid_ref("slot_", &request.slot_ref)
             || !valid_ref("decl_", &request.declaration_fingerprint)
-            || !matches!(request.operation_kind.as_str(), "create" | "replace")
-            || !matches!(request.source.as_str(), "generated" | "import")
-            || request.action == "prepare" && request.external_evidence.is_some()
-            || request.action == "rollback" && request.external_evidence.is_some()
-            || request.action == "finalize" && request.external_evidence.is_none()
+            || !matches!(
+                request.operation_kind.as_str(),
+                "create" | "replace" | "remove"
+            )
+            || !matches!(request.source.as_str(), "generated" | "import" | "remove")
+            || (request.operation_kind == "remove") != (request.source == "remove")
+            || request.operation_kind == "remove" && request.purge_not_before_unix_secs == 0
+            || request.operation_kind != "remove" && request.purge_not_before_unix_secs != 0
+            || request.action == "prepare"
+                && (request.external_evidence.is_some()
+                    || request.external_removal_evidence.is_some())
+            || request.action == "rollback"
+                && (request.external_evidence.is_some()
+                    || request.external_removal_evidence.is_some())
+            || request.action == "purge"
+                && (request.operation_kind != "remove"
+                    || request.external_evidence.is_some()
+                    || request.external_removal_evidence.is_some())
+            || request.action == "finalize"
+                && match request.operation_kind.as_str() {
+                    "remove" => {
+                        request.external_evidence.is_some()
+                            || request.external_removal_evidence.is_none()
+                    }
+                    "create" | "replace" => {
+                        request.external_evidence.is_none()
+                            || request.external_removal_evidence.is_some()
+                    }
+                    _ => true,
+                }
         {
             return Err("web_transaction_request_invalid");
         }
@@ -516,7 +612,11 @@ fn load_catalog(path: &Path) -> Result<ReviewedCatalog> {
             slot_ref: entry.slot_ref.clone(),
             declaration_fingerprint: entry.declaration_fingerprint.clone(),
             operation_kind: entry.operation_kind.clone(),
-            source: entry.plan.source.mode().to_string(),
+            source: if entry.operation_kind == "remove" {
+                "remove".to_string()
+            } else {
+                entry.plan.source.mode().to_string()
+            },
         };
         if entries.insert(key, entry).is_some() {
             anyhow::bail!("web transaction catalog entries must be unique");
@@ -530,13 +630,20 @@ fn validate_catalog_entry(entry: &TransactionCatalogEntry) -> Result<()> {
         || !valid_ref("svc_", &entry.service_ref)
         || !valid_ref("slot_", &entry.slot_ref)
         || !valid_ref("decl_", &entry.declaration_fingerprint)
-        || !matches!(entry.operation_kind.as_str(), "create" | "replace")
+        || !matches!(
+            entry.operation_kind.as_str(),
+            "create" | "replace" | "remove"
+        )
         || entry.plan.operation_id != "web-transaction-template"
     {
         anyhow::bail!("web transaction catalog entry is invalid");
     }
     validate_delivery_plan(&entry.delivery)?;
-    validate_plan(&entry.plan, SystemTime::now())?;
+    let mut plan = entry.plan.clone();
+    if entry.operation_kind == "remove" {
+        plan.source = EntrySource::Remove;
+    }
+    validate_plan(&plan, SystemTime::now())?;
     Ok(())
 }
 
@@ -759,6 +866,86 @@ async fn finalize_prepared_operation(
     ))
 }
 
+async fn finalize_prepared_removal(
+    transaction: &EntryTransaction,
+    request: &TransactionRequest,
+    now: SystemTime,
+) -> Result<TransactionResponse> {
+    let status = transaction.status().await?;
+    if status.operation_kind != "remove"
+        || status.generation == 0
+        || status.generation
+            != request
+                .external_removal_evidence
+                .as_ref()
+                .map(|evidence| evidence.generation)
+                .unwrap_or_default()
+    {
+        return Err(WebTransactionError("web_transaction_evidence_invalid").into());
+    }
+    if status.phase == EntryPhase::Completed {
+        return Ok(response_from_status(
+            &request.operation_ref,
+            &status,
+            false,
+            Some(status.generation),
+        ));
+    }
+    if !matches!(status.phase, EntryPhase::Validated | EntryPhase::Activating) {
+        return Err(WebTransactionError("web_transaction_finalize_phase_invalid").into());
+    }
+    validate_external_removal_evidence(
+        request
+            .external_removal_evidence
+            .as_ref()
+            .ok_or(WebTransactionError("web_transaction_evidence_invalid"))?,
+        now,
+    )?;
+    let completed = transaction
+        .finalize_removal(now, request.purge_not_before_unix_secs)
+        .await?;
+    Ok(response_from_status(
+        &request.operation_ref,
+        &completed,
+        false,
+        Some(completed.generation),
+    ))
+}
+
+fn validate_external_removal_evidence(
+    evidence: &ExternalRemovalEvidence,
+    now: SystemTime,
+) -> Result<()> {
+    let now = unix_seconds(now)?;
+    let oldest = [
+        evidence.heartbeat_observed_at_unix_secs,
+        evidence.process_observed_at_unix_secs,
+        evidence.cache_observed_at_unix_secs,
+    ]
+    .into_iter()
+    .min()
+    .unwrap_or_default();
+    let newest = [
+        evidence.heartbeat_observed_at_unix_secs,
+        evidence.process_observed_at_unix_secs,
+        evidence.cache_observed_at_unix_secs,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or_default();
+    if evidence.generation == 0
+        || !evidence.runtime_absent
+        || evidence.process_state != "stopped"
+        || evidence.cache_state != "quarantined"
+        || oldest == 0
+        || newest > now.saturating_add(EXTERNAL_CLOCK_SKEW_SECONDS)
+        || now.saturating_sub(oldest) > EXTERNAL_HEALTH_FRESHNESS_SECONDS
+    {
+        return Err(WebTransactionError("web_transaction_evidence_invalid").into());
+    }
+    Ok(())
+}
+
 async fn rollback_prepared_operation(
     transaction: &EntryTransaction,
     entry: &TransactionCatalogEntry,
@@ -885,6 +1072,9 @@ fn transaction_for(
     }
     let mut file = entry.plan.clone();
     file.operation_id = internal_operation_id(operation_ref)?;
+    if entry.operation_kind == "remove" {
+        file.source = EntrySource::Remove;
+    }
     validate_plan(&file, SystemTime::now())?;
     let encoded = serde_json::to_vec(&file)
         .map_err(|_| anyhow::anyhow!("web transaction plan encoding failed"))?;
@@ -917,7 +1107,10 @@ async fn reconcile_catalog(catalog: &ReviewedCatalog, release: &ReleaseAdmission
             if !summary.release_matches {
                 anyhow::bail!("web transaction journal release binding changed");
             }
-            if matches!(summary.phase.as_str(), "completed" | "rolled_back") {
+            if matches!(
+                summary.phase.as_str(),
+                "completed" | "destroyed" | "rolled_back"
+            ) {
                 continue;
             }
             let mut matching = None;
@@ -935,6 +1128,14 @@ async fn reconcile_catalog(catalog: &ReviewedCatalog, release: &ReleaseAdmission
             }
             let (matching_entry, transaction) = matching
                 .context("web transaction journal has no current reviewed catalog binding")?;
+            // A managed removal has already crossed its declaration-detach
+            // boundary before it reaches this daemon. Preserve every
+            // non-terminal journal across restarts so the bridge can resume
+            // the exact operation; never turn process restart into an
+            // implicit secret restore.
+            if matching_entry.operation_kind == "remove" {
+                continue;
+            }
             let request = request_for_entry(matching_entry, &operation_ref, "prepare", None);
             let journal_generation = if summary.generation == 0 {
                 matching_entry.delivery.generation
@@ -979,12 +1180,18 @@ fn request_for_entry(
         action: action.to_string(),
         operation_ref: operation_ref.to_string(),
         operation_kind: entry.operation_kind.clone(),
-        source: entry.plan.source.mode().to_string(),
+        source: if entry.operation_kind == "remove" {
+            "remove".to_string()
+        } else {
+            entry.plan.source.mode().to_string()
+        },
         host_ref: entry.host_ref.clone(),
         service_ref: entry.service_ref.clone(),
         slot_ref: entry.slot_ref.clone(),
         declaration_fingerprint: entry.declaration_fingerprint.clone(),
+        purge_not_before_unix_secs: 0,
         external_evidence,
+        external_removal_evidence: None,
     }
 }
 
@@ -1124,6 +1331,24 @@ fn prepared_response(
     }
 }
 
+fn prepared_removal_response(
+    request: &TransactionRequest,
+    status: &EntryStatus,
+) -> TransactionResponse {
+    TransactionResponse {
+        schema: RESPONSE_SCHEMA,
+        schema_version: SCHEMA_VERSION,
+        operation_ref: Some(request.operation_ref.clone()),
+        secret_ref: Some(status.secret_ref.clone()),
+        mode: Some("remove".to_string()),
+        generation: Some(status.generation),
+        phase: "prepared".to_string(),
+        reason_code: "entry_removal_prepared".to_string(),
+        expects_value: false,
+        value_returned: false,
+    }
+}
+
 fn denied_response(
     operation_ref: Option<String>,
     reason_code: &'static str,
@@ -1193,7 +1418,9 @@ mod tests {
             service_ref: "svc_0123456789abcdef".to_string(),
             slot_ref: "slot_0123456789abcdef".to_string(),
             declaration_fingerprint: "decl_0123456789abcdef".to_string(),
+            purge_not_before_unix_secs: 0,
             external_evidence: None,
+            external_removal_evidence: None,
         }
     }
 

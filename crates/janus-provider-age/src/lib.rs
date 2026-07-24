@@ -94,6 +94,19 @@ pub struct AgeRollbackMaterial {
     pub value_returned: bool,
 }
 
+/// Value-free handle to one reversibly quarantined encrypted generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgeQuarantineMaterial {
+    /// Secret whose active ciphertext was moved out of service.
+    pub secret_ref: SecretRef,
+    /// Caller-bound identifier persisted in the removal journal.
+    pub quarantine_id: String,
+    /// Earliest reviewed instant at which irreversible purge is permitted.
+    pub purge_not_before_unix_secs: u64,
+    /// Quarantine handles never return secret values.
+    pub value_returned: bool,
+}
+
 impl AgeSecretStore {
     /// Create encrypted material only when the manifest-declared target is absent.
     ///
@@ -401,6 +414,147 @@ impl AgeSecretStore {
         })?
     }
 
+    /// Atomically move one active ciphertext into caller-bound quarantine.
+    pub async fn quarantine_with_id(
+        &mut self,
+        name: &SecretName,
+        quarantine_id: String,
+        purge_not_before_unix_secs: u64,
+    ) -> JanusResult<AgeQuarantineMaterial> {
+        let secret_ref = self.ensure_manifest(name)?.secret_ref.clone();
+        validate_quarantine_id(&quarantine_id)?;
+        if purge_not_before_unix_secs == 0 {
+            return Err(JanusError::InvalidManifest {
+                detail: "age quarantine deadline is invalid".to_string(),
+            });
+        }
+        self.ensure_scope_dir()?;
+        let path = self.path_for(name)?;
+        let quarantine_path = self.quarantine_path_for(name, &quarantine_id)?;
+        let scope_dir = self.scope_dir();
+        let not_found_name = secret_ref.as_str().to_string();
+        tokio::task::spawn_blocking(move || {
+            let _lock = try_lock_store_exclusive(&scope_dir)?;
+            if quarantine_path.is_file() && !path.exists() {
+                return Ok(());
+            }
+            if quarantine_path.exists() {
+                return Err(JanusError::StoreUnavailable {
+                    detail: "age quarantine material already exists".to_string(),
+                });
+            }
+            if !path.is_file() {
+                return Err(JanusError::NotFound {
+                    name: not_found_name,
+                });
+            }
+            fs::rename(&path, &quarantine_path).map_err(map_store_io)?;
+            sync_parent(&quarantine_path)?;
+            Ok(())
+        })
+        .await
+        .map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("age quarantine task failed: {err}"),
+        })??;
+        Ok(AgeQuarantineMaterial {
+            secret_ref,
+            quarantine_id,
+            purge_not_before_unix_secs,
+            value_returned: false,
+        })
+    }
+
+    /// Restore caller-bound quarantine before irreversible purge.
+    pub async fn restore_quarantine_if_present(
+        &mut self,
+        quarantine: &AgeQuarantineMaterial,
+    ) -> JanusResult<AgeAdminOutcome> {
+        validate_quarantine_material(quarantine)?;
+        let name = self
+            .catalog
+            .meta_by_ref(&quarantine.secret_ref)?
+            .name
+            .clone();
+        let path = self.path_for(&name)?;
+        let quarantine_path = self.quarantine_path_for(&name, &quarantine.quarantine_id)?;
+        let scope_dir = self.scope_dir();
+        let recipient_count = self.recipients.len();
+        let changed = tokio::task::spawn_blocking(move || {
+            let _lock = try_lock_store_exclusive(&scope_dir)?;
+            if !quarantine_path.exists() {
+                return Ok(false);
+            }
+            if path.exists() {
+                return Err(JanusError::StoreUnavailable {
+                    detail: "age quarantine restore target exists".to_string(),
+                });
+            }
+            fs::rename(&quarantine_path, &path).map_err(map_store_io)?;
+            sync_parent(&path)?;
+            Ok(true)
+        })
+        .await
+        .map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("age quarantine restore task failed: {err}"),
+        })??;
+        Ok(AgeAdminOutcome {
+            action: "quarantine.restore",
+            changed,
+            present_secrets: usize::from(changed),
+            recipient_count,
+            value_returned: false,
+        })
+    }
+
+    /// Irreversibly purge caller-bound ciphertext only after its reviewed wait.
+    pub async fn purge_quarantine_if_due(
+        &mut self,
+        quarantine: &AgeQuarantineMaterial,
+        now: SystemTime,
+    ) -> JanusResult<AgeAdminOutcome> {
+        validate_quarantine_material(quarantine)?;
+        if unix_seconds(now)? < quarantine.purge_not_before_unix_secs {
+            return Err(JanusError::PolicyDenied {
+                reason_code: "age_quarantine_not_due",
+                detail: "age quarantine recovery window is still open".to_string(),
+            });
+        }
+        let name = self
+            .catalog
+            .meta_by_ref(&quarantine.secret_ref)?
+            .name
+            .clone();
+        let path = self.path_for(&name)?;
+        let quarantine_path = self.quarantine_path_for(&name, &quarantine.quarantine_id)?;
+        let scope_dir = self.scope_dir();
+        let recipient_count = self.recipients.len();
+        let changed = tokio::task::spawn_blocking(move || {
+            let _lock = try_lock_store_exclusive(&scope_dir)?;
+            if path.exists() {
+                return Err(JanusError::StoreUnavailable {
+                    detail: "age quarantine purge target became active".to_string(),
+                });
+            }
+            if !quarantine_path.exists() {
+                return Ok(false);
+            }
+            fs::remove_file(&quarantine_path).map_err(map_store_io)?;
+            sync_parent(&quarantine_path)?;
+            Ok(true)
+        })
+        .await
+        .map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("age quarantine purge task failed: {err}"),
+        })??;
+        Ok(AgeAdminOutcome {
+            action: "quarantine.purge",
+            changed,
+            present_secrets: 0,
+            recipient_count,
+            value_returned: false,
+        })
+    }
+
     /// Plan a recipient-set change without decrypting or writing values.
     pub fn key_rotation_dry_run(
         &self,
@@ -658,6 +812,19 @@ impl AgeSecretStore {
         let mut rollback_file_name = file_name.to_os_string();
         rollback_file_name.push(format!(".rollback.{rollback_id}"));
         Ok(path.with_file_name(rollback_file_name))
+    }
+
+    fn quarantine_path_for(&self, name: &SecretName, quarantine_id: &str) -> JanusResult<PathBuf> {
+        validate_quarantine_id(quarantine_id)?;
+        let path = self.path_for(name)?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| JanusError::StoreUnavailable {
+                detail: "age quarantine path has no file name".to_string(),
+            })?;
+        let mut quarantine_file_name = file_name.to_os_string();
+        quarantine_file_name.push(format!(".quarantine.{quarantine_id}"));
+        Ok(path.with_file_name(quarantine_file_name))
     }
 
     fn ensure_scope_dir(&self) -> JanusResult<()> {
@@ -1009,6 +1176,46 @@ fn validate_rollback_id(value: &str) -> JanusResult<()> {
     Ok(())
 }
 
+fn validate_quarantine_id(value: &str) -> JanusResult<()> {
+    if value.len() < 12
+        || value.len() > 96
+        || !value.starts_with("qrn_")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(JanusError::InvalidIdentifier {
+            kind: "age_quarantine_id",
+        });
+    }
+    Ok(())
+}
+
+fn validate_quarantine_material(quarantine: &AgeQuarantineMaterial) -> JanusResult<()> {
+    validate_quarantine_id(&quarantine.quarantine_id)?;
+    if quarantine.purge_not_before_unix_secs == 0 || quarantine.value_returned {
+        return Err(JanusError::InvalidManifest {
+            detail: "age quarantine material is invalid".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn unix_seconds(now: SystemTime) -> JanusResult<u64> {
+    now.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| JanusError::StoreUnavailable {
+            detail: "system clock is before the Unix epoch".to_string(),
+        })
+}
+
+fn sync_parent(path: &Path) -> JanusResult<()> {
+    let parent = path.parent().ok_or_else(|| JanusError::StoreUnavailable {
+        detail: "age material path has no parent".to_string(),
+    })?;
+    sync_dir(parent)
+}
+
 fn try_lock_store_exclusive(scope_dir: &Path) -> JanusResult<StoreLock> {
     fs::create_dir_all(scope_dir).map_err(map_store_io)?;
     set_dir_private(scope_dir)?;
@@ -1335,6 +1542,7 @@ mod tests {
         AuditWrite, ManifestCatalog, OwnerRef, Principal, PrincipalId, PrincipalKind, ProfileId,
         SafeLabel, ScopePathV1, SecretClass, SecretLifecycle, SecretMeta, SecretRef, TrustLevel,
     };
+    use std::time::Duration;
     use tempfile::TempDir;
 
     const TEST_SSH_ED25519_PK: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHsKLqeplhpW+uObz5dvMgjz1OxfM/XXUB+VHtZ6isGN alice@rust";
@@ -1584,6 +1792,109 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
         assert_eq!(fs::read(&path).unwrap(), original_ciphertext);
         let recovered = store.get(&fixture.canary).await.unwrap();
         assert_eq!(recovered.expose_bytes(), b"entry-original-canary");
+    }
+
+    #[tokio::test]
+    async fn quarantine_is_bound_recoverable_due_only_and_never_returns_a_value() {
+        let fixture = fixture();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+        let canary = b"quarantine-value-must-stay-encrypted";
+        store
+            .set(&fixture.canary, SecretValue::new(canary.to_vec()))
+            .await
+            .unwrap();
+        let active_path = store.path_for(&fixture.canary).unwrap();
+        let active_ciphertext = fs::read(&active_path).unwrap();
+        let deadline = 1_800_086_400;
+        let quarantine = store
+            .quarantine_with_id(
+                &fixture.canary,
+                "qrn_testoperation0001".to_string(),
+                deadline,
+            )
+            .await
+            .unwrap();
+        let quarantine_path = store
+            .quarantine_path_for(&fixture.canary, &quarantine.quarantine_id)
+            .unwrap();
+        assert!(!active_path.exists());
+        assert_eq!(fs::read(&quarantine_path).unwrap(), active_ciphertext);
+        assert!(!quarantine.value_returned);
+        assert!(!format!("{quarantine:?}").contains("quarantine-value"));
+
+        let replay = store
+            .quarantine_with_id(&fixture.canary, quarantine.quarantine_id.clone(), deadline)
+            .await
+            .unwrap();
+        assert_eq!(replay, quarantine);
+        assert!(matches!(
+            store
+                .purge_quarantine_if_due(
+                    &quarantine,
+                    UNIX_EPOCH + Duration::from_secs(deadline - 1),
+                )
+                .await,
+            Err(JanusError::PolicyDenied {
+                reason_code: "age_quarantine_not_due",
+                ..
+            })
+        ));
+
+        let restored = store
+            .restore_quarantine_if_present(&quarantine)
+            .await
+            .unwrap();
+        assert!(restored.changed);
+        assert!(!restored.value_returned);
+        assert!(!quarantine_path.exists());
+        assert_eq!(
+            store.get(&fixture.canary).await.unwrap().expose_bytes(),
+            canary
+        );
+        assert!(
+            !store
+                .restore_quarantine_if_present(&quarantine)
+                .await
+                .unwrap()
+                .changed
+        );
+
+        store
+            .quarantine_with_id(&fixture.canary, quarantine.quarantine_id.clone(), deadline)
+            .await
+            .unwrap();
+        store
+            .set(
+                &fixture.canary,
+                SecretValue::new(b"conflicting-active-generation".to_vec()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .purge_quarantine_if_due(&quarantine, UNIX_EPOCH + Duration::from_secs(deadline),)
+                .await,
+            Err(JanusError::StoreUnavailable { .. })
+        ));
+        fs::remove_file(&active_path).unwrap();
+
+        let purged = store
+            .purge_quarantine_if_due(&quarantine, UNIX_EPOCH + Duration::from_secs(deadline))
+            .await
+            .unwrap();
+        assert!(purged.changed);
+        assert!(!purged.value_returned);
+        assert!(!quarantine_path.exists());
+        assert!(
+            !store
+                .purge_quarantine_if_due(
+                    &quarantine,
+                    UNIX_EPOCH + Duration::from_secs(deadline + 1),
+                )
+                .await
+                .unwrap()
+                .changed
+        );
     }
 
     #[tokio::test]

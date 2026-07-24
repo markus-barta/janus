@@ -784,6 +784,7 @@ form.action button, .btn {
   cursor: pointer;
 }
 form.action button:hover, .btn:hover { opacity: 0.88; }
+.btn.danger, form.action button.danger { background: var(--danger); }
 .btn.quiet {
   background: none;
   border: 1px solid var(--hairline);
@@ -1237,6 +1238,16 @@ table.ledger tr:last-child td { border-bottom: 0; }
   border-radius: 9px;
   background: var(--teal-soft);
 }
+.managed-removal-summary {
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--hairline));
+  border-radius: 9px;
+  background: var(--danger-soft);
+  color: var(--ink);
+}
+.managed-removal-summary h2 { margin: 0 0 8px; }
+.managed-removal-summary p { margin: 6px 0; font-size: 12.5px; }
+.managed-removal-summary small { display: block; margin-top: 4px; color: var(--muted); }
 .managed-trust-note > span {
   display: grid;
   place-items: center;

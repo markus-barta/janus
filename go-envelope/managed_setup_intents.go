@@ -33,6 +33,8 @@ const (
 	managedIntentSignatureDomain    = "inspr.janus.signed-managed-service-setup-intent.v1"
 	managedHumanSessionRefDomain    = "inspr.managed-service-human-session.v1"
 	managedIntentContractVersion    = 1
+	managedManifestCurrentVersion   = 2
+	managedManifestPreviousVersion  = 1
 	managedIntentMaxTTLSeconds      = int64(300)
 	managedIntentClockSkewSeconds   = int64(30)
 	managedIntentMaxEnvelopeBytes   = int64(64 * 1024)
@@ -302,6 +304,8 @@ type managedDeclarationContext struct {
 	DeliveryProfileRef string
 	ReloadProfileRef   string
 	HealthProfileRef   string
+	BindingState       string
+	DetachProfileRef   string
 	AllowedSources     []string
 }
 
@@ -348,7 +352,7 @@ func (resolver managedManifestResolver) Resolve(intent managedSetupIntent) (mana
 					service.ServiceRef == intent.ServiceRef &&
 					slot.SlotRef == intent.SlotRef &&
 					manifest.DeclarationFingerprint == intent.DeclarationFingerprint &&
-					equalManagedSources(slot.AllowedSources, intent.AllowedSources) {
+					managedIntentMatchesSlot(intent, slot) {
 					context := managedDeclarationContext{
 						ServiceLabel:       service.SafeLabel,
 						SlotLabel:          slot.SafeLabel,
@@ -357,6 +361,8 @@ func (resolver managedManifestResolver) Resolve(intent managedSetupIntent) (mana
 						DeliveryProfileRef: slot.Delivery.ProfileRef,
 						ReloadProfileRef:   slot.Reload.ProfileRef,
 						HealthProfileRef:   slot.Health.ProfileRef,
+						BindingState:       managedSlotBindingState(manifest.SchemaVersion, slot),
+						DetachProfileRef:   slot.Detach.ProfileRef,
 						AllowedSources:     append([]string(nil), slot.AllowedSources...),
 					}
 					found = &context
@@ -393,6 +399,8 @@ type managedManifestSlot struct {
 	Delivery       managedManifestDelivery `json:"delivery"`
 	Reload         managedManifestReload   `json:"reload"`
 	Health         managedManifestHealth   `json:"health"`
+	BindingState   string                  `json:"binding_state,omitempty"`
+	Detach         managedManifestDetach   `json:"detach,omitempty"`
 	AllowedSources []string                `json:"allowed_sources"`
 }
 
@@ -409,6 +417,11 @@ type managedManifestReload struct {
 type managedManifestHealth struct {
 	Probe      string `json:"probe"`
 	ProfileRef string `json:"profile_ref"`
+}
+
+type managedManifestDetach struct {
+	Method     string `json:"method,omitempty"`
+	ProfileRef string `json:"profile_ref,omitempty"`
 }
 
 type managedCanonicalManifest struct {
@@ -433,9 +446,34 @@ type managedCanonicalManifestSlot struct {
 	SlotRef        string                  `json:"slot_ref"`
 }
 
+type managedCanonicalManifestV2 struct {
+	HostRef  string                              `json:"host_ref"`
+	Services []managedCanonicalManifestServiceV2 `json:"services"`
+}
+
+type managedCanonicalManifestServiceV2 struct {
+	RuntimeKind string                           `json:"runtime_kind"`
+	SafeLabel   string                           `json:"safe_label"`
+	ServiceRef  string                           `json:"service_ref"`
+	Slots       []managedCanonicalManifestSlotV2 `json:"slots"`
+}
+
+type managedCanonicalManifestSlotV2 struct {
+	AllowedSources []string                `json:"allowed_sources"`
+	BindingState   string                  `json:"binding_state"`
+	ConsumerKind   string                  `json:"consumer_kind"`
+	Delivery       managedManifestDelivery `json:"delivery"`
+	Detach         managedManifestDetach   `json:"detach"`
+	Health         managedManifestHealth   `json:"health"`
+	Reload         managedManifestReload   `json:"reload"`
+	SafeLabel      string                  `json:"safe_label"`
+	SlotRef        string                  `json:"slot_ref"`
+}
+
 func validateManagedManifest(manifest managedManifest) error {
 	if manifest.Schema != managedManifestSchema ||
-		manifest.SchemaVersion != managedIntentContractVersion ||
+		(manifest.SchemaVersion != managedManifestPreviousVersion &&
+			manifest.SchemaVersion != managedManifestCurrentVersion) ||
 		manifest.GeneratedBy != "nixcfg" ||
 		!validManagedRef("host_", manifest.HostRef) ||
 		!validManagedRef("decl_", manifest.DeclarationFingerprint) ||
@@ -444,6 +482,7 @@ func validateManagedManifest(manifest managedManifest) error {
 		return errors.New("managed_intent_declaration_invalid")
 	}
 	canonical := managedCanonicalManifest{HostRef: manifest.HostRef}
+	canonicalV2 := managedCanonicalManifestV2{HostRef: manifest.HostRef}
 	lastService := ""
 	seenSlots := map[string]bool{}
 	for _, service := range manifest.Services {
@@ -461,6 +500,11 @@ func validateManagedManifest(manifest managedManifest) error {
 			SafeLabel:   service.SafeLabel,
 			ServiceRef:  service.ServiceRef,
 		}
+		canonicalServiceV2 := managedCanonicalManifestServiceV2{
+			RuntimeKind: service.RuntimeKind,
+			SafeLabel:   service.SafeLabel,
+			ServiceRef:  service.ServiceRef,
+		}
 		lastSlot := ""
 		for _, slot := range service.Slots {
 			if !validManagedRef("slot_", slot.SlotRef) ||
@@ -474,7 +518,8 @@ func validateManagedManifest(manifest managedManifest) error {
 				!validManagedRef("reload_", slot.Reload.ProfileRef) ||
 				slot.Health.Probe != "compose_healthcheck" ||
 				!validManagedRef("health_", slot.Health.ProfileRef) ||
-				!validManagedSourcePolicy(slot.AllowedSources) {
+				!validManagedDetachPolicy(manifest.SchemaVersion, slot) ||
+				!validManagedSlotSourcePolicy(manifest.SchemaVersion, slot) {
 				return errors.New("managed_intent_declaration_invalid")
 			}
 			seenSlots[slot.SlotRef] = true
@@ -488,10 +533,26 @@ func validateManagedManifest(manifest managedManifest) error {
 				SafeLabel:      slot.SafeLabel,
 				SlotRef:        slot.SlotRef,
 			})
+			canonicalServiceV2.Slots = append(canonicalServiceV2.Slots, managedCanonicalManifestSlotV2{
+				AllowedSources: slot.AllowedSources,
+				BindingState:   slot.BindingState,
+				ConsumerKind:   slot.ConsumerKind,
+				Delivery:       slot.Delivery,
+				Detach:         slot.Detach,
+				Health:         slot.Health,
+				Reload:         slot.Reload,
+				SafeLabel:      slot.SafeLabel,
+				SlotRef:        slot.SlotRef,
+			})
 		}
 		canonical.Services = append(canonical.Services, canonicalService)
+		canonicalV2.Services = append(canonicalV2.Services, canonicalServiceV2)
 	}
-	raw, err := encodeManagedCanonicalJSON(canonical)
+	var fingerprintBody any = canonicalV2
+	if manifest.SchemaVersion == managedManifestPreviousVersion {
+		fingerprintBody = canonical
+	}
+	raw, err := encodeManagedCanonicalJSON(fingerprintBody)
 	if err != nil {
 		return errors.New("managed_intent_declaration_invalid")
 	}
@@ -584,10 +645,11 @@ func (store *managedReplayStore) consume(intent managedSetupIntent, now int64) (
 }
 
 type managedAcceptedIntent struct {
-	Intent       managedSetupIntent
-	Context      managedDeclarationContext
-	Source       string
-	OperationRef string
+	Intent                    managedSetupIntent
+	Context                   managedDeclarationContext
+	Source                    string
+	OperationRef              string
+	PurgeNotBeforeUnixSeconds int64
 }
 
 type managedSetupInspection struct {
@@ -649,7 +711,13 @@ func (consumer *managedSetupIntentConsumer) Inspect(ctx context.Context, intentR
 		!validManagedSafeLabel(declarationContext.SlotLabel) ||
 		declarationContext.ConsumerKind != "managed_service" ||
 		declarationContext.DeliveryKind != "private_env_file" ||
-		!equalManagedSources(declarationContext.AllowedSources, intent.AllowedSources) {
+		intent.OperationKind == "remove" &&
+			(declarationContext.BindingState != "detached" ||
+				!validManagedRef("detach_", declarationContext.DetachProfileRef) ||
+				len(intent.AllowedSources) != 0) ||
+		intent.OperationKind != "remove" &&
+			(declarationContext.BindingState != "required" ||
+				!equalManagedSources(declarationContext.AllowedSources, intent.AllowedSources)) {
 		return managedSetupInspection{}, managedIntentError("managed_intent_declaration_drift")
 	}
 	return managedSetupInspection{Intent: intent, Context: declarationContext}, nil
@@ -660,7 +728,9 @@ func (consumer *managedSetupIntentConsumer) Consume(ctx context.Context, intentR
 	if err != nil {
 		return managedAcceptedIntent{}, err
 	}
-	if !containsManagedSource(inspection.Intent.AllowedSources, source) {
+	if inspection.Intent.OperationKind == "remove" && source != "remove" ||
+		inspection.Intent.OperationKind != "remove" &&
+			!containsManagedSource(inspection.Intent.AllowedSources, source) {
 		return managedAcceptedIntent{}, managedIntentError("managed_intent_source_denied")
 	}
 	now := consumer.now().Unix()
@@ -715,8 +785,9 @@ func validateManagedSetupIntent(intent managedSetupIntent) error {
 		!validManagedRef("sys_", intent.AudienceRef) ||
 		!validManagedRef("nonce_", intent.NonceRef) ||
 		!validManagedRef("decl_", intent.DeclarationFingerprint) ||
-		(intent.OperationKind != "create" && intent.OperationKind != "replace") ||
-		!validManagedSourcePolicy(intent.AllowedSources) ||
+		(intent.OperationKind != "create" && intent.OperationKind != "replace" && intent.OperationKind != "remove") ||
+		(intent.OperationKind == "remove" && len(intent.AllowedSources) != 0) ||
+		(intent.OperationKind != "remove" && !validManagedSourcePolicy(intent.AllowedSources)) ||
 		intent.ReturnTarget != "pharos_service" ||
 		intent.IssuedAtUnixSeconds <= 0 ||
 		ttl <= 0 ||
@@ -842,7 +913,40 @@ func containsManagedSource(sources []string, expected string) bool {
 }
 
 func validManagedSource(source string) bool {
-	return source == "generated" || source == "import"
+	return source == "generated" || source == "import" || source == "remove"
+}
+
+func managedIntentMatchesSlot(intent managedSetupIntent, slot managedManifestSlot) bool {
+	if intent.OperationKind == "remove" {
+		return slot.BindingState == "detached" && len(intent.AllowedSources) == 0
+	}
+	return slot.BindingState != "detached" &&
+		equalManagedSources(slot.AllowedSources, intent.AllowedSources)
+}
+
+func managedSlotBindingState(version int, slot managedManifestSlot) string {
+	if version == managedManifestPreviousVersion {
+		return "required"
+	}
+	return slot.BindingState
+}
+
+func validManagedDetachPolicy(version int, slot managedManifestSlot) bool {
+	if version == managedManifestPreviousVersion {
+		return slot.BindingState == "" &&
+			slot.Detach.Method == "" &&
+			slot.Detach.ProfileRef == ""
+	}
+	return (slot.BindingState == "required" || slot.BindingState == "detached") &&
+		slot.Detach.Method == "compose_stop_and_verify" &&
+		validManagedRef("detach_", slot.Detach.ProfileRef)
+}
+
+func validManagedSlotSourcePolicy(version int, slot managedManifestSlot) bool {
+	if version == managedManifestPreviousVersion || slot.BindingState == "required" {
+		return validManagedSourcePolicy(slot.AllowedSources)
+	}
+	return slot.BindingState == "detached" && len(slot.AllowedSources) == 0
 }
 
 func equalManagedSources(first, second []string) bool {

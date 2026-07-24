@@ -10,12 +10,12 @@ use janus_core::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, ConsumerDescriptor, ConsumerRef, JanusError,
     LifecycleTransitionPolicy, OwnerRef, Principal, PrincipalChain, PrincipalId, PrincipalKind,
     ProfileId, ReleaseAdmission, ReloadMethod, SafeLabel, ScopeRef, SecretClass, SecretDescriptor,
-    SecretLifecycle, SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretValue,
-    Severity,
+    SecretLifecycle, SecretMetadataOverlay, SecretName, SecretRef, SecretStore,
+    SecretTombstoneRequest, SecretValue, Severity, TombstonePolicy,
 };
 use janus_forge::{ConsumerRotationHooks, GeneratedAlphabet, GeneratedValuePolicy};
-use janus_local::JsonlAuditSink;
-use janus_provider_age::{AgeRollbackMaterial, AgeSecretStore};
+use janus_local::{FileTombstoneRegistry, JsonlAuditSink, TombstoneRegistry};
+use janus_provider_age::{AgeQuarantineMaterial, AgeRollbackMaterial, AgeSecretStore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -26,6 +26,8 @@ const MAX_BINDING_FILE_BYTES: usize = 1024 * 1024;
 const MAX_IMPORT_BYTES: usize = 64 * 1024;
 const MAX_REVIEW_AGE: Duration = Duration::from_secs(366 * 24 * 60 * 60);
 const MAX_ENTRY_JOURNALS: usize = 4096;
+const REMOVAL_TOMBSTONE_RETAIN_SECONDS: u64 = 366 * 24 * 60 * 60;
+const TOMBSTONE_DIR_ENV: &str = "JANUS_LIFECYCLE_TOMBSTONE_DIR";
 
 #[path = "lifecycle_entry/web_transaction.rs"]
 pub(super) mod web_transaction;
@@ -93,6 +95,7 @@ pub(super) struct EntryPlanFile {
 pub(super) enum EntrySource {
     Generated { alphabet: String, length: usize },
     Import,
+    Remove,
 }
 
 impl EntrySource {
@@ -100,6 +103,7 @@ impl EntrySource {
         match self {
             Self::Generated { .. } => "generated",
             Self::Import => "import",
+            Self::Remove => "remove",
         }
     }
 }
@@ -119,6 +123,7 @@ pub(super) enum EntryPhase {
     Validated,
     Activating,
     Completed,
+    Destroyed,
     RollingBack,
     RolledBack,
     Failed,
@@ -133,6 +138,7 @@ impl EntryPhase {
             Self::Validated => "validated",
             Self::Activating => "activating",
             Self::Completed => "completed",
+            Self::Destroyed => "destroyed",
             Self::RollingBack => "rolling_back",
             Self::RolledBack => "rolled_back",
             Self::Failed => "failed",
@@ -159,6 +165,10 @@ struct EntryJournal {
     generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rollback_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quarantine_id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_generation")]
+    purge_not_before_unix_secs: u64,
     phase: EntryPhase,
     preflighted_at_unix_secs: u64,
     created_by_operation: bool,
@@ -202,6 +212,7 @@ pub(super) struct EntryTransaction {
 pub(super) enum ManagedEntryOperationKind {
     Create,
     Replace,
+    Remove,
 }
 
 impl ManagedEntryOperationKind {
@@ -209,6 +220,7 @@ impl ManagedEntryOperationKind {
         match self {
             Self::Create => "create",
             Self::Replace => "replace",
+            Self::Remove => "remove",
         }
     }
 
@@ -216,6 +228,7 @@ impl ManagedEntryOperationKind {
         match value {
             "create" => Ok(Self::Create),
             "replace" => Ok(Self::Replace),
+            "remove" => Ok(Self::Remove),
             _ => anyhow::bail!(
                 "lifecycle entry denied reason_code=entry_operation_kind_invalid value_returned=false"
             ),
@@ -274,6 +287,9 @@ async fn run_inner(args: &[String], release: ReleaseAdmission) -> Result<()> {
                     .await
             }
             EntrySource::Generated { .. } => transaction.apply_generated(SystemTime::now()).await,
+            EntrySource::Remove => anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_remove_cli_denied value_returned=false"
+            ),
         }
         .context("lifecycle entry command failed closed")?;
         emit_status(command.operation, &status);
@@ -324,6 +340,15 @@ pub(super) fn stable_error_reason(error: &anyhow::Error) -> &'static str {
         "entry_import_empty",
         "entry_import_oversize",
         "entry_import_trailing_data",
+        "entry_removal_contract_invalid",
+        "entry_removal_deadline_invalid",
+        "entry_removal_finalize_phase_invalid",
+        "entry_removal_purge_not_due",
+        "entry_removal_value_denied",
+        "entry_removal_activation_denied",
+        "entry_removal_detach_boundary_crossed",
+        "entry_removal_restore_unproven",
+        "entry_removal_tombstone_conflict",
     ];
     let rendered = error.to_string();
     KNOWN
@@ -459,6 +484,8 @@ impl EntryTransaction {
             operation_kind: self.operation_kind.as_str().to_string(),
             generation,
             rollback_id: None,
+            quarantine_id: None,
+            purge_not_before_unix_secs: 0,
             phase: EntryPhase::Preflighted,
             preflighted_at_unix_secs: unix_seconds(now)?,
             created_by_operation: false,
@@ -519,6 +546,230 @@ impl EntryTransaction {
             );
         }
         self.apply_value_after_preflight(now, || Ok(value)).await
+    }
+
+    pub(super) async fn prepare_removal(
+        &self,
+        now: SystemTime,
+        purge_not_before_unix_secs: u64,
+    ) -> Result<EntryStatus> {
+        if self.operation_kind != ManagedEntryOperationKind::Remove
+            || !matches!(self.plan.file.source, EntrySource::Remove)
+        {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_removal_contract_invalid value_returned=false"
+            );
+        }
+        let now_seconds = unix_seconds(now)?;
+        if purge_not_before_unix_secs <= now_seconds {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_removal_deadline_invalid value_returned=false"
+            );
+        }
+        let _lock = self.lock()?;
+        let mut journal = if self.journal_path().exists() {
+            let existing = self.read_bound_journal()?;
+            if existing.operation_kind != "remove"
+                || existing.purge_not_before_unix_secs != purge_not_before_unix_secs
+            {
+                anyhow::bail!(
+                    "lifecycle entry denied reason_code=entry_operation_replay value_returned=false"
+                );
+            }
+            match existing.phase {
+                EntryPhase::Preflighted => existing,
+                EntryPhase::Validated
+                | EntryPhase::Activating
+                | EntryPhase::Completed
+                | EntryPhase::Destroyed => return Ok(status_from_journal(&existing)),
+                _ => {
+                    anyhow::bail!(
+                        "lifecycle entry denied reason_code=entry_operation_replay value_returned=false"
+                    );
+                }
+            }
+        } else {
+            let generation = self.next_generation()?;
+            let context = self
+                .bound_context(ExpectedPresence::Present, &[SecretLifecycle::Active])
+                .await?;
+            let journal = EntryJournal {
+                schema_version: JOURNAL_SCHEMA_VERSION,
+                operation_id: self.plan.file.operation_id.clone(),
+                plan_fingerprint: self.plan.fingerprint.clone(),
+                target_fingerprint: context.target_fingerprint.clone(),
+                release_fingerprint: release_fingerprint(&self.release),
+                secret_ref: self.plan.file.secret_ref.clone(),
+                mode: "remove".to_string(),
+                operation_kind: "remove".to_string(),
+                generation,
+                rollback_id: None,
+                quarantine_id: None,
+                purge_not_before_unix_secs,
+                phase: EntryPhase::Preflighted,
+                preflighted_at_unix_secs: now_seconds,
+                created_by_operation: false,
+                reason_code: "entry_removal_preflight_ok".to_string(),
+                integrity_hash: String::new(),
+            };
+            self.write_journal(journal.clone())?;
+            journal
+        };
+        let context = self
+            .bound_context(
+                ExpectedPresence::Present,
+                &[SecretLifecycle::Active, SecretLifecycle::Disabled],
+            )
+            .await?;
+        self.ensure_target_binding(&journal, &context)?;
+        let mut audit = self.audit()?;
+        if context.descriptor.lifecycle == SecretLifecycle::Active {
+            LifecycleTransitionPolicy::transition(
+                &context.descriptor,
+                SecretLifecycle::Disabled,
+                SafeLabel::new("managed service binding detached")?,
+                &self.principal,
+                &mut audit,
+            )?;
+            if let Err(error) =
+                self.set_lifecycle(&context.descriptor.name, SecretLifecycle::Disabled)
+            {
+                journal.phase = EntryPhase::Failed;
+                journal.reason_code = "entry_removal_revoke_failed".to_string();
+                let _ = self.write_journal(journal);
+                return Err(error);
+            }
+        }
+        let disabled = self
+            .bound_context(ExpectedPresence::Present, &[SecretLifecycle::Disabled])
+            .await?;
+        self.ensure_target_binding(&journal, &disabled)?;
+        journal.phase = EntryPhase::Validated;
+        journal.reason_code = "entry_removal_delivery_revoked".to_string();
+        self.write_journal(journal.clone())?;
+        Ok(status_from_journal(&journal))
+    }
+
+    pub(super) async fn finalize_removal(
+        &self,
+        now: SystemTime,
+        purge_not_before_unix_secs: u64,
+    ) -> Result<EntryStatus> {
+        if self.operation_kind != ManagedEntryOperationKind::Remove {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_removal_contract_invalid value_returned=false"
+            );
+        }
+        let _lock = self.lock()?;
+        let mut journal = self.read_bound_journal()?;
+        if journal.phase == EntryPhase::Completed {
+            return Ok(status_from_journal(&journal));
+        }
+        if !matches!(
+            journal.phase,
+            EntryPhase::Validated | EntryPhase::Activating
+        ) || journal.purge_not_before_unix_secs != purge_not_before_unix_secs
+        {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_removal_finalize_phase_invalid value_returned=false"
+            );
+        }
+        let mut context = self
+            .bound_context(
+                ExpectedPresence::Either,
+                &[SecretLifecycle::Disabled, SecretLifecycle::PendingDelete],
+            )
+            .await?;
+        self.ensure_target_binding(&journal, &context)?;
+        let quarantine_id = journal
+            .quarantine_id
+            .clone()
+            .unwrap_or_else(|| deterministic_quarantine_id(&journal.operation_id));
+        if journal.phase == EntryPhase::Validated {
+            self.ensure_fresh(&journal, now)?;
+            journal.quarantine_id = Some(quarantine_id.clone());
+            journal.phase = EntryPhase::Activating;
+            journal.reason_code = "entry_removal_quarantine_started".to_string();
+            self.write_journal(journal.clone())?;
+        }
+        context
+            .store
+            .quarantine_with_id(
+                &context.descriptor.name,
+                quarantine_id,
+                purge_not_before_unix_secs,
+            )
+            .await
+            .context("entry removal quarantine denied")?;
+        if context.descriptor.lifecycle == SecretLifecycle::Disabled {
+            let mut audit = self.audit()?;
+            LifecycleTransitionPolicy::transition(
+                &context.descriptor,
+                SecretLifecycle::PendingDelete,
+                SafeLabel::new("managed service secret quarantined")?,
+                &self.principal,
+                &mut audit,
+            )?;
+            self.set_lifecycle(&context.descriptor.name, SecretLifecycle::PendingDelete)?;
+        }
+        let quarantined = self
+            .bound_context(ExpectedPresence::Absent, &[SecretLifecycle::PendingDelete])
+            .await?;
+        self.ensure_target_binding(&journal, &quarantined)?;
+        journal.phase = EntryPhase::Completed;
+        journal.reason_code = "entry_removal_quarantined".to_string();
+        self.write_journal(journal.clone())?;
+        Ok(status_from_journal(&journal))
+    }
+
+    pub(super) async fn purge_removal(&self, now: SystemTime) -> Result<EntryStatus> {
+        if self.operation_kind != ManagedEntryOperationKind::Remove {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_removal_contract_invalid value_returned=false"
+            );
+        }
+        let _lock = self.lock()?;
+        let mut journal = self.read_bound_journal()?;
+        if journal.phase == EntryPhase::Destroyed {
+            return Ok(status_from_journal(&journal));
+        }
+        if journal.phase != EntryPhase::Completed
+            || unix_seconds(now)? < journal.purge_not_before_unix_secs
+        {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_removal_purge_not_due value_returned=false"
+            );
+        }
+        let mut context = self
+            .bound_context(ExpectedPresence::Absent, &[SecretLifecycle::PendingDelete])
+            .await?;
+        self.ensure_target_binding(&journal, &context)?;
+        let quarantine = AgeQuarantineMaterial {
+            secret_ref: self.secret_ref()?,
+            quarantine_id: journal.quarantine_id.clone().ok_or_else(|| {
+                JanusError::policy_denied(
+                    "entry_removal_state_invalid",
+                    "removal quarantine binding is missing",
+                )
+            })?,
+            purge_not_before_unix_secs: journal.purge_not_before_unix_secs,
+            value_returned: false,
+        };
+        self.record_removal_tombstone(&context.descriptor, journal.purge_not_before_unix_secs)?;
+        context
+            .store
+            .purge_quarantine_if_due(&quarantine, now)
+            .await
+            .context("entry removal purge denied")?;
+        self.set_lifecycle(&context.descriptor.name, SecretLifecycle::Destroyed)?;
+        let destroyed = self
+            .bound_context(ExpectedPresence::Absent, &[SecretLifecycle::Destroyed])
+            .await?;
+        self.ensure_target_binding(&journal, &destroyed)?;
+        journal.phase = EntryPhase::Destroyed;
+        journal.reason_code = "entry_removal_destroyed".to_string();
+        self.write_journal(journal.clone())?;
+        Ok(status_from_journal(&journal))
     }
 
     async fn apply_value_after_preflight<F>(
@@ -615,6 +866,11 @@ impl EntryTransaction {
                         value_returned: false,
                     })
             }
+            ManagedEntryOperationKind::Remove => {
+                anyhow::bail!(
+                    "lifecycle entry denied reason_code=entry_removal_value_denied value_returned=false"
+                )
+            }
         };
         if let Err(error) = store_result {
             self.rollback_operation(
@@ -708,6 +964,11 @@ impl EntryTransaction {
     }
 
     async fn activate_bound(&self, now: SystemTime, run_local_reload: bool) -> Result<EntryStatus> {
+        if self.operation_kind == ManagedEntryOperationKind::Remove {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_removal_activation_denied value_returned=false"
+            );
+        }
         let _lock = self.lock()?;
         let mut journal = self.read_bound_journal()?;
         if journal.phase != EntryPhase::Validated {
@@ -854,6 +1115,11 @@ impl EntryTransaction {
     /// boundary. The caller receives a zeroizing `SecretValue`; no string,
     /// debug, log, or response representation is created.
     pub(super) async fn staged_value_for_host_delivery(&self) -> Result<janus_core::SecretValue> {
+        if self.operation_kind == ManagedEntryOperationKind::Remove {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_removal_value_denied value_returned=false"
+            );
+        }
         let _lock = self.lock()?;
         let journal = self.read_bound_journal()?;
         if journal.phase != EntryPhase::Validated {
@@ -902,7 +1168,11 @@ impl EntryTransaction {
         let mut context = self
             .bound_context(
                 ExpectedPresence::Either,
-                &[SecretLifecycle::Draft, SecretLifecycle::Active],
+                if self.operation_kind == ManagedEntryOperationKind::Remove {
+                    &[SecretLifecycle::Active, SecretLifecycle::Disabled]
+                } else {
+                    &[SecretLifecycle::Draft, SecretLifecycle::Active]
+                },
             )
             .await?;
         self.ensure_target_binding(&journal, &context)?;
@@ -936,40 +1206,75 @@ impl EntryTransaction {
         let _lock = self.lock()?;
         let journal = self.read_bound_journal()?;
         let (presence, lifecycles) = match journal.phase {
-            EntryPhase::Preflighted => (
-                self.preflight_presence(),
-                self.preflight_lifecycles().to_vec(),
-            ),
+            EntryPhase::Preflighted => {
+                if self.operation_kind == ManagedEntryOperationKind::Remove {
+                    (
+                        ExpectedPresence::Present,
+                        vec![SecretLifecycle::Active, SecretLifecycle::Disabled],
+                    )
+                } else {
+                    (
+                        self.preflight_presence(),
+                        self.preflight_lifecycles().to_vec(),
+                    )
+                }
+            }
             EntryPhase::Applying | EntryPhase::Failed => (
                 ExpectedPresence::Either,
                 vec![SecretLifecycle::Draft, SecretLifecycle::Active],
             ),
-            EntryPhase::Stored | EntryPhase::Validated => (
-                ExpectedPresence::Present,
-                vec![
-                    if self.operation_kind == ManagedEntryOperationKind::Create {
-                        SecretLifecycle::Draft
-                    } else {
-                        SecretLifecycle::Active
-                    },
-                ],
-            ),
-            EntryPhase::Activating => (
-                ExpectedPresence::Present,
-                vec![SecretLifecycle::Draft, SecretLifecycle::Active],
-            ),
-            EntryPhase::Completed => (ExpectedPresence::Present, vec![SecretLifecycle::Active]),
-            EntryPhase::RollingBack => (
-                ExpectedPresence::Either,
-                vec![SecretLifecycle::Draft, SecretLifecycle::Active],
-            ),
-            EntryPhase::RolledBack => {
-                if self.operation_kind == ManagedEntryOperationKind::Create {
-                    (ExpectedPresence::Absent, vec![SecretLifecycle::Draft])
+            EntryPhase::Stored | EntryPhase::Validated => {
+                if self.operation_kind == ManagedEntryOperationKind::Remove {
+                    (ExpectedPresence::Present, vec![SecretLifecycle::Disabled])
+                } else {
+                    (
+                        ExpectedPresence::Present,
+                        vec![
+                            if self.operation_kind == ManagedEntryOperationKind::Create {
+                                SecretLifecycle::Draft
+                            } else {
+                                SecretLifecycle::Active
+                            },
+                        ],
+                    )
+                }
+            }
+            EntryPhase::Activating => {
+                if self.operation_kind == ManagedEntryOperationKind::Remove {
+                    (
+                        ExpectedPresence::Either,
+                        vec![SecretLifecycle::Disabled, SecretLifecycle::PendingDelete],
+                    )
+                } else {
+                    (
+                        ExpectedPresence::Present,
+                        vec![SecretLifecycle::Draft, SecretLifecycle::Active],
+                    )
+                }
+            }
+            EntryPhase::Completed => {
+                if self.operation_kind == ManagedEntryOperationKind::Remove {
+                    (
+                        ExpectedPresence::Absent,
+                        vec![SecretLifecycle::PendingDelete],
+                    )
                 } else {
                     (ExpectedPresence::Present, vec![SecretLifecycle::Active])
                 }
             }
+            EntryPhase::Destroyed => (ExpectedPresence::Absent, vec![SecretLifecycle::Destroyed]),
+            EntryPhase::RollingBack => (
+                ExpectedPresence::Either,
+                vec![SecretLifecycle::Draft, SecretLifecycle::Active],
+            ),
+            EntryPhase::RolledBack => match self.operation_kind {
+                ManagedEntryOperationKind::Create => {
+                    (ExpectedPresence::Absent, vec![SecretLifecycle::Draft])
+                }
+                ManagedEntryOperationKind::Replace | ManagedEntryOperationKind::Remove => {
+                    (ExpectedPresence::Present, vec![SecretLifecycle::Active])
+                }
+            },
         };
         let context = self.bound_context(presence, &lifecycles).await?;
         self.ensure_target_binding(&journal, &context)?;
@@ -993,6 +1298,10 @@ impl EntryTransaction {
             }
             ManagedEntryOperationKind::Replace => {
                 self.rollback_replacement(context, journal, audit, reason_code)
+                    .await
+            }
+            ManagedEntryOperationKind::Remove => {
+                self.rollback_removal(context, journal, audit, reason_code)
                     .await
             }
         }
@@ -1127,6 +1436,39 @@ impl EntryTransaction {
         if let Some(error) = start_write_error {
             return Err(error);
         }
+        Ok(())
+    }
+
+    async fn rollback_removal<A>(
+        &self,
+        context: &mut BoundContext,
+        journal: &mut EntryJournal,
+        audit: &mut A,
+        reason_code: &'static str,
+    ) -> Result<()>
+    where
+        A: AuditSink,
+    {
+        if journal.quarantine_id.is_some() || journal.phase == EntryPhase::Completed {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_removal_detach_boundary_crossed value_returned=false"
+            );
+        }
+        if !context.descriptor.present {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_removal_restore_unproven value_returned=false"
+            );
+        }
+        self.audit_entry(
+            audit,
+            AuditOutcome::Allowed,
+            "entry_removal_cancelled",
+            Severity::High,
+        )?;
+        self.set_lifecycle(&context.descriptor.name, SecretLifecycle::Active)?;
+        journal.phase = EntryPhase::RolledBack;
+        journal.reason_code = reason_code.to_string();
+        self.write_journal(journal.clone())?;
         Ok(())
     }
 
@@ -1325,6 +1667,7 @@ impl EntryTransaction {
         match self.operation_kind {
             ManagedEntryOperationKind::Create => ExpectedPresence::Absent,
             ManagedEntryOperationKind::Replace => ExpectedPresence::Present,
+            ManagedEntryOperationKind::Remove => ExpectedPresence::Present,
         }
     }
 
@@ -1332,11 +1675,13 @@ impl EntryTransaction {
         match self.operation_kind {
             ManagedEntryOperationKind::Create => &[SecretLifecycle::Draft],
             ManagedEntryOperationKind::Replace => &[SecretLifecycle::Active],
+            ManagedEntryOperationKind::Remove => &[SecretLifecycle::Active],
         }
     }
 
     fn next_generation(&self) -> Result<u64> {
         let mut maximum = 0_u64;
+        let mut active_generation = self.generation_floor.max(1);
         for summary in scan_journal_summaries(
             &self.plan.file.state_dir,
             &self.release,
@@ -1351,12 +1696,20 @@ impl EntryTransaction {
                     "lifecycle entry denied reason_code=entry_conflicting_release value_returned=false"
                 );
             }
-            if !matches!(summary.phase.as_str(), "completed" | "rolled_back") {
+            if !matches!(
+                summary.phase.as_str(),
+                "completed" | "destroyed" | "rolled_back"
+            ) {
                 anyhow::bail!(
                     "lifecycle entry denied reason_code=entry_conflicting_operation value_returned=false"
                 );
             }
             maximum = maximum.max(summary.generation);
+            if summary.phase == "completed"
+                && matches!(summary.operation_kind.as_str(), "create" | "replace")
+            {
+                active_generation = active_generation.max(summary.generation);
+            }
         }
         let next = match self.operation_kind {
             ManagedEntryOperationKind::Create => maximum
@@ -1365,6 +1718,11 @@ impl EntryTransaction {
             ManagedEntryOperationKind::Replace => {
                 maximum.max(self.generation_floor.max(1)).checked_add(1)
             }
+            // Removal targets the ciphertext generation that is actually
+            // active. A newer failed replacement has a larger journal
+            // generation but its rollback restored the most recent completed
+            // create/replace generation.
+            ManagedEntryOperationKind::Remove => Some(active_generation),
         };
         next.ok_or_else(|| {
             JanusError::policy_denied(
@@ -1379,6 +1737,7 @@ impl EntryTransaction {
         match self.operation_kind {
             ManagedEntryOperationKind::Create => create,
             ManagedEntryOperationKind::Replace => replace,
+            ManagedEntryOperationKind::Remove => "entry_removal_invalid",
         }
         .to_string()
     }
@@ -1481,6 +1840,54 @@ impl EntryTransaction {
         .context("entry metadata update denied")
     }
 
+    fn record_removal_tombstone(
+        &self,
+        descriptor: &SecretDescriptor,
+        destroyed_at_unix_secs: u64,
+    ) -> Result<()> {
+        let registry = FileTombstoneRegistry::new(
+            std::env::var(TOMBSTONE_DIR_ENV)
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/var/lib/janus/tombstones")),
+        );
+        let reason = SafeLabel::new("managed service secret removed")?;
+        let destroyed_at = UNIX_EPOCH
+            .checked_add(Duration::from_secs(destroyed_at_unix_secs))
+            .context("entry removal tombstone time invalid")?;
+        let retain_until = destroyed_at
+            .checked_add(Duration::from_secs(REMOVAL_TOMBSTONE_RETAIN_SECONDS))
+            .context("entry removal tombstone retention invalid")?;
+        if let Some(existing) = registry
+            .list()?
+            .into_iter()
+            .find(|record| record.secret_ref == descriptor.secret_ref)
+        {
+            if existing.reason != reason
+                || existing.destroyed_at != destroyed_at
+                || existing.retain_until != retain_until
+            {
+                anyhow::bail!(
+                    "lifecycle entry denied reason_code=entry_removal_tombstone_conflict value_returned=false"
+                );
+            }
+            return Ok(());
+        }
+        let mut audit = self.audit()?;
+        let tombstone = TombstonePolicy::record(
+            descriptor,
+            SecretTombstoneRequest::new(
+                descriptor.secret_ref.clone(),
+                reason,
+                destroyed_at,
+                retain_until,
+            ),
+            &self.principal,
+            &mut audit,
+        )?;
+        registry.record(&tombstone, &self.principal)?;
+        Ok(())
+    }
+
     fn audit(&self) -> Result<JsonlAuditSink> {
         JsonlAuditSink::open(self.plan.file.audit_path.clone()).context("entry audit unavailable")
     }
@@ -1497,10 +1904,11 @@ impl EntryTransaction {
     {
         audit.record(
             AuditEvent::new(
-                if self.operation_kind == ManagedEntryOperationKind::Create {
-                    AuditAction::SecretLifecycle
-                } else {
-                    AuditAction::RotationLifecycle
+                match self.operation_kind {
+                    ManagedEntryOperationKind::Create | ManagedEntryOperationKind::Remove => {
+                        AuditAction::SecretLifecycle
+                    }
+                    ManagedEntryOperationKind::Replace => AuditAction::RotationLifecycle,
                 },
                 outcome,
                 reason_code,
@@ -1584,6 +1992,15 @@ impl EntryTransaction {
             || self.operation_kind == ManagedEntryOperationKind::Replace
                 && journal.phase != EntryPhase::Preflighted
                 && journal.rollback_id.is_none()
+            || self.operation_kind != ManagedEntryOperationKind::Remove
+                && (journal.quarantine_id.is_some() || journal.purge_not_before_unix_secs != 0)
+            || self.operation_kind == ManagedEntryOperationKind::Remove
+                && (journal.rollback_id.is_some()
+                    || journal.purge_not_before_unix_secs == 0
+                    || journal
+                        .quarantine_id
+                        .as_deref()
+                        .is_some_and(|value| !valid_quarantine_id(value)))
         {
             anyhow::bail!(
                 "lifecycle entry denied reason_code=entry_journal_binding_mismatch value_returned=false"
@@ -1683,6 +2100,7 @@ pub(super) fn validate_plan(plan: &EntryPlanFile, now: SystemTime) -> Result<()>
                 anyhow::bail!("entry import source binding is invalid");
             }
         }
+        EntrySource::Remove => {}
     }
     let paths = [
         &plan.secretspec_manifest,
@@ -1844,6 +2262,23 @@ fn replacement_rollback_id(operation_id: &str, generation: u64) -> String {
     format!("rb_webtx_{}", &digest[..32])
 }
 
+fn deterministic_quarantine_id(operation_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"inspr.janus.managed-removal-quarantine.v1\0");
+    hasher.update(operation_id.as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    format!("qrn_{}", &digest[..24])
+}
+
+fn valid_quarantine_id(value: &str) -> bool {
+    value.len() >= 12
+        && value.len() <= 96
+        && value.starts_with("qrn_")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
 fn release_fingerprint(release: &ReleaseAdmission) -> String {
     hash_fields(&[
         "janus-entry-release-v1".to_string(),
@@ -1943,12 +2378,23 @@ pub(super) fn scan_journal_summaries(
         verify_journal(&journal)?;
         if journal.schema_version != JOURNAL_SCHEMA_VERSION
             || journal.operation_id != operation_id
-            || !matches!(journal.mode.as_str(), "generated" | "import")
+            || !matches!(journal.mode.as_str(), "generated" | "import" | "remove")
             || ManagedEntryOperationKind::parse(&journal.operation_kind).is_err()
+            || (journal.operation_kind == "remove") != (journal.mode == "remove")
             || journal.operation_kind == "create" && journal.rollback_id.is_some()
             || journal.operation_kind == "replace"
                 && journal.phase != EntryPhase::Preflighted
                 && journal.rollback_id.is_none()
+            || journal.operation_kind != "remove"
+                && (journal.quarantine_id.is_some() || journal.purge_not_before_unix_secs != 0)
+            || journal.operation_kind == "remove"
+                && (journal.rollback_id.is_some()
+                    || journal.generation == 0
+                    || journal.purge_not_before_unix_secs == 0
+                    || journal
+                        .quarantine_id
+                        .as_deref()
+                        .is_some_and(|value| !valid_quarantine_id(value)))
         {
             return Err(JanusError::policy_denied(
                 "entry_journal_binding_mismatch",
@@ -2239,6 +2685,8 @@ mod tests {
             operation_kind: "create".to_string(),
             generation: 0,
             rollback_id: None,
+            quarantine_id: None,
+            purge_not_before_unix_secs: 0,
             phase: EntryPhase::Preflighted,
             preflighted_at_unix_secs: 1,
             created_by_operation: false,
@@ -2251,10 +2699,14 @@ mod tests {
         assert!(!legacy_shape.contains("operation_kind"));
         assert!(!legacy_shape.contains("generation"));
         assert!(!legacy_shape.contains("rollback_id"));
+        assert!(!legacy_shape.contains("quarantine_id"));
+        assert!(!legacy_shape.contains("purge_not_before_unix_secs"));
         let decoded: EntryJournal = serde_json::from_str(&legacy_shape).unwrap();
         assert_eq!(decoded.operation_kind, "create");
         assert_eq!(decoded.generation, 0);
         assert!(decoded.rollback_id.is_none());
+        assert!(decoded.quarantine_id.is_none());
+        assert_eq!(decoded.purge_not_before_unix_secs, 0);
         verify_journal(&decoded).unwrap();
         journal.phase = EntryPhase::Completed;
         assert!(verify_journal(&journal).is_err());

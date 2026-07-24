@@ -21,17 +21,19 @@ const (
 )
 
 type managedTransactionRequest struct {
-	Schema                 string                             `json:"schema"`
-	SchemaVersion          int                                `json:"schema_version"`
-	Action                 string                             `json:"action"`
-	OperationRef           string                             `json:"operation_ref"`
-	OperationKind          string                             `json:"operation_kind"`
-	Source                 string                             `json:"source"`
-	HostRef                string                             `json:"host_ref"`
-	ServiceRef             string                             `json:"service_ref"`
-	SlotRef                string                             `json:"slot_ref"`
-	DeclarationFingerprint string                             `json:"declaration_fingerprint"`
-	ExternalEvidence       *managedExternalActivationEvidence `json:"external_evidence"`
+	Schema                  string                             `json:"schema"`
+	SchemaVersion           int                                `json:"schema_version"`
+	Action                  string                             `json:"action"`
+	OperationRef            string                             `json:"operation_ref"`
+	OperationKind           string                             `json:"operation_kind"`
+	Source                  string                             `json:"source"`
+	HostRef                 string                             `json:"host_ref"`
+	ServiceRef              string                             `json:"service_ref"`
+	SlotRef                 string                             `json:"slot_ref"`
+	DeclarationFingerprint  string                             `json:"declaration_fingerprint"`
+	PurgeNotBeforeUnixSecs  int64                              `json:"purge_not_before_unix_secs"`
+	ExternalEvidence        *managedExternalActivationEvidence `json:"external_evidence"`
+	ExternalRemovalEvidence *managedExternalRemovalEvidence    `json:"external_removal_evidence"`
 }
 
 type managedExternalActivationEvidence struct {
@@ -42,6 +44,16 @@ type managedExternalActivationEvidence struct {
 	HeartbeatObservedAtUnixSeconds int64  `json:"heartbeat_observed_at_unix_secs"`
 	ProcessObservedAtUnixSeconds   int64  `json:"process_observed_at_unix_secs"`
 	ProbeObservedAtUnixSeconds     int64  `json:"probe_observed_at_unix_secs"`
+}
+
+type managedExternalRemovalEvidence struct {
+	Generation                     uint64 `json:"generation"`
+	RuntimeAbsent                  bool   `json:"runtime_absent"`
+	ProcessState                   string `json:"process_state"`
+	CacheState                     string `json:"cache_state"`
+	HeartbeatObservedAtUnixSeconds int64  `json:"heartbeat_observed_at_unix_secs"`
+	ProcessObservedAtUnixSeconds   int64  `json:"process_observed_at_unix_secs"`
+	CacheObservedAtUnixSeconds     int64  `json:"cache_observed_at_unix_secs"`
 }
 
 type managedTransactionResponse struct {
@@ -79,7 +91,9 @@ type managedTransactionExecutor interface {
 
 type managedTransactionController interface {
 	Finalize(context.Context, managedOperationBridgeRecord, managedExternalActivationEvidence) (managedTransactionResult, error)
+	FinalizeRemoval(context.Context, managedOperationBridgeRecord, managedExternalRemovalEvidence) (managedTransactionResult, error)
 	Rollback(context.Context, managedOperationBridgeRecord) (managedTransactionResult, error)
+	Purge(context.Context, managedOperationBridgeRecord) (managedTransactionResult, error)
 }
 
 type managedTransactionBackend interface {
@@ -98,17 +112,19 @@ func newManagedTransactionClient(socketPath string) *managedTransactionClient {
 
 func (client *managedTransactionClient) Execute(ctx context.Context, accepted managedAcceptedIntent, importedValue []byte) (managedTransactionResult, error) {
 	request := managedTransactionRequest{
-		Schema:                 managedTransactionRequestSchema,
-		SchemaVersion:          managedTransactionSchemaVersion,
-		Action:                 "prepare",
-		OperationRef:           accepted.OperationRef,
-		OperationKind:          accepted.Intent.OperationKind,
-		Source:                 accepted.Source,
-		HostRef:                accepted.Intent.HostRef,
-		ServiceRef:             accepted.Intent.ServiceRef,
-		SlotRef:                accepted.Intent.SlotRef,
-		DeclarationFingerprint: accepted.Intent.DeclarationFingerprint,
-		ExternalEvidence:       nil,
+		Schema:                  managedTransactionRequestSchema,
+		SchemaVersion:           managedTransactionSchemaVersion,
+		Action:                  "prepare",
+		OperationRef:            accepted.OperationRef,
+		OperationKind:           accepted.Intent.OperationKind,
+		Source:                  accepted.Source,
+		HostRef:                 accepted.Intent.HostRef,
+		ServiceRef:              accepted.Intent.ServiceRef,
+		SlotRef:                 accepted.Intent.SlotRef,
+		DeclarationFingerprint:  accepted.Intent.DeclarationFingerprint,
+		PurgeNotBeforeUnixSecs:  accepted.PurgeNotBeforeUnixSeconds,
+		ExternalEvidence:        nil,
+		ExternalRemovalEvidence: nil,
 	}
 	if err := validateManagedTransactionRequest(request, importedValue); err != nil {
 		return managedTransactionResult{}, err
@@ -134,7 +150,7 @@ func (client *managedTransactionClient) Execute(ctx context.Context, accepted ma
 	if err != nil {
 		return managedTransactionResult{}, err
 	}
-	if first.Phase == "prepared" || first.Phase == "completed" {
+	if first.Phase == "prepared" || first.Phase == "completed" || first.Phase == "destroyed" {
 		return transactionResult(first), nil
 	}
 	if first.Phase == "rolled_back" {
@@ -168,8 +184,11 @@ func validateManagedTransactionRequest(request managedTransactionRequest, import
 		!validManagedRef("decl_", request.DeclarationFingerprint) ||
 		request.Action != "prepare" ||
 		request.ExternalEvidence != nil ||
-		(request.OperationKind != "create" && request.OperationKind != "replace") ||
-		(request.Source != "generated" && request.Source != "import") {
+		(request.OperationKind != "create" && request.OperationKind != "replace" && request.OperationKind != "remove") ||
+		(request.Source != "generated" && request.Source != "import" && request.Source != "remove") ||
+		(request.OperationKind == "remove") != (request.Source == "remove") ||
+		request.OperationKind == "remove" && request.PurgeNotBeforeUnixSecs <= 0 ||
+		request.OperationKind != "remove" && request.PurgeNotBeforeUnixSecs != 0 {
 		return managedTransactionError("web_transaction_request_invalid")
 	}
 	if request.Source == "generated" && len(importedValue) != 0 {
@@ -178,30 +197,43 @@ func validateManagedTransactionRequest(request managedTransactionRequest, import
 	if request.Source == "import" && (len(importedValue) == 0 || len(importedValue) > managedTransactionMaxFrameBytes) {
 		return managedTransactionError("web_transaction_value_invalid")
 	}
+	if request.Source == "remove" && len(importedValue) != 0 {
+		return managedTransactionError("web_transaction_value_denied")
+	}
 	return nil
 }
 
 func (client *managedTransactionClient) Finalize(ctx context.Context, record managedOperationBridgeRecord, evidence managedExternalActivationEvidence) (managedTransactionResult, error) {
-	return client.control(ctx, record, "finalize", &evidence)
+	return client.control(ctx, record, "finalize", &evidence, nil)
+}
+
+func (client *managedTransactionClient) FinalizeRemoval(ctx context.Context, record managedOperationBridgeRecord, evidence managedExternalRemovalEvidence) (managedTransactionResult, error) {
+	return client.control(ctx, record, "finalize", nil, &evidence)
 }
 
 func (client *managedTransactionClient) Rollback(ctx context.Context, record managedOperationBridgeRecord) (managedTransactionResult, error) {
-	return client.control(ctx, record, "rollback", nil)
+	return client.control(ctx, record, "rollback", nil, nil)
 }
 
-func (client *managedTransactionClient) control(ctx context.Context, record managedOperationBridgeRecord, action string, evidence *managedExternalActivationEvidence) (managedTransactionResult, error) {
+func (client *managedTransactionClient) Purge(ctx context.Context, record managedOperationBridgeRecord) (managedTransactionResult, error) {
+	return client.control(ctx, record, "purge", nil, nil)
+}
+
+func (client *managedTransactionClient) control(ctx context.Context, record managedOperationBridgeRecord, action string, evidence *managedExternalActivationEvidence, removalEvidence *managedExternalRemovalEvidence) (managedTransactionResult, error) {
 	request := managedTransactionRequest{
-		Schema:                 managedTransactionRequestSchema,
-		SchemaVersion:          managedTransactionSchemaVersion,
-		Action:                 action,
-		OperationRef:           record.OperationRef,
-		OperationKind:          record.OperationKind,
-		Source:                 record.Source,
-		HostRef:                record.HostRef,
-		ServiceRef:             record.ServiceRef,
-		SlotRef:                record.SlotRef,
-		DeclarationFingerprint: record.DeclarationFingerprint,
-		ExternalEvidence:       evidence,
+		Schema:                  managedTransactionRequestSchema,
+		SchemaVersion:           managedTransactionSchemaVersion,
+		Action:                  action,
+		OperationRef:            record.OperationRef,
+		OperationKind:           record.OperationKind,
+		Source:                  record.Source,
+		HostRef:                 record.HostRef,
+		ServiceRef:              record.ServiceRef,
+		SlotRef:                 record.SlotRef,
+		DeclarationFingerprint:  record.DeclarationFingerprint,
+		PurgeNotBeforeUnixSecs:  record.PurgeNotBeforeUnixSeconds,
+		ExternalEvidence:        evidence,
+		ExternalRemovalEvidence: removalEvidence,
 	}
 	if err := validateManagedControlRequest(request); err != nil {
 		return managedTransactionResult{}, err
@@ -228,7 +260,8 @@ func (client *managedTransactionClient) control(ctx context.Context, record mana
 	}
 	if response.ExpectsValue ||
 		action == "finalize" && response.Phase != "completed" ||
-		action == "rollback" && response.Phase != "rolled_back" {
+		action == "rollback" && response.Phase != "rolled_back" ||
+		action == "purge" && response.Phase != "destroyed" {
 		return managedTransactionResult{}, managedTransactionError("web_transaction_incomplete")
 	}
 	return transactionResult(response), nil
@@ -242,14 +275,33 @@ func validateManagedControlRequest(request managedTransactionRequest) error {
 		!validManagedRef("svc_", request.ServiceRef) ||
 		!validManagedRef("slot_", request.SlotRef) ||
 		!validManagedRef("decl_", request.DeclarationFingerprint) ||
-		(request.OperationKind != "create" && request.OperationKind != "replace") ||
-		(request.Source != "generated" && request.Source != "import") ||
-		request.Action == "finalize" && !validManagedExternalEvidence(request.ExternalEvidence) ||
-		request.Action == "rollback" && request.ExternalEvidence != nil ||
-		request.Action != "finalize" && request.Action != "rollback" {
+		(request.OperationKind != "create" && request.OperationKind != "replace" && request.OperationKind != "remove") ||
+		(request.Source != "generated" && request.Source != "import" && request.Source != "remove") ||
+		(request.OperationKind == "remove") != (request.Source == "remove") ||
+		request.OperationKind == "remove" && request.PurgeNotBeforeUnixSecs <= 0 ||
+		request.OperationKind != "remove" && request.PurgeNotBeforeUnixSecs != 0 ||
+		request.Action == "finalize" && request.OperationKind != "remove" &&
+			(!validManagedExternalEvidence(request.ExternalEvidence) || request.ExternalRemovalEvidence != nil) ||
+		request.Action == "finalize" && request.OperationKind == "remove" &&
+			(request.ExternalEvidence != nil || !validManagedExternalRemovalEvidence(request.ExternalRemovalEvidence)) ||
+		(request.Action == "rollback" || request.Action == "purge") &&
+			(request.ExternalEvidence != nil || request.ExternalRemovalEvidence != nil) ||
+		request.Action == "purge" && request.OperationKind != "remove" ||
+		request.Action != "finalize" && request.Action != "rollback" && request.Action != "purge" {
 		return managedTransactionError("web_transaction_request_invalid")
 	}
 	return nil
+}
+
+func validManagedExternalRemovalEvidence(evidence *managedExternalRemovalEvidence) bool {
+	return evidence != nil &&
+		evidence.Generation > 0 &&
+		evidence.RuntimeAbsent &&
+		evidence.ProcessState == "stopped" &&
+		evidence.CacheState == "quarantined" &&
+		evidence.HeartbeatObservedAtUnixSeconds > 0 &&
+		evidence.ProcessObservedAtUnixSeconds > 0 &&
+		evidence.CacheObservedAtUnixSeconds > 0
 }
 
 func validManagedExternalEvidence(evidence *managedExternalActivationEvidence) bool {
@@ -371,7 +423,7 @@ func validManagedTransactionReason(reason string) bool {
 
 func validManagedTransactionPhase(phase string) bool {
 	switch phase {
-	case "denied", "preflighted", "prepared", "completed", "rolled_back":
+	case "denied", "preflighted", "prepared", "completed", "destroyed", "rolled_back":
 		return true
 	default:
 		return false

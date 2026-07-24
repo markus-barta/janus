@@ -30,6 +30,8 @@ const ENVELOPE_SCHEMA: &str = "inspr.janus.host-envelope.v1";
 const PAYLOAD_SCHEMA: &str = "inspr.janus.host-envelope-payload.v1";
 const STATE_SCHEMA: &str = "inspr.janus.host-envelope-state.v1";
 const CONTROL_SCHEMA: &str = "inspr.janus.host-envelope-control.v1";
+const QUARANTINE_CONTROL_SCHEMA: &str = "inspr.janus.host-envelope-quarantine-control.v1";
+const QUARANTINE_STATE_SCHEMA: &str = "inspr.janus.host-envelope-quarantine.v1";
 const SIGNATURE_DOMAIN: &[u8] = b"inspr.janus.host-envelope.signature.v1\0";
 const SCHEMA_VERSION: u8 = 1;
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
@@ -162,6 +164,20 @@ pub struct HostEnvelopeControlV1 {
     pub generation: u64,
 }
 
+/// Exact value-free control for reversible host-cache quarantine and purge.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostEnvelopeQuarantineControlV1 {
+    pub schema: String,
+    pub schema_version: u8,
+    pub operation_ref: String,
+    pub host_ref: String,
+    pub service_ref: String,
+    pub slot_ref: String,
+    pub generation: u64,
+    pub purge_not_before_unix_secs: u64,
+}
+
 /// Value-free result suitable for Pharos status forwarding.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -207,6 +223,22 @@ struct HostSlotStateV1 {
     previous: Option<CachedGenerationV1>,
     rollback_deadline_unix_secs: Option<u64>,
     committed: bool,
+    integrity_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct HostQuarantineStateV1 {
+    schema: String,
+    schema_version: u8,
+    operation_ref: String,
+    host_ref: String,
+    service_ref: String,
+    slot_ref: String,
+    generation: u64,
+    current: CachedGenerationV1,
+    purge_not_before_unix_secs: u64,
+    packet_sha256: String,
     integrity_hash: String,
 }
 
@@ -572,6 +604,265 @@ impl HostExecutor {
         ))
     }
 
+    /// Remove runtime plaintext and move the exact committed ciphertext into a
+    /// bounded, operation-bound recovery quarantine.
+    pub fn quarantine(
+        &self,
+        request: &HostEnvelopeQuarantineControlV1,
+    ) -> HostResult<HostExecutorOutcome> {
+        validate_quarantine_control(request, &self.config.host_ref)?;
+        let slot = self.quarantine_control_slot(request)?;
+        let slot_dir = self.slot_cache_dir(&slot.slot_ref);
+        let _lock = lock_slot(&slot_dir, self.config.owner_uid)?;
+        self.reconcile_interrupted_install(slot, SystemTime::now())?;
+        reject_partial_files(&slot_dir, self.config.owner_uid)?;
+        let quarantine_root = self.paths.cache_root.join(".quarantine");
+        ensure_private_dir(&quarantine_root, self.config.owner_uid)?;
+        let quarantine_slot_root = quarantine_root.join(&request.slot_ref);
+        ensure_private_dir(&quarantine_slot_root, self.config.owner_uid)?;
+        let quarantine_dir = quarantine_slot_root.join(&request.operation_ref);
+        ensure_private_dir(&quarantine_dir, self.config.owner_uid)?;
+        let quarantine_packet_path = quarantine_dir.join("current.envelope");
+        let quarantine_state_path = quarantine_dir.join("state.json");
+        let existing_quarantine =
+            load_optional_quarantine_state(&quarantine_state_path, self.config.owner_uid)?;
+        if let Some(existing) = existing_quarantine.as_ref() {
+            validate_quarantine_binding(existing, request)?;
+            validate_cached_packet(
+                &quarantine_packet_path,
+                &existing.current,
+                self.config.owner_uid,
+                "host_quarantine_packet_unavailable",
+            )?;
+        }
+
+        let state_path = slot_dir.join("state.json");
+        let current_path = slot_dir.join("current.envelope");
+        if existing_quarantine.is_none() {
+            let state = load_required_state(&state_path, self.config.owner_uid)?;
+            validate_quarantine_state(request, &state)?;
+            if !state.committed || state.previous.is_some() {
+                return Err(HostEnvelopeError::new(
+                    "host_quarantine_staged_generation_denied",
+                ));
+            }
+            let packet = read_private_regular(
+                &current_path,
+                MAX_PACKET_BYTES,
+                Some(self.config.owner_uid),
+                "host_cache_current_unavailable",
+            )?;
+            if sha256_hex(&packet) != state.current.packet_sha256 {
+                return Err(HostEnvelopeError::new("host_cache_current_mismatch"));
+            }
+            if entry_exists(
+                &quarantine_packet_path,
+                "host_quarantine_packet_unavailable",
+            )? {
+                let interrupted = read_private_regular(
+                    &quarantine_packet_path,
+                    MAX_PACKET_BYTES,
+                    Some(self.config.owner_uid),
+                    "host_quarantine_packet_unavailable",
+                )?;
+                if interrupted != packet {
+                    return Err(HostEnvelopeError::new("host_quarantine_conflict"));
+                }
+            } else {
+                atomic_write(
+                    &quarantine_packet_path,
+                    &packet,
+                    0o600,
+                    self.config.owner_uid,
+                    "host_quarantine_write_failed",
+                )?;
+            }
+            write_quarantine_state(
+                &quarantine_state_path,
+                HostQuarantineStateV1 {
+                    schema: QUARANTINE_STATE_SCHEMA.to_string(),
+                    schema_version: SCHEMA_VERSION,
+                    operation_ref: request.operation_ref.clone(),
+                    host_ref: request.host_ref.clone(),
+                    service_ref: request.service_ref.clone(),
+                    slot_ref: request.slot_ref.clone(),
+                    generation: request.generation,
+                    current: state.current,
+                    purge_not_before_unix_secs: request.purge_not_before_unix_secs,
+                    packet_sha256: sha256_hex(&packet),
+                    integrity_hash: String::new(),
+                },
+                self.config.owner_uid,
+            )?;
+        }
+
+        self.remove_runtime_file(slot)?;
+        remove_private_file_if_present(
+            &current_path,
+            self.config.owner_uid,
+            "host_cache_current_unavailable",
+        )?;
+        remove_private_file_if_present(
+            &slot_dir.join("previous.envelope"),
+            self.config.owner_uid,
+            "host_cache_previous_unavailable",
+        )?;
+        remove_private_file_if_present(
+            &state_path,
+            self.config.owner_uid,
+            "host_cache_state_unavailable",
+        )?;
+        sync_dir(&slot_dir, "host_cache_sync_failed")?;
+        Ok(outcome_from_quarantine_control(
+            "quarantine",
+            request,
+            "quarantined",
+            "host_envelope_quarantined",
+        ))
+    }
+
+    /// Explicitly recover a quarantined generation before its irreversible
+    /// boundary. Normal remove orchestration never calls this automatically.
+    pub fn restore_quarantine(
+        &self,
+        request: &HostEnvelopeQuarantineControlV1,
+        now: SystemTime,
+    ) -> HostResult<HostExecutorOutcome> {
+        validate_quarantine_control(request, &self.config.host_ref)?;
+        if unix_seconds(now)? >= request.purge_not_before_unix_secs {
+            return Err(HostEnvelopeError::new("host_quarantine_restore_expired"));
+        }
+        let slot = self.quarantine_control_slot(request)?;
+        let slot_dir = self.slot_cache_dir(&slot.slot_ref);
+        let _lock = lock_slot(&slot_dir, self.config.owner_uid)?;
+        let quarantine_dir = self.quarantine_dir(request);
+        let quarantine_state_path = quarantine_dir.join("state.json");
+        let state = load_required_quarantine_state(&quarantine_state_path, self.config.owner_uid)?;
+        validate_quarantine_binding(&state, request)?;
+        let packet_path = quarantine_dir.join("current.envelope");
+        let packet = read_private_regular(
+            &packet_path,
+            MAX_PACKET_BYTES,
+            Some(self.config.owner_uid),
+            "host_quarantine_packet_unavailable",
+        )?;
+        if sha256_hex(&packet) != state.packet_sha256 {
+            return Err(HostEnvelopeError::new("host_quarantine_packet_mismatch"));
+        }
+        if entry_exists(
+            &slot_dir.join("current.envelope"),
+            "host_cache_current_unavailable",
+        )? || entry_exists(&slot_dir.join("state.json"), "host_cache_state_unavailable")?
+        {
+            return Err(HostEnvelopeError::new(
+                "host_quarantine_restore_target_exists",
+            ));
+        }
+        let opened = self.open_packet(&packet, now)?;
+        self.resolve_slot(&opened.binding)?;
+        if opened.binding.generation != state.generation
+            || opened.packet_sha256 != state.packet_sha256
+        {
+            return Err(HostEnvelopeError::new("host_quarantine_packet_mismatch"));
+        }
+        atomic_write(
+            &slot_dir.join("current.envelope"),
+            &packet,
+            0o600,
+            self.config.owner_uid,
+            "host_cache_write_failed",
+        )?;
+        write_state(
+            &slot_dir.join("state.json"),
+            HostSlotStateV1 {
+                schema: STATE_SCHEMA.to_string(),
+                schema_version: SCHEMA_VERSION,
+                host_ref: request.host_ref.clone(),
+                service_ref: request.service_ref.clone(),
+                slot_ref: request.slot_ref.clone(),
+                current: state.current,
+                previous: None,
+                rollback_deadline_unix_secs: None,
+                committed: true,
+                integrity_hash: String::new(),
+            },
+            self.config.owner_uid,
+        )?;
+        self.materialize(slot, &opened.value)?;
+        remove_private_file_if_present(
+            &packet_path,
+            self.config.owner_uid,
+            "host_quarantine_packet_unavailable",
+        )?;
+        remove_private_file_if_present(
+            &quarantine_state_path,
+            self.config.owner_uid,
+            "host_quarantine_state_unavailable",
+        )?;
+        Ok(outcome_from_quarantine_control(
+            "restore-quarantine",
+            request,
+            "active",
+            "host_envelope_quarantine_restored",
+        ))
+    }
+
+    /// Permanently delete the quarantined host ciphertext after its reviewed
+    /// recovery window. The runtime and active cache must still be absent.
+    pub fn purge_quarantine(
+        &self,
+        request: &HostEnvelopeQuarantineControlV1,
+        now: SystemTime,
+    ) -> HostResult<HostExecutorOutcome> {
+        validate_quarantine_control(request, &self.config.host_ref)?;
+        if unix_seconds(now)? < request.purge_not_before_unix_secs {
+            return Err(HostEnvelopeError::new("host_quarantine_not_due"));
+        }
+        let slot = self.quarantine_control_slot(request)?;
+        let slot_dir = self.slot_cache_dir(&slot.slot_ref);
+        let _lock = lock_slot(&slot_dir, self.config.owner_uid)?;
+        if entry_exists(
+            &slot_dir.join("current.envelope"),
+            "host_cache_current_unavailable",
+        )? || entry_exists(&slot_dir.join("state.json"), "host_cache_state_unavailable")?
+            || entry_exists(&self.runtime_path(slot), "host_runtime_target_unsafe")?
+        {
+            return Err(HostEnvelopeError::new(
+                "host_quarantine_purge_active_target_denied",
+            ));
+        }
+        let quarantine_dir = self.quarantine_dir(request);
+        let quarantine_state_path = quarantine_dir.join("state.json");
+        let Some(state) =
+            load_optional_quarantine_state(&quarantine_state_path, self.config.owner_uid)?
+        else {
+            return Ok(outcome_from_quarantine_control(
+                "purge-quarantine",
+                request,
+                "destroyed",
+                "host_envelope_quarantine_purge_idempotent",
+            ));
+        };
+        validate_quarantine_binding(&state, request)?;
+        remove_private_file_if_present(
+            &quarantine_dir.join("current.envelope"),
+            self.config.owner_uid,
+            "host_quarantine_packet_unavailable",
+        )?;
+        remove_private_file_if_present(
+            &quarantine_state_path,
+            self.config.owner_uid,
+            "host_quarantine_state_unavailable",
+        )?;
+        sync_dir(&quarantine_dir, "host_quarantine_sync_failed")?;
+        Ok(outcome_from_quarantine_control(
+            "purge-quarantine",
+            request,
+            "destroyed",
+            "host_envelope_quarantine_purged",
+        ))
+    }
+
     /// Value-free cache status. It does not decrypt or read runtime files.
     pub fn status(&self) -> HostResult<Vec<HostExecutorOutcome>> {
         let mut results = Vec::with_capacity(self.config.slots.len());
@@ -611,17 +902,19 @@ impl HostExecutor {
                         value_returned: false,
                     });
                 }
-                None => results.push(HostExecutorOutcome {
-                    action: "status".to_string(),
-                    host_ref: self.config.host_ref.clone(),
-                    service_ref: Some(slot.service_ref.clone()),
-                    slot_ref: Some(slot.slot_ref.clone()),
-                    operation_ref: None,
-                    generation: None,
-                    phase: "missing".to_string(),
-                    reason_code: "host_envelope_missing".to_string(),
-                    value_returned: false,
-                }),
+                None => results.push(self.quarantine_status_for_slot(slot)?.unwrap_or_else(|| {
+                    HostExecutorOutcome {
+                        action: "status".to_string(),
+                        host_ref: self.config.host_ref.clone(),
+                        service_ref: Some(slot.service_ref.clone()),
+                        slot_ref: Some(slot.slot_ref.clone()),
+                        operation_ref: None,
+                        generation: None,
+                        phase: "missing".to_string(),
+                        reason_code: "host_envelope_missing".to_string(),
+                        value_returned: false,
+                    }
+                })),
             }
         }
         Ok(results)
@@ -774,6 +1067,113 @@ impl HostExecutor {
             .ok_or_else(|| HostEnvelopeError::new("host_envelope_slot_denied"))
     }
 
+    fn quarantine_control_slot(
+        &self,
+        request: &HostEnvelopeQuarantineControlV1,
+    ) -> HostResult<&HostSecretSlotV1> {
+        self.config
+            .slots
+            .iter()
+            .find(|slot| {
+                slot.service_ref == request.service_ref && slot.slot_ref == request.slot_ref
+            })
+            .ok_or_else(|| HostEnvelopeError::new("host_envelope_slot_denied"))
+    }
+
+    fn quarantine_dir(&self, request: &HostEnvelopeQuarantineControlV1) -> PathBuf {
+        self.paths
+            .cache_root
+            .join(".quarantine")
+            .join(&request.slot_ref)
+            .join(&request.operation_ref)
+    }
+
+    fn quarantine_status_for_slot(
+        &self,
+        slot: &HostSecretSlotV1,
+    ) -> HostResult<Option<HostExecutorOutcome>> {
+        let root = self
+            .paths
+            .cache_root
+            .join(".quarantine")
+            .join(&slot.slot_ref);
+        if !entry_exists(&root, "host_quarantine_state_unavailable")? {
+            return Ok(None);
+        }
+        validate_private_directory_metadata(
+            &root,
+            self.config.owner_uid,
+            "host_quarantine_state_unavailable",
+        )?;
+        let mut active = None;
+        for entry in fs::read_dir(&root)
+            .map_err(|_| HostEnvelopeError::new("host_quarantine_state_unavailable"))?
+        {
+            let entry =
+                entry.map_err(|_| HostEnvelopeError::new("host_quarantine_state_unavailable"))?;
+            let operation_ref = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| HostEnvelopeError::new("host_quarantine_state_invalid"))?;
+            if !valid_ref("op_", &operation_ref) {
+                return Err(HostEnvelopeError::new("host_quarantine_state_invalid"));
+            }
+            let operation_dir = entry.path();
+            validate_private_directory_metadata(
+                &operation_dir,
+                self.config.owner_uid,
+                "host_quarantine_state_invalid",
+            )?;
+            let state_path = operation_dir.join("state.json");
+            if !entry_exists(&state_path, "host_quarantine_state_invalid")? {
+                continue;
+            }
+            let state = load_required_quarantine_state(&state_path, self.config.owner_uid)?;
+            validate_quarantine_record(&state)?;
+            if state.operation_ref != operation_ref
+                || state.host_ref != self.config.host_ref
+                || state.service_ref != slot.service_ref
+                || state.slot_ref != slot.slot_ref
+                || state.generation == 0
+            {
+                return Err(HostEnvelopeError::new("host_quarantine_state_mismatch"));
+            }
+            validate_cached_packet(
+                &operation_dir.join("current.envelope"),
+                &state.current,
+                self.config.owner_uid,
+                "host_quarantine_packet_unavailable",
+            )?;
+            if active.is_some() {
+                return Err(HostEnvelopeError::new("host_quarantine_conflict"));
+            }
+            active = Some(HostExecutorOutcome {
+                action: "status".to_string(),
+                host_ref: self.config.host_ref.clone(),
+                service_ref: Some(slot.service_ref.clone()),
+                slot_ref: Some(slot.slot_ref.clone()),
+                operation_ref: Some(state.operation_ref),
+                generation: Some(state.generation),
+                phase: "quarantined".to_string(),
+                reason_code: "host_envelope_quarantine_recoverable".to_string(),
+                value_returned: false,
+            });
+        }
+        Ok(active)
+    }
+
+    fn runtime_path(&self, slot: &HostSecretSlotV1) -> PathBuf {
+        self.paths
+            .runtime_root
+            .join(&slot.service_ref)
+            .join(format!("{}.env", slot.slot_ref))
+    }
+
+    fn remove_runtime_file(&self, slot: &HostSecretSlotV1) -> HostResult<()> {
+        let target = self.runtime_path(slot);
+        remove_private_file_if_present(&target, self.config.owner_uid, "host_runtime_target_unsafe")
+    }
+
     fn slot_cache_dir(&self, slot_ref: &str) -> PathBuf {
         self.paths.cache_root.join(slot_ref)
     }
@@ -795,20 +1195,7 @@ impl HostExecutor {
 
     fn remove_runtime_files(&self) -> HostResult<()> {
         for slot in &self.config.slots {
-            let target = self
-                .paths
-                .runtime_root
-                .join(&slot.service_ref)
-                .join(format!("{}.env", slot.slot_ref));
-            if entry_exists(&target, "host_runtime_target_unsafe")? {
-                validate_private_regular_metadata(
-                    &target,
-                    self.config.owner_uid,
-                    "host_runtime_target_unsafe",
-                )?;
-                fs::remove_file(&target)
-                    .map_err(|_| HostEnvelopeError::new("host_runtime_remove_failed"))?;
-            }
+            self.remove_runtime_file(slot)?;
         }
         Ok(())
     }
@@ -1024,6 +1411,74 @@ fn validate_control_state(
         || state.current.generation != request.generation
     {
         return Err(HostEnvelopeError::new("host_envelope_control_mismatch"));
+    }
+    Ok(())
+}
+
+fn validate_quarantine_control(
+    request: &HostEnvelopeQuarantineControlV1,
+    host_ref: &str,
+) -> HostResult<()> {
+    if request.schema != QUARANTINE_CONTROL_SCHEMA
+        || request.schema_version != SCHEMA_VERSION
+        || request.host_ref != host_ref
+        || !valid_ref("op_", &request.operation_ref)
+        || !valid_ref("svc_", &request.service_ref)
+        || !valid_ref("slot_", &request.slot_ref)
+        || request.generation == 0
+        || request.purge_not_before_unix_secs == 0
+    {
+        return Err(HostEnvelopeError::new("host_quarantine_control_invalid"));
+    }
+    Ok(())
+}
+
+fn validate_quarantine_state(
+    request: &HostEnvelopeQuarantineControlV1,
+    state: &HostSlotStateV1,
+) -> HostResult<()> {
+    if state.host_ref != request.host_ref
+        || state.service_ref != request.service_ref
+        || state.slot_ref != request.slot_ref
+        || state.current.generation != request.generation
+    {
+        return Err(HostEnvelopeError::new("host_quarantine_control_mismatch"));
+    }
+    Ok(())
+}
+
+fn validate_quarantine_binding(
+    state: &HostQuarantineStateV1,
+    request: &HostEnvelopeQuarantineControlV1,
+) -> HostResult<()> {
+    validate_quarantine_record(state)?;
+    if state.operation_ref != request.operation_ref
+        || state.host_ref != request.host_ref
+        || state.service_ref != request.service_ref
+        || state.slot_ref != request.slot_ref
+        || state.generation != request.generation
+        || state.purge_not_before_unix_secs != request.purge_not_before_unix_secs
+        || state.current.generation != request.generation
+    {
+        return Err(HostEnvelopeError::new("host_quarantine_state_mismatch"));
+    }
+    Ok(())
+}
+
+fn validate_quarantine_record(state: &HostQuarantineStateV1) -> HostResult<()> {
+    if state.schema != QUARANTINE_STATE_SCHEMA
+        || state.schema_version != SCHEMA_VERSION
+        || !valid_ref("op_", &state.operation_ref)
+        || !valid_ref("host_", &state.host_ref)
+        || !valid_ref("svc_", &state.service_ref)
+        || !valid_ref("slot_", &state.slot_ref)
+        || state.generation == 0
+        || state.purge_not_before_unix_secs == 0
+        || state.current.generation != state.generation
+        || state.packet_sha256 != state.current.packet_sha256
+        || !validate_cached_generation(&state.current)
+    {
+        return Err(HostEnvelopeError::new("host_quarantine_state_mismatch"));
     }
     Ok(())
 }
@@ -1272,6 +1727,21 @@ fn ensure_private_dir(path: &Path, owner_uid: u32) -> HostResult<()> {
     Ok(())
 }
 
+fn validate_private_directory_metadata(
+    path: &Path,
+    owner_uid: u32,
+    reason: &'static str,
+) -> HostResult<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| HostEnvelopeError::new(reason))?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != owner_uid
+        || metadata.mode() & 0o777 != 0o700
+    {
+        return Err(HostEnvelopeError::new(reason));
+    }
+    Ok(())
+}
+
 fn atomic_write(
     path: &Path,
     bytes: &[u8],
@@ -1388,6 +1858,59 @@ fn write_state(path: &Path, mut state: HostSlotStateV1, owner_uid: u32) -> HostR
     )
 }
 
+fn write_quarantine_state(
+    path: &Path,
+    mut state: HostQuarantineStateV1,
+    owner_uid: u32,
+) -> HostResult<()> {
+    state.integrity_hash.clear();
+    state.integrity_hash = quarantine_state_integrity(&state)?;
+    let raw = serde_json::to_vec(&state)
+        .map_err(|_| HostEnvelopeError::new("host_quarantine_state_invalid"))?;
+    atomic_write(
+        path,
+        &raw,
+        0o600,
+        owner_uid,
+        "host_quarantine_state_write_failed",
+    )
+}
+
+fn load_optional_quarantine_state(
+    path: &Path,
+    owner_uid: u32,
+) -> HostResult<Option<HostQuarantineStateV1>> {
+    if !entry_exists(path, "host_quarantine_state_invalid")? {
+        return Ok(None);
+    }
+    load_required_quarantine_state(path, owner_uid).map(Some)
+}
+
+fn load_required_quarantine_state(
+    path: &Path,
+    owner_uid: u32,
+) -> HostResult<HostQuarantineStateV1> {
+    let raw = read_private_regular(
+        path,
+        MAX_CONFIG_BYTES,
+        Some(owner_uid),
+        "host_quarantine_state_invalid",
+    )?;
+    let state: HostQuarantineStateV1 = decode_strict_json(&raw, "host_quarantine_state_invalid")?;
+    if state.integrity_hash != quarantine_state_integrity(&state)? {
+        return Err(HostEnvelopeError::new("host_quarantine_state_tampered"));
+    }
+    Ok(state)
+}
+
+fn quarantine_state_integrity(state: &HostQuarantineStateV1) -> HostResult<String> {
+    let mut unsigned = state.clone();
+    unsigned.integrity_hash.clear();
+    let raw = serde_json::to_vec(&unsigned)
+        .map_err(|_| HostEnvelopeError::new("host_quarantine_state_invalid"))?;
+    Ok(sha256_hex(&raw))
+}
+
 fn load_optional_state(path: &Path, owner_uid: u32) -> HostResult<Option<HostSlotStateV1>> {
     if !entry_exists(path, "host_cache_state_invalid")? {
         return Ok(None);
@@ -1437,6 +1960,22 @@ fn cached_generation(binding: &HostEnvelopeBindingV1, packet_sha256: &str) -> Ca
     }
 }
 
+fn remove_private_file_if_present(
+    path: &Path,
+    owner_uid: u32,
+    reason: &'static str,
+) -> HostResult<()> {
+    if !entry_exists(path, reason)? {
+        return Ok(());
+    }
+    validate_private_regular_metadata(path, owner_uid, reason)?;
+    fs::remove_file(path).map_err(|_| HostEnvelopeError::new(reason))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| HostEnvelopeError::new(reason))?;
+    sync_dir(parent, reason)
+}
+
 fn outcome(
     action: &str,
     binding: &HostEnvelopeBindingV1,
@@ -1450,6 +1989,25 @@ fn outcome(
         slot_ref: Some(binding.slot_ref.clone()),
         operation_ref: Some(binding.operation_ref.clone()),
         generation: Some(binding.generation),
+        phase: phase.to_string(),
+        reason_code: reason_code.to_string(),
+        value_returned: false,
+    }
+}
+
+fn outcome_from_quarantine_control(
+    action: &str,
+    request: &HostEnvelopeQuarantineControlV1,
+    phase: &str,
+    reason_code: &str,
+) -> HostExecutorOutcome {
+    HostExecutorOutcome {
+        action: action.to_string(),
+        host_ref: request.host_ref.clone(),
+        service_ref: Some(request.service_ref.clone()),
+        slot_ref: Some(request.slot_ref.clone()),
+        operation_ref: Some(request.operation_ref.clone()),
+        generation: Some(request.generation),
         phase: phase.to_string(),
         reason_code: reason_code.to_string(),
         value_returned: false,
@@ -1544,6 +2102,11 @@ pub fn read_bounded_input<R: Read>(reader: &mut R, maximum: usize) -> HostResult
 /// Parse a strict control request.
 pub fn parse_control(raw: &[u8]) -> HostResult<HostEnvelopeControlV1> {
     decode_strict_json(raw, "host_envelope_control_invalid")
+}
+
+/// Parse a strict quarantine/purge control request.
+pub fn parse_quarantine_control(raw: &[u8]) -> HostResult<HostEnvelopeQuarantineControlV1> {
+    decode_strict_json(raw, "host_quarantine_control_invalid")
 }
 
 /// Maximum accepted install packet size.

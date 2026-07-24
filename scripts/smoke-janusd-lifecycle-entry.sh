@@ -49,6 +49,8 @@ web_catalog="${runtime}/web-transaction-catalog.json"
 web_signing_key="${runtime}/web-signing-key.json"
 web_host_identity="${runtime}/web-host-ed25519"
 web_outbox="${runtime}/web-outbox"
+web_tombstones="${runtime}/web-tombstones"
+web_removal_deadline_file="${runtime}/web-removal-deadline"
 web_socket="${socket_root}/tx.sock"
 web_log="${runtime}/web-transaction.log"
 web_abort_ready="${runtime}/web-abort-ready"
@@ -57,8 +59,10 @@ web_canary="SENSITIVE_WEB_TRANSACTION_CANARY_9d3e"
 web_failed_replacement_canary="SENSITIVE_WEB_REPLACEMENT_ROLLBACK_CANARY_62a1"
 web_replacement_canary="SENSITIVE_WEB_REPLACEMENT_SUCCESS_CANARY_b817"
 
-mkdir -p "${runtime}" "${store_dir}" "${state_dir}" "${audit_dir}" "${web_outbox}"
-chmod 700 "${runtime}" "${store_dir}" "${state_dir}" "${audit_dir}" "${web_outbox}"
+mkdir -p "${runtime}" "${store_dir}" "${state_dir}" "${audit_dir}" "${web_outbox}" \
+  "${web_tombstones}"
+chmod 700 "${runtime}" "${store_dir}" "${state_dir}" "${audit_dir}" "${web_outbox}" \
+  "${web_tombstones}"
 : >"${log}"
 : >"${web_log}"
 chmod 600 "${log}" "${web_log}"
@@ -335,10 +339,13 @@ generated_replace_entry = create_entry | {
         "source": {"mode": "generated", "alphabet": "url_safe", "length": 48},
     },
 }
+remove_entry = create_entry | {
+    "operation_kind": "remove",
+}
 catalog = {
     "schema": "inspr.janus.managed-web-transaction-catalog.v2",
     "schema_version": 2,
-    "entries": [create_entry, replace_entry, generated_replace_entry],
+    "entries": [create_entry, replace_entry, generated_replace_entry, remove_entry],
 }
 pathlib.Path(os.environ["WEB_CATALOG"]).write_text(
     json.dumps(catalog, indent=2) + "\n", encoding="utf-8"
@@ -418,6 +425,7 @@ export JANUS_MANAGED_WEB_TRANSACTION_SOCKET="${web_socket}"
 export JANUS_MANAGED_WEB_TRANSACTION_CATALOG_FILE="${web_catalog}"
 export JANUS_MANAGED_WEB_TRANSACTION_ALLOWED_UID
 JANUS_MANAGED_WEB_TRANSACTION_ALLOWED_UID="$(id -u)"
+export JANUS_LIFECYCLE_TOMBSTONE_DIR="${web_tombstones}"
 
 start_web_daemon() {
   "${janusd_web_bin}" >>"${web_log}" 2>&1 &
@@ -809,6 +817,179 @@ chmod 600 "${web_replacement_decrypted}"
 [ "$(find "${store_dir}" -type f -name '*.rollback.*' -print -quit)" = "" ] ||
   fail "terminal replacement retained central rollback material"
 
+WEB_SOCKET="${web_socket}" REMOVAL_DEADLINE_FILE="${web_removal_deadline_file}" python3 - <<'PY'
+import json
+import os
+import socket
+import struct
+import time
+
+def transact(request):
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    peer.connect(os.environ["WEB_SOCKET"])
+    body = json.dumps(request, separators=(",", ":")).encode()
+    peer.sendall(struct.pack(">I", len(body)) + body)
+    header = peer.recv(4)
+    if len(header) != 4:
+        raise SystemExit("removal response header truncated")
+    size = struct.unpack(">I", header)[0]
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = peer.recv(remaining)
+        if not chunk:
+            raise SystemExit("removal response truncated")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    peer.close()
+    response = json.loads(b"".join(chunks))
+    if response["value_returned"] is not False or response["expects_value"]:
+        raise SystemExit("removal response admitted or returned value bytes")
+    return response
+
+base = {
+    "schema": "inspr.janus.managed-web-transaction-request.v2",
+    "schema_version": 2,
+    "operation_kind": "remove",
+    "source": "remove",
+    "host_ref": "host_0123456789abcdef",
+    "service_ref": "svc_0123456789abcdef",
+    "slot_ref": "slot_0123456789abcdef",
+    "declaration_fingerprint": "decl_0123456789abcdef",
+    "external_evidence": None,
+    "external_removal_evidence": None,
+}
+
+# Cancellation is explicit and available only before quarantine.
+cancel = base | {
+    "action": "prepare",
+    "operation_ref": "op_webremovecancel1",
+    "purge_not_before_unix_secs": int(time.time()) + 300,
+}
+prepared_cancel = transact(cancel)
+if prepared_cancel["phase"] != "prepared" or prepared_cancel["generation"] != 4:
+    raise SystemExit("pre-quarantine removal cancellation fixture did not bind active generation 4")
+rolled_back = transact(cancel | {"action": "rollback"})
+if rolled_back["phase"] != "rolled_back" or rolled_back["generation"] != 4:
+    raise SystemExit("pre-quarantine removal did not restore active delivery")
+
+# Leave a second prepared removal across a daemon restart. The restart must
+# preserve it rather than silently restoring or discarding it.
+deadline = int(time.time()) + 10
+remove = base | {
+    "action": "prepare",
+    "operation_ref": "op_webremovefinal01",
+    "purge_not_before_unix_secs": deadline,
+}
+prepared = transact(remove)
+if prepared["phase"] != "prepared" or prepared["generation"] != 4:
+    raise SystemExit("removal targeted a failed journal generation instead of active generation 4")
+open(os.environ["REMOVAL_DEADLINE_FILE"], "w", encoding="utf-8").write(str(deadline) + "\n")
+PY
+
+grep -F 'lifecycle = "disabled"' "${metadata}" >/dev/null ||
+  fail "prepared removal did not revoke active delivery"
+[ -f "${web_ciphertext}" ] || fail "prepared removal deleted ciphertext before host absence proof"
+
+kill "${web_daemon_pid}"
+wait "${web_daemon_pid}" >/dev/null 2>&1 || true
+web_daemon_pid=""
+start_web_daemon
+
+WEB_SOCKET="${web_socket}" REMOVAL_DEADLINE_FILE="${web_removal_deadline_file}" python3 - <<'PY'
+import json
+import os
+import socket
+import struct
+import time
+
+def transact(request):
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    peer.connect(os.environ["WEB_SOCKET"])
+    body = json.dumps(request, separators=(",", ":")).encode()
+    peer.sendall(struct.pack(">I", len(body)) + body)
+    header = peer.recv(4)
+    if len(header) != 4:
+        raise SystemExit("removal response header truncated")
+    size = struct.unpack(">I", header)[0]
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = peer.recv(remaining)
+        if not chunk:
+            raise SystemExit("removal response truncated")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    peer.close()
+    response = json.loads(b"".join(chunks))
+    if response["value_returned"] is not False or response["expects_value"]:
+        raise SystemExit("removal control returned or requested value bytes")
+    return response
+
+deadline = int(open(os.environ["REMOVAL_DEADLINE_FILE"], encoding="utf-8").read())
+base = {
+    "schema": "inspr.janus.managed-web-transaction-request.v2",
+    "schema_version": 2,
+    "operation_ref": "op_webremovefinal01",
+    "operation_kind": "remove",
+    "source": "remove",
+    "host_ref": "host_0123456789abcdef",
+    "service_ref": "svc_0123456789abcdef",
+    "slot_ref": "slot_0123456789abcdef",
+    "declaration_fingerprint": "decl_0123456789abcdef",
+    "purge_not_before_unix_secs": deadline,
+    "external_evidence": None,
+    "external_removal_evidence": None,
+}
+resumed = transact(base | {"action": "prepare"})
+if resumed["phase"] != "prepared" or resumed["generation"] != 4:
+    raise SystemExit("daemon restart did not preserve the exact prepared removal")
+
+observed = int(time.time())
+finalize = base | {
+    "action": "finalize",
+    "external_removal_evidence": {
+        "generation": 4,
+        "runtime_absent": True,
+        "process_state": "stopped",
+        "cache_state": "quarantined",
+        "heartbeat_observed_at_unix_secs": observed,
+        "process_observed_at_unix_secs": observed,
+        "cache_observed_at_unix_secs": observed,
+    },
+}
+completed = transact(finalize)
+if completed["phase"] != "completed" or completed["generation"] != 4:
+    raise SystemExit("fresh exact absence proof did not quarantine the central ciphertext")
+
+rollback = transact(base | {"action": "rollback"})
+if rollback["phase"] != "denied":
+    raise SystemExit("post-quarantine removal rollback crossed the irreversible boundary")
+
+early = transact(base | {"action": "purge"})
+if early["phase"] != "denied" or early["reason_code"] != "entry_removal_purge_not_due":
+    raise SystemExit("removal purge did not enforce the recovery deadline")
+time.sleep(max(0.0, deadline - time.time() + 0.1))
+destroyed = transact(base | {"action": "purge"})
+if destroyed["phase"] != "destroyed" or destroyed["generation"] != 4:
+    raise SystemExit("due removal did not reach durable destroyed state")
+replayed = transact(base | {"action": "purge"})
+if replayed["phase"] != "destroyed" or replayed["generation"] != 4:
+    raise SystemExit("destroyed removal replay was not idempotent")
+PY
+
+[ ! -e "${web_ciphertext}" ] || fail "destroyed removal retained active ciphertext"
+[ "$(find "${store_dir}" -type f -name '*.quarantine.*' -print -quit)" = "" ] ||
+  fail "destroyed removal retained central quarantine material"
+grep -F 'lifecycle = "destroyed"' "${metadata}" >/dev/null ||
+  fail "destroyed removal did not persist lifecycle metadata"
+[ "$(find "${web_tombstones}" -type f -name '*.json' -print -quit)" != "" ] ||
+  fail "destroyed removal did not persist a retention tombstone"
+jq -e \
+  '.phase == "destroyed" and .operation_kind == "remove" and .generation == 4 and (.quarantine_id | type == "string")' \
+  "${state_dir}/webtx_webremovefinal01.json" >/dev/null ||
+  fail "destroyed removal journal lost its exact quarantine binding"
+
 for action in secret.lifecycle consumer.validate consumer.reload; do
   grep -F "\"action\":\"${action}\"" "${audit_path}" >/dev/null ||
     fail "entry audit evidence missing ${action}"
@@ -828,4 +1009,4 @@ for canary in "${web_failed_replacement_canary}" "${web_replacement_canary}"; do
   fi
 done
 
-printf 'ok: lifecycle-entry smoke passed create, imported/generated replacement, restart-safe rollback, monotonic commit, duplicate idempotency, and value-free evidence value_returned=false\n'
+printf 'ok: lifecycle-entry smoke passed create, imported/generated replacement, restart-safe rollback/removal, active-generation targeting, bounded quarantine/purge, duplicate idempotency, and value-free evidence value_returned=false\n'

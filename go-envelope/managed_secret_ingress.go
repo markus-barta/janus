@@ -100,10 +100,15 @@ func (app *App) handleManagedSetup(w http.ResponseWriter, r *http.Request) {
 	stepUpReady := proofOK &&
 		proof.IntentRef == intentRef &&
 		proof.HumanSessionRef == managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject) &&
-		containsManagedSource(inspection.Intent.AllowedSources, proof.Source)
+		(containsManagedSource(inspection.Intent.AllowedSources, proof.Source) ||
+			inspection.Intent.OperationKind == "remove" && proof.Source == "remove")
 	selectedSource := proof.Source
 	if !stepUpReady {
-		selectedSource = preferredManagedSource(inspection.Intent.AllowedSources)
+		if inspection.Intent.OperationKind == "remove" {
+			selectedSource = "remove"
+		} else {
+			selectedSource = preferredManagedSource(inspection.Intent.AllowedSources)
+		}
 	}
 	app.audit(r, "managed_secret.setup.view", "allowed", session.Subject, "value-free setup context")
 	renderTemplateStatus(w, app.templates, "managed_secret_setup", http.StatusOK, managedSetupPageData{
@@ -157,7 +162,9 @@ func (app *App) handleManagedSetupStepUp(w http.ResponseWriter, r *http.Request)
 		app.renderSafeFailure(w, r, managedIntentHTTPStatus(err), "setup_link_unavailable", "This setup request is unavailable or expired. Start again from Pharos.", nil)
 		return
 	}
-	if !containsManagedSource(inspection.Intent.AllowedSources, source) {
+	if inspection.Intent.OperationKind == "remove" && source != "remove" ||
+		inspection.Intent.OperationKind != "remove" &&
+			!containsManagedSource(inspection.Intent.AllowedSources, source) {
 		app.audit(r, "managed_secret.step_up.start", "denied", session.Subject, "source unavailable")
 		app.renderSafeFailure(w, r, http.StatusForbidden, "source_not_allowed", "That setup choice is not allowed for this service. Start again from Pharos.", nil)
 		return
@@ -260,7 +267,7 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 	importedValue, err := decodeManagedFormValueInPlace(rawValue)
 	if err != nil ||
 		accepted.Source == "import" && len(importedValue) == 0 ||
-		accepted.Source == "generated" && len(importedValue) != 0 {
+		(accepted.Source == "generated" || accepted.Source == "remove") && len(importedValue) != 0 {
 		app.clearManagedStepUpProofCookies(w)
 		app.audit(r, "managed_secret.execute", "denied", session.Subject, "value shape rejected")
 		app.renderSafeFailure(w, r, http.StatusBadRequest, "value_not_accepted", "The value could not be accepted. Start again from Pharos.", nil)

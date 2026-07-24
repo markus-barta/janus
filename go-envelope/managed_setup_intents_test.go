@@ -32,12 +32,20 @@ type managedTestDeclaration struct {
 }
 
 func (declaration managedTestDeclaration) Resolve(intent managedSetupIntent) (managedDeclarationContext, error) {
+	bindingState := "required"
+	detachProfileRef := ""
+	if intent.OperationKind == "remove" {
+		bindingState = "detached"
+		detachProfileRef = "detach_0123456789abcdef"
+	}
 	return managedDeclarationContext{
-		ServiceLabel:   "Canary service",
-		SlotLabel:      "Admin password",
-		ConsumerKind:   "managed_service",
-		DeliveryKind:   "private_env_file",
-		AllowedSources: append([]string(nil), intent.AllowedSources...),
+		ServiceLabel:     "Canary service",
+		SlotLabel:        "Admin password",
+		ConsumerKind:     "managed_service",
+		DeliveryKind:     "private_env_file",
+		BindingState:     bindingState,
+		DetachProfileRef: detachProfileRef,
+		AllowedSources:   append([]string(nil), intent.AllowedSources...),
 	}, declaration.err
 }
 
@@ -457,6 +465,32 @@ func TestManagedManifestResolverRecomputesFingerprintAndFailsClosed(t *testing.T
 	}
 	if _, err := resolver.Resolve(intent); err == nil || err.Error() != "managed_intent_declaration_unavailable" {
 		t.Fatalf("fingerprint drift must fail closed, got %v", err)
+	}
+}
+
+func TestManagedV2DetachRequiresNoCreationSources(t *testing.T) {
+	slot := managedManifestSlot{
+		BindingState: "detached",
+		Detach: managedManifestDetach{
+			Method:     "compose_stop_and_verify",
+			ProfileRef: "detach_8a0f4e271c93",
+		},
+	}
+	if !validManagedDetachPolicy(managedManifestCurrentVersion, slot) ||
+		!validManagedSlotSourcePolicy(managedManifestCurrentVersion, slot) {
+		t.Fatal("reviewed detached slot with no creation sources was rejected")
+	}
+	slot.AllowedSources = []string{"generated"}
+	if validManagedSlotSourcePolicy(managedManifestCurrentVersion, slot) {
+		t.Fatal("detached slot retained a creation source")
+	}
+	slot.BindingState = "required"
+	if !validManagedSlotSourcePolicy(managedManifestCurrentVersion, slot) {
+		t.Fatal("required slot lost its explicit creation source")
+	}
+	slot.AllowedSources = nil
+	if validManagedSlotSourcePolicy(managedManifestCurrentVersion, slot) {
+		t.Fatal("required slot admitted an empty creation policy")
 	}
 }
 

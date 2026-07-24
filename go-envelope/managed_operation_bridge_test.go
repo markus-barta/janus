@@ -22,6 +22,7 @@ type fakeManagedTransactionBackend struct {
 	executeHook   func(managedAcceptedIntent, []byte)
 	finalizeCount int
 	rollbackCount int
+	purgeCount    int
 }
 
 func (fake *fakeManagedTransactionBackend) Execute(_ context.Context, accepted managedAcceptedIntent, value []byte) (managedTransactionResult, error) {
@@ -43,6 +44,18 @@ func (fake *fakeManagedTransactionBackend) Finalize(_ context.Context, record ma
 	}, nil
 }
 
+func (fake *fakeManagedTransactionBackend) FinalizeRemoval(_ context.Context, record managedOperationBridgeRecord, evidence managedExternalRemovalEvidence) (managedTransactionResult, error) {
+	fake.finalizeCount++
+	return managedTransactionResult{
+		OperationRef: record.OperationRef,
+		SecretRef:    "sec_0123456789abcdef",
+		Mode:         record.Source,
+		Generation:   evidence.Generation,
+		Phase:        "completed",
+		ReasonCode:   "entry_removal_quarantined",
+	}, nil
+}
+
 func (fake *fakeManagedTransactionBackend) Rollback(_ context.Context, record managedOperationBridgeRecord) (managedTransactionResult, error) {
 	fake.rollbackCount++
 	return managedTransactionResult{
@@ -52,6 +65,18 @@ func (fake *fakeManagedTransactionBackend) Rollback(_ context.Context, record ma
 		Generation:   record.Generation,
 		Phase:        "rolled_back",
 		ReasonCode:   "entry_rollback_ok",
+	}, nil
+}
+
+func (fake *fakeManagedTransactionBackend) Purge(_ context.Context, record managedOperationBridgeRecord) (managedTransactionResult, error) {
+	fake.purgeCount++
+	return managedTransactionResult{
+		OperationRef: record.OperationRef,
+		SecretRef:    "sec_0123456789abcdef",
+		Mode:         record.Source,
+		Generation:   record.Generation,
+		Phase:        "destroyed",
+		ReasonCode:   "entry_removal_destroyed",
 	}, nil
 }
 
@@ -641,5 +666,272 @@ func TestManagedBrowserImportRegistersHostDeliveryAndFinalizesWithoutValueReturn
 	})
 	if err != nil || result.Phase != "completed" || backend.finalizeCount != 1 {
 		t.Fatalf("fresh health did not finalize central activation: %#v %v", result, err)
+	}
+}
+
+func TestManagedBrowserRemovalCarriesNoValueQuarantinesAndPurgesOnlyWhenDue(t *testing.T) {
+	const forbiddenCanary = "SENSITIVE_REMOVAL_VALUE_MUST_NEVER_EXIST_363"
+	app, _, _, session, sessionCookie, proofCookie := managedIngressFixture(t, "remove")
+	root := t.TempDir()
+	store, err := newManagedOperationBridgeStore(filepath.Join(root, "bridge.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_800_000_000, 0).UTC()
+	deadline := now.Add(managedRemovalRecoveryWindow).Unix()
+	phase := "removal_pending"
+	var registeredBody []byte
+	statusServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPost {
+			var readErr error
+			registeredBody, readErr = io.ReadAll(request.Body)
+			if readErr != nil {
+				t.Error(readErr)
+			}
+		}
+		summary := managedPharosOperationSummary{
+			OperationRef:              managedTestOpRef,
+			OperationKind:             "remove",
+			HostRef:                   "host_0123456789abcdef",
+			ServiceRef:                "svc_0123456789abcdef",
+			SlotRef:                   "slot_0123456789abcdef",
+			DeclarationFingerprint:    "decl_0123456789abcdef",
+			Generation:                1,
+			PurgeNotBeforeUnixSeconds: deadline,
+			Phase:                     phase,
+			CreatedAtUnixSeconds:      now.Unix(),
+			UpdatedAtUnixSeconds:      now.Add(10 * time.Second).Unix(),
+			ValueReturned:             false,
+		}
+		if phase == "removed" {
+			summary.Removal = &managedPharosRemovalSummary{
+				Generation:                     1,
+				Outcome:                        "healthy",
+				HeartbeatObservedAtUnixSeconds: now.Add(9 * time.Second).Unix(),
+				ProcessObservedAtUnixSeconds:   now.Add(9 * time.Second).Unix(),
+				CacheObservedAtUnixSeconds:     now.Add(9 * time.Second).Unix(),
+				AcceptedAtUnixSeconds:          now.Add(10 * time.Second).Unix(),
+			}
+		}
+		response.Header().Set("Content-Type", "application/json")
+		if request.Method == http.MethodPost {
+			response.WriteHeader(http.StatusCreated)
+		}
+		_ = json.NewEncoder(response).Encode(managedPharosOperationStatus{
+			Schema:        managedOperationStatusSchema,
+			SchemaVersion: 1,
+			Operation:     summary,
+			ValueReturned: false,
+		})
+	}))
+	defer statusServer.Close()
+	pharos, err := newManagedPharosOperationClient(
+		statusServer.URL,
+		strings.Repeat("i", 32),
+		statusServer.Client(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valueObserved := false
+	backend := &fakeManagedTransactionBackend{
+		executeResult: managedTransactionResult{
+			OperationRef: managedTestOpRef,
+			SecretRef:    managedTestSecretRef,
+			Mode:         "remove",
+			Generation:   1,
+			Phase:        "prepared",
+			ReasonCode:   "entry_removal_prepared",
+		},
+		executeHook: func(accepted managedAcceptedIntent, value []byte) {
+			valueObserved = len(value) != 0 ||
+				accepted.Intent.OperationKind != "remove" ||
+				accepted.Source != "remove" ||
+				accepted.Context.BindingState != "detached" ||
+				accepted.Context.DetachProfileRef != "detach_0123456789abcdef"
+		},
+	}
+	bridge := &managedOperationBridge{
+		transaction: backend,
+		pharos:      pharos,
+		store:       store,
+		outboxDir:   filepath.Join(root, "outbox-does-not-exist"),
+		now:         func() time.Time { return now },
+	}
+	app.managedTxn = bridge
+	app.managedBridge = bridge
+	form := "csrf_token=" + app.csrfToken(session) +
+		"&intent_ref=" + managedTestIntentRef +
+		"&source=remove&secret_value="
+	request := managedRequest(
+		t,
+		app,
+		session,
+		sessionCookie,
+		proofCookie,
+		strings.NewReader(form),
+		int64(len(form)),
+	)
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || valueObserved {
+		t.Fatalf("value-free removal handoff failed: status=%d value_observed=%t", response.Code, valueObserved)
+	}
+	record, ok := store.get(managedTestOpRef)
+	if !ok ||
+		record.OperationKind != "remove" ||
+		record.Source != "remove" ||
+		record.DetachProfileRef != "detach_0123456789abcdef" ||
+		record.PurgeNotBeforeUnixSeconds != deadline ||
+		record.Phase != "registered" ||
+		record.ValueReturned {
+		t.Fatalf("removal was not durably and exactly bound: %#v", record)
+	}
+	for label, captured := range map[string][]byte{
+		"browser response": response.Body.Bytes(),
+		"Pharos request":   registeredBody,
+	} {
+		if strings.Contains(string(captured), forbiddenCanary) {
+			t.Fatalf("%s retained a forbidden removal value", label)
+		}
+	}
+	var ready managedOperationReadyRequest
+	if decodeStrictJSON(registeredBody, &ready) != nil ||
+		ready.OperationKind != "remove" ||
+		ready.PurgeNotBeforeUnixSeconds != deadline ||
+		ready.ValueReturned {
+		t.Fatalf("Pharos removal registration drifted: %#v", ready)
+	}
+	if _, err := bridge.packetForHost(managedTestOpRef, record.HostRef); err == nil {
+		t.Fatal("removal unexpectedly exposed a host packet")
+	}
+
+	phase = "removed"
+	result, err := bridge.reconcile(context.Background(), managedHostReconcileRequest{
+		Schema:        managedHostReconcileRequestSchema,
+		SchemaVersion: 1,
+		OperationRef:  managedTestOpRef,
+		HostRef:       record.HostRef,
+		Generation:    record.Generation,
+	})
+	if err != nil ||
+		result.Phase != "completed" ||
+		result.ValueReturned ||
+		backend.finalizeCount != 1 {
+		t.Fatalf("fresh removal evidence did not quarantine centrally: %#v %v", result, err)
+	}
+	quarantined, ok := store.get(managedTestOpRef)
+	if !ok || quarantined.Phase != "quarantined" {
+		t.Fatalf("removal quarantine was not persisted: %#v", quarantined)
+	}
+	if due := store.pendingPurge(deadline - 1); len(due) != 0 {
+		t.Fatalf("removal became purgeable before its deadline: %#v", due)
+	}
+	due := store.pendingPurge(deadline)
+	if len(due) != 1 || due[0].OperationRef != managedTestOpRef {
+		t.Fatalf("removal was not purgeable at its exact boundary: %#v", due)
+	}
+	purged, err := backend.Purge(context.Background(), due[0])
+	if err != nil || purged.Phase != "destroyed" || purged.ValueReturned {
+		t.Fatalf("due purge failed: %#v %v", purged, err)
+	}
+	if err := store.setPhase(managedTestOpRef, "destroyed", deadline); err != nil {
+		t.Fatal(err)
+	}
+	if backend.rollbackCount != 0 || backend.purgeCount != 1 {
+		t.Fatalf("removal used an unsafe recovery path: %#v", backend)
+	}
+
+	backend.executeResult = purged
+	replayed, err := bridge.Execute(context.Background(), managedAcceptedIntent{
+		Intent: managedSetupIntent{
+			OperationKind:          "remove",
+			HostRef:                record.HostRef,
+			ServiceRef:             record.ServiceRef,
+			SlotRef:                record.SlotRef,
+			DeclarationFingerprint: record.DeclarationFingerprint,
+		},
+		Source:       "remove",
+		OperationRef: record.OperationRef,
+		Context: managedDeclarationContext{
+			DeliveryProfileRef: record.DeliveryProfileRef,
+			ReloadProfileRef:   record.ReloadProfileRef,
+			HealthProfileRef:   record.HealthProfileRef,
+			BindingState:       "detached",
+			DetachProfileRef:   record.DetachProfileRef,
+		},
+	}, nil)
+	if err != nil || replayed.Phase != "destroyed" {
+		t.Fatalf("destroyed removal replay was not idempotent: %#v %v", replayed, err)
+	}
+}
+
+func TestManagedFailedRemovalRequiresReviewAndNeverRestoresAutomatically(t *testing.T) {
+	store, err := newManagedOperationBridgeStore(filepath.Join(t.TempDir(), "bridge.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := managedBridgeRecord("op_removefailure01")
+	record.OperationKind = "remove"
+	record.Source = "remove"
+	record.DetachProfileRef = "detach_0123456789abcdef"
+	record.PurgeNotBeforeUnixSeconds = 1_800_086_400
+	if err := store.putPrepared(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.setPhase(record.OperationRef, "registered", 1_800_000_001); err != nil {
+		t.Fatal(err)
+	}
+	statusServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(managedPharosOperationStatus{
+			Schema:        managedOperationStatusSchema,
+			SchemaVersion: 1,
+			Operation: managedPharosOperationSummary{
+				OperationRef:              record.OperationRef,
+				OperationKind:             record.OperationKind,
+				HostRef:                   record.HostRef,
+				ServiceRef:                record.ServiceRef,
+				SlotRef:                   record.SlotRef,
+				DeclarationFingerprint:    record.DeclarationFingerprint,
+				Generation:                record.Generation,
+				PurgeNotBeforeUnixSeconds: record.PurgeNotBeforeUnixSeconds,
+				Phase:                     "failed",
+				CreatedAtUnixSeconds:      record.CreatedAtUnixSeconds,
+				UpdatedAtUnixSeconds:      record.CreatedAtUnixSeconds + 10,
+				ValueReturned:             false,
+			},
+			ValueReturned: false,
+		})
+	}))
+	defer statusServer.Close()
+	pharos, err := newManagedPharosOperationClient(
+		statusServer.URL,
+		strings.Repeat("i", 32),
+		statusServer.Client(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &fakeManagedTransactionBackend{}
+	bridge := &managedOperationBridge{
+		transaction: backend,
+		pharos:      pharos,
+		store:       store,
+		now:         func() time.Time { return time.Unix(1_800_000_011, 0) },
+	}
+	_, err = bridge.reconcile(context.Background(), managedHostReconcileRequest{
+		Schema:        managedHostReconcileRequestSchema,
+		SchemaVersion: 1,
+		OperationRef:  record.OperationRef,
+		HostRef:       record.HostRef,
+		Generation:    record.Generation,
+	})
+	if err == nil || err.Error() != "managed_operation_removal_review_required" {
+		t.Fatalf("failed removal did not stop for review: %v", err)
+	}
+	review, ok := store.get(record.OperationRef)
+	if !ok || review.Phase != "review_required" || backend.rollbackCount != 0 {
+		t.Fatalf("failed removal was restored automatically: record=%#v backend=%#v", review, backend)
 	}
 }

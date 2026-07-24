@@ -6,8 +6,8 @@ use std::io::{self, Write};
 use std::time::SystemTime;
 
 use janus_host::{
-    maximum_control_bytes, maximum_packet_bytes, parse_control, read_bounded_input, HostExecutor,
-    HostExecutorOutcome,
+    maximum_control_bytes, maximum_packet_bytes, parse_control, parse_quarantine_control,
+    read_bounded_input, HostExecutor, HostExecutorOutcome,
 };
 
 fn main() {
@@ -50,6 +50,18 @@ fn run() -> Result<(), &'static str> {
             vec![executor
                 .rollback(&request, now)
                 .map_err(|error| error.reason_code())?]
+        }
+        "quarantine" | "restore-quarantine" | "purge-quarantine" => {
+            let raw = read_bounded_input(&mut io::stdin().lock(), maximum_control_bytes())
+                .map_err(|error| error.reason_code())?;
+            let request = parse_quarantine_control(&raw).map_err(|error| error.reason_code())?;
+            vec![match args[0].as_str() {
+                "quarantine" => executor.quarantine(&request),
+                "restore-quarantine" => executor.restore_quarantine(&request, now),
+                "purge-quarantine" => executor.purge_quarantine(&request, now),
+                _ => unreachable!("closed quarantine actions"),
+            }
+            .map_err(|error| error.reason_code())?]
         }
         "status" => executor.status().map_err(|error| error.reason_code())?,
         _ => return Err("host_executor_arguments_denied"),

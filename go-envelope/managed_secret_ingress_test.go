@@ -45,6 +45,12 @@ func (fake *fakeManagedIntentAuthority) Inspect(_ context.Context, intentRef, hu
 	if intentRef != fake.intent.IntentRef || humanSessionRef != fake.intent.HumanSessionRef {
 		return managedSetupInspection{}, managedIntentError("managed_intent_wrong_user")
 	}
+	bindingState := "required"
+	detachProfileRef := ""
+	if fake.intent.OperationKind == "remove" {
+		bindingState = "detached"
+		detachProfileRef = "detach_0123456789abcdef"
+	}
 	return managedSetupInspection{
 		Intent: fake.intent,
 		Context: managedDeclarationContext{
@@ -55,6 +61,8 @@ func (fake *fakeManagedIntentAuthority) Inspect(_ context.Context, intentRef, hu
 			DeliveryProfileRef: "delivery_2d7a0f63c951",
 			ReloadProfileRef:   "reload_65bc19f3a087",
 			HealthProfileRef:   "health_918d0ce7b4a2",
+			BindingState:       bindingState,
+			DetachProfileRef:   detachProfileRef,
 			AllowedSources:     append([]string(nil), fake.intent.AllowedSources...),
 		},
 	}, nil
@@ -71,8 +79,15 @@ func (fake *fakeManagedIntentAuthority) Consume(_ context.Context, intentRef, hu
 	if intentRef != fake.intent.IntentRef || humanSessionRef != fake.intent.HumanSessionRef {
 		return managedAcceptedIntent{}, managedIntentError("managed_intent_wrong_user")
 	}
-	if !containsManagedSource(fake.intent.AllowedSources, source) {
+	if fake.intent.OperationKind == "remove" && source != "remove" ||
+		fake.intent.OperationKind != "remove" && !containsManagedSource(fake.intent.AllowedSources, source) {
 		return managedAcceptedIntent{}, managedIntentError("managed_intent_source_denied")
+	}
+	bindingState := "required"
+	detachProfileRef := ""
+	if fake.intent.OperationKind == "remove" {
+		bindingState = "detached"
+		detachProfileRef = "detach_0123456789abcdef"
 	}
 	return managedAcceptedIntent{
 		Intent:       fake.intent,
@@ -86,6 +101,8 @@ func (fake *fakeManagedIntentAuthority) Consume(_ context.Context, intentRef, hu
 			DeliveryProfileRef: "delivery_2d7a0f63c951",
 			ReloadProfileRef:   "reload_65bc19f3a087",
 			HealthProfileRef:   "health_918d0ce7b4a2",
+			BindingState:       bindingState,
+			DetachProfileRef:   detachProfileRef,
 			AllowedSources:     append([]string(nil), fake.intent.AllowedSources...),
 		},
 	}, nil
@@ -162,6 +179,10 @@ func managedIngressFixture(t *testing.T, source string) (*App, *fakeManagedInten
 		IssuedAtUnixSeconds:    time.Now().UTC().Add(-time.Minute).Unix(),
 		ExpiresAtUnixSeconds:   time.Now().UTC().Add(time.Minute).Unix(),
 		ReturnTarget:           "pharos_service",
+	}
+	if source == "remove" {
+		intent.OperationKind = "remove"
+		intent.AllowedSources = nil
 	}
 	authority := &fakeManagedIntentAuthority{intent: intent}
 	executor := &fakeManagedTransactionExecutor{result: managedTransactionResult{

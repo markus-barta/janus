@@ -33,24 +33,27 @@ const (
 	managedHostOutboxMaxBytes          = int64(512 * 1024)
 	managedTokenGenerationMaxBytes     = int64(1024 * 1024)
 	managedTokenGenerationCurrentBytes = int64(65)
+	managedRemovalRecoveryWindow       = 24 * time.Hour
 )
 
 type managedOperationBridgeRecord struct {
-	OperationRef           string `json:"operation_ref"`
-	OperationKind          string `json:"operation_kind"`
-	Source                 string `json:"source"`
-	HostRef                string `json:"host_ref"`
-	ServiceRef             string `json:"service_ref"`
-	SlotRef                string `json:"slot_ref"`
-	DeclarationFingerprint string `json:"declaration_fingerprint"`
-	DeliveryProfileRef     string `json:"delivery_profile_ref"`
-	ReloadProfileRef       string `json:"reload_profile_ref"`
-	HealthProfileRef       string `json:"health_profile_ref"`
-	Generation             uint64 `json:"generation"`
-	Phase                  string `json:"phase"`
-	CreatedAtUnixSeconds   int64  `json:"created_at_unix_secs"`
-	UpdatedAtUnixSeconds   int64  `json:"updated_at_unix_secs"`
-	ValueReturned          bool   `json:"value_returned"`
+	OperationRef              string `json:"operation_ref"`
+	OperationKind             string `json:"operation_kind"`
+	Source                    string `json:"source"`
+	HostRef                   string `json:"host_ref"`
+	ServiceRef                string `json:"service_ref"`
+	SlotRef                   string `json:"slot_ref"`
+	DeclarationFingerprint    string `json:"declaration_fingerprint"`
+	DeliveryProfileRef        string `json:"delivery_profile_ref"`
+	ReloadProfileRef          string `json:"reload_profile_ref"`
+	HealthProfileRef          string `json:"health_profile_ref"`
+	DetachProfileRef          string `json:"detach_profile_ref,omitempty"`
+	Generation                uint64 `json:"generation"`
+	PurgeNotBeforeUnixSeconds int64  `json:"purge_not_before_unix_secs,omitempty"`
+	Phase                     string `json:"phase"`
+	CreatedAtUnixSeconds      int64  `json:"created_at_unix_secs"`
+	UpdatedAtUnixSeconds      int64  `json:"updated_at_unix_secs"`
+	ValueReturned             bool   `json:"value_returned"`
 }
 
 type managedOperationBridgeDocument struct {
@@ -81,16 +84,17 @@ type managedPharosOperationClient struct {
 }
 
 type managedOperationReadyRequest struct {
-	Schema                 string `json:"schema"`
-	SchemaVersion          int    `json:"schema_version"`
-	OperationRef           string `json:"operation_ref"`
-	OperationKind          string `json:"operation_kind"`
-	HostRef                string `json:"host_ref"`
-	ServiceRef             string `json:"service_ref"`
-	SlotRef                string `json:"slot_ref"`
-	DeclarationFingerprint string `json:"declaration_fingerprint"`
-	Generation             uint64 `json:"generation"`
-	ValueReturned          bool   `json:"value_returned"`
+	Schema                    string `json:"schema"`
+	SchemaVersion             int    `json:"schema_version"`
+	OperationRef              string `json:"operation_ref"`
+	OperationKind             string `json:"operation_kind"`
+	HostRef                   string `json:"host_ref"`
+	ServiceRef                string `json:"service_ref"`
+	SlotRef                   string `json:"slot_ref"`
+	DeclarationFingerprint    string `json:"declaration_fingerprint"`
+	Generation                uint64 `json:"generation"`
+	PurgeNotBeforeUnixSeconds int64  `json:"purge_not_before_unix_secs,omitempty"`
+	ValueReturned             bool   `json:"value_returned"`
 }
 
 type managedPharosOperationStatus struct {
@@ -101,20 +105,22 @@ type managedPharosOperationStatus struct {
 }
 
 type managedPharosOperationSummary struct {
-	OperationRef           string                        `json:"operation_ref"`
-	OperationKind          string                        `json:"operation_kind"`
-	HostRef                string                        `json:"host_ref"`
-	ServiceRef             string                        `json:"service_ref"`
-	SlotRef                string                        `json:"slot_ref"`
-	DeclarationFingerprint string                        `json:"declaration_fingerprint"`
-	Generation             uint64                        `json:"generation"`
-	Phase                  string                        `json:"phase"`
-	ReasonCode             *string                       `json:"reason_code"`
-	CreatedAtUnixSeconds   int64                         `json:"created_at_unix_secs"`
-	UpdatedAtUnixSeconds   int64                         `json:"updated_at_unix_secs"`
-	Health                 *managedPharosHealthSummary   `json:"health"`
-	Rollback               *managedPharosRollbackSummary `json:"rollback,omitempty"`
-	ValueReturned          bool                          `json:"value_returned"`
+	OperationRef              string                        `json:"operation_ref"`
+	OperationKind             string                        `json:"operation_kind"`
+	HostRef                   string                        `json:"host_ref"`
+	ServiceRef                string                        `json:"service_ref"`
+	SlotRef                   string                        `json:"slot_ref"`
+	DeclarationFingerprint    string                        `json:"declaration_fingerprint"`
+	Generation                uint64                        `json:"generation"`
+	PurgeNotBeforeUnixSeconds int64                         `json:"purge_not_before_unix_secs,omitempty"`
+	Phase                     string                        `json:"phase"`
+	ReasonCode                *string                       `json:"reason_code"`
+	CreatedAtUnixSeconds      int64                         `json:"created_at_unix_secs"`
+	UpdatedAtUnixSeconds      int64                         `json:"updated_at_unix_secs"`
+	Health                    *managedPharosHealthSummary   `json:"health"`
+	Rollback                  *managedPharosRollbackSummary `json:"rollback,omitempty"`
+	Removal                   *managedPharosRemovalSummary  `json:"removal,omitempty"`
+	ValueReturned             bool                          `json:"value_returned"`
 }
 
 type managedPharosHealthSummary struct {
@@ -132,6 +138,15 @@ type managedPharosRollbackSummary struct {
 	HeartbeatObservedAtUnixSeconds int64  `json:"heartbeat_observed_at_unix_secs"`
 	ProcessObservedAtUnixSeconds   int64  `json:"process_observed_at_unix_secs"`
 	ProbeObservedAtUnixSeconds     int64  `json:"probe_observed_at_unix_secs"`
+	AcceptedAtUnixSeconds          int64  `json:"accepted_at_unix_secs"`
+}
+
+type managedPharosRemovalSummary struct {
+	Generation                     uint64 `json:"generation"`
+	Outcome                        string `json:"outcome"`
+	HeartbeatObservedAtUnixSeconds int64  `json:"heartbeat_observed_at_unix_secs"`
+	ProcessObservedAtUnixSeconds   int64  `json:"process_observed_at_unix_secs"`
+	CacheObservedAtUnixSeconds     int64  `json:"cache_observed_at_unix_secs"`
 	AcceptedAtUnixSeconds          int64  `json:"accepted_at_unix_secs"`
 }
 
@@ -244,6 +259,10 @@ func newManagedOperationBridgeStore(path string) (*managedOperationBridgeStore, 
 }
 
 func (bridge *managedOperationBridge) Execute(ctx context.Context, accepted managedAcceptedIntent, importedValue []byte) (managedTransactionResult, error) {
+	now := bridge.now()
+	if accepted.Intent.OperationKind == "remove" {
+		accepted.PurgeNotBeforeUnixSeconds = now.Add(managedRemovalRecoveryWindow).Unix()
+	}
 	result, err := bridge.transaction.Execute(ctx, accepted, importedValue)
 	if err != nil {
 		return managedTransactionResult{}, err
@@ -251,27 +270,32 @@ func (bridge *managedOperationBridge) Execute(ctx context.Context, accepted mana
 	if result.Generation == 0 || result.OperationRef != accepted.OperationRef {
 		return managedTransactionResult{}, managedTransactionError("managed_operation_prepare_invalid")
 	}
-	now := bridge.now().Unix()
 	record := managedOperationBridgeRecord{
-		OperationRef:           accepted.OperationRef,
-		OperationKind:          accepted.Intent.OperationKind,
-		Source:                 accepted.Source,
-		HostRef:                accepted.Intent.HostRef,
-		ServiceRef:             accepted.Intent.ServiceRef,
-		SlotRef:                accepted.Intent.SlotRef,
-		DeclarationFingerprint: accepted.Intent.DeclarationFingerprint,
-		DeliveryProfileRef:     accepted.Context.DeliveryProfileRef,
-		ReloadProfileRef:       accepted.Context.ReloadProfileRef,
-		HealthProfileRef:       accepted.Context.HealthProfileRef,
-		Generation:             result.Generation,
-		Phase:                  "prepared",
-		CreatedAtUnixSeconds:   now,
-		UpdatedAtUnixSeconds:   now,
-		ValueReturned:          false,
+		OperationRef:              accepted.OperationRef,
+		OperationKind:             accepted.Intent.OperationKind,
+		Source:                    accepted.Source,
+		HostRef:                   accepted.Intent.HostRef,
+		ServiceRef:                accepted.Intent.ServiceRef,
+		SlotRef:                   accepted.Intent.SlotRef,
+		DeclarationFingerprint:    accepted.Intent.DeclarationFingerprint,
+		DeliveryProfileRef:        accepted.Context.DeliveryProfileRef,
+		ReloadProfileRef:          accepted.Context.ReloadProfileRef,
+		HealthProfileRef:          accepted.Context.HealthProfileRef,
+		Generation:                result.Generation,
+		PurgeNotBeforeUnixSeconds: accepted.PurgeNotBeforeUnixSeconds,
+		Phase:                     "prepared",
+		CreatedAtUnixSeconds:      now.Unix(),
+		UpdatedAtUnixSeconds:      now.Unix(),
+		ValueReturned:             false,
 	}
-	if result.Phase == "completed" {
+	if accepted.Intent.OperationKind == "remove" {
+		record.DetachProfileRef = accepted.Context.DetachProfileRef
+	}
+	if result.Phase == "completed" || result.Phase == "destroyed" {
 		existing, ok := bridge.store.get(record.OperationRef)
-		if !ok || existing.Phase != "completed" || !sameManagedOperation(existing, record) {
+		if !ok ||
+			(existing.Phase != "completed" && existing.Phase != "quarantined" && existing.Phase != "destroyed") ||
+			!sameManagedOperation(existing, record) {
 			return managedTransactionResult{}, managedTransactionError("managed_operation_prepare_invalid")
 		}
 		return result, nil
@@ -315,6 +339,13 @@ func (bridge *managedOperationBridge) Run(ctx context.Context) {
 				})
 				cancel()
 			}
+			for _, record := range bridge.store.pendingPurge(bridge.now().Unix()) {
+				retryContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+				if _, err := bridge.transaction.Purge(retryContext, record); err == nil {
+					_ = bridge.store.setPhase(record.OperationRef, "destroyed", bridge.now().Unix())
+				}
+				cancel()
+			}
 		}
 	}
 }
@@ -324,7 +355,9 @@ func (bridge *managedOperationBridge) ensureRegistered(ctx context.Context, oper
 	if !ok {
 		return managedTransactionError("managed_operation_unknown")
 	}
-	if record.Phase == "registered" || record.Phase == "completed" || record.Phase == "rolled_back" {
+	if record.Phase == "registered" || record.Phase == "completed" ||
+		record.Phase == "quarantined" || record.Phase == "destroyed" ||
+		record.Phase == "rolled_back" || record.Phase == "review_required" {
 		return nil
 	}
 	if record.Phase != "prepared" {
@@ -362,7 +395,26 @@ func (bridge *managedOperationBridge) reconcile(ctx context.Context, request man
 			return managedTransactionResult{}, managedTransactionError("managed_operation_state_unavailable")
 		}
 		return result, nil
+	case "removed":
+		evidence, ok := status.externalRemovalEvidence()
+		if !ok {
+			return managedTransactionResult{}, managedTransactionError("managed_operation_evidence_invalid")
+		}
+		result, err := bridge.transaction.FinalizeRemoval(ctx, record, evidence)
+		if err != nil {
+			return managedTransactionResult{}, err
+		}
+		if err := bridge.store.setPhase(record.OperationRef, "quarantined", bridge.now().Unix()); err != nil {
+			return managedTransactionResult{}, managedTransactionError("managed_operation_state_unavailable")
+		}
+		return result, nil
 	case "failed", "rolled_back", "superseded":
+		if record.OperationKind == "remove" {
+			if err := bridge.store.setPhase(record.OperationRef, "review_required", bridge.now().Unix()); err != nil {
+				return managedTransactionResult{}, managedTransactionError("managed_operation_state_unavailable")
+			}
+			return managedTransactionResult{}, managedTransactionError("managed_operation_removal_review_required")
+		}
 		result, err := bridge.transaction.Rollback(ctx, record)
 		if err != nil {
 			return managedTransactionResult{}, err
@@ -379,6 +431,7 @@ func (bridge *managedOperationBridge) reconcile(ctx context.Context, request man
 func (bridge *managedOperationBridge) packetForHost(operationRef, hostRef string) ([]byte, error) {
 	record, ok := bridge.store.get(operationRef)
 	if !ok || record.HostRef != hostRef ||
+		record.OperationKind == "remove" ||
 		record.Phase != "prepared" && record.Phase != "registered" {
 		return nil, managedTransactionError("managed_host_envelope_denied")
 	}
@@ -405,16 +458,17 @@ func (bridge *managedOperationBridge) hostAuthorized(hostRef, token string) bool
 
 func (client *managedPharosOperationClient) register(ctx context.Context, record managedOperationBridgeRecord) (managedPharosOperationStatus, error) {
 	request := managedOperationReadyRequest{
-		Schema:                 managedOperationReadySchema,
-		SchemaVersion:          1,
-		OperationRef:           record.OperationRef,
-		OperationKind:          record.OperationKind,
-		HostRef:                record.HostRef,
-		ServiceRef:             record.ServiceRef,
-		SlotRef:                record.SlotRef,
-		DeclarationFingerprint: record.DeclarationFingerprint,
-		Generation:             record.Generation,
-		ValueReturned:          false,
+		Schema:                    managedOperationReadySchema,
+		SchemaVersion:             1,
+		OperationRef:              record.OperationRef,
+		OperationKind:             record.OperationKind,
+		HostRef:                   record.HostRef,
+		ServiceRef:                record.ServiceRef,
+		SlotRef:                   record.SlotRef,
+		DeclarationFingerprint:    record.DeclarationFingerprint,
+		Generation:                record.Generation,
+		PurgeNotBeforeUnixSeconds: record.PurgeNotBeforeUnixSeconds,
+		ValueReturned:             false,
 	}
 	return client.request(ctx, http.MethodPost, "/internal/managed-service-operations", request)
 }
@@ -467,7 +521,7 @@ func (status managedPharosOperationStatus) valid() bool {
 		!status.ValueReturned &&
 		!operation.ValueReturned &&
 		validManagedRef("op_", operation.OperationRef) &&
-		(operation.OperationKind == "create" || operation.OperationKind == "replace") &&
+		(operation.OperationKind == "create" || operation.OperationKind == "replace" || operation.OperationKind == "remove") &&
 		validManagedRef("host_", operation.HostRef) &&
 		validManagedRef("svc_", operation.ServiceRef) &&
 		validManagedRef("slot_", operation.SlotRef) &&
@@ -475,8 +529,36 @@ func (status managedPharosOperationStatus) valid() bool {
 		operation.Generation > 0 &&
 		operation.CreatedAtUnixSeconds > 0 &&
 		operation.UpdatedAtUnixSeconds >= operation.CreatedAtUnixSeconds &&
+		validManagedPharosOperationKindPhase(operation) &&
+		validManagedPharosReason(operation.ReasonCode) &&
 		validManagedOperationPhase(operation.Phase) &&
-		validManagedPharosHealth(operation)
+		validManagedPharosHealth(operation) &&
+		validManagedPharosRemoval(operation)
+}
+
+func validManagedPharosOperationKindPhase(operation managedPharosOperationSummary) bool {
+	removalPhase := operation.Phase == "removal_pending" ||
+		operation.Phase == "removing" ||
+		operation.Phase == "removed"
+	if operation.OperationKind == "remove" {
+		return removalPhase || operation.Phase == "failed" || operation.Phase == "superseded"
+	}
+	return !removalPhase
+}
+
+func validManagedPharosReason(reason *string) bool {
+	if reason == nil {
+		return true
+	}
+	if len(*reason) < 3 || len(*reason) > 96 {
+		return false
+	}
+	for _, character := range *reason {
+		if (character < 'a' || character > 'z') && character != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func validManagedPharosHealth(operation managedPharosOperationSummary) bool {
@@ -507,6 +589,40 @@ func validManagedPharosHealth(operation managedPharosOperationSummary) bool {
 		health.AcceptedAtUnixSeconds > 0
 }
 
+func validManagedPharosRemoval(operation managedPharosOperationSummary) bool {
+	if (operation.Phase == "removed") != (operation.OperationKind == "remove" && operation.Removal != nil) {
+		return false
+	}
+	if operation.OperationKind == "remove" {
+		if operation.PurgeNotBeforeUnixSeconds <= operation.CreatedAtUnixSeconds {
+			return false
+		}
+	} else if operation.PurgeNotBeforeUnixSeconds != 0 {
+		return false
+	}
+	if operation.Phase != "removed" {
+		return operation.Removal == nil
+	}
+	removal := operation.Removal
+	return operation.OperationKind == "remove" &&
+		operation.Health == nil &&
+		operation.Rollback == nil &&
+		removal != nil &&
+		removal.Generation == operation.Generation &&
+		removal.Outcome == "healthy" &&
+		removal.HeartbeatObservedAtUnixSeconds > 0 &&
+		removal.ProcessObservedAtUnixSeconds > 0 &&
+		removal.CacheObservedAtUnixSeconds > 0 &&
+		removal.AcceptedAtUnixSeconds == operation.UpdatedAtUnixSeconds &&
+		operation.PurgeNotBeforeUnixSeconds > removal.AcceptedAtUnixSeconds &&
+		removal.HeartbeatObservedAtUnixSeconds >= operation.CreatedAtUnixSeconds &&
+		removal.HeartbeatObservedAtUnixSeconds <= removal.AcceptedAtUnixSeconds &&
+		removal.ProcessObservedAtUnixSeconds >= operation.CreatedAtUnixSeconds &&
+		removal.ProcessObservedAtUnixSeconds <= removal.AcceptedAtUnixSeconds &&
+		removal.CacheObservedAtUnixSeconds >= operation.CreatedAtUnixSeconds &&
+		removal.CacheObservedAtUnixSeconds <= removal.AcceptedAtUnixSeconds
+}
+
 func (status managedPharosOperationStatus) matches(record managedOperationBridgeRecord) bool {
 	operation := status.Operation
 	return status.valid() &&
@@ -516,7 +632,8 @@ func (status managedPharosOperationStatus) matches(record managedOperationBridge
 		operation.ServiceRef == record.ServiceRef &&
 		operation.SlotRef == record.SlotRef &&
 		operation.DeclarationFingerprint == record.DeclarationFingerprint &&
-		operation.Generation == record.Generation
+		operation.Generation == record.Generation &&
+		operation.PurgeNotBeforeUnixSeconds == record.PurgeNotBeforeUnixSeconds
 }
 
 func (status managedPharosOperationStatus) externalEvidence() (managedExternalActivationEvidence, bool) {
@@ -537,9 +654,27 @@ func (status managedPharosOperationStatus) externalEvidence() (managedExternalAc
 	return evidence, validManagedExternalEvidence(&evidence)
 }
 
+func (status managedPharosOperationStatus) externalRemovalEvidence() (managedExternalRemovalEvidence, bool) {
+	removal := status.Operation.Removal
+	if status.Operation.Phase != "removed" || removal == nil ||
+		removal.Generation != status.Operation.Generation || removal.Outcome != "healthy" {
+		return managedExternalRemovalEvidence{}, false
+	}
+	evidence := managedExternalRemovalEvidence{
+		Generation:                     removal.Generation,
+		RuntimeAbsent:                  true,
+		ProcessState:                   "stopped",
+		CacheState:                     "quarantined",
+		HeartbeatObservedAtUnixSeconds: removal.HeartbeatObservedAtUnixSeconds,
+		ProcessObservedAtUnixSeconds:   removal.ProcessObservedAtUnixSeconds,
+		CacheObservedAtUnixSeconds:     removal.CacheObservedAtUnixSeconds,
+	}
+	return evidence, validManagedExternalRemovalEvidence(&evidence)
+}
+
 func validManagedOperationPhase(value string) bool {
 	switch value {
-	case "install_pending", "installing", "reload_pending", "reloading", "verify_pending", "verifying", "active", "rolled_back", "failed", "superseded":
+	case "install_pending", "installing", "reload_pending", "reloading", "verify_pending", "verifying", "removal_pending", "removing", "active", "removed", "rolled_back", "failed", "superseded":
 		return true
 	default:
 		return false
@@ -639,6 +774,23 @@ func (store *managedOperationBridgeStore) pendingReconciliation() []managedOpera
 	return pending
 }
 
+func (store *managedOperationBridgeStore) pendingPurge(now int64) []managedOperationBridgeRecord {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var pending []managedOperationBridgeRecord
+	for _, record := range store.document.Operations {
+		if record.Phase == "quarantined" &&
+			record.PurgeNotBeforeUnixSeconds > 0 &&
+			now >= record.PurgeNotBeforeUnixSeconds {
+			pending = append(pending, record)
+		}
+	}
+	sort.Slice(pending, func(left, right int) bool {
+		return pending[left].OperationRef < pending[right].OperationRef
+	})
+	return pending
+}
+
 func sameManagedOperation(left, right managedOperationBridgeRecord) bool {
 	left.Phase = ""
 	left.CreatedAtUnixSeconds = 0
@@ -678,8 +830,9 @@ func validateManagedOperationBridgeDocument(document managedOperationBridgeDocum
 
 func validateManagedOperationBridgeRecord(record managedOperationBridgeRecord) error {
 	if !validManagedRef("op_", record.OperationRef) ||
-		(record.OperationKind != "create" && record.OperationKind != "replace") ||
-		(record.Source != "generated" && record.Source != "import") ||
+		(record.OperationKind != "create" && record.OperationKind != "replace" && record.OperationKind != "remove") ||
+		(record.Source != "generated" && record.Source != "import" && record.Source != "remove") ||
+		(record.OperationKind == "remove") != (record.Source == "remove") ||
 		!validManagedRef("host_", record.HostRef) ||
 		!validManagedRef("svc_", record.ServiceRef) ||
 		!validManagedRef("slot_", record.SlotRef) ||
@@ -687,6 +840,14 @@ func validateManagedOperationBridgeRecord(record managedOperationBridgeRecord) e
 		!validManagedRef("delivery_", record.DeliveryProfileRef) ||
 		!validManagedRef("reload_", record.ReloadProfileRef) ||
 		!validManagedRef("health_", record.HealthProfileRef) ||
+		record.OperationKind == "remove" && !validManagedRef("detach_", record.DetachProfileRef) ||
+		record.OperationKind != "remove" && record.DetachProfileRef != "" ||
+		record.OperationKind == "remove" && record.PurgeNotBeforeUnixSeconds <= record.CreatedAtUnixSeconds ||
+		record.OperationKind != "remove" && record.PurgeNotBeforeUnixSeconds != 0 ||
+		record.OperationKind == "remove" &&
+			(record.Phase == "completed" || record.Phase == "rolled_back") ||
+		record.OperationKind != "remove" &&
+			(record.Phase == "quarantined" || record.Phase == "destroyed" || record.Phase == "review_required") ||
 		record.Generation == 0 ||
 		!validManagedBridgePhase(record.Phase) ||
 		record.CreatedAtUnixSeconds <= 0 ||
@@ -699,7 +860,7 @@ func validateManagedOperationBridgeRecord(record managedOperationBridgeRecord) e
 
 func validManagedBridgePhase(phase string) bool {
 	switch phase {
-	case "prepared", "registered", "completed", "rolled_back":
+	case "prepared", "registered", "completed", "quarantined", "destroyed", "rolled_back", "review_required":
 		return true
 	default:
 		return false
@@ -708,7 +869,8 @@ func validManagedBridgePhase(phase string) bool {
 
 func validManagedBridgeTransition(from, to string) bool {
 	return from == "prepared" && (to == "registered" || to == "rolled_back") ||
-		from == "registered" && (to == "completed" || to == "rolled_back")
+		from == "registered" && (to == "completed" || to == "quarantined" || to == "rolled_back" || to == "review_required") ||
+		from == "quarantined" && to == "destroyed"
 }
 
 func (record managedHostOutboxRecord) matches(bridge managedOperationBridgeRecord, now int64) bool {

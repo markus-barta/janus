@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::{
-    read_private_regular, valid_ref, HostEnvelopeControlV1, HostExecutor, HostExecutorOutcome,
+    read_private_regular, valid_ref, HostEnvelopeControlV1, HostEnvelopeQuarantineControlV1,
+    HostExecutor, HostExecutorOutcome,
 };
 
 const CONFIG_SCHEMA: &str = "inspr.janus.managed-host-agent-config.v1";
@@ -83,6 +84,7 @@ struct ManagedHostProfileV1 {
     delivery_profile_ref: String,
     reload_profile_ref: String,
     health_profile_ref: String,
+    detach_profile_ref: String,
     compose_file: String,
     compose_service: String,
     container_name: String,
@@ -94,6 +96,7 @@ enum AgentPhase {
     Install,
     Reload,
     Verify,
+    Remove,
 }
 
 impl AgentPhase {
@@ -102,6 +105,7 @@ impl AgentPhase {
             Self::Install => "delivery_",
             Self::Reload => "reload_",
             Self::Verify => "health_",
+            Self::Remove => "detach_",
         }
     }
 }
@@ -120,6 +124,8 @@ struct ManagedOperationLeaseV1 {
     slot_ref: String,
     declaration_fingerprint: String,
     generation: u64,
+    #[serde(default)]
+    purge_not_before_unix_secs: Option<i64>,
     phase: AgentPhase,
     profile_ref: String,
     leased_at_unix_secs: i64,
@@ -148,6 +154,8 @@ struct ManagedOperationResultV1<'a> {
     health_evidence: Option<ManagedHealthEvidenceV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rollback_evidence: Option<ManagedRollbackEvidenceV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    removal_evidence: Option<ManagedRemovalEvidenceV1>,
     value_returned: bool,
 }
 
@@ -173,6 +181,17 @@ struct ManagedRollbackEvidenceV1 {
     probe_observed_at_unix_secs: i64,
 }
 
+#[derive(Clone, Copy, Serialize)]
+struct ManagedRemovalEvidenceV1 {
+    generation: u64,
+    runtime_absent: bool,
+    process_state: &'static str,
+    cache_state: &'static str,
+    heartbeat_observed_at_unix_secs: i64,
+    process_observed_at_unix_secs: i64,
+    cache_observed_at_unix_secs: i64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManagedOperationStatusV1 {
@@ -192,12 +211,17 @@ struct ManagedOperationSummaryV1 {
     slot_ref: String,
     declaration_fingerprint: String,
     generation: u64,
+    #[serde(default)]
+    purge_not_before_unix_secs: Option<i64>,
     phase: String,
     reason_code: Option<String>,
     created_at_unix_secs: i64,
     updated_at_unix_secs: i64,
     health: Option<ManagedHealthSummaryV1>,
+    #[serde(default)]
     rollback: Option<ManagedRollbackSummaryV1>,
+    #[serde(default)]
+    removal: Option<ManagedRemovalSummaryV1>,
     value_returned: bool,
 }
 
@@ -220,6 +244,17 @@ struct ManagedRollbackSummaryV1 {
     heartbeat_observed_at_unix_secs: i64,
     process_observed_at_unix_secs: i64,
     probe_observed_at_unix_secs: i64,
+    accepted_at_unix_secs: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedRemovalSummaryV1 {
+    generation: u64,
+    outcome: String,
+    heartbeat_observed_at_unix_secs: i64,
+    process_observed_at_unix_secs: i64,
+    cache_observed_at_unix_secs: i64,
     accepted_at_unix_secs: i64,
 }
 
@@ -395,7 +430,7 @@ impl ManagedHostAgent {
                     self.report_failure_and_reconcile(lease, outcome, reason, rollback)?;
                     return Ok(());
                 }
-                self.report(lease, "succeeded", "phase_succeeded", None, None)?;
+                self.report(lease, "succeeded", "phase_succeeded", None, None, None)?;
             }
             AgentPhase::Reload => {
                 if !staged_exact(executor, lease)? {
@@ -432,7 +467,7 @@ impl ManagedHostAgent {
                     self.report_failure_and_reconcile(lease, outcome, reason, rollback)?;
                     return Ok(());
                 }
-                self.report(lease, "succeeded", "phase_succeeded", None, None)?;
+                self.report(lease, "succeeded", "phase_succeeded", None, None, None)?;
             }
             AgentPhase::Verify => {
                 if !staged_exact(executor, lease)? {
@@ -472,8 +507,14 @@ impl ManagedHostAgent {
                         return Ok(());
                     }
                 };
-                let status =
-                    self.report(lease, "succeeded", "phase_succeeded", Some(evidence), None)?;
+                let status = self.report(
+                    lease,
+                    "succeeded",
+                    "phase_succeeded",
+                    Some(evidence),
+                    None,
+                    None,
+                )?;
                 if status.operation.phase != "active" {
                     return Err(ManagedHostAgentError::new(
                         "managed_host_activation_unconfirmed",
@@ -488,6 +529,87 @@ impl ManagedHostAgent {
                     .commit(&control_for_lease(lease))
                     .map_err(|_| ManagedHostAgentError::new("managed_host_commit_failed"))?;
             }
+            AgentPhase::Remove => {
+                let purge_not_before = lease
+                    .purge_not_before_unix_secs
+                    .and_then(|value| u64::try_from(value).ok())
+                    .ok_or_else(|| ManagedHostAgentError::new("managed_host_lease_invalid"))?;
+                if self.compose_stop_for_removal(profile).is_err()
+                    || self.verify_stopped(profile).is_err()
+                {
+                    self.report_failure_and_reconcile(
+                        lease,
+                        "uncertain",
+                        "removal_uncertain",
+                        None,
+                    )?;
+                    return Ok(());
+                }
+                let control = quarantine_control_for_lease(lease, purge_not_before);
+                let quarantined = match executor.quarantine(&control) {
+                    Ok(outcome)
+                        if outcome.phase == "quarantined"
+                            && outcome.operation_ref.as_deref()
+                                == Some(lease.operation_ref.as_str())
+                            && outcome.generation == Some(lease.generation) =>
+                    {
+                        outcome
+                    }
+                    _ => {
+                        self.report_failure_and_reconcile(
+                            lease,
+                            "uncertain",
+                            "removal_uncertain",
+                            None,
+                        )?;
+                        return Ok(());
+                    }
+                };
+                let missing = executor
+                    .status()
+                    .map_err(|_| ManagedHostAgentError::new("managed_host_status_unavailable"))?
+                    .into_iter()
+                    .any(|outcome| {
+                        outcome.service_ref.as_deref() == Some(lease.service_ref.as_str())
+                            && outcome.slot_ref.as_deref() == Some(lease.slot_ref.as_str())
+                            && outcome.phase == "quarantined"
+                            && outcome.operation_ref.as_deref()
+                                == quarantined.operation_ref.as_deref()
+                            && outcome.generation == Some(lease.generation)
+                    });
+                if !missing {
+                    self.report_failure_and_reconcile(
+                        lease,
+                        "uncertain",
+                        "removal_uncertain",
+                        None,
+                    )?;
+                    return Ok(());
+                }
+                let observed_at = unix_seconds()?;
+                let status = self.report(
+                    lease,
+                    "succeeded",
+                    "phase_succeeded",
+                    None,
+                    None,
+                    Some(ManagedRemovalEvidenceV1 {
+                        generation: lease.generation,
+                        runtime_absent: true,
+                        process_state: "stopped",
+                        cache_state: "quarantined",
+                        heartbeat_observed_at_unix_secs: observed_at,
+                        process_observed_at_unix_secs: observed_at,
+                        cache_observed_at_unix_secs: observed_at,
+                    }),
+                )?;
+                if status.operation.phase != "removed" {
+                    return Err(ManagedHostAgentError::new(
+                        "managed_host_removal_unconfirmed",
+                    ));
+                }
+                self.reconcile(lease)?;
+            }
         }
         Ok(())
     }
@@ -496,7 +618,10 @@ impl ManagedHostAgent {
         let outcomes = executor
             .status()
             .map_err(|_| ManagedHostAgentError::new("managed_host_status_unavailable"))?;
-        for outcome in outcomes.iter().filter(|outcome| outcome.phase == "staged") {
+        for outcome in outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome.phase.as_str(), "staged" | "quarantined"))
+        {
             let (Some(operation_ref), Some(generation), Some(service_ref), Some(slot_ref)) = (
                 outcome.operation_ref.as_deref(),
                 outcome.generation,
@@ -512,6 +637,51 @@ impl ManagedHostAgent {
                 || status.operation.generation != generation
             {
                 return Err(ManagedHostAgentError::new("managed_host_status_invalid"));
+            }
+            if outcome.phase == "quarantined" {
+                match status.operation.phase.as_str() {
+                    "removed" => {
+                        self.reconcile_parts(operation_ref, generation)?;
+                        if status
+                            .operation
+                            .purge_not_before_unix_secs
+                            .is_some_and(|deadline| unix_seconds().is_ok_and(|now| now >= deadline))
+                        {
+                            let deadline =
+                                u64::try_from(status.operation.purge_not_before_unix_secs.unwrap())
+                                    .map_err(|_| {
+                                        ManagedHostAgentError::new("managed_host_status_invalid")
+                                    })?;
+                            executor
+                                .purge_quarantine(
+                                    &HostEnvelopeQuarantineControlV1 {
+                                        schema: "inspr.janus.host-envelope-quarantine-control.v1"
+                                            .to_string(),
+                                        schema_version: 1,
+                                        operation_ref: operation_ref.to_string(),
+                                        host_ref: self.config.host_ref.clone(),
+                                        service_ref: service_ref.to_string(),
+                                        slot_ref: slot_ref.to_string(),
+                                        generation,
+                                        purge_not_before_unix_secs: deadline,
+                                    },
+                                    SystemTime::now(),
+                                )
+                                .map_err(|_| {
+                                    ManagedHostAgentError::new(
+                                        "managed_host_quarantine_purge_failed",
+                                    )
+                                })?;
+                        }
+                    }
+                    "failed" | "superseded" => {
+                        return Err(ManagedHostAgentError::new(
+                            "managed_host_quarantine_review_required",
+                        ))
+                    }
+                    _ => {}
+                }
+                continue;
             }
             let control = HostEnvelopeControlV1 {
                 schema: "inspr.janus.host-envelope-control.v1".to_string(),
@@ -569,6 +739,7 @@ impl ManagedHostAgent {
         reason_code: &'static str,
         health_evidence: Option<ManagedHealthEvidenceV1>,
         rollback_evidence: Option<ManagedRollbackEvidenceV1>,
+        removal_evidence: Option<ManagedRemovalEvidenceV1>,
     ) -> AgentResult<ManagedOperationStatusV1> {
         let result = ManagedOperationResultV1 {
             schema: RESULT_SCHEMA,
@@ -582,6 +753,7 @@ impl ManagedHostAgent {
             generation: lease.generation,
             health_evidence,
             rollback_evidence,
+            removal_evidence,
             value_returned: false,
         };
         let body = serde_json::to_vec(&result)
@@ -606,7 +778,7 @@ impl ManagedHostAgent {
         reason_code: &'static str,
         rollback_evidence: Option<ManagedRollbackEvidenceV1>,
     ) -> AgentResult<()> {
-        let status = self.report(lease, outcome, reason_code, None, rollback_evidence)?;
+        let status = self.report(lease, outcome, reason_code, None, rollback_evidence, None)?;
         if matches!(
             status.operation.phase.as_str(),
             "failed" | "rolled_back" | "superseded"
@@ -765,6 +937,61 @@ impl ManagedHostAgent {
         }
     }
 
+    fn compose_stop_for_removal(&self, profile: &ManagedHostProfileV1) -> AgentResult<()> {
+        let status = self
+            .compose_command(profile)
+            .args(["stop", &profile.compose_service])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|_| ManagedHostAgentError::new("managed_host_removal_uncertain"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(ManagedHostAgentError::new("managed_host_removal_uncertain"))
+        }
+    }
+
+    fn verify_stopped(&self, profile: &ManagedHostProfileV1) -> AgentResult<()> {
+        let compose = self
+            .compose_command(profile)
+            .args([
+                "ps",
+                "--status",
+                "running",
+                "--quiet",
+                &profile.compose_service,
+            ])
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|_| ManagedHostAgentError::new("managed_host_removal_uncertain"))?;
+        if !compose.status.success()
+            || compose.stdout.len() > MAX_COMMAND_OUTPUT_BYTES
+            || !compose.stdout.iter().all(u8::is_ascii_whitespace)
+        {
+            return Err(ManagedHostAgentError::new("managed_host_removal_uncertain"));
+        }
+        let exact = Command::new(&self.config.docker_executable)
+            .args([
+                "inspect",
+                "--format",
+                "{{json .State}}",
+                &profile.container_name,
+            ])
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|_| ManagedHostAgentError::new("managed_host_removal_uncertain"))?;
+        if exact.status.success()
+            && !exact.stdout.is_empty()
+            && exact.stdout.len() <= MAX_COMMAND_OUTPUT_BYTES
+            && docker_state_is_stopped(&exact.stdout)
+        {
+            Ok(())
+        } else {
+            Err(ManagedHostAgentError::new("managed_host_removal_uncertain"))
+        }
+    }
+
     fn compose_command(&self, profile: &ManagedHostProfileV1) -> Command {
         let mut command = Command::new(&self.config.docker_executable);
         command.args([
@@ -836,6 +1063,7 @@ impl ManagedHostAgent {
             AgentPhase::Install => &profile.delivery_profile_ref,
             AgentPhase::Reload => &profile.reload_profile_ref,
             AgentPhase::Verify => &profile.health_profile_ref,
+            AgentPhase::Remove => &profile.detach_profile_ref,
         };
         if expected != &lease.profile_ref {
             return Err(ManagedHostAgentError::new("managed_host_profile_mismatch"));
@@ -997,6 +1225,7 @@ fn valid_profile(profile: &ManagedHostProfileV1) -> bool {
         && valid_ref("delivery_", &profile.delivery_profile_ref)
         && valid_ref("reload_", &profile.reload_profile_ref)
         && valid_ref("health_", &profile.health_profile_ref)
+        && valid_ref("detach_", &profile.detach_profile_ref)
         && absolute_clean(&profile.compose_file)
         && safe_runtime_name(&profile.compose_service)
         && safe_runtime_name(&profile.container_name)
@@ -1041,13 +1270,28 @@ fn validate_lease(lease: &ManagedOperationLeaseV1, host_ref: &str) -> AgentResul
         || lease.schema_version != SCHEMA_VERSION
         || !valid_ref("lease_", &lease.lease_ref)
         || !valid_ref("op_", &lease.operation_ref)
-        || !matches!(lease.operation_kind.as_str(), "create" | "replace")
+        || !matches!(
+            lease.operation_kind.as_str(),
+            "create" | "replace" | "remove"
+        )
         || lease.host_ref != host_ref
         || !valid_ref("svc_", &lease.service_ref)
         || !valid_ref("slot_", &lease.slot_ref)
         || !valid_ref("decl_", &lease.declaration_fingerprint)
         || !valid_ref(lease.phase.expected_profile_prefix(), &lease.profile_ref)
         || lease.generation == 0
+        || match lease.operation_kind.as_str() {
+            "remove" => {
+                lease.phase != AgentPhase::Remove
+                    || lease
+                        .purge_not_before_unix_secs
+                        .map_or(true, |deadline| deadline <= lease.expires_at_unix_secs)
+            }
+            "create" | "replace" => {
+                lease.phase == AgentPhase::Remove || lease.purge_not_before_unix_secs.is_some()
+            }
+            _ => true,
+        }
         || lease.leased_at_unix_secs <= 0
         || lease.expires_at_unix_secs <= lease.leased_at_unix_secs
         || lease.value_returned
@@ -1069,13 +1313,34 @@ fn validate_status(
         || operation.value_returned
         || operation.operation_ref != operation_ref
         || operation.host_ref != host_ref
-        || !matches!(operation.operation_kind.as_str(), "create" | "replace")
+        || !matches!(
+            operation.operation_kind.as_str(),
+            "create" | "replace" | "remove"
+        )
         || !valid_ref("svc_", &operation.service_ref)
         || !valid_ref("slot_", &operation.slot_ref)
         || !valid_ref("decl_", &operation.declaration_fingerprint)
         || operation.generation == 0
+        || match operation.operation_kind.as_str() {
+            "remove" => operation
+                .purge_not_before_unix_secs
+                .map_or(true, |deadline| deadline <= operation.created_at_unix_secs),
+            "create" | "replace" => operation.purge_not_before_unix_secs.is_some(),
+            _ => true,
+        }
         || operation.created_at_unix_secs <= 0
         || operation.updated_at_unix_secs < operation.created_at_unix_secs
+        || match operation.operation_kind.as_str() {
+            "remove" => !matches!(
+                operation.phase.as_str(),
+                "removal_pending" | "removing" | "removed" | "failed" | "superseded"
+            ),
+            "create" | "replace" => matches!(
+                operation.phase.as_str(),
+                "removal_pending" | "removing" | "removed"
+            ),
+            _ => true,
+        }
         || !matches!(
             operation.phase.as_str(),
             "install_pending"
@@ -1084,7 +1349,10 @@ fn validate_status(
                 | "reloading"
                 | "verify_pending"
                 | "verifying"
+                | "removal_pending"
+                | "removing"
                 | "active"
+                | "removed"
                 | "rolled_back"
                 | "failed"
                 | "superseded"
@@ -1126,12 +1394,47 @@ fn validate_status(
     } else if operation.rollback.is_some() {
         return Err(ManagedHostAgentError::new("managed_host_status_invalid"));
     }
+    if operation.phase == "removed" {
+        let Some(removal) = &operation.removal else {
+            return Err(ManagedHostAgentError::new("managed_host_status_invalid"));
+        };
+        if operation.operation_kind != "remove"
+            || removal.generation != operation.generation
+            || removal.outcome != "healthy"
+            || removal.heartbeat_observed_at_unix_secs <= 0
+            || removal.process_observed_at_unix_secs <= 0
+            || removal.cache_observed_at_unix_secs <= 0
+            || removal.accepted_at_unix_secs <= 0
+            || removal.accepted_at_unix_secs != operation.updated_at_unix_secs
+            || operation
+                .purge_not_before_unix_secs
+                .map_or(true, |deadline| deadline <= removal.accepted_at_unix_secs)
+            || [
+                removal.heartbeat_observed_at_unix_secs,
+                removal.process_observed_at_unix_secs,
+                removal.cache_observed_at_unix_secs,
+            ]
+            .iter()
+            .any(|observed| {
+                *observed < operation.created_at_unix_secs
+                    || *observed > removal.accepted_at_unix_secs
+            })
+        {
+            return Err(ManagedHostAgentError::new("managed_host_status_invalid"));
+        }
+    } else if operation.removal.is_some() {
+        return Err(ManagedHostAgentError::new("managed_host_status_invalid"));
+    }
     if let Some(reason) = &operation.reason_code {
         if !safe_runtime_name(reason) {
             return Err(ManagedHostAgentError::new("managed_host_status_invalid"));
         }
     }
     Ok(())
+}
+
+fn docker_state_is_stopped(raw: &[u8]) -> bool {
+    decode_strict::<DockerState>(raw).is_ok_and(|state| !state.running && state.status == "exited")
 }
 
 fn staged_exact(executor: &HostExecutor, lease: &ManagedOperationLeaseV1) -> AgentResult<bool> {
@@ -1157,6 +1460,22 @@ fn control_for_lease(lease: &ManagedOperationLeaseV1) -> HostEnvelopeControlV1 {
         service_ref: lease.service_ref.clone(),
         slot_ref: lease.slot_ref.clone(),
         generation: lease.generation,
+    }
+}
+
+fn quarantine_control_for_lease(
+    lease: &ManagedOperationLeaseV1,
+    purge_not_before_unix_secs: u64,
+) -> HostEnvelopeQuarantineControlV1 {
+    HostEnvelopeQuarantineControlV1 {
+        schema: "inspr.janus.host-envelope-quarantine-control.v1".to_string(),
+        schema_version: 1,
+        operation_ref: lease.operation_ref.clone(),
+        host_ref: lease.host_ref.clone(),
+        service_ref: lease.service_ref.clone(),
+        slot_ref: lease.slot_ref.clone(),
+        generation: lease.generation,
+        purge_not_before_unix_secs,
     }
 }
 
@@ -1196,6 +1515,7 @@ mod tests {
                 delivery_profile_ref: "delivery_2d7a0f63c951".to_string(),
                 reload_profile_ref: "reload_094df2f6c8b1".to_string(),
                 health_profile_ref: "health_2a02f96c33d4".to_string(),
+                detach_profile_ref: "detach_8a0f4e271c93".to_string(),
                 compose_file: "/etc/janus-managed/canary.compose.yaml".to_string(),
                 compose_service: "secret-canary".to_string(),
                 container_name: "janus-managed-secret-canary".to_string(),
@@ -1233,6 +1553,7 @@ mod tests {
             slot_ref: "slot_49c0e8a17d63".to_string(),
             declaration_fingerprint: "decl_a84f209c4b32".to_string(),
             generation: 1,
+            purge_not_before_unix_secs: None,
             phase: AgentPhase::Reload,
             profile_ref: "reload_094df2f6c8b1".to_string(),
             leased_at_unix_secs: 1_800_000_000,
@@ -1291,6 +1612,83 @@ mod tests {
                 .unwrap()
                 .operation_kind,
             "create"
+        );
+    }
+
+    #[test]
+    fn removal_lease_status_and_exact_container_absence_are_closed() {
+        let mut lease = ManagedOperationLeaseV1 {
+            schema: LEASE_SCHEMA.to_string(),
+            schema_version: SCHEMA_VERSION,
+            lease_ref: "lease_remove000001".to_string(),
+            operation_ref: "op_remove00000001".to_string(),
+            operation_kind: "remove".to_string(),
+            host_ref: "host_58f36c72a91e".to_string(),
+            service_ref: "svc_0bca8d31f7e2".to_string(),
+            slot_ref: "slot_49c0e8a17d63".to_string(),
+            declaration_fingerprint: "decl_a84f209c4b32".to_string(),
+            generation: 1,
+            purge_not_before_unix_secs: Some(1_800_086_400),
+            phase: AgentPhase::Remove,
+            profile_ref: "detach_8a0f4e271c93".to_string(),
+            leased_at_unix_secs: 1_800_000_000,
+            expires_at_unix_secs: 1_800_000_060,
+            value_returned: false,
+        };
+        validate_lease(&lease, "host_58f36c72a91e").expect("bound removal lease");
+        lease.profile_ref = "health_2a02f96c33d4".to_string();
+        assert_eq!(
+            validate_lease(&lease, "host_58f36c72a91e").unwrap_err(),
+            ManagedHostAgentError::new("managed_host_lease_invalid")
+        );
+
+        assert!(docker_state_is_stopped(
+            br#"{"Running":false,"Status":"exited","Health":null}"#
+        ));
+        assert!(!docker_state_is_stopped(
+            br#"{"Running":true,"Status":"running","Health":null}"#
+        ));
+        assert!(!docker_state_is_stopped(
+            br#"{"Running":false,"Status":"dead","Health":null}"#
+        ));
+
+        let raw = br#"{
+          "schema":"inspr.pharos.managed-service-operation-status.v1",
+          "schema_version":1,
+          "operation":{
+            "operation_ref":"op_remove00000001",
+            "operation_kind":"remove",
+            "host_ref":"host_58f36c72a91e",
+            "service_ref":"svc_0bca8d31f7e2",
+            "slot_ref":"slot_49c0e8a17d63",
+            "declaration_fingerprint":"decl_a84f209c4b32",
+            "generation":1,
+            "purge_not_before_unix_secs":1800086400,
+            "phase":"removed",
+            "reason_code":"phase_succeeded",
+            "created_at_unix_secs":1800000000,
+            "updated_at_unix_secs":1800000010,
+            "health":null,
+            "rollback":null,
+            "removal":{
+              "generation":1,
+              "outcome":"healthy",
+              "heartbeat_observed_at_unix_secs":1800000009,
+              "process_observed_at_unix_secs":1800000009,
+              "cache_observed_at_unix_secs":1800000009,
+              "accepted_at_unix_secs":1800000010
+            },
+            "value_returned":false
+          },
+          "value_returned":false
+        }"#;
+        let mut status: ManagedOperationStatusV1 = decode_strict(raw).unwrap();
+        validate_status(&status, "host_58f36c72a91e", "op_remove00000001")
+            .expect("exact removal status");
+        status.operation.removal.as_mut().unwrap().generation = 2;
+        assert_eq!(
+            validate_status(&status, "host_58f36c72a91e", "op_remove00000001").unwrap_err(),
+            ManagedHostAgentError::new("managed_host_status_invalid")
         );
     }
 
