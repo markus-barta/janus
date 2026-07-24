@@ -1320,6 +1320,8 @@ mod tests {
             &[EntryJournalSummary {
                 operation_id: "entry-fixture".to_string(),
                 secret_ref: descriptor.secret_ref.clone(),
+                operation_kind: "create".to_string(),
+                generation: 0,
                 phase: "failed".to_string(),
                 reason_code: "entry_fixture_failed".to_string(),
                 preflighted_at_unix_secs: 1,

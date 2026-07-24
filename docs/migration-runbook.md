@@ -10,7 +10,8 @@ databases, or disaster-recovery material.
 
 ## Safety contract
 
-- Stop every `janusd-use`, `janusd-admin`, and `janus-warden` instance that uses the approval
+- Stop every `janusd-use`, `janusd-admin`, `janusd-web-transactiond`, and
+  `janus-warden` instance that uses the approval
   registry. Preflight takes a local maintenance lock but cannot stop remote
   writers.
 - Render the reviewed

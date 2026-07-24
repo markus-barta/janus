@@ -12,10 +12,10 @@ agents - without making raw credentials part of prompts, command arguments,
 logs, or application code.
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
-[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.10-cb7c28.svg)](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.10)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.11-cb7c28.svg)](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.11)
 
 [Product site](https://janus.inspr.at) ·
-[Rust engine v0.1.10](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.10) ·
+[Rust engine v0.1.11](https://github.com/markus-barta/janus/releases/tag/rust-engine-v0.1.11) ·
 [INSPR](https://www.inspr.at)
 
 ## What Janus does
@@ -75,7 +75,7 @@ Janus has two layers with different histories:
 
 | Layer | Role | Language | Status |
 |---|---|---|---|
-| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.10`. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.11`. |
 | **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
 The Rust engine is no longer a skeleton. Core execution paths ship with unit,
@@ -205,8 +205,10 @@ On a supported Linux system, build the native Nix package:
 nix build .#janus-engine
 ```
 
-The package installs `janusd-use`, `janusd-admin`, `janus-warden`, and the
-non-operational `janusd` migration helper for supported Linux systems. The
+The package installs `janusd-use`, `janusd-admin`,
+`janusd-web-transactiond`, `janus-warden`, and the non-operational `janusd`
+migration helper for supported Linux systems. The private transaction daemon
+has no CLI operations and accepts only the reviewed local socket protocol; the
 legacy helper cannot run either plane's commands.
 
 ### Release assurance
@@ -226,6 +228,8 @@ It exercises:
 - a real reference-only Warden MCP session;
 - the hard use/admin process boundary and retired mixed entry point;
 - the approval-to-env-file operator flow;
+- the private web-to-Rust lifecycle transaction, crash reconciliation, and
+  value-free protocol flow;
 - the versioned approval-registry migration and rollback flow;
 - the exact-scope recovery and explicit boundary-transfer flow;
 - the exact, single-use break-glass lifecycle and independent review flow;
@@ -348,6 +352,18 @@ Claude Code can route this exact permit-bound shape while blocking raw secret
 references in arbitrary tools. See
 [`docs/claude-code-hooks.md`](docs/claude-code-hooks.md) for installation,
 verification, and rollback.
+
+### Managed-service web ingress
+
+Pharos can issue a short-lived, signed intent for one nixcfg-declared
+host/service/slot. Janus then requires the `lifecycle.entry` permission, exact
+same-origin CSRF checks, and a fresh ZITADEL passwordless passkey assertion
+before it generates or accepts one bounded value. The value is handed once to
+the typed local transaction boundary and is never rendered back or added to an
+ordinary API. See the
+[`managed-service contract`](docs/managed-service-secret-contract.md),
+[`web ingress boundary`](docs/managed-secret-ingress.md), and
+[`typed transaction protocol`](docs/managed-web-transaction.md).
 
 ### Service env file
 

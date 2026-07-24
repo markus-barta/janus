@@ -769,6 +769,35 @@ func ValidateCatalog(descriptors []SecretDescriptor) []CatalogGate {
 				Message:   "Secret has no declared consumers; one-click rotation stays blocked.",
 			})
 		}
+		if desc.RecordType != "" && desc.RecordType != "service_secret" {
+			gates = append(gates, CatalogGate{
+				SecretRef: ref,
+				Severity:  "medium",
+				Code:      "unsupported_record_type",
+				Message:   "Secret record type is not supported by this Janus release.",
+			})
+		}
+		if desc.RecordType == "service_secret" {
+			for _, field := range []struct {
+				value   string
+				code    string
+				message string
+			}{
+				{desc.Consumer, "missing_service_consumer", "Service secret needs a declared consumer label."},
+				{desc.Host, "missing_service_host", "Service secret needs a declared host label."},
+				{desc.Health, "missing_service_health", "Service secret needs value-free health posture."},
+				{desc.RotationPosture, "missing_rotation_posture", "Service secret needs value-free rotation posture."},
+			} {
+				if strings.TrimSpace(field.value) == "" {
+					gates = append(gates, CatalogGate{
+						SecretRef: ref,
+						Severity:  "medium",
+						Code:      field.code,
+						Message:   field.message,
+					})
+				}
+			}
+		}
 		if !desc.UseEnabled {
 			gates = append(gates, CatalogGate{
 				SecretRef: ref,

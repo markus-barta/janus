@@ -29,6 +29,8 @@
               "-p"
               "janusd"
               "-p"
+              "janus-host"
+              "-p"
               "janus-warden"
             ];
             cargoTestFlags = [ "--workspace" ];
@@ -39,6 +41,9 @@
               install -Dm755 "$release_dir/janusd" "$out/bin/janusd"
               install -Dm755 "$release_dir/janusd-use" "$out/bin/janusd-use"
               install -Dm755 "$release_dir/janusd-admin" "$out/bin/janusd-admin"
+              install -Dm755 "$release_dir/janusd-web-transactiond" "$out/bin/janusd-web-transactiond"
+              install -Dm755 "$release_dir/janus-host-executor" "$out/bin/janus-host-executor"
+              install -Dm755 "$release_dir/janus-managed-host-agent" "$out/bin/janus-managed-host-agent"
               install -Dm755 "$release_dir/janus-warden" "$out/bin/janus-warden"
               runHook postInstall
             '';

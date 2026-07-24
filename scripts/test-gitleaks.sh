@@ -10,29 +10,46 @@ if [[ ! -x "${gitleaks_bin}" ]] && ! command -v "${gitleaks_bin}" >/dev/null 2>&
 fi
 
 ignore_count="$(awk '!/^#/ && NF { count++ } END { print count + 0 }' "${repo}/.gitleaksignore")"
-if [[ "${ignore_count}" != "6" ]]; then
-  echo "expected exactly six reviewed Gitleaks fingerprints, got ${ignore_count}" >&2
+if [[ "${ignore_count}" != "22" ]]; then
+  echo "expected exactly twenty-two reviewed Gitleaks fingerprints, got ${ignore_count}" >&2
   exit 1
 fi
 
 cd "${repo}"
-"${gitleaks_bin}" git \
+history_report="$(mktemp)"
+tracked_tree="$(mktemp -d)"
+tracked_report="$(mktemp)"
+negative_repo="$(mktemp -d)"
+cleanup() {
+  rm -f -- "${history_report}" "${tracked_report}"
+  rm -rf -- "${tracked_tree}" "${negative_repo}"
+}
+trap cleanup EXIT
+
+report_findings() {
+  local phase=$1
+  local report=$2
+  printf 'Gitleaks %s scan rejected reviewed input; value_returned=false\n' "${phase}" >&2
+  jq -r \
+    '.[] | [.RuleID, .File, (.StartLine | tostring), .Commit, .Fingerprint] | @tsv' \
+    "${report}" >&2
+}
+
+if ! "${gitleaks_bin}" git \
   --gitleaks-ignore-path "${repo}/.gitleaksignore" \
   --redact=100 \
   --no-banner \
   --no-color \
   --log-level warn \
-  --log-opts=--all
-
-tracked_tree="$(mktemp -d)"
-negative_repo="$(mktemp -d)"
-cleanup() {
-  rm -rf -- "${tracked_tree}" "${negative_repo}"
-}
-trap cleanup EXIT
+  --report-format json \
+  --report-path "${history_report}" \
+  --log-opts=--all; then
+  report_findings history "${history_report}"
+  exit 1
+fi
 
 git archive "$(git write-tree)" | tar -xf - -C "${tracked_tree}"
-(
+if ! (
   cd "${tracked_tree}"
   "${gitleaks_bin}" dir \
     --gitleaks-ignore-path .gitleaksignore \
@@ -40,8 +57,13 @@ git archive "$(git write-tree)" | tar -xf - -C "${tracked_tree}"
     --no-banner \
     --no-color \
     --log-level warn \
+    --report-format json \
+    --report-path "${tracked_report}" \
     .
-)
+); then
+  report_findings tracked-tree "${tracked_report}"
+  exit 1
+fi
 
 git -C "${negative_repo}" init -q
 git -C "${negative_repo}" config user.name "Janus Gitleaks Fixture"

@@ -16,6 +16,12 @@ Cargo.lock.bak
 __pycache__/
 *.py[cod]
 
+# Browser QA dependencies and failure artifacts
+/node_modules/
+/test-results/
+/playwright-report/
+/browser-qa/test-results/
+
 # editor / OS
 .DS_Store
 *.swp

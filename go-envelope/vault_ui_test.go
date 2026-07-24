@@ -99,6 +99,65 @@ func TestVaultPageRendersFocusWithOperatorActions(t *testing.T) {
 	}
 }
 
+func TestVaultPresentsManagedServiceSecretWithoutRevealOrCopy(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	app.store.mu.Lock()
+	app.store.items = []SecretDescriptor{{
+		ID:              "csb1-managed-canary",
+		DisplayName:     "Canary admin password",
+		RecordType:      "service_secret",
+		Consumer:        "Canary service",
+		Host:            "csb1",
+		Provider:        "janus-managed",
+		Classification:  "high",
+		Owner:           "platform",
+		Scope:           "csb1",
+		Source:          "managed://slot/canary",
+		RotationDays:    90,
+		LastCheckedAt:   time.Now().UTC().Add(-time.Hour),
+		Status:          "managed",
+		Health:          "healthy",
+		RotationPosture: "current",
+		RevealAllowed:   true,
+		UseEnabled:      true,
+		ConsumerCount:   1,
+		EgressMode:      "none",
+	}}
+	app.store.normalizeLocked()
+	app.store.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/?ref=csb1-managed-canary", nil)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", out.Code, out.Body.String())
+	}
+	body := out.Body.String()
+	for _, expected := range []string{
+		"Service secret",
+		"Canary service",
+		"csb1",
+		"Lifecycle",
+		"Age",
+		"Rotation",
+		"current",
+		"Health",
+		"healthy",
+		"no reveal",
+		"Advanced manual setup",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("managed record should render %q: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{"reveal permitted", "Copy secret", "Reveal secret", "managed://slot/canary"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("managed record exposed forbidden UI %q: %s", forbidden, body)
+		}
+	}
+}
+
 func TestVaultPageHidesOperatorFormsForViewer(t *testing.T) {
 	app := newTestApp(t)
 	session := Session{Subject: "viewer", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}

@@ -27,22 +27,28 @@ import (
 )
 
 const (
-	sessionCookie     = "janus_session"
-	hostSessionCookie = "__Host-janus_session"
-	stateCookie       = "janus_oidc_state"
-	hostStateCookie   = "__Host-janus_oidc_state"
-	nonceCookie       = "janus_oidc_nonce"
-	hostNonceCookie   = "__Host-janus_oidc_nonce"
-	pkceCookie        = "janus_oidc_pkce"
-	hostPKCECookie    = "__Host-janus_oidc_pkce"
-	returnCookie      = "janus_oidc_return"
-	hostReturnCookie  = "__Host-janus_oidc_return"
-	attemptCookie     = "janus_oidc_attempt"
-	hostAttemptCookie = "__Host-janus_oidc_attempt"
-	defaultSessionTTL = 12 * time.Hour
-	loginAttemptTTL   = 10 * time.Minute
-	maxLoginAttempts  = 3
-	maxRequestBody    = int64(4096)
+	sessionCookie          = "janus_session"
+	hostSessionCookie      = "__Host-janus_session"
+	stateCookie            = "janus_oidc_state"
+	hostStateCookie        = "__Host-janus_oidc_state"
+	nonceCookie            = "janus_oidc_nonce"
+	hostNonceCookie        = "__Host-janus_oidc_nonce"
+	pkceCookie             = "janus_oidc_pkce"
+	hostPKCECookie         = "__Host-janus_oidc_pkce"
+	returnCookie           = "janus_oidc_return"
+	hostReturnCookie       = "__Host-janus_oidc_return"
+	attemptCookie          = "janus_oidc_attempt"
+	hostAttemptCookie      = "__Host-janus_oidc_attempt"
+	stepUpFlowCookie       = "janus_managed_stepup_flow"
+	hostStepUpFlowCookie   = "__Host-janus_managed_stepup_flow"
+	stepUpProofCookie      = "janus_managed_stepup_proof"
+	hostStepUpProofCookie  = "__Host-janus_managed_stepup_proof"
+	managedLoginCookie     = "janus_managed_login_intent"
+	hostManagedLoginCookie = "__Host-janus_managed_login_intent"
+	defaultSessionTTL      = 12 * time.Hour
+	loginAttemptTTL        = 10 * time.Minute
+	maxLoginAttempts       = 3
+	maxRequestBody         = int64(4096)
 )
 
 type Config struct {
@@ -59,6 +65,7 @@ type Config struct {
 	CookieKey     []byte
 	RolePolicy    RolePolicy
 	ScopePolicy   ScopePolicy
+	ManagedSetup  *managedSetupRuntimeConfig
 }
 
 func (c Config) OIDCConfigured() bool {
@@ -112,59 +119,95 @@ func (c Config) AttemptCookieName() string {
 	return attemptCookie
 }
 
+func (c Config) StepUpFlowCookieName() string {
+	if c.SecureCookies() {
+		return hostStepUpFlowCookie
+	}
+	return stepUpFlowCookie
+}
+
+func (c Config) StepUpProofCookieName() string {
+	if c.SecureCookies() {
+		return hostStepUpProofCookie
+	}
+	return stepUpProofCookie
+}
+
+func (c Config) ManagedLoginCookieName() string {
+	if c.SecureCookies() {
+		return hostManagedLoginCookie
+	}
+	return managedLoginCookie
+}
+
 type SecretDescriptor struct {
-	ID             string    `json:"id"`
-	DisplayName    string    `json:"display_name"`
-	Provider       string    `json:"provider"`
-	Classification string    `json:"classification"`
-	Owner          string    `json:"owner"`
-	Scope          string    `json:"scope,omitempty"`
-	Source         string    `json:"source,omitempty"`
-	RotationDays   int       `json:"rotation_days"`
-	LastCheckedAt  time.Time `json:"last_checked_at"`
-	Lifecycle      string    `json:"lifecycle"`
-	Status         string    `json:"status"`
-	RevealAllowed  bool      `json:"reveal_allowed"`
-	UseEnabled     bool      `json:"use_enabled"`
-	ConsumerCount  int       `json:"consumer_count"`
-	EgressMode     string    `json:"egress_mode,omitempty"`
-	Tags           []string  `json:"tags"`
+	ID              string    `json:"id"`
+	DisplayName     string    `json:"display_name"`
+	RecordType      string    `json:"type,omitempty"`
+	Consumer        string    `json:"consumer,omitempty"`
+	Host            string    `json:"host,omitempty"`
+	Provider        string    `json:"provider"`
+	Classification  string    `json:"classification"`
+	Owner           string    `json:"owner"`
+	Scope           string    `json:"scope,omitempty"`
+	Source          string    `json:"source,omitempty"`
+	RotationDays    int       `json:"rotation_days"`
+	LastCheckedAt   time.Time `json:"last_checked_at"`
+	Lifecycle       string    `json:"lifecycle"`
+	Status          string    `json:"status"`
+	Health          string    `json:"health,omitempty"`
+	RotationPosture string    `json:"rotation_posture,omitempty"`
+	RevealAllowed   bool      `json:"reveal_allowed"`
+	UseEnabled      bool      `json:"use_enabled"`
+	ConsumerCount   int       `json:"consumer_count"`
+	EgressMode      string    `json:"egress_mode,omitempty"`
+	Tags            []string  `json:"tags"`
 }
 
 func (d SecretDescriptor) MarshalJSON() ([]byte, error) {
 	type publicDescriptor struct {
-		ID             string    `json:"id"`
-		DisplayName    string    `json:"display_name"`
-		Provider       string    `json:"provider"`
-		Classification string    `json:"classification"`
-		Owner          string    `json:"owner"`
-		Scope          string    `json:"scope,omitempty"`
-		RotationDays   int       `json:"rotation_days"`
-		LastCheckedAt  time.Time `json:"last_checked_at"`
-		Lifecycle      string    `json:"lifecycle"`
-		Status         string    `json:"status"`
-		RevealAllowed  bool      `json:"reveal_allowed"`
-		UseEnabled     bool      `json:"use_enabled"`
-		ConsumerCount  int       `json:"consumer_count"`
-		EgressMode     string    `json:"egress_mode,omitempty"`
-		Tags           []string  `json:"tags"`
+		ID              string    `json:"id"`
+		DisplayName     string    `json:"display_name"`
+		RecordType      string    `json:"type,omitempty"`
+		Consumer        string    `json:"consumer,omitempty"`
+		Host            string    `json:"host,omitempty"`
+		Provider        string    `json:"provider"`
+		Classification  string    `json:"classification"`
+		Owner           string    `json:"owner"`
+		Scope           string    `json:"scope,omitempty"`
+		RotationDays    int       `json:"rotation_days"`
+		LastCheckedAt   time.Time `json:"last_checked_at"`
+		Lifecycle       string    `json:"lifecycle"`
+		Status          string    `json:"status"`
+		Health          string    `json:"health,omitempty"`
+		RotationPosture string    `json:"rotation_posture,omitempty"`
+		RevealAllowed   bool      `json:"reveal_allowed"`
+		UseEnabled      bool      `json:"use_enabled"`
+		ConsumerCount   int       `json:"consumer_count"`
+		EgressMode      string    `json:"egress_mode,omitempty"`
+		Tags            []string  `json:"tags"`
 	}
 	return json.Marshal(publicDescriptor{
-		ID:             d.ID,
-		DisplayName:    d.DisplayName,
-		Provider:       d.Provider,
-		Classification: d.Classification,
-		Owner:          d.Owner,
-		Scope:          d.Scope,
-		RotationDays:   d.RotationDays,
-		LastCheckedAt:  d.LastCheckedAt,
-		Lifecycle:      d.Lifecycle,
-		Status:         d.Status,
-		RevealAllowed:  d.RevealAllowed,
-		UseEnabled:     d.UseEnabled,
-		ConsumerCount:  d.ConsumerCount,
-		EgressMode:     d.EgressMode,
-		Tags:           d.Tags,
+		ID:              d.ID,
+		DisplayName:     d.DisplayName,
+		RecordType:      d.RecordType,
+		Consumer:        d.Consumer,
+		Host:            d.Host,
+		Provider:        d.Provider,
+		Classification:  d.Classification,
+		Owner:           d.Owner,
+		Scope:           d.Scope,
+		RotationDays:    d.RotationDays,
+		LastCheckedAt:   d.LastCheckedAt,
+		Lifecycle:       d.Lifecycle,
+		Status:          d.Status,
+		Health:          d.Health,
+		RotationPosture: d.RotationPosture,
+		RevealAllowed:   d.RevealAllowed,
+		UseEnabled:      d.UseEnabled,
+		ConsumerCount:   d.ConsumerCount,
+		EgressMode:      d.EgressMode,
+		Tags:            d.Tags,
 	})
 }
 
@@ -234,6 +277,11 @@ func (s *Store) normalizeLocked() {
 		item := &s.items[i]
 		item.ID = strings.TrimSpace(item.ID)
 		item.DisplayName = strings.TrimSpace(item.DisplayName)
+		item.RecordType = strings.TrimSpace(item.RecordType)
+		item.Consumer = strings.TrimSpace(item.Consumer)
+		item.Host = strings.TrimSpace(item.Host)
+		item.Health = strings.TrimSpace(item.Health)
+		item.RotationPosture = strings.TrimSpace(item.RotationPosture)
 		if item.DisplayName == "" {
 			item.DisplayName = item.ID
 		}
@@ -261,6 +309,21 @@ func (s *Store) normalizeLocked() {
 		}
 		if item.EgressMode == "" {
 			item.EgressMode = "none"
+		}
+		if item.RecordType == "service_secret" {
+			if item.Host == "" {
+				item.Host = item.Scope
+			}
+			if item.Health == "" {
+				item.Health = "not_reported"
+			}
+			if item.RotationPosture == "" {
+				if item.Lifecycle == LifecycleActive {
+					item.RotationPosture = "current"
+				} else {
+					item.RotationPosture = "review_due"
+				}
+			}
 		}
 		item.RevealAllowed = false
 	}
@@ -317,14 +380,17 @@ type AuditEntry struct {
 }
 
 type App struct {
-	cfg       Config
-	store     *Store
-	broker    *Broker
-	permits   *PermitStore
-	limiter   *RateLimiter
-	oauth     *oauth2.Config
-	verifier  *oidc.IDTokenVerifier
-	templates *template.Template
+	cfg           Config
+	store         *Store
+	broker        *Broker
+	permits       *PermitStore
+	limiter       *RateLimiter
+	oauth         *oauth2.Config
+	verifier      *oidc.IDTokenVerifier
+	templates     *template.Template
+	managedSetup  managedSetupIntentAuthority
+	managedTxn    managedTransactionExecutor
+	managedBridge *managedOperationBridge
 }
 
 type Session struct {
@@ -515,6 +581,11 @@ func loadConfig() (Config, error) {
 	}
 	cfg.RolePolicy = LoadRolePolicyFromEnv()
 	cfg.ScopePolicy = LoadScopePolicyFromEnv()
+	managedSetup, err := loadManagedSetupRuntimeConfigFromEnv()
+	if err != nil {
+		return cfg, err
+	}
+	cfg.ManagedSetup = managedSetup
 
 	if _, err := url.ParseRequestURI(cfg.PublicURL); err != nil {
 		return cfg, fmt.Errorf("JANUS_PUBLIC_URL is invalid: %w", err)
@@ -537,6 +608,21 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 		permits:   permitStore,
 		limiter:   NewRateLimiter(180, time.Minute),
 		templates: mustTemplates(),
+	}
+	if cfg.ManagedSetup != nil {
+		managedSetup, err := newManagedSetupIntentConsumer(*cfg.ManagedSetup, cfg.DataDir)
+		if err != nil {
+			return nil, fmt.Errorf("managed setup intent consumer: %w", err)
+		}
+		transaction := newManagedTransactionClient(cfg.ManagedSetup.TransactionSocket)
+		bridge, err := newManagedOperationBridge(*cfg.ManagedSetup, cfg.DataDir, transaction)
+		if err != nil {
+			return nil, fmt.Errorf("managed operation bridge: %w", err)
+		}
+		app.managedSetup = managedSetup
+		app.managedTxn = bridge
+		app.managedBridge = bridge
+		go bridge.Run(ctx)
 	}
 
 	if cfg.OIDCConfigured() {
@@ -573,6 +659,11 @@ func (app *App) routeSpecs() []routeSpec {
 		{pattern: "GET /login", permission: PermissionHealthRead, handler: app.handleLogin},
 		{pattern: "GET /auth/reset", permission: PermissionHealthRead, handler: app.handleAuthReset},
 		{pattern: "GET /oidc/callback", permission: PermissionHealthRead, handler: app.handleCallback},
+		{pattern: "GET /managed-service/setup", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetup},
+		{pattern: "POST /managed-service/setup/step-up", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetupStepUp},
+		{pattern: "POST /managed-service/setup/execute", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetupExecute},
+		{pattern: "GET /internal/managed-service-host-envelopes/{hostRef}/{operationRef}", permission: PermissionLifecycleEntry, handler: app.handleManagedHostEnvelope},
+		{pattern: "POST /internal/managed-service-operations/{operationRef}/reconcile", permission: PermissionLifecycleEntry, handler: app.handleManagedHostReconcile},
 		{pattern: "POST /logout", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleLogout},
 		{pattern: "GET /auth/smoke", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleAuthSmokePage},
 		{pattern: "GET /session-witness", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleSessionWitnessPage},
@@ -634,13 +725,13 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/access", "/requests", "/ledger", "/assurance", "/settings", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/access", "/requests", "/ledger", "/assurance", "/settings", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/managed-service/setup", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
 	case "/session-witness/verify-current":
 		return []string{http.MethodPost}, true
-	case "/logout", "/api/warden/resolve", "/api/permits", "/ui/warden/resolve", "/ui/permits":
+	case "/logout", "/managed-service/setup/step-up", "/managed-service/setup/execute", "/api/warden/resolve", "/api/permits", "/ui/warden/resolve", "/ui/permits":
 		return []string{http.MethodPost}, true
 	case "/api/auth/session-witness/verify":
 		return []string{http.MethodPost}, true
@@ -651,6 +742,10 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 	case singleSegmentRunPath(path, "/api/permits/"):
 		return []string{http.MethodPost}, true
 	case singleSegmentRunPath(path, "/ui/permits/"):
+		return []string{http.MethodPost}, true
+	case managedHostEnvelopePath(path):
+		return []string{http.MethodGet}, true
+	case managedHostReconcilePath(path):
 		return []string{http.MethodPost}, true
 	default:
 		return nil, false
@@ -801,6 +896,13 @@ func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				if r.URL.Path == "/managed-service/setup" {
+					if intentRef, valid := exactManagedIntentQuery(r.URL); valid {
+						app.writeManagedLoginIntent(w, intentRef)
+						app.renderLoginLanding(w, r)
+						return
+					}
+				}
 				if _, safe := safeLoginReturnPath(r.URL.RequestURI()); safe {
 					app.renderLoginLanding(w, r)
 					return
@@ -1711,6 +1813,21 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		app.renderSetup(w, r)
 		return
 	}
+	if _, err := firstCookie(
+		r,
+		app.cfg.StepUpFlowCookieName(),
+		stepUpFlowCookie,
+		app.cfg.StepUpProofCookieName(),
+		stepUpProofCookie,
+	); err == nil {
+		app.clearManagedStepUpCookies(w)
+	}
+	managedLogin := r.URL.Query().Get("managed") == "1"
+	_, managedLoginValid := app.readManagedLoginIntent(r)
+	_, managedLoginPresentErr := firstCookie(r, app.cfg.ManagedLoginCookieName(), managedLoginCookie)
+	if managedLoginPresentErr == nil && (!managedLogin || !managedLoginValid) {
+		app.clearManagedLoginIntentCookies(w)
+	}
 	if r.URL.Query().Get("reset") == "1" {
 		app.handleAuthReset(w, r)
 		return
@@ -1735,33 +1852,9 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	state := randomToken(32)
 	nonce := randomToken(32)
 	verifier := oauth2.GenerateVerifier()
-	http.SetCookie(w, &http.Cookie{
-		Name:     app.cfg.StateCookieName(),
-		Value:    state,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   app.cfg.SecureCookies(),
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   300,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     app.cfg.NonceCookieName(),
-		Value:    nonce,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   app.cfg.SecureCookies(),
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   300,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     app.cfg.PKCECookieName(),
-		Value:    verifier,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   app.cfg.SecureCookies(),
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   300,
-	})
+	app.writeOIDCEphemeralCookie(w, app.cfg.StateCookieName(), state)
+	app.writeOIDCEphemeralCookie(w, app.cfg.NonceCookieName(), nonce)
+	app.writeOIDCEphemeralCookie(w, app.cfg.PKCECookieName(), verifier)
 	app.audit(r, "auth.login.start", "allowed", "", "")
 	http.Redirect(w, r, app.oauth.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce), oauth2.S256ChallengeOption(verifier)), http.StatusFound)
 }
@@ -1783,13 +1876,19 @@ func (app *App) handleAuthReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) renderLoginLanding(w http.ResponseWriter, r *http.Request) {
+	startHref := loginRedirectTarget(r)
+	if r.URL.Path == "/managed-service/setup" {
+		if _, ok := exactManagedIntentQuery(r.URL); ok {
+			startHref = "/login?managed=1"
+		}
+	}
 	renderTemplateStatus(w, app.templates, "login_landing", http.StatusOK, map[string]any{
 		"Title":         "Janus login",
 		"CSPNonce":      cspNonceFromContext(r.Context()),
 		"Mode":          app.cfg.ProductMode,
 		"Session":       Session{},
 		"AuthScreen":    true,
-		"StartHref":     loginRedirectTarget(r),
+		"StartHref":     startHref,
 		"ValueReturned": false,
 	})
 }
@@ -1810,6 +1909,14 @@ func (app *App) renderNoAccess(w http.ResponseWriter, r *http.Request) {
 func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if !app.cfg.OIDCConfigured() || app.oauth == nil || app.verifier == nil {
 		app.renderSetup(w, r)
+		return
+	}
+	stepUpFlow, stepUpExpected, stepUpFlowErr := app.readManagedStepUpFlow(r)
+	if stepUpFlowErr != nil {
+		app.clearOIDCLoginCookies(w)
+		app.clearManagedStepUpProofCookies(w)
+		app.audit(r, "managed_secret.step_up.complete", "denied", "", "step-up flow invalid")
+		app.renderAuthError(w, r, http.StatusBadRequest, "passwordless_step_up_failed", "A fresh passwordless passkey confirmation is required for this secret change.")
 		return
 	}
 	if r.URL.Query().Get("error") != "" {
@@ -1874,12 +1981,14 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var claims struct {
-		Subject string   `json:"sub"`
-		Email   string   `json:"email"`
-		Name    string   `json:"name"`
-		Nonce   string   `json:"nonce"`
-		Groups  []string `json:"groups"`
-		Roles   []string `json:"roles"`
+		Subject  string   `json:"sub"`
+		Email    string   `json:"email"`
+		Name     string   `json:"name"`
+		Nonce    string   `json:"nonce"`
+		Groups   []string `json:"groups"`
+		Roles    []string `json:"roles"`
+		AuthTime int64    `json:"auth_time"`
+		AMR      []string `json:"amr"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		app.clearOIDCLoginCookies(w)
@@ -1933,12 +2042,27 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Roles:   projectedRoles,
 		Expiry:  time.Now().UTC().Add(defaultSessionTTL),
 	}
+	if stepUpExpected {
+		app.completeManagedStepUpCallback(
+			w,
+			r,
+			session,
+			stepUpFlow,
+			state.Value,
+			claims.AuthTime,
+			claims.AMR,
+		)
+		return
+	}
 	app.writeSession(w, session)
-	returnPath, ok := app.readOIDCLoginReturnPath(r)
-	if !ok {
-		returnPath = "/"
+	returnPath := "/"
+	if managedIntentRef, managedLogin := app.readManagedLoginIntent(r); managedLogin {
+		returnPath = "/managed-service/setup?intent=" + url.QueryEscape(managedIntentRef)
+	} else if regularReturn, ok := app.readOIDCLoginReturnPath(r); ok {
+		returnPath = regularReturn
 	}
 	app.clearOIDCLoginCookies(w)
+	app.clearManagedLoginIntentCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
 	app.audit(r, "auth.login.complete", "allowed", session.Subject, "")
 	http.Redirect(w, r, returnPath, http.StatusFound)
@@ -1954,6 +2078,8 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	app.audit(r, "auth.logout", "allowed", session.Subject, "")
 	app.clearSessionCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
+	app.clearManagedStepUpCookies(w)
+	app.clearManagedLoginIntentCookies(w)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -2015,6 +2141,8 @@ func authErrorCopy(reasonCode string) (string, string) {
 		return "Identity response needs review", "Try again once. If it repeats, use the request id for server-side audit lookup."
 	case "login_integrity_check_failed", "logout_integrity_check_failed":
 		return "Login integrity check failed", "Reload Janus and start again so state, nonce, PKCE, and CSRF checks are fresh."
+	case "passwordless_step_up_failed":
+		return "Passkey confirmation needed", "Return to the secret setup page and confirm again with a passwordless passkey."
 	default:
 		return "Login needs a fresh start", "Start a clean login from Janus."
 	}
@@ -2219,6 +2347,7 @@ func (app *App) clearOIDCLoginCookies(w http.ResponseWriter) {
 		app.clearCookie(w, pkceCookie)
 	}
 	app.clearOIDCLoginReturnCookie(w)
+	app.clearManagedStepUpFlowCookies(w)
 }
 
 func (app *App) clearSessionCookies(w http.ResponseWriter) {
@@ -2232,6 +2361,8 @@ func (app *App) clearAllAuthCookies(w http.ResponseWriter) {
 	app.clearSessionCookies(w)
 	app.clearOIDCLoginCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
+	app.clearManagedStepUpProofCookies(w)
+	app.clearManagedLoginIntentCookies(w)
 }
 
 func (app *App) clearOIDCLoginReturnCookie(w http.ResponseWriter) {
@@ -3070,7 +3201,9 @@ func renderTemplate(w http.ResponseWriter, templates *template.Template, name st
 }
 
 func renderTemplateStatus(w http.ResponseWriter, templates *template.Template, name string, status int, data any) {
-	w.Header().Set("Cache-Control", "no-store")
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	if err := templates.ExecuteTemplate(w, name, data); err != nil {

@@ -17,7 +17,7 @@ repository changes and increment `policy_version` when their meaning changes.
 Admission runs outside the image being admitted:
 
 ```bash
-JANUS_ENGINE_RELEASE_TAG="rust-engine-v0.1.10" # replace with the reviewed release
+JANUS_ENGINE_RELEASE_TAG="rust-engine-v0.1.11" # replace with the reviewed release
 scripts/admit-engine-release.sh \
   --policy config/release-channels/v1.json \
   --channel stable \
@@ -51,7 +51,8 @@ otherwise recovery reruns the unchanged tag and commit.
 
 ## Runtime configuration
 
-Set these variables for `janus-warden`, `janusd-use`, and `janusd-admin`:
+Set these variables for `janus-warden`, `janusd-use`, `janusd-admin`, and
+`janusd-web-transactiond`:
 
 | Variable | Meaning |
 | --- | --- |

@@ -1,0 +1,264 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"net"
+	"strings"
+	"testing"
+)
+
+const managedTransactionCanary = "SENSITIVE_WEB_TRANSACTION_CANARY_9d3e"
+
+func managedTransactionAccepted(source string) managedAcceptedIntent {
+	intent := managedTestIntent(1_784_833_200)
+	return managedAcceptedIntent{
+		Intent:       intent,
+		Source:       source,
+		OperationRef: "op_0123456789abcdef",
+	}
+}
+
+func managedResponse(request managedTransactionRequest, phase, reason string, expects bool) managedTransactionResponse {
+	secretRef := "sec_" + "0123456789abcdef"
+	mode := request.Source
+	var generation *uint64
+	if phase == "prepared" || phase == "completed" || phase == "rolled_back" {
+		value := uint64(1)
+		generation = &value
+	}
+	return managedTransactionResponse{
+		Schema:        managedTransactionResponseSchema,
+		SchemaVersion: managedTransactionSchemaVersion,
+		OperationRef:  &request.OperationRef,
+		SecretRef:     &secretRef,
+		Mode:          &mode,
+		Generation:    generation,
+		Phase:         phase,
+		ReasonCode:    reason,
+		ExpectsValue:  expects,
+		ValueReturned: false,
+	}
+}
+
+func writeManagedTestResponse(t *testing.T, conn net.Conn, response managedTransactionResponse) {
+	t.Helper()
+	raw, err := json.Marshal(response)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if err := writeManagedTransactionFrame(conn, raw); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestManagedTransactionImportWaitsForValueFreePreflight(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	client := newManagedTransactionClient("/run/janus/managed-transaction.sock")
+	client.dial = func(_ context.Context, network, address string) (net.Conn, error) {
+		if network != "unix" || address != client.socketPath {
+			t.Fatalf("unexpected dial target %s %s", network, address)
+		}
+		return clientConn, nil
+	}
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		defer serverConn.Close()
+		rawRequest, err := readManagedTransactionFrame(serverConn)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if strings.Contains(string(rawRequest), managedTransactionCanary) {
+			t.Error("value crossed the value-free preflight frame")
+			return
+		}
+		var request managedTransactionRequest
+		if err := decodeStrictJSON(rawRequest, &request); err != nil {
+			t.Error(err)
+			return
+		}
+		writeManagedTestResponse(t, serverConn, managedResponse(request, "preflighted", "entry_preflight_ok", true))
+		value, err := readManagedTransactionFrame(serverConn)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if string(value) != managedTransactionCanary {
+			t.Error("import value did not use the single raw frame")
+			return
+		}
+		writeManagedTestResponse(t, serverConn, managedResponse(request, "prepared", "entry_delivery_prepared", false))
+	}()
+
+	result, err := client.Execute(
+		context.Background(),
+		managedTransactionAccepted("import"),
+		[]byte(managedTransactionCanary),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Phase != "prepared" || result.Generation != 1 || result.ValueReturned {
+		t.Fatalf("unexpected safe result: %#v", result)
+	}
+	<-serverDone
+}
+
+func TestManagedTransactionGeneratedSendsNoValueFrame(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	client := newManagedTransactionClient("/run/janus/managed-transaction.sock")
+	client.dial = func(context.Context, string, string) (net.Conn, error) {
+		return clientConn, nil
+	}
+	go func() {
+		defer serverConn.Close()
+		rawRequest, err := readManagedTransactionFrame(serverConn)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		var request managedTransactionRequest
+		if err := decodeStrictJSON(rawRequest, &request); err != nil {
+			t.Error(err)
+			return
+		}
+		writeManagedTestResponse(t, serverConn, managedResponse(request, "preflighted", "entry_preflight_ok", false))
+		writeManagedTestResponse(t, serverConn, managedResponse(request, "prepared", "entry_delivery_prepared", false))
+	}()
+	result, err := client.Execute(context.Background(), managedTransactionAccepted("generated"), nil)
+	if err != nil || result.Phase != "prepared" || result.Generation != 1 {
+		t.Fatalf("generated transaction failed safely: result=%#v err=%v", result, err)
+	}
+}
+
+func TestManagedTransactionRejectsValueBeforeGeneratedDial(t *testing.T) {
+	client := newManagedTransactionClient("/run/janus/managed-transaction.sock")
+	called := false
+	client.dial = func(context.Context, string, string) (net.Conn, error) {
+		called = true
+		return nil, nil
+	}
+	_, err := client.Execute(
+		context.Background(),
+		managedTransactionAccepted("generated"),
+		[]byte(managedTransactionCanary),
+	)
+	if err == nil || err.Error() != "web_transaction_value_denied" || called {
+		t.Fatalf("generated value should fail before dial: called=%t err=%v", called, err)
+	}
+}
+
+func TestManagedTransactionBoundaryAdmitsReviewedReplaceIntent(t *testing.T) {
+	accepted := managedTransactionAccepted("import")
+	accepted.Intent.OperationKind = "replace"
+	request := managedTransactionRequest{
+		Schema:                 managedTransactionRequestSchema,
+		SchemaVersion:          managedTransactionSchemaVersion,
+		Action:                 "prepare",
+		OperationRef:           accepted.OperationRef,
+		OperationKind:          accepted.Intent.OperationKind,
+		Source:                 accepted.Source,
+		HostRef:                accepted.Intent.HostRef,
+		ServiceRef:             accepted.Intent.ServiceRef,
+		SlotRef:                accepted.Intent.SlotRef,
+		DeclarationFingerprint: accepted.Intent.DeclarationFingerprint,
+	}
+	if err := validateManagedTransactionRequest(request, []byte("synthetic-replacement")); err != nil {
+		t.Fatalf("typed client should admit a signed reviewed replacement intent: %v", err)
+	}
+	request.OperationKind = "edit"
+	if err := validateManagedTransactionRequest(request, []byte("synthetic-replacement")); err == nil {
+		t.Fatal("typed client must reject arbitrary edit operations")
+	}
+}
+
+func TestManagedTransactionReplaceFailsClosedAtCurrentDownstreamBoundary(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	client := newManagedTransactionClient("/run/janus/managed-transaction.sock")
+	client.dial = func(context.Context, string, string) (net.Conn, error) {
+		return clientConn, nil
+	}
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		defer serverConn.Close()
+		rawRequest, err := readManagedTransactionFrame(serverConn)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if strings.Contains(string(rawRequest), managedTransactionCanary) {
+			t.Error("replacement value crossed the value-free request frame")
+			return
+		}
+		var request managedTransactionRequest
+		if err := decodeStrictJSON(rawRequest, &request); err != nil {
+			t.Error(err)
+			return
+		}
+		if request.OperationKind != "replace" {
+			t.Errorf("expected replace operation, got %q", request.OperationKind)
+			return
+		}
+		writeManagedTestResponse(
+			t,
+			serverConn,
+			managedResponse(request, "denied", "web_transaction_request_invalid", false),
+		)
+	}()
+
+	accepted := managedTransactionAccepted("import")
+	accepted.Intent.OperationKind = "replace"
+	_, err := client.Execute(
+		context.Background(),
+		accepted,
+		[]byte(managedTransactionCanary),
+	)
+	if err == nil ||
+		err.Error() != "web_transaction_request_invalid" ||
+		strings.Contains(err.Error(), managedTransactionCanary) {
+		t.Fatalf("current downstream replacement denial must be stable and value-free: %v", err)
+	}
+	<-serverDone
+}
+
+func TestManagedTransactionDenialCannotEchoValue(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	client := newManagedTransactionClient("/run/janus/managed-transaction.sock")
+	client.dial = func(context.Context, string, string) (net.Conn, error) {
+		return clientConn, nil
+	}
+	go func() {
+		defer serverConn.Close()
+		rawRequest, err := readManagedTransactionFrame(serverConn)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		var request managedTransactionRequest
+		if err := decodeStrictJSON(rawRequest, &request); err != nil {
+			t.Error(err)
+			return
+		}
+		response := managedResponse(request, "denied", "web_transaction_declaration_denied", false)
+		response.SecretRef = nil
+		response.Mode = nil
+		writeManagedTestResponse(t, serverConn, response)
+	}()
+	_, err := client.Execute(
+		context.Background(),
+		managedTransactionAccepted("import"),
+		[]byte(managedTransactionCanary),
+	)
+	if err == nil || err.Error() != "web_transaction_declaration_denied" ||
+		strings.Contains(err.Error(), managedTransactionCanary) {
+		t.Fatalf("denial should be stable and value-free: %v", err)
+	}
+}

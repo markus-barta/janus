@@ -13,6 +13,7 @@ pub mod broker;
 pub mod consumer;
 pub mod delegation;
 pub mod error;
+pub mod managed_service;
 pub mod manifest;
 pub mod metadata;
 pub mod migration;
@@ -57,6 +58,21 @@ pub use delegation::{
     DelegationRevocation, DelegationRevocationSnapshotV1, DelegationScope, DelegationStatus,
 };
 pub use error::{JanusError, JanusResult};
+pub use managed_service::{
+    managed_contract_version_compatible, parse_managed_service_contract_fixture,
+    ManagedConsumerKind, ManagedDeclarationFingerprint, ManagedDeliveryKind,
+    ManagedDeliveryProfileRef, ManagedEvidenceRef, ManagedFailureKind, ManagedGenerationRef,
+    ManagedHealthProfileRef, ManagedHostRef, ManagedHumanSessionRef, ManagedNonceRef,
+    ManagedOperationRef, ManagedReasonCode, ManagedReloadProfileRef, ManagedReturnTarget,
+    ManagedSecretEvidenceV1, ManagedSecretOperationKind, ManagedSecretOperationV1,
+    ManagedSecretPhase, ManagedSecretRef, ManagedSecretSlotRef, ManagedSecretSlotV1,
+    ManagedSecretSource, ManagedSecretStateMachine, ManagedServiceDeclarationV1, ManagedServiceRef,
+    ManagedSetupIntentRef, ManagedSetupIntentV1, ManagedSystemRef, ManagedWorkflowAuthority,
+    MANAGED_SERVICE_CONTRACT_VERSION, MANAGED_SERVICE_DECLARATION_SCHEMA,
+    MANAGED_SERVICE_EVIDENCE_SCHEMA, MANAGED_SERVICE_FIXTURE_SCHEMA,
+    MANAGED_SERVICE_OPERATION_SCHEMA, MANAGED_SERVICE_SETUP_INTENT_SCHEMA,
+    MAX_MANAGED_SERVICE_CONTRACT_BYTES, MAX_SETUP_INTENT_TTL_SECS,
+};
 pub use manifest::{load_secretspec_manifest_catalog, ManifestCatalog};
 pub use metadata::{SecretMetadataOverlay, SecretMetadataPatch};
 pub use migration::{MigrationCompatibility, MigrationManifest, MigrationPhase, MigrationRisk};

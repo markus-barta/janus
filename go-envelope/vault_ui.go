@@ -130,7 +130,7 @@ func applyVaultFilters(data map[string]any, r *http.Request) {
 			continue
 		}
 		if q != "" {
-			haystack := strings.ToLower(d.ID + " " + d.DisplayName + " " + d.Owner + " " + d.Scope + " " + strings.Join(d.Tags, " "))
+			haystack := strings.ToLower(d.ID + " " + d.DisplayName + " " + d.RecordType + " " + d.Consumer + " " + d.Host + " " + d.Owner + " " + d.Scope + " " + strings.Join(d.Tags, " "))
 			if !strings.Contains(haystack, q) {
 				continue
 			}

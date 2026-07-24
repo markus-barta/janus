@@ -42,7 +42,7 @@ try:
 finally:
     subprocess.run(["docker", "rm", "-f", container], check=False, capture_output=True)
 
-for binary in ("janusd", "janusd-use", "janusd-admin", "janus-warden"):
+for binary in ("janusd", "janusd-use", "janusd-admin", "janusd-web-transactiond", "janus-host-executor", "janus-warden"):
     path = f"/usr/local/bin/{binary}"
     member = members.get(path)
     if member is None or not member.isfile() or member.mode & 0o111 == 0:
@@ -60,7 +60,7 @@ policy = members.get("/etc/janus/release-channels-v1.json")
 if policy is None or not policy.isfile() or policy.mode & 0o022:
     raise SystemExit("release policy is absent or group/world writable")
 
-print("engine image filesystem ok user=65532:65532 binaries=4 runtime_packages=0 shell=none")
+print("engine image filesystem ok user=65532:65532 binaries=6 runtime_packages=0 shell=none")
 PY
 
 runtime=(
@@ -70,14 +70,24 @@ runtime=(
   --security-opt no-new-privileges
   --network none
   --user 65532:65532
-  --tmpfs /tmp:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700
-  --tmpfs /run/janus/age:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700
-  --tmpfs /run/janus/permits:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700
-  --tmpfs /var/lib/janus/secrets:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700
+  --tmpfs "/tmp:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700"
+  --tmpfs "/run/janus/age:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700"
+  --tmpfs "/run/janus/permits:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700"
+  --tmpfs "/var/lib/janus/secrets:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700"
 )
 for binary in janusd janusd-use janusd-admin; do
   "${runtime[@]}" --entrypoint "/usr/local/bin/${binary}" "${image}" --help >/dev/null
 done
+if "${runtime[@]}" --entrypoint /usr/local/bin/janusd-web-transactiond \
+  "${image}" --help >/dev/null 2>&1; then
+  echo "janusd-web-transactiond unexpectedly accepted argv" >&2
+  exit 1
+fi
+if "${runtime[@]}" --entrypoint /usr/local/bin/janus-host-executor \
+  "${image}" --help >/dev/null 2>&1; then
+  echo "janus-host-executor unexpectedly accepted an unreviewed action" >&2
+  exit 1
+fi
 
 echo "engine hardened runtime ok read_only=true cap_drop=ALL no_new_privileges=true network=none"
 python3 "${repo}/scripts/smoke-warden-mcp.py" --image "${image}"
