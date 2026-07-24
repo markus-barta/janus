@@ -113,6 +113,8 @@ struct ManagedOperationLeaseV1 {
     schema_version: u16,
     lease_ref: String,
     operation_ref: String,
+    #[serde(default = "default_create_operation_kind")]
+    operation_kind: String,
     host_ref: String,
     service_ref: String,
     slot_ref: String,
@@ -144,12 +146,25 @@ struct ManagedOperationResultV1<'a> {
     reason_code: &'static str,
     generation: u64,
     health_evidence: Option<ManagedHealthEvidenceV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rollback_evidence: Option<ManagedRollbackEvidenceV1>,
     value_returned: bool,
 }
 
 #[derive(Clone, Copy, Serialize)]
 struct ManagedHealthEvidenceV1 {
     generation: u64,
+    materialized: bool,
+    process_state: &'static str,
+    probe_state: &'static str,
+    heartbeat_observed_at_unix_secs: i64,
+    process_observed_at_unix_secs: i64,
+    probe_observed_at_unix_secs: i64,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct ManagedRollbackEvidenceV1 {
+    restored_generation: u64,
     materialized: bool,
     process_state: &'static str,
     probe_state: &'static str,
@@ -182,6 +197,7 @@ struct ManagedOperationSummaryV1 {
     created_at_unix_secs: i64,
     updated_at_unix_secs: i64,
     health: Option<ManagedHealthSummaryV1>,
+    rollback: Option<ManagedRollbackSummaryV1>,
     value_returned: bool,
 }
 
@@ -189,6 +205,17 @@ struct ManagedOperationSummaryV1 {
 #[serde(deny_unknown_fields)]
 struct ManagedHealthSummaryV1 {
     generation: u64,
+    outcome: String,
+    heartbeat_observed_at_unix_secs: i64,
+    process_observed_at_unix_secs: i64,
+    probe_observed_at_unix_secs: i64,
+    accepted_at_unix_secs: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedRollbackSummaryV1 {
+    restored_generation: u64,
     outcome: String,
     heartbeat_observed_at_unix_secs: i64,
     process_observed_at_unix_secs: i64,
@@ -331,58 +358,135 @@ impl ManagedHostAgent {
         let profile = self.profile_for_lease(lease)?;
         match lease.phase {
             AgentPhase::Install => {
-                let packet = self.fetch_packet(lease)?;
+                let packet = match self.fetch_packet(lease) {
+                    Ok(packet) => packet,
+                    Err(_) => {
+                        let rollback = if lease.operation_kind == "replace" {
+                            self.recover_replacement(executor, lease, profile).ok()
+                        } else {
+                            None
+                        };
+                        let outcome = if lease.operation_kind == "replace" && rollback.is_none() {
+                            "uncertain"
+                        } else {
+                            "failed"
+                        };
+                        self.report_failure_and_reconcile(
+                            lease,
+                            outcome,
+                            "delivery_failed",
+                            rollback,
+                        )?;
+                        return Ok(());
+                    }
+                };
                 if executor.install(&packet, SystemTime::now()).is_err() {
-                    self.report(lease, "failed", "delivery_failed", None)?;
+                    let rollback = if lease.operation_kind == "replace" {
+                        self.recover_replacement(executor, lease, profile).ok()
+                    } else {
+                        None
+                    };
+                    let (outcome, reason) =
+                        if lease.operation_kind == "replace" && rollback.is_none() {
+                            ("uncertain", "executor_failed")
+                        } else {
+                            ("failed", "delivery_failed")
+                        };
+                    self.report_failure_and_reconcile(lease, outcome, reason, rollback)?;
                     return Ok(());
                 }
-                self.report(lease, "succeeded", "phase_succeeded", None)?;
+                self.report(lease, "succeeded", "phase_succeeded", None, None)?;
             }
             AgentPhase::Reload => {
                 if !staged_exact(executor, lease)? {
-                    self.report(lease, "failed", "reload_failed", None)?;
+                    let rollback = if lease.operation_kind == "replace" {
+                        self.recover_replacement(executor, lease, profile).ok()
+                    } else {
+                        None
+                    };
+                    let (outcome, reason) =
+                        if lease.operation_kind == "replace" && rollback.is_none() {
+                            ("uncertain", "reload_uncertain")
+                        } else {
+                            ("failed", "reload_failed")
+                        };
+                    self.report_failure_and_reconcile(lease, outcome, reason, rollback)?;
                     return Ok(());
                 }
                 if self.compose_up(profile).is_err() {
-                    let recovered = self.rollback_and_recover(executor, lease, profile);
-                    let (outcome, reason) = if recovered.is_ok() {
+                    let (rollback, recovered) = if lease.operation_kind == "replace" {
+                        let rollback = self.recover_replacement(executor, lease, profile).ok();
+                        let recovered = rollback.is_some();
+                        (rollback, recovered)
+                    } else {
+                        (
+                            None,
+                            self.rollback_and_recover(executor, lease, profile).is_ok(),
+                        )
+                    };
+                    let (outcome, reason) = if recovered {
                         ("failed", "reload_failed")
                     } else {
                         ("uncertain", "reload_uncertain")
                     };
-                    self.report(lease, outcome, reason, None)?;
+                    self.report_failure_and_reconcile(lease, outcome, reason, rollback)?;
                     return Ok(());
                 }
-                self.report(lease, "succeeded", "phase_succeeded", None)?;
+                self.report(lease, "succeeded", "phase_succeeded", None, None)?;
             }
             AgentPhase::Verify => {
                 if !staged_exact(executor, lease)? {
-                    self.report(lease, "failed", "verification_failed", None)?;
+                    let rollback = if lease.operation_kind == "replace" {
+                        self.recover_replacement(executor, lease, profile).ok()
+                    } else {
+                        None
+                    };
+                    let (outcome, reason) =
+                        if lease.operation_kind == "replace" && rollback.is_none() {
+                            ("uncertain", "executor_failed")
+                        } else {
+                            ("failed", "verification_failed")
+                        };
+                    self.report_failure_and_reconcile(lease, outcome, reason, rollback)?;
                     return Ok(());
                 }
                 let evidence = match self.verify(profile, lease.generation) {
                     Ok(evidence) => evidence,
                     Err(_) => {
-                        let recovered = self.rollback_and_recover(executor, lease, profile);
-                        let (outcome, reason) = if recovered.is_ok() {
+                        let (rollback, recovered) = if lease.operation_kind == "replace" {
+                            let rollback = self.recover_replacement(executor, lease, profile).ok();
+                            let recovered = rollback.is_some();
+                            (rollback, recovered)
+                        } else {
+                            (
+                                None,
+                                self.rollback_and_recover(executor, lease, profile).is_ok(),
+                            )
+                        };
+                        let (outcome, reason) = if recovered {
                             ("failed", "verification_failed")
                         } else {
                             ("uncertain", "executor_failed")
                         };
-                        self.report(lease, outcome, reason, None)?;
+                        self.report_failure_and_reconcile(lease, outcome, reason, rollback)?;
                         return Ok(());
                     }
                 };
-                let status = self.report(lease, "succeeded", "phase_succeeded", Some(evidence))?;
+                let status =
+                    self.report(lease, "succeeded", "phase_succeeded", Some(evidence), None)?;
                 if status.operation.phase != "active" {
                     return Err(ManagedHostAgentError::new(
                         "managed_host_activation_unconfirmed",
                     ));
                 }
+                // Janus must commit the central transaction while the host's
+                // previous generation is still recoverable. A lost response is
+                // retry-safe; only the acknowledged central commit permits the
+                // host rollback generation to be discarded.
+                self.reconcile(lease)?;
                 executor
                     .commit(&control_for_lease(lease))
                     .map_err(|_| ManagedHostAgentError::new("managed_host_commit_failed"))?;
-                self.reconcile(lease)?;
             }
         }
         Ok(())
@@ -420,12 +524,12 @@ impl ManagedHostAgent {
             };
             match status.operation.phase.as_str() {
                 "active" => {
+                    self.reconcile_parts(operation_ref, generation)?;
                     executor
                         .commit(&control)
                         .map_err(|_| ManagedHostAgentError::new("managed_host_commit_failed"))?;
-                    self.reconcile_parts(operation_ref, generation)?;
                 }
-                "failed" | "superseded" => {
+                "failed" | "rolled_back" | "superseded" => {
                     let profile = self.profile_for_slot(service_ref, slot_ref)?;
                     let rollback = executor
                         .rollback(&control, SystemTime::now())
@@ -464,6 +568,7 @@ impl ManagedHostAgent {
         outcome: &'static str,
         reason_code: &'static str,
         health_evidence: Option<ManagedHealthEvidenceV1>,
+        rollback_evidence: Option<ManagedRollbackEvidenceV1>,
     ) -> AgentResult<ManagedOperationStatusV1> {
         let result = ManagedOperationResultV1 {
             schema: RESULT_SCHEMA,
@@ -476,6 +581,7 @@ impl ManagedHostAgent {
             reason_code,
             generation: lease.generation,
             health_evidence,
+            rollback_evidence,
             value_returned: false,
         };
         let body = serde_json::to_vec(&result)
@@ -491,6 +597,23 @@ impl ManagedHostAgent {
             .map_err(|_| ManagedHostAgentError::new("managed_host_status_invalid"))?;
         validate_status(&status, &self.config.host_ref, &lease.operation_ref)?;
         Ok(status)
+    }
+
+    fn report_failure_and_reconcile(
+        &self,
+        lease: &ManagedOperationLeaseV1,
+        outcome: &'static str,
+        reason_code: &'static str,
+        rollback_evidence: Option<ManagedRollbackEvidenceV1>,
+    ) -> AgentResult<()> {
+        let status = self.report(lease, outcome, reason_code, None, rollback_evidence)?;
+        if matches!(
+            status.operation.phase.as_str(),
+            "failed" | "rolled_back" | "superseded"
+        ) {
+            self.reconcile(lease)?;
+        }
+        Ok(())
     }
 
     fn status(&self, operation_ref: &str) -> AgentResult<ManagedOperationStatusV1> {
@@ -548,6 +671,56 @@ impl ManagedHostAgent {
             .rollback(&control_for_lease(lease), SystemTime::now())
             .map_err(|_| ManagedHostAgentError::new("managed_host_rollback_failed"))?;
         self.recover_runtime(profile, &outcome)
+    }
+
+    fn recover_replacement(
+        &self,
+        executor: &HostExecutor,
+        lease: &ManagedOperationLeaseV1,
+        profile: &ManagedHostProfileV1,
+    ) -> AgentResult<ManagedRollbackEvidenceV1> {
+        let status = executor
+            .status()
+            .map_err(|_| ManagedHostAgentError::new("managed_host_status_unavailable"))?;
+        let current = status
+            .into_iter()
+            .find(|outcome| {
+                outcome.service_ref.as_deref() == Some(lease.service_ref.as_str())
+                    && outcome.slot_ref.as_deref() == Some(lease.slot_ref.as_str())
+            })
+            .ok_or_else(|| ManagedHostAgentError::new("managed_host_status_invalid"))?;
+        let restored = if current.phase == "staged"
+            && current.generation == Some(lease.generation)
+            && current.operation_ref.as_deref() == Some(lease.operation_ref.as_str())
+        {
+            let outcome = executor
+                .rollback(&control_for_lease(lease), SystemTime::now())
+                .map_err(|_| ManagedHostAgentError::new("managed_host_rollback_failed"))?;
+            self.recover_runtime(profile, &outcome)?;
+            outcome
+        } else if current.phase == "active"
+            && current
+                .generation
+                .is_some_and(|generation| generation < lease.generation)
+        {
+            current
+        } else {
+            return Err(ManagedHostAgentError::new("managed_host_recovery_unproven"));
+        };
+        let restored_generation = restored
+            .generation
+            .filter(|generation| *generation > 0 && *generation < lease.generation)
+            .ok_or_else(|| ManagedHostAgentError::new("managed_host_recovery_unproven"))?;
+        let health = self.verify(profile, restored_generation)?;
+        Ok(ManagedRollbackEvidenceV1 {
+            restored_generation,
+            materialized: health.materialized,
+            process_state: health.process_state,
+            probe_state: health.probe_state,
+            heartbeat_observed_at_unix_secs: health.heartbeat_observed_at_unix_secs,
+            process_observed_at_unix_secs: health.process_observed_at_unix_secs,
+            probe_observed_at_unix_secs: health.probe_observed_at_unix_secs,
+        })
     }
 
     fn recover_runtime(
@@ -859,11 +1032,16 @@ fn safe_runtime_name(value: &str) -> bool {
         })
 }
 
+fn default_create_operation_kind() -> String {
+    "create".to_string()
+}
+
 fn validate_lease(lease: &ManagedOperationLeaseV1, host_ref: &str) -> AgentResult<()> {
     if lease.schema != LEASE_SCHEMA
         || lease.schema_version != SCHEMA_VERSION
         || !valid_ref("lease_", &lease.lease_ref)
         || !valid_ref("op_", &lease.operation_ref)
+        || !matches!(lease.operation_kind.as_str(), "create" | "replace")
         || lease.host_ref != host_ref
         || !valid_ref("svc_", &lease.service_ref)
         || !valid_ref("slot_", &lease.slot_ref)
@@ -907,6 +1085,7 @@ fn validate_status(
                 | "verify_pending"
                 | "verifying"
                 | "active"
+                | "rolled_back"
                 | "failed"
                 | "superseded"
         )
@@ -927,6 +1106,24 @@ fn validate_status(
             return Err(ManagedHostAgentError::new("managed_host_status_invalid"));
         }
     } else if operation.health.is_some() {
+        return Err(ManagedHostAgentError::new("managed_host_status_invalid"));
+    }
+    if operation.phase == "rolled_back" {
+        let Some(rollback) = &operation.rollback else {
+            return Err(ManagedHostAgentError::new("managed_host_status_invalid"));
+        };
+        if operation.operation_kind != "replace"
+            || rollback.restored_generation == 0
+            || rollback.restored_generation >= operation.generation
+            || rollback.outcome != "healthy"
+            || rollback.heartbeat_observed_at_unix_secs <= 0
+            || rollback.process_observed_at_unix_secs <= 0
+            || rollback.probe_observed_at_unix_secs <= 0
+            || rollback.accepted_at_unix_secs <= 0
+        {
+            return Err(ManagedHostAgentError::new("managed_host_status_invalid"));
+        }
+    } else if operation.rollback.is_some() {
         return Err(ManagedHostAgentError::new("managed_host_status_invalid"));
     }
     if let Some(reason) = &operation.reason_code {
@@ -1030,6 +1227,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             lease_ref: "lease_49c0e8a17d63".to_string(),
             operation_ref: "op_58f36c72a91e".to_string(),
+            operation_kind: "create".to_string(),
             host_ref: "host_58f36c72a91e".to_string(),
             service_ref: "svc_0bca8d31f7e2".to_string(),
             slot_ref: "slot_49c0e8a17d63".to_string(),
@@ -1057,6 +1255,7 @@ mod tests {
           "schema_version":1,
           "lease_ref":"lease_49c0e8a17d63",
           "operation_ref":"op_58f36c72a91e",
+          "operation_kind":"create",
           "host_ref":"host_58f36c72a91e",
           "service_ref":"svc_0bca8d31f7e2",
           "slot_ref":"slot_49c0e8a17d63",
@@ -1070,5 +1269,74 @@ mod tests {
           "secret_value":"SENSITIVE_AGENT_CANARY"
         }"#;
         assert!(decode_strict::<ManagedOperationLeaseV1>(lease).is_err());
+
+        let previous_create_lease = br#"{
+          "schema":"inspr.pharos.managed-service-operation-lease.v1",
+          "schema_version":1,
+          "lease_ref":"lease_49c0e8a17d63",
+          "operation_ref":"op_58f36c72a91e",
+          "host_ref":"host_58f36c72a91e",
+          "service_ref":"svc_0bca8d31f7e2",
+          "slot_ref":"slot_49c0e8a17d63",
+          "declaration_fingerprint":"decl_a84f209c4b32",
+          "generation":1,
+          "phase":"install",
+          "profile_ref":"delivery_2d7a0f63c951",
+          "leased_at_unix_secs":1800000000,
+          "expires_at_unix_secs":1800000060,
+          "value_returned":false
+        }"#;
+        assert_eq!(
+            decode_strict::<ManagedOperationLeaseV1>(previous_create_lease)
+                .unwrap()
+                .operation_kind,
+            "create"
+        );
+    }
+
+    #[test]
+    fn rolled_back_status_requires_a_bound_healthy_previous_generation() {
+        let raw = br#"{
+          "schema":"inspr.pharos.managed-service-operation-status.v1",
+          "schema_version":1,
+          "operation":{
+            "operation_ref":"op_58f36c72a91e",
+            "operation_kind":"replace",
+            "host_ref":"host_58f36c72a91e",
+            "service_ref":"svc_0bca8d31f7e2",
+            "slot_ref":"slot_49c0e8a17d63",
+            "declaration_fingerprint":"decl_a84f209c4b32",
+            "generation":2,
+            "phase":"rolled_back",
+            "reason_code":"verification_failed",
+            "created_at_unix_secs":1800000000,
+            "updated_at_unix_secs":1800000010,
+            "health":null,
+            "rollback":{
+              "restored_generation":1,
+              "outcome":"healthy",
+              "heartbeat_observed_at_unix_secs":1800000009,
+              "process_observed_at_unix_secs":1800000009,
+              "probe_observed_at_unix_secs":1800000009,
+              "accepted_at_unix_secs":1800000010
+            },
+            "value_returned":false
+          },
+          "value_returned":false
+        }"#;
+        let mut status: ManagedOperationStatusV1 = decode_strict(raw).unwrap();
+        validate_status(&status, "host_58f36c72a91e", "op_58f36c72a91e")
+            .expect("healthy previous generation accepted");
+        status
+            .operation
+            .rollback
+            .as_mut()
+            .unwrap()
+            .restored_generation = 2;
+        assert_eq!(
+            validate_status(&status, "host_58f36c72a91e", "op_58f36c72a91e",)
+                .expect_err("current generation cannot be rollback proof"),
+            ManagedHostAgentError::new("managed_host_status_invalid")
+        );
     }
 }

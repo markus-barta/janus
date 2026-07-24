@@ -229,10 +229,25 @@ impl AgeSecretStore {
         name: &SecretName,
         value: SecretValue,
     ) -> JanusResult<AgeRollbackMaterial> {
+        let rollback_id = generated_rollback_id()?;
+        self.prepare_generated_rotation_with_id(name, value, rollback_id)
+            .await
+    }
+
+    /// Store a replacement with a caller-bound opaque rollback id.
+    ///
+    /// The lifecycle journal persists the id before value-bearing work starts,
+    /// so restart recovery can always find and restore the old ciphertext.
+    pub async fn prepare_generated_rotation_with_id(
+        &mut self,
+        name: &SecretName,
+        value: SecretValue,
+        rollback_id: String,
+    ) -> JanusResult<AgeRollbackMaterial> {
         let secret_ref = self.ensure_manifest(name)?.secret_ref.clone();
+        validate_rollback_id(&rollback_id)?;
         self.ensure_scope_dir()?;
         let path = self.path_for(name)?;
-        let rollback_id = generated_rollback_id()?;
         let rollback_path = self.rollback_path_for(name, &rollback_id)?;
         let scope_dir = self.scope_dir();
         let recipients = self.recipients.clone();
@@ -307,6 +322,74 @@ impl AgeSecretStore {
             Ok(AgeAdminOutcome {
                 action: "rotation.rollback",
                 changed: true,
+                present_secrets: 1,
+                recipient_count,
+                value_returned: false,
+            })
+        })
+        .await
+        .map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("age generated rotation rollback task failed: {err}"),
+        })?
+    }
+
+    /// Idempotently discard rollback material after a committed replacement.
+    pub async fn commit_generated_rotation_if_present(
+        &mut self,
+        rollback: &AgeRollbackMaterial,
+    ) -> JanusResult<AgeAdminOutcome> {
+        let name = self.catalog.meta_by_ref(&rollback.secret_ref)?.name.clone();
+        let rollback_path = self.rollback_path_for(&name, &rollback.rollback_id)?;
+        let scope_dir = self.scope_dir();
+        let recipient_count = self.recipients.len();
+        tokio::task::spawn_blocking(move || {
+            let _lock = try_lock_store_exclusive(&scope_dir)?;
+            let changed = if rollback_path.is_file() {
+                fs::remove_file(&rollback_path).map_err(map_store_io)?;
+                sync_dir(&scope_dir)?;
+                true
+            } else {
+                false
+            };
+            Ok(AgeAdminOutcome {
+                action: "rotation.commit",
+                changed,
+                present_secrets: 1,
+                recipient_count,
+                value_returned: false,
+            })
+        })
+        .await
+        .map_err(|err| JanusError::StoreUnavailable {
+            detail: format!("age generated rotation commit task failed: {err}"),
+        })?
+    }
+
+    /// Idempotently restore rollback material when preparation may have
+    /// stopped before the journal could observe the backend result.
+    pub async fn rollback_generated_rotation_if_present(
+        &mut self,
+        rollback: &AgeRollbackMaterial,
+    ) -> JanusResult<AgeAdminOutcome> {
+        let name = self.catalog.meta_by_ref(&rollback.secret_ref)?.name.clone();
+        let path = self.path_for(&name)?;
+        let rollback_path = self.rollback_path_for(&name, &rollback.rollback_id)?;
+        let scope_dir = self.scope_dir();
+        let recipient_count = self.recipients.len();
+        tokio::task::spawn_blocking(move || {
+            let _lock = try_lock_store_exclusive(&scope_dir)?;
+            let changed = if rollback_path.is_file() {
+                let encrypted = fs::read(&rollback_path).map_err(map_store_io)?;
+                write_atomically(&path, &scope_dir, &encrypted)?;
+                fs::remove_file(&rollback_path).map_err(map_store_io)?;
+                sync_dir(&scope_dir)?;
+                true
+            } else {
+                false
+            };
+            Ok(AgeAdminOutcome {
+                action: "rotation.rollback",
+                changed,
                 present_secrets: 1,
                 recipient_count,
                 value_returned: false,
@@ -835,6 +918,11 @@ fn prepare_generated_rotation_locked(
     if !path.is_file() {
         return Err(JanusError::NotFound {
             name: not_found_name.to_string(),
+        });
+    }
+    if rollback_path.exists() {
+        return Err(JanusError::StoreUnavailable {
+            detail: "age rotation rollback material already exists".to_string(),
         });
     }
     let current = fs::read(path).map_err(map_store_io)?;
@@ -1615,6 +1703,81 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             store.commit_generated_rotation(&rollback).await,
             Err(JanusError::NotFound { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn journal_bound_rotation_recovery_is_idempotent_and_never_overwrites_rollback() {
+        let fixture = fixture();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+        store
+            .set(
+                &fixture.canary,
+                SecretValue::new(b"journal-original-canary".to_vec()),
+            )
+            .await
+            .unwrap();
+        let path = store.path_for(&fixture.canary).unwrap();
+        let original_ciphertext = fs::read(&path).unwrap();
+
+        let rollback = store
+            .prepare_generated_rotation_with_id(
+                &fixture.canary,
+                SecretValue::new(b"journal-first-replacement".to_vec()),
+                "rb_journalbound0001".to_string(),
+            )
+            .await
+            .unwrap();
+        let first_replacement_ciphertext = fs::read(&path).unwrap();
+        assert_ne!(first_replacement_ciphertext, original_ciphertext);
+
+        let duplicate = store
+            .prepare_generated_rotation_with_id(
+                &fixture.canary,
+                SecretValue::new(b"journal-second-replacement".to_vec()),
+                rollback.rollback_id.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(duplicate, JanusError::StoreUnavailable { .. }));
+        assert_eq!(fs::read(&path).unwrap(), first_replacement_ciphertext);
+
+        let restored = store
+            .rollback_generated_rotation_if_present(&rollback)
+            .await
+            .unwrap();
+        assert!(restored.changed);
+        assert_eq!(fs::read(&path).unwrap(), original_ciphertext);
+        let duplicate_restore = store
+            .rollback_generated_rotation_if_present(&rollback)
+            .await
+            .unwrap();
+        assert!(!duplicate_restore.changed);
+        assert_eq!(fs::read(&path).unwrap(), original_ciphertext);
+
+        let committed = store
+            .prepare_generated_rotation_with_id(
+                &fixture.canary,
+                SecretValue::new(b"journal-committed-replacement".to_vec()),
+                "rb_journalbound0002".to_string(),
+            )
+            .await
+            .unwrap();
+        let committed_ciphertext = fs::read(&path).unwrap();
+        assert!(
+            store
+                .commit_generated_rotation_if_present(&committed)
+                .await
+                .unwrap()
+                .changed
+        );
+        assert!(
+            !store
+                .commit_generated_rotation_if_present(&committed)
+                .await
+                .unwrap()
+                .changed
+        );
+        assert_eq!(fs::read(&path).unwrap(), committed_ciphertext);
     }
 
     #[tokio::test]

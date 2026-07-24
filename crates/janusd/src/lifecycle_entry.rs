@@ -15,7 +15,7 @@ use janus_core::{
 };
 use janus_forge::{ConsumerRotationHooks, GeneratedAlphabet, GeneratedValuePolicy};
 use janus_local::JsonlAuditSink;
-use janus_provider_age::AgeSecretStore;
+use janus_provider_age::{AgeRollbackMaterial, AgeSecretStore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -25,6 +25,7 @@ const MAX_PLAN_BYTES: usize = 64 * 1024;
 const MAX_BINDING_FILE_BYTES: usize = 1024 * 1024;
 const MAX_IMPORT_BYTES: usize = 64 * 1024;
 const MAX_REVIEW_AGE: Duration = Duration::from_secs(366 * 24 * 60 * 60);
+const MAX_ENTRY_JOURNALS: usize = 4096;
 
 #[path = "lifecycle_entry/web_transaction.rs"]
 pub(super) mod web_transaction;
@@ -149,6 +150,15 @@ struct EntryJournal {
     release_fingerprint: String,
     secret_ref: String,
     mode: String,
+    #[serde(
+        default = "default_create_operation_kind",
+        skip_serializing_if = "is_create_operation_kind"
+    )]
+    operation_kind: String,
+    #[serde(default, skip_serializing_if = "is_zero_generation")]
+    generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rollback_id: Option<String>,
     phase: EntryPhase,
     preflighted_at_unix_secs: u64,
     created_by_operation: bool,
@@ -161,6 +171,8 @@ pub(super) struct EntryStatus {
     pub(super) operation_id: String,
     pub(super) secret_ref: String,
     pub(super) mode: String,
+    pub(super) operation_kind: String,
+    pub(super) generation: u64,
     pub(super) phase: EntryPhase,
     pub(super) reason_code: String,
     pub(super) value_returned: bool,
@@ -170,6 +182,8 @@ pub(super) struct EntryStatus {
 pub(super) struct EntryJournalSummary {
     pub operation_id: String,
     pub secret_ref: SecretRef,
+    pub operation_kind: String,
+    pub generation: u64,
     pub phase: String,
     pub reason_code: String,
     pub preflighted_at_unix_secs: u64,
@@ -180,6 +194,33 @@ pub(super) struct EntryTransaction {
     plan: EntryPlan,
     release: ReleaseAdmission,
     principal: PrincipalChain,
+    operation_kind: ManagedEntryOperationKind,
+    generation_floor: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ManagedEntryOperationKind {
+    Create,
+    Replace,
+}
+
+impl ManagedEntryOperationKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Replace => "replace",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "create" => Ok(Self::Create),
+            "replace" => Ok(Self::Replace),
+            _ => anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_operation_kind_invalid value_returned=false"
+            ),
+        }
+    }
 }
 
 struct BoundContext {
@@ -349,6 +390,22 @@ impl EntryTransaction {
         release: ReleaseAdmission,
         principal: PrincipalChain,
     ) -> Result<Self> {
+        Self::new_managed(
+            plan,
+            release,
+            principal,
+            ManagedEntryOperationKind::Create,
+            0,
+        )
+    }
+
+    pub(super) fn new_managed(
+        plan: EntryPlan,
+        release: ReleaseAdmission,
+        principal: PrincipalChain,
+        operation_kind: ManagedEntryOperationKind,
+        generation_floor: u64,
+    ) -> Result<Self> {
         let expected_scope = ScopeRef::from_opaque(plan.file.expected_scope_ref.clone())?;
         if expected_scope != principal.scope {
             return Err(JanusError::policy_denied(
@@ -368,6 +425,8 @@ impl EntryTransaction {
             plan,
             release,
             principal,
+            operation_kind,
+            generation_floor,
         })
     }
 
@@ -378,8 +437,9 @@ impl EntryTransaction {
                 "lifecycle entry denied reason_code=entry_operation_replay value_returned=false"
             );
         }
+        let generation = self.next_generation()?;
         let context = self
-            .bound_context(ExpectedPresence::Absent, &[SecretLifecycle::Draft])
+            .bound_context(self.preflight_presence(), self.preflight_lifecycles())
             .await?;
         let mut audit = self.audit()?;
         self.audit_entry(
@@ -396,6 +456,9 @@ impl EntryTransaction {
             release_fingerprint: release_fingerprint(&self.release),
             secret_ref: self.plan.file.secret_ref.clone(),
             mode: self.plan.file.source.mode().to_string(),
+            operation_kind: self.operation_kind.as_str().to_string(),
+            generation,
+            rollback_id: None,
             phase: EntryPhase::Preflighted,
             preflighted_at_unix_secs: unix_seconds(now)?,
             created_by_operation: false,
@@ -475,20 +538,29 @@ impl EntryTransaction {
         }
         self.ensure_fresh(&journal, now)?;
         let mut context = self
-            .bound_context(ExpectedPresence::Absent, &[SecretLifecycle::Draft])
+            .bound_context(self.preflight_presence(), self.preflight_lifecycles())
             .await?;
         self.ensure_target_binding(&journal, &context)?;
 
         // Import bytes are read only after every value-free binding is valid.
         let value = read_value()?;
+        if self.operation_kind == ManagedEntryOperationKind::Replace {
+            journal.rollback_id = Some(replacement_rollback_id(
+                &journal.operation_id,
+                journal.generation,
+            ));
+        }
         journal.phase = EntryPhase::Applying;
-        journal.reason_code = "entry_apply_started".to_string();
+        journal.reason_code = self.reason("entry_apply_started", "entry_replacement_started");
         self.write_journal(journal.clone())?;
         let mut audit = match self.audit() {
             Ok(audit) => audit,
             Err(error) => {
                 journal.phase = EntryPhase::RolledBack;
-                journal.reason_code = "entry_audit_unavailable_rolled_back".to_string();
+                journal.reason_code = self.reason(
+                    "entry_audit_unavailable_rolled_back",
+                    "entry_replacement_audit_unavailable_rolled_back",
+                );
                 self.write_journal(journal)?;
                 return Err(error);
             }
@@ -496,38 +568,73 @@ impl EntryTransaction {
         if let Err(error) = self.audit_entry(
             &mut audit,
             AuditOutcome::Allowed,
-            "entry_apply_started",
+            if self.operation_kind == ManagedEntryOperationKind::Create {
+                "entry_apply_started"
+            } else {
+                "entry_replacement_started"
+            },
             Severity::High,
         ) {
-            self.rollback_created(
+            self.rollback_operation(
                 &mut context,
                 &mut journal,
                 &mut audit,
-                "entry_audit_failed_rolled_back",
+                self.rollback_reason("entry_audit_failed_rolled_back"),
             )
             .await?;
             return Err(error);
         }
 
-        if let Err(error) = context
-            .store
-            .create_if_absent(&context.descriptor.name, value)
-            .await
-        {
-            journal.phase = EntryPhase::Failed;
-            journal.reason_code = "entry_create_failed".to_string();
-            self.write_journal(journal)?;
-            return Err(error.into());
-        }
-        journal.created_by_operation = true;
-        journal.phase = EntryPhase::Stored;
-        journal.reason_code = "entry_ciphertext_stored".to_string();
-        if let Err(error) = self.write_journal(journal.clone()) {
-            self.rollback_created(
+        let store_result = match self.operation_kind {
+            ManagedEntryOperationKind::Create => {
+                context
+                    .store
+                    .create_if_absent(&context.descriptor.name, value)
+                    .await
+            }
+            ManagedEntryOperationKind::Replace => {
+                let rollback_id = journal.rollback_id.clone().ok_or_else(|| {
+                    JanusError::policy_denied(
+                        "entry_replacement_state_invalid",
+                        "replacement rollback binding is missing",
+                    )
+                })?;
+                context
+                    .store
+                    .prepare_generated_rotation_with_id(
+                        &context.descriptor.name,
+                        value,
+                        rollback_id,
+                    )
+                    .await
+                    .map(|_| janus_provider_age::AgeAdminOutcome {
+                        action: "rotation.prepare",
+                        changed: true,
+                        present_secrets: 1,
+                        recipient_count: context.store.recipient_count(),
+                        value_returned: false,
+                    })
+            }
+        };
+        if let Err(error) = store_result {
+            self.rollback_operation(
                 &mut context,
                 &mut journal,
                 &mut audit,
-                "entry_journal_failed_rolled_back",
+                self.rollback_reason("entry_store_failed_rolled_back"),
+            )
+            .await?;
+            return Err(error.into());
+        }
+        journal.created_by_operation = self.operation_kind == ManagedEntryOperationKind::Create;
+        journal.phase = EntryPhase::Stored;
+        journal.reason_code = self.reason("entry_ciphertext_stored", "entry_replacement_staged");
+        if let Err(error) = self.write_journal(journal.clone()) {
+            self.rollback_operation(
+                &mut context,
+                &mut journal,
+                &mut audit,
+                self.rollback_reason("entry_journal_failed_rolled_back"),
             )
             .await?;
             return Err(error);
@@ -543,11 +650,11 @@ impl EntryTransaction {
                     Severity::High,
                     &context.consumer.consumer_ref,
                 );
-                self.rollback_created(
+                self.rollback_operation(
                     &mut context,
                     &mut journal,
                     &mut audit,
-                    "entry_validation_failed_rolled_back",
+                    self.rollback_reason("entry_validation_failed_rolled_back"),
                 )
                 .await?;
                 return Err(error.into());
@@ -560,24 +667,24 @@ impl EntryTransaction {
                 Severity::Notice,
                 &context.consumer.consumer_ref,
             ) {
-                self.rollback_created(
+                self.rollback_operation(
                     &mut context,
                     &mut journal,
                     &mut audit,
-                    "entry_audit_failed_rolled_back",
+                    self.rollback_reason("entry_audit_failed_rolled_back"),
                 )
                 .await?;
                 return Err(error);
             }
         }
         journal.phase = EntryPhase::Validated;
-        journal.reason_code = "entry_validation_ok".to_string();
+        journal.reason_code = self.reason("entry_validation_ok", "entry_replacement_validated");
         if let Err(error) = self.write_journal(journal.clone()) {
-            self.rollback_created(
+            self.rollback_operation(
                 &mut context,
                 &mut journal,
                 &mut audit,
-                "entry_journal_failed_rolled_back",
+                self.rollback_reason("entry_journal_failed_rolled_back"),
             )
             .await?;
             return Err(error);
@@ -610,36 +717,64 @@ impl EntryTransaction {
         }
         self.ensure_fresh(&journal, now)?;
         let mut context = self
-            .bound_context(ExpectedPresence::Present, &[SecretLifecycle::Draft])
+            .bound_context(
+                ExpectedPresence::Present,
+                if self.operation_kind == ManagedEntryOperationKind::Create {
+                    &[SecretLifecycle::Draft]
+                } else {
+                    &[SecretLifecycle::Active]
+                },
+            )
             .await?;
         self.ensure_target_binding(&journal, &context)?;
         let mut audit = self.audit()?;
         journal.phase = EntryPhase::Activating;
-        journal.reason_code = "entry_activation_started".to_string();
+        journal.reason_code = self.reason(
+            "entry_activation_started",
+            "entry_replacement_commit_started",
+        );
         self.write_journal(journal.clone())?;
 
-        if let Err(error) = LifecycleTransitionPolicy::transition(
-            &context.descriptor,
-            SecretLifecycle::Active,
-            SafeLabel::new(self.plan.file.activation_reason.clone())?,
-            &self.principal,
+        if self.operation_kind == ManagedEntryOperationKind::Create {
+            if let Err(error) = LifecycleTransitionPolicy::transition(
+                &context.descriptor,
+                SecretLifecycle::Active,
+                SafeLabel::new(self.plan.file.activation_reason.clone())?,
+                &self.principal,
+                &mut audit,
+            ) {
+                self.rollback_operation(
+                    &mut context,
+                    &mut journal,
+                    &mut audit,
+                    "entry_activation_audit_failed_rolled_back",
+                )
+                .await?;
+                return Err(error.into());
+            }
+            if let Err(error) =
+                self.set_lifecycle(&context.descriptor.name, SecretLifecycle::Active)
+            {
+                self.rollback_operation(
+                    &mut context,
+                    &mut journal,
+                    &mut audit,
+                    "entry_activation_write_failed_rolled_back",
+                )
+                .await?;
+                return Err(error);
+            }
+        } else if let Err(error) = self.audit_entry(
             &mut audit,
+            AuditOutcome::Allowed,
+            "entry_replacement_commit_started",
+            Severity::High,
         ) {
-            self.rollback_created(
+            self.rollback_operation(
                 &mut context,
                 &mut journal,
                 &mut audit,
-                "entry_activation_audit_failed_rolled_back",
-            )
-            .await?;
-            return Err(error.into());
-        }
-        if let Err(error) = self.set_lifecycle(&context.descriptor.name, SecretLifecycle::Active) {
-            self.rollback_created(
-                &mut context,
-                &mut journal,
-                &mut audit,
-                "entry_activation_write_failed_rolled_back",
+                "entry_replacement_audit_failed_rolled_back",
             )
             .await?;
             return Err(error);
@@ -662,11 +797,11 @@ impl EntryTransaction {
                 Severity::High,
                 &context.consumer.consumer_ref,
             );
-            self.rollback_created(
+            self.rollback_operation(
                 &mut context,
                 &mut journal,
                 &mut audit,
-                "entry_reload_failed_rolled_back",
+                self.rollback_reason("entry_reload_failed_rolled_back"),
             )
             .await?;
             return Err(error.into());
@@ -679,40 +814,46 @@ impl EntryTransaction {
             Severity::Notice,
             &context.consumer.consumer_ref,
         ) {
-            self.rollback_created(
+            self.rollback_operation(
                 &mut context,
                 &mut journal,
                 &mut audit,
-                "entry_audit_failed_rolled_back",
+                self.rollback_reason("entry_audit_failed_rolled_back"),
             )
             .await?;
             return Err(error);
         }
 
         journal.phase = EntryPhase::Completed;
-        journal.reason_code = if run_local_reload {
+        journal.reason_code = if self.operation_kind == ManagedEntryOperationKind::Replace {
+            "entry_replacement_committed"
+        } else if run_local_reload {
             "entry_activation_ok"
         } else {
             "entry_external_activation_ok"
         }
         .to_string();
         if let Err(error) = self.write_journal(journal.clone()) {
-            self.rollback_created(
+            self.rollback_operation(
                 &mut context,
                 &mut journal,
                 &mut audit,
-                "entry_journal_failed_rolled_back",
+                self.rollback_reason("entry_journal_failed_rolled_back"),
             )
             .await?;
             return Err(error);
         }
+        if self.operation_kind == ManagedEntryOperationKind::Replace {
+            self.commit_replacement_cleanup(&mut context, &journal)
+                .await?;
+        }
         Ok(status_from_journal(&journal))
     }
 
-    /// Read the exact draft value only for the reviewed host-encryption
+    /// Read the exact staged value only for the reviewed host-encryption
     /// boundary. The caller receives a zeroizing `SecretValue`; no string,
     /// debug, log, or response representation is created.
-    pub(super) async fn draft_value_for_host_delivery(&self) -> Result<janus_core::SecretValue> {
+    pub(super) async fn staged_value_for_host_delivery(&self) -> Result<janus_core::SecretValue> {
         let _lock = self.lock()?;
         let journal = self.read_bound_journal()?;
         if journal.phase != EntryPhase::Validated {
@@ -721,7 +862,14 @@ impl EntryTransaction {
             );
         }
         let context = self
-            .bound_context(ExpectedPresence::Present, &[SecretLifecycle::Draft])
+            .bound_context(
+                ExpectedPresence::Present,
+                if self.operation_kind == ManagedEntryOperationKind::Create {
+                    &[SecretLifecycle::Draft]
+                } else {
+                    &[SecretLifecycle::Active]
+                },
+            )
             .await?;
         self.ensure_target_binding(&journal, &context)?;
         let mut audit = self.audit()?;
@@ -759,8 +907,28 @@ impl EntryTransaction {
             .await?;
         self.ensure_target_binding(&journal, &context)?;
         let mut audit = self.audit()?;
-        self.rollback_created(&mut context, &mut journal, &mut audit, "entry_rollback_ok")
+        let reason = self.rollback_reason("entry_rollback_ok");
+        self.rollback_operation(&mut context, &mut journal, &mut audit, reason)
             .await?;
+        Ok(status_from_journal(&journal))
+    }
+
+    pub(super) async fn finish_completed_cleanup(&self) -> Result<EntryStatus> {
+        let _lock = self.lock()?;
+        let journal = self.read_bound_journal()?;
+        if journal.phase != EntryPhase::Completed {
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_cleanup_phase_invalid value_returned=false"
+            );
+        }
+        if self.operation_kind == ManagedEntryOperationKind::Replace {
+            let mut context = self
+                .bound_context(ExpectedPresence::Present, &[SecretLifecycle::Active])
+                .await?;
+            self.ensure_target_binding(&journal, &context)?;
+            self.commit_replacement_cleanup(&mut context, &journal)
+                .await?;
+        }
         Ok(status_from_journal(&journal))
     }
 
@@ -768,14 +936,24 @@ impl EntryTransaction {
         let _lock = self.lock()?;
         let journal = self.read_bound_journal()?;
         let (presence, lifecycles) = match journal.phase {
-            EntryPhase::Preflighted => (ExpectedPresence::Absent, vec![SecretLifecycle::Draft]),
+            EntryPhase::Preflighted => (
+                self.preflight_presence(),
+                self.preflight_lifecycles().to_vec(),
+            ),
             EntryPhase::Applying | EntryPhase::Failed => (
                 ExpectedPresence::Either,
                 vec![SecretLifecycle::Draft, SecretLifecycle::Active],
             ),
-            EntryPhase::Stored | EntryPhase::Validated => {
-                (ExpectedPresence::Present, vec![SecretLifecycle::Draft])
-            }
+            EntryPhase::Stored | EntryPhase::Validated => (
+                ExpectedPresence::Present,
+                vec![
+                    if self.operation_kind == ManagedEntryOperationKind::Create {
+                        SecretLifecycle::Draft
+                    } else {
+                        SecretLifecycle::Active
+                    },
+                ],
+            ),
             EntryPhase::Activating => (
                 ExpectedPresence::Present,
                 vec![SecretLifecycle::Draft, SecretLifecycle::Active],
@@ -785,11 +963,39 @@ impl EntryTransaction {
                 ExpectedPresence::Either,
                 vec![SecretLifecycle::Draft, SecretLifecycle::Active],
             ),
-            EntryPhase::RolledBack => (ExpectedPresence::Absent, vec![SecretLifecycle::Draft]),
+            EntryPhase::RolledBack => {
+                if self.operation_kind == ManagedEntryOperationKind::Create {
+                    (ExpectedPresence::Absent, vec![SecretLifecycle::Draft])
+                } else {
+                    (ExpectedPresence::Present, vec![SecretLifecycle::Active])
+                }
+            }
         };
         let context = self.bound_context(presence, &lifecycles).await?;
         self.ensure_target_binding(&journal, &context)?;
         Ok(status_from_journal(&journal))
+    }
+
+    async fn rollback_operation<A>(
+        &self,
+        context: &mut BoundContext,
+        journal: &mut EntryJournal,
+        audit: &mut A,
+        reason_code: &'static str,
+    ) -> Result<()>
+    where
+        A: AuditSink,
+    {
+        match self.operation_kind {
+            ManagedEntryOperationKind::Create => {
+                self.rollback_created(context, journal, audit, reason_code)
+                    .await
+            }
+            ManagedEntryOperationKind::Replace => {
+                self.rollback_replacement(context, journal, audit, reason_code)
+                    .await
+            }
+        }
     }
 
     async fn rollback_created<A>(
@@ -857,6 +1063,93 @@ impl EntryTransaction {
         if let Some(error) = start_write_error {
             return Err(error);
         }
+        Ok(())
+    }
+
+    async fn rollback_replacement<A>(
+        &self,
+        context: &mut BoundContext,
+        journal: &mut EntryJournal,
+        audit: &mut A,
+        reason_code: &'static str,
+    ) -> Result<()>
+    where
+        A: AuditSink,
+    {
+        journal.phase = EntryPhase::RollingBack;
+        journal.reason_code = reason_code.to_string();
+        let start_write_error = self.write_journal(journal.clone()).err();
+        let audit_error = self
+            .audit_entry(
+                audit,
+                AuditOutcome::Allowed,
+                "entry_replacement_rollback_started",
+                Severity::High,
+            )
+            .err();
+        if let Some(rollback_id) = journal.rollback_id.clone() {
+            let rollback = AgeRollbackMaterial {
+                secret_ref: self.secret_ref()?,
+                rollback_id,
+                value_returned: false,
+            };
+            if let Err(error) = context
+                .store
+                .rollback_generated_rotation_if_present(&rollback)
+                .await
+            {
+                journal.phase = EntryPhase::Failed;
+                journal.reason_code = "entry_replacement_rollback_failed".to_string();
+                let _ = self.write_journal(journal.clone());
+                return Err(error.into());
+            }
+        }
+        let descriptors = context
+            .store
+            .list()
+            .await
+            .context("entry replacement rollback inspection denied")?;
+        let descriptor = exact_descriptor(&descriptors, &self.secret_ref()?)?;
+        if !descriptor.present || descriptor.lifecycle != SecretLifecycle::Active {
+            journal.phase = EntryPhase::Failed;
+            journal.reason_code = "entry_replacement_restore_invalid".to_string();
+            let _ = self.write_journal(journal.clone());
+            anyhow::bail!(
+                "lifecycle entry denied reason_code=entry_replacement_restore_invalid value_returned=false"
+            );
+        }
+        journal.phase = EntryPhase::RolledBack;
+        journal.reason_code = reason_code.to_string();
+        self.write_journal(journal.clone())?;
+        if let Some(error) = audit_error {
+            return Err(error);
+        }
+        if let Some(error) = start_write_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn commit_replacement_cleanup(
+        &self,
+        context: &mut BoundContext,
+        journal: &EntryJournal,
+    ) -> Result<()> {
+        let rollback_id = journal.rollback_id.clone().ok_or_else(|| {
+            JanusError::policy_denied(
+                "entry_replacement_state_invalid",
+                "replacement rollback binding is missing",
+            )
+        })?;
+        context
+            .store
+            .commit_generated_rotation_if_present(&AgeRollbackMaterial {
+                secret_ref: self.secret_ref()?,
+                rollback_id,
+                value_returned: false,
+            })
+            .await
+            .context("entry replacement cleanup denied")?;
         Ok(())
     }
 
@@ -1028,6 +1321,85 @@ impl EntryTransaction {
         Ok(())
     }
 
+    fn preflight_presence(&self) -> ExpectedPresence {
+        match self.operation_kind {
+            ManagedEntryOperationKind::Create => ExpectedPresence::Absent,
+            ManagedEntryOperationKind::Replace => ExpectedPresence::Present,
+        }
+    }
+
+    fn preflight_lifecycles(&self) -> &'static [SecretLifecycle] {
+        match self.operation_kind {
+            ManagedEntryOperationKind::Create => &[SecretLifecycle::Draft],
+            ManagedEntryOperationKind::Replace => &[SecretLifecycle::Active],
+        }
+    }
+
+    fn next_generation(&self) -> Result<u64> {
+        let mut maximum = 0_u64;
+        for summary in scan_journal_summaries(
+            &self.plan.file.state_dir,
+            &self.release,
+            MAX_ENTRY_JOURNALS,
+            MAX_PLAN_BYTES,
+        )? {
+            if summary.secret_ref.as_str() != self.plan.file.secret_ref {
+                continue;
+            }
+            if !summary.release_matches {
+                anyhow::bail!(
+                    "lifecycle entry denied reason_code=entry_conflicting_release value_returned=false"
+                );
+            }
+            if !matches!(summary.phase.as_str(), "completed" | "rolled_back") {
+                anyhow::bail!(
+                    "lifecycle entry denied reason_code=entry_conflicting_operation value_returned=false"
+                );
+            }
+            maximum = maximum.max(summary.generation);
+        }
+        let next = match self.operation_kind {
+            ManagedEntryOperationKind::Create => maximum
+                .checked_add(1)
+                .map(|generation| generation.max(self.generation_floor.max(1))),
+            ManagedEntryOperationKind::Replace => {
+                maximum.max(self.generation_floor.max(1)).checked_add(1)
+            }
+        };
+        next.ok_or_else(|| {
+            JanusError::policy_denied(
+                "entry_generation_exhausted",
+                "entry generation cannot advance",
+            )
+            .into()
+        })
+    }
+
+    fn reason(&self, create: &'static str, replace: &'static str) -> String {
+        match self.operation_kind {
+            ManagedEntryOperationKind::Create => create,
+            ManagedEntryOperationKind::Replace => replace,
+        }
+        .to_string()
+    }
+
+    fn rollback_reason(&self, create: &'static str) -> &'static str {
+        if self.operation_kind == ManagedEntryOperationKind::Create {
+            return create;
+        }
+        match create {
+            "entry_store_failed_rolled_back" => "entry_replacement_store_failed_rolled_back",
+            "entry_validation_failed_rolled_back" => {
+                "entry_replacement_validation_failed_rolled_back"
+            }
+            "entry_reload_failed_rolled_back" => "entry_replacement_reload_failed_rolled_back",
+            "entry_journal_failed_rolled_back" => "entry_replacement_journal_failed_rolled_back",
+            "entry_audit_failed_rolled_back" => "entry_replacement_audit_failed_rolled_back",
+            "entry_rollback_ok" => "entry_replacement_rollback_ok",
+            _ => "entry_replacement_rolled_back",
+        }
+    }
+
     fn target_fingerprint(
         &self,
         descriptor: &SecretDescriptor,
@@ -1125,7 +1497,11 @@ impl EntryTransaction {
     {
         audit.record(
             AuditEvent::new(
-                AuditAction::SecretLifecycle,
+                if self.operation_kind == ManagedEntryOperationKind::Create {
+                    AuditAction::SecretLifecycle
+                } else {
+                    AuditAction::RotationLifecycle
+                },
                 outcome,
                 reason_code,
                 severity,
@@ -1169,7 +1545,7 @@ impl EntryTransaction {
             .plan
             .file
             .state_dir
-            .join(format!("{}.lock", self.plan.file.operation_id));
+            .join(format!("{}.lock", self.plan.file.secret_ref));
         reject_symlink(&path)?;
         let file = private_open(&path, true, false)?;
         file.try_lock_exclusive().map_err(|_| {
@@ -1201,6 +1577,13 @@ impl EntryTransaction {
             || journal.release_fingerprint != release_fingerprint(&self.release)
             || journal.secret_ref != self.plan.file.secret_ref
             || journal.mode != self.plan.file.source.mode()
+            || journal.operation_kind != self.operation_kind.as_str()
+            || self.generation_floor > 0 && journal.generation == 0
+            || self.operation_kind == ManagedEntryOperationKind::Create
+                && journal.rollback_id.is_some()
+            || self.operation_kind == ManagedEntryOperationKind::Replace
+                && journal.phase != EntryPhase::Preflighted
+                && journal.rollback_id.is_none()
         {
             anyhow::bail!(
                 "lifecycle entry denied reason_code=entry_journal_binding_mismatch value_returned=false"
@@ -1432,10 +1815,33 @@ fn status_from_journal(journal: &EntryJournal) -> EntryStatus {
         operation_id: journal.operation_id.clone(),
         secret_ref: journal.secret_ref.clone(),
         mode: journal.mode.clone(),
+        operation_kind: journal.operation_kind.clone(),
+        generation: journal.generation,
         phase: journal.phase,
         reason_code: journal.reason_code.clone(),
         value_returned: false,
     }
+}
+
+fn default_create_operation_kind() -> String {
+    "create".to_string()
+}
+
+fn is_create_operation_kind(value: &str) -> bool {
+    value == "create"
+}
+
+fn is_zero_generation(value: &u64) -> bool {
+    *value == 0
+}
+
+fn replacement_rollback_id(operation_id: &str, generation: u64) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"inspr.janus.lifecycle-entry-replacement-rollback.v1\0");
+    hasher.update(operation_id.as_bytes());
+    hasher.update(generation.to_be_bytes());
+    let digest = hex::encode(hasher.finalize());
+    format!("rb_webtx_{}", &digest[..32])
 }
 
 fn release_fingerprint(release: &ReleaseAdmission) -> String {
@@ -1538,6 +1944,11 @@ pub(super) fn scan_journal_summaries(
         if journal.schema_version != JOURNAL_SCHEMA_VERSION
             || journal.operation_id != operation_id
             || !matches!(journal.mode.as_str(), "generated" | "import")
+            || ManagedEntryOperationKind::parse(&journal.operation_kind).is_err()
+            || journal.operation_kind == "create" && journal.rollback_id.is_some()
+            || journal.operation_kind == "replace"
+                && journal.phase != EntryPhase::Preflighted
+                && journal.rollback_id.is_none()
         {
             return Err(JanusError::policy_denied(
                 "entry_journal_binding_mismatch",
@@ -1545,10 +1956,15 @@ pub(super) fn scan_journal_summaries(
             )
             .into());
         }
+        if let Some(rollback_id) = journal.rollback_id.as_deref() {
+            validate_operation_id(rollback_id)?;
+        }
         SafeLabel::new(journal.reason_code.clone())?;
         summaries.push(EntryJournalSummary {
             operation_id: journal.operation_id,
             secret_ref: SecretRef::new(journal.secret_ref)?,
+            operation_kind: journal.operation_kind,
+            generation: journal.generation,
             phase: journal.phase.as_str().to_string(),
             reason_code: journal.reason_code,
             preflighted_at_unix_secs: journal.preflighted_at_unix_secs,
@@ -1820,6 +2236,9 @@ mod tests {
             release_fingerprint: "release".to_string(),
             secret_ref: "sec_fixture".to_string(),
             mode: "generated".to_string(),
+            operation_kind: "create".to_string(),
+            generation: 0,
+            rollback_id: None,
             phase: EntryPhase::Preflighted,
             preflighted_at_unix_secs: 1,
             created_by_operation: false,
@@ -1828,6 +2247,15 @@ mod tests {
         };
         journal.integrity_hash = journal_hash(&journal).unwrap();
         verify_journal(&journal).unwrap();
+        let legacy_shape = serde_json::to_string(&journal).unwrap();
+        assert!(!legacy_shape.contains("operation_kind"));
+        assert!(!legacy_shape.contains("generation"));
+        assert!(!legacy_shape.contains("rollback_id"));
+        let decoded: EntryJournal = serde_json::from_str(&legacy_shape).unwrap();
+        assert_eq!(decoded.operation_kind, "create");
+        assert_eq!(decoded.generation, 0);
+        assert!(decoded.rollback_id.is_none());
+        verify_journal(&decoded).unwrap();
         journal.phase = EntryPhase::Completed;
         assert!(verify_journal(&journal).is_err());
     }

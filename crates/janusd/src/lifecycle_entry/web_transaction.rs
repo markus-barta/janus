@@ -27,6 +27,7 @@ use zeroize::Zeroize;
 use super::{
     read_regular_bounded, scan_journal_summaries, stable_error_reason, validate_plan, EntryPhase,
     EntryPlan, EntryPlanFile, EntrySource, EntryStatus, EntryTransaction,
+    ManagedEntryOperationKind,
 };
 
 const CATALOG_SCHEMA: &str = "inspr.janus.managed-web-transaction-catalog.v2";
@@ -328,34 +329,53 @@ async fn handle_connection(
     }
 
     match transaction.status().await {
-        Ok(status) if matches!(status.phase, EntryPhase::Completed | EntryPhase::RolledBack) => {
+        Ok(status) if status.phase == EntryPhase::Completed => {
+            let response = match transaction.finish_completed_cleanup().await {
+                Ok(status) => response_from_status(
+                    &request.operation_ref,
+                    &status,
+                    false,
+                    Some(status.generation),
+                ),
+                Err(error) => denied_response(operation_ref, stable_web_error_reason(&error)),
+            };
+            let _ = write_response(&mut stream, &response).await;
+            return;
+        }
+        Ok(status) if status.phase == EntryPhase::RolledBack => {
             let _ = write_response(
                 &mut stream,
                 &response_from_status(
                     &request.operation_ref,
                     &status,
                     false,
-                    Some(entry.delivery.generation),
+                    Some(status.generation),
                 ),
             )
             .await;
             return;
         }
         Ok(status) if status.phase == EntryPhase::Validated => {
-            let response = match load_bound_outbox(entry, &request, SystemTime::now()) {
-                Ok(record) => prepared_response(&request, &status, record.generation),
-                Err(error) => {
-                    let _ = transaction.rollback().await;
-                    denied_response(operation_ref, stable_web_error_reason(&error))
-                }
-            };
+            let response =
+                match load_bound_outbox(entry, &request, status.generation, SystemTime::now()) {
+                    Ok(record) => prepared_response(&request, &status, record.generation),
+                    Err(error) => {
+                        let _ = transaction.rollback().await;
+                        denied_response(operation_ref, stable_web_error_reason(&error))
+                    }
+                };
             let _ = write_response(&mut stream, &response).await;
             return;
         }
         Ok(_) => {
             let status = transaction.rollback().await;
             let response = match status {
-                Ok(status) => response_from_status(&request.operation_ref, &status, false, None),
+                Ok(status) => response_from_status(
+                    &request.operation_ref,
+                    &status,
+                    false,
+                    Some(status.generation),
+                ),
                 Err(error) => denied_response(operation_ref, stable_web_error_reason(&error)),
             };
             let _ = write_response(&mut stream, &response).await;
@@ -454,7 +474,7 @@ impl ReviewedCatalog {
             || !valid_ref("svc_", &request.service_ref)
             || !valid_ref("slot_", &request.slot_ref)
             || !valid_ref("decl_", &request.declaration_fingerprint)
-            || request.operation_kind != "create"
+            || !matches!(request.operation_kind.as_str(), "create" | "replace")
             || !matches!(request.source.as_str(), "generated" | "import")
             || request.action == "prepare" && request.external_evidence.is_some()
             || request.action == "rollback" && request.external_evidence.is_some()
@@ -510,7 +530,7 @@ fn validate_catalog_entry(entry: &TransactionCatalogEntry) -> Result<()> {
         || !valid_ref("svc_", &entry.service_ref)
         || !valid_ref("slot_", &entry.slot_ref)
         || !valid_ref("decl_", &entry.declaration_fingerprint)
-        || entry.operation_kind != "create"
+        || !matches!(entry.operation_kind.as_str(), "create" | "replace")
         || entry.plan.operation_id != "web-transaction-template"
     {
         anyhow::bail!("web transaction catalog entry is invalid");
@@ -567,23 +587,26 @@ async fn prepare_host_delivery(
     request: &TransactionRequest,
     now: SystemTime,
 ) -> Result<(EntryStatus, u64)> {
+    let status = transaction.status().await?;
+    if status.phase != EntryPhase::Validated
+        || status.operation_kind != request.operation_kind
+        || status.generation == 0
+    {
+        return Err(WebTransactionError("web_transaction_delivery_phase_invalid").into());
+    }
+    let generation = status.generation;
     let existing_path = outbox_path(entry, &request.operation_ref)?;
     if existing_path.exists() {
-        let existing = load_bound_outbox(entry, request, now)?;
-        let status = transaction.status().await?;
-        if status.phase != EntryPhase::Validated {
-            return Err(WebTransactionError("web_transaction_delivery_phase_invalid").into());
-        }
+        let existing = load_bound_outbox(entry, request, generation, now)?;
         return Ok((status, existing.generation));
     }
     let prepared_at = unix_seconds(now)?;
     let expires_at = prepared_at
         .checked_add(entry.delivery.envelope_ttl_seconds)
         .ok_or(WebTransactionError("web_transaction_delivery_invalid"))?;
-    let value = transaction.draft_value_for_host_delivery().await?;
+    let value = transaction.staged_value_for_host_delivery().await?;
     let signing_key = load_signing_key(&entry.delivery)?;
-    let envelope_ref =
-        deterministic_envelope_ref(&request.operation_ref, entry.delivery.generation);
+    let envelope_ref = deterministic_envelope_ref(&request.operation_ref, generation);
     let packet = seal_host_envelope(HostEnvelopeSealRequest {
         binding: HostEnvelopeBindingV1 {
             schema: HOST_PAYLOAD_SCHEMA.to_string(),
@@ -596,7 +619,7 @@ async fn prepare_host_delivery(
             secret_ref: entry.plan.secret_ref.clone(),
             scope_ref: entry.plan.expected_scope_ref.clone(),
             declaration_fingerprint: request.declaration_fingerprint.clone(),
-            generation: entry.delivery.generation,
+            generation,
             revocation_epoch: entry.delivery.revocation_epoch,
             issued_at_unix_secs: prepared_at,
             expires_at_unix_secs: expires_at,
@@ -619,7 +642,7 @@ async fn prepare_host_delivery(
         scope_ref: entry.plan.expected_scope_ref.clone(),
         declaration_fingerprint: request.declaration_fingerprint.clone(),
         envelope_ref,
-        generation: entry.delivery.generation,
+        generation,
         revocation_epoch: entry.delivery.revocation_epoch,
         prepared_at_unix_secs: prepared_at,
         expires_at_unix_secs: expires_at,
@@ -633,24 +656,22 @@ async fn prepare_host_delivery(
     encoded.push(b'\n');
     super::write_private_atomic(&outbox_path(entry, &request.operation_ref)?, &encoded)
         .map_err(|_| WebTransactionError("web_transaction_delivery_persistence_failed"))?;
-    let status = transaction.status().await?;
-    if status.phase != EntryPhase::Validated {
-        return Err(WebTransactionError("web_transaction_delivery_phase_invalid").into());
-    }
     Ok((status, record.generation))
 }
 
 fn load_bound_outbox(
     entry: &TransactionCatalogEntry,
     request: &TransactionRequest,
+    expected_generation: u64,
     now: SystemTime,
 ) -> Result<HostEnvelopeOutboxRecord> {
-    load_bound_outbox_internal(entry, request, now, false)
+    load_bound_outbox_internal(entry, request, expected_generation, now, false)
 }
 
 fn load_bound_outbox_internal(
     entry: &TransactionCatalogEntry,
     request: &TransactionRequest,
+    expected_generation: u64,
     now: SystemTime,
     allow_expired: bool,
 ) -> Result<HostEnvelopeOutboxRecord> {
@@ -673,7 +694,8 @@ fn load_bound_outbox_internal(
         || record.secret_ref != entry.plan.secret_ref
         || record.scope_ref != entry.plan.expected_scope_ref
         || record.declaration_fingerprint != request.declaration_fingerprint
-        || record.generation != entry.delivery.generation
+        || record.generation != expected_generation
+        || record.generation < entry.delivery.generation
         || record.revocation_epoch != entry.delivery.revocation_epoch
         || record.prepared_at_unix_secs == 0
         || record.expires_at_unix_secs <= record.prepared_at_unix_secs
@@ -700,19 +722,23 @@ async fn finalize_prepared_operation(
     now: SystemTime,
 ) -> Result<TransactionResponse> {
     let status = transaction.status().await?;
+    if status.operation_kind != request.operation_kind || status.generation == 0 {
+        return Err(WebTransactionError("web_transaction_finalize_phase_invalid").into());
+    }
     if status.phase == EntryPhase::Completed {
-        remove_outbox_if_present(entry, request)?;
+        let status = transaction.finish_completed_cleanup().await?;
+        remove_outbox_if_present(entry, request, status.generation)?;
         return Ok(response_from_status(
             &request.operation_ref,
             &status,
             false,
-            Some(entry.delivery.generation),
+            Some(status.generation),
         ));
     }
     if status.phase != EntryPhase::Validated {
         return Err(WebTransactionError("web_transaction_finalize_phase_invalid").into());
     }
-    let record = load_bound_outbox(entry, request, now)?;
+    let record = load_bound_outbox(entry, request, status.generation, now)?;
     validate_external_evidence(
         request
             .external_evidence
@@ -724,7 +750,7 @@ async fn finalize_prepared_operation(
     let completed = transaction
         .activate_after_external_verification(now)
         .await?;
-    remove_outbox_if_present(entry, request)?;
+    remove_outbox_if_present(entry, request, record.generation)?;
     Ok(response_from_status(
         &request.operation_ref,
         &completed,
@@ -739,6 +765,9 @@ async fn rollback_prepared_operation(
     request: &TransactionRequest,
 ) -> Result<TransactionResponse> {
     let status = transaction.status().await?;
+    if status.operation_kind != request.operation_kind || status.generation == 0 {
+        return Err(WebTransactionError("web_transaction_rollback_phase_invalid").into());
+    }
     if status.phase == EntryPhase::Completed {
         return Err(WebTransactionError("web_transaction_completed_rollback_denied").into());
     }
@@ -747,12 +776,12 @@ async fn rollback_prepared_operation(
     } else {
         transaction.rollback().await?
     };
-    remove_outbox_if_present(entry, request)?;
+    remove_outbox_if_present(entry, request, rolled_back.generation)?;
     Ok(response_from_status(
         &request.operation_ref,
         &rolled_back,
         false,
-        Some(entry.delivery.generation),
+        Some(rolled_back.generation),
     ))
 }
 
@@ -804,6 +833,7 @@ fn outbox_path(entry: &TransactionCatalogEntry, operation_ref: &str) -> Result<P
 fn remove_outbox_if_present(
     entry: &TransactionCatalogEntry,
     request: &TransactionRequest,
+    expected_generation: u64,
 ) -> Result<()> {
     let path = outbox_path(entry, &request.operation_ref)?;
     super::reject_symlink(&path)?;
@@ -812,7 +842,8 @@ fn remove_outbox_if_present(
     }
     // A removal is permitted only after the file was opened and validated as
     // the exact operation-bound private record.
-    let _ = load_bound_outbox_internal(entry, request, SystemTime::now(), true)?;
+    let _ =
+        load_bound_outbox_internal(entry, request, expected_generation, SystemTime::now(), true)?;
     fs::remove_file(&path)
         .map_err(|_| WebTransactionError("web_transaction_delivery_persistence_failed"))?;
     fs::File::open(&entry.delivery.outbox_dir)
@@ -861,7 +892,13 @@ fn transaction_for(
         file,
         fingerprint: hex::encode(Sha256::digest(encoded)),
     };
-    EntryTransaction::new(plan, release, super::entry_principal_from_env()?)
+    EntryTransaction::new_managed(
+        plan,
+        release,
+        super::entry_principal_from_env()?,
+        ManagedEntryOperationKind::parse(&entry.operation_kind)?,
+        entry.delivery.generation,
+    )
 }
 
 async fn reconcile_catalog(catalog: &ReviewedCatalog, release: &ReleaseAdmission) -> Result<()> {
@@ -893,29 +930,24 @@ async fn reconcile_catalog(catalog: &ReviewedCatalog, release: &ReleaseAdmission
                     if matching.is_some() {
                         anyhow::bail!("web transaction journal catalog binding is ambiguous");
                     }
-                    matching = Some(candidate);
+                    matching = Some((entry, candidate));
                 }
             }
-            let transaction = matching
+            let (matching_entry, transaction) = matching
                 .context("web transaction journal has no current reviewed catalog binding")?;
-            let matching_entry = catalog
-                .entries
-                .values()
-                .find(|entry| {
-                    entry.plan.state_dir == state_dir
-                        && entry.plan.secret_ref == summary.secret_ref.as_str()
-                        && transaction_for(entry, &operation_ref, release.clone()).is_ok_and(
-                            |candidate| candidate.plan.fingerprint == transaction.plan.fingerprint,
-                        )
-                })
-                .context("web transaction journal catalog binding disappeared")?;
             let request = request_for_entry(matching_entry, &operation_ref, "prepare", None);
+            let journal_generation = if summary.generation == 0 {
+                matching_entry.delivery.generation
+            } else {
+                summary.generation
+            };
             if summary.phase == "validated" {
                 let path = outbox_path(matching_entry, &operation_ref)?;
                 if path.exists() {
                     let record = load_bound_outbox_internal(
                         matching_entry,
                         &request,
+                        journal_generation,
                         SystemTime::now(),
                         true,
                     )
@@ -929,7 +961,7 @@ async fn reconcile_catalog(catalog: &ReviewedCatalog, release: &ReleaseAdmission
                 .rollback()
                 .await
                 .context("web transaction partial journal rollback failed")?;
-            remove_outbox_if_present(matching_entry, &request)?;
+            remove_outbox_if_present(matching_entry, &request, journal_generation)?;
         }
     }
     Ok(())
@@ -1215,7 +1247,7 @@ mod tests {
             operation_kind: request.operation_kind.clone(),
             source: request.source.clone(),
         };
-        let catalog = ReviewedCatalog {
+        let mut catalog = ReviewedCatalog {
             entries: BTreeMap::from([(
                 key,
                 TransactionCatalogEntry {
@@ -1249,8 +1281,22 @@ mod tests {
         request.operation_kind = "replace".to_string();
         assert_eq!(
             catalog.resolve(&request).err(),
-            Some("web_transaction_request_invalid")
+            Some("web_transaction_declaration_denied")
         );
+        let mut replacement_entry = catalog.entries.values().next().unwrap().clone();
+        replacement_entry.operation_kind = "replace".to_string();
+        catalog.entries.insert(
+            CatalogKey {
+                host_ref: request.host_ref.clone(),
+                service_ref: request.service_ref.clone(),
+                slot_ref: request.slot_ref.clone(),
+                declaration_fingerprint: request.declaration_fingerprint.clone(),
+                operation_kind: request.operation_kind.clone(),
+                source: request.source.clone(),
+            },
+            replacement_entry,
+        );
+        assert!(catalog.resolve(&request).is_ok());
     }
 
     #[test]

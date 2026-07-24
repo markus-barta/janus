@@ -54,6 +54,8 @@ web_log="${runtime}/web-transaction.log"
 web_abort_ready="${runtime}/web-abort-ready"
 import_canary="janus-lifecycle-entry-import-canary"
 web_canary="SENSITIVE_WEB_TRANSACTION_CANARY_9d3e"
+web_failed_replacement_canary="SENSITIVE_WEB_REPLACEMENT_ROLLBACK_CANARY_62a1"
+web_replacement_canary="SENSITIVE_WEB_REPLACEMENT_SUCCESS_CANARY_b817"
 
 mkdir -p "${runtime}" "${store_dir}" "${state_dir}" "${audit_dir}" "${web_outbox}"
 chmod 700 "${runtime}" "${store_dir}" "${state_dir}" "${audit_dir}" "${web_outbox}"
@@ -303,28 +305,40 @@ signing_key = {
 pathlib.Path(os.environ["WEB_SIGNING_KEY"]).write_text(
     json.dumps(signing_key, indent=2) + "\n", encoding="utf-8"
 )
+delivery = {
+    "schema": "inspr.janus.managed-host-delivery-plan.v1",
+    "schema_version": 1,
+    "host_recipient": os.environ["WEB_HOST_RECIPIENT"],
+    "producer_key_id": "key_websmoke0001",
+    "producer_signing_key_file": os.environ["WEB_SIGNING_KEY"],
+    "outbox_dir": os.environ["WEB_OUTBOX"],
+    "generation": 1,
+    "revocation_epoch": 1,
+    "envelope_ttl_seconds": 900,
+}
+create_entry = {
+    "host_ref": "host_0123456789abcdef",
+    "service_ref": "svc_0123456789abcdef",
+    "slot_ref": "slot_0123456789abcdef",
+    "declaration_fingerprint": "decl_0123456789abcdef",
+    "operation_kind": "create",
+    "plan": web_plan,
+    "delivery": delivery,
+}
+replace_entry = create_entry | {
+    "operation_kind": "replace",
+}
+generated_replace_entry = create_entry | {
+    "operation_kind": "replace",
+    "plan": web_plan | {
+        "rotation_strategy": "generated",
+        "source": {"mode": "generated", "alphabet": "url_safe", "length": 48},
+    },
+}
 catalog = {
     "schema": "inspr.janus.managed-web-transaction-catalog.v2",
     "schema_version": 2,
-    "entries": [{
-        "host_ref": "host_0123456789abcdef",
-        "service_ref": "svc_0123456789abcdef",
-        "slot_ref": "slot_0123456789abcdef",
-        "declaration_fingerprint": "decl_0123456789abcdef",
-        "operation_kind": "create",
-        "plan": web_plan,
-        "delivery": {
-            "schema": "inspr.janus.managed-host-delivery-plan.v1",
-            "schema_version": 1,
-            "host_recipient": os.environ["WEB_HOST_RECIPIENT"],
-            "producer_key_id": "key_websmoke0001",
-            "producer_signing_key_file": os.environ["WEB_SIGNING_KEY"],
-            "outbox_dir": os.environ["WEB_OUTBOX"],
-            "generation": 1,
-            "revocation_epoch": 1,
-            "envelope_ttl_seconds": 900,
-        },
-    }],
+    "entries": [create_entry, replace_entry, generated_replace_entry],
 }
 pathlib.Path(os.environ["WEB_CATALOG"]).write_text(
     json.dumps(catalog, indent=2) + "\n", encoding="utf-8"
@@ -528,7 +542,7 @@ if preflight["phase"] != "preflighted" or not preflight["expects_value"]:
 secret = os.environ["WEB_CANARY"].encode()
 frame(peer, secret)
 prepared = response(peer)
-if prepared["phase"] != "prepared" or prepared["expects_value"] or prepared["generation"] != 1:
+if prepared["phase"] != "prepared" or prepared["expects_value"] or prepared["generation"] != 2:
     raise SystemExit(
         "web transaction did not prepare host delivery: "
         + prepared.get("reason_code", "missing_reason")
@@ -543,7 +557,7 @@ if outbox["value_returned"] is not False or os.environ["WEB_CANARY"] in json.dum
 finalize = request | {
     "action": "finalize",
     "external_evidence": {
-        "generation": 1,
+        "generation": 2,
         "materialized": True,
         "process_state": "running",
         "probe_state": "healthy",
@@ -557,7 +571,7 @@ finalizer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 finalizer.connect(os.environ["WEB_SOCKET"])
 frame(finalizer, finalize_body)
 complete = response(finalizer)
-if complete["phase"] != "completed" or complete["expects_value"] or complete["generation"] != 1:
+if complete["phase"] != "completed" or complete["expects_value"] or complete["generation"] != 2:
     raise SystemExit("web transaction did not finalize external activation")
 finalizer.close()
 if os.path.exists(outbox_path):
@@ -589,6 +603,212 @@ chmod 600 "${web_decrypted}"
 [ "$(cat "${web_decrypted}")" = "${web_canary}" ] ||
   fail "web transaction ciphertext did not recover the input stream"
 
+web_original_ciphertext="${runtime}/web-original.age"
+cp "${web_ciphertext}" "${web_original_ciphertext}"
+chmod 600 "${web_original_ciphertext}"
+
+WEB_SOCKET="${web_socket}" \
+  WEB_FAILED_REPLACEMENT_CANARY="${web_failed_replacement_canary}" \
+  WEB_OUTBOX="${web_outbox}" python3 - <<'PY'
+import json
+import os
+import socket
+import struct
+
+def response(peer):
+    header = peer.recv(4)
+    if len(header) != 4:
+        raise SystemExit("replacement response header truncated")
+    size = struct.unpack(">I", header)[0]
+    chunks = []
+    while sum(map(len, chunks)) < size:
+        chunk = peer.recv(size - sum(map(len, chunks)))
+        if not chunk:
+            raise SystemExit("replacement response truncated")
+        chunks.append(chunk)
+    value = json.loads(b"".join(chunks))
+    if value["value_returned"] is not False:
+        raise SystemExit("replacement response returned a value")
+    return value
+
+request = {
+    "schema": "inspr.janus.managed-web-transaction-request.v2",
+    "schema_version": 2,
+    "action": "prepare",
+    "operation_ref": "op_webreplacecrash1",
+    "operation_kind": "replace",
+    "source": "import",
+    "host_ref": "host_0123456789abcdef",
+    "service_ref": "svc_0123456789abcdef",
+    "slot_ref": "slot_0123456789abcdef",
+    "declaration_fingerprint": "decl_0123456789abcdef",
+    "external_evidence": None,
+}
+peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+peer.connect(os.environ["WEB_SOCKET"])
+body = json.dumps(request, separators=(",", ":")).encode()
+peer.sendall(struct.pack(">I", len(body)) + body)
+preflight = response(peer)
+if preflight["phase"] != "preflighted" or not preflight["expects_value"]:
+    raise SystemExit("replacement did not gate value entry behind preflight")
+secret = os.environ["WEB_FAILED_REPLACEMENT_CANARY"].encode()
+peer.sendall(struct.pack(">I", len(secret)) + secret)
+prepared = response(peer)
+if prepared["phase"] != "prepared" or prepared["generation"] != 3:
+    raise SystemExit("first replacement did not receive monotonic generation 3")
+peer.close()
+outbox_path = os.path.join(os.environ["WEB_OUTBOX"], "op_webreplacecrash1.json")
+outbox = json.loads(open(outbox_path, encoding="utf-8").read())
+if outbox["operation_kind"] != "replace" or outbox["generation"] != 3:
+    raise SystemExit("replacement outbox binding is invalid")
+if os.environ["WEB_FAILED_REPLACEMENT_CANARY"] in json.dumps(outbox):
+    raise SystemExit("replacement value crossed the ciphertext-only outbox")
+PY
+
+jq -e \
+  '.phase == "validated" and .operation_kind == "replace" and .generation == 3 and (.rollback_id | type == "string")' \
+  "${state_dir}/webtx_webreplacecrash1.json" >/dev/null ||
+  fail "replacement did not durably journal rollback material before host handoff"
+cmp -s "${web_original_ciphertext}" "${web_ciphertext}" &&
+  fail "replacement staging did not change the current ciphertext"
+
+kill "${web_daemon_pid}"
+wait "${web_daemon_pid}" >/dev/null 2>&1 || true
+web_daemon_pid=""
+start_web_daemon
+
+WEB_SOCKET="${web_socket}" WEB_OUTBOX="${web_outbox}" \
+  WEB_CIPHERTEXT="${web_ciphertext}" \
+  WEB_REPLACEMENT_CANARY="${web_replacement_canary}" python3 - <<'PY'
+import json
+import os
+import socket
+import struct
+
+def transact(request, secret=None):
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    peer.connect(os.environ["WEB_SOCKET"])
+    body = json.dumps(request, separators=(",", ":")).encode()
+    peer.sendall(struct.pack(">I", len(body)) + body)
+    first = read_response(peer)
+    if secret is None or first["phase"] != "preflighted":
+        peer.close()
+        return first
+    encoded = secret.encode()
+    peer.sendall(struct.pack(">I", len(encoded)) + encoded)
+    final = read_response(peer)
+    peer.close()
+    return final
+
+def read_response(peer):
+    header = peer.recv(4)
+    if len(header) != 4:
+        raise SystemExit("replacement response header truncated")
+    size = struct.unpack(">I", header)[0]
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = peer.recv(remaining)
+        if not chunk:
+            raise SystemExit("replacement response truncated")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    value = json.loads(b"".join(chunks))
+    if value["value_returned"] is not False:
+        raise SystemExit("replacement response returned a value")
+    return value
+
+base = {
+    "schema": "inspr.janus.managed-web-transaction-request.v2",
+    "schema_version": 2,
+    "operation_kind": "replace",
+    "source": "import",
+    "host_ref": "host_0123456789abcdef",
+    "service_ref": "svc_0123456789abcdef",
+    "slot_ref": "slot_0123456789abcdef",
+    "declaration_fingerprint": "decl_0123456789abcdef",
+    "external_evidence": None,
+}
+rollback_request = base | {
+    "action": "rollback",
+    "operation_ref": "op_webreplacecrash1",
+}
+rolled_back = transact(rollback_request)
+if rolled_back["phase"] != "rolled_back" or rolled_back["generation"] != 3:
+    raise SystemExit("restarted replacement did not roll back generation 3")
+if os.path.exists(os.path.join(os.environ["WEB_OUTBOX"], "op_webreplacecrash1.json")):
+    raise SystemExit("rolled-back replacement retained its host outbox")
+
+prepare = base | {
+    "action": "prepare",
+    "operation_ref": "op_webreplacesucc01",
+}
+prepared = transact(prepare, os.environ["WEB_REPLACEMENT_CANARY"])
+if prepared["phase"] != "prepared" or prepared["generation"] != 4:
+    raise SystemExit("replacement retry did not advance to generation 4")
+outbox_path = os.path.join(os.environ["WEB_OUTBOX"], "op_webreplacesucc01.json")
+outbox = json.loads(open(outbox_path, encoding="utf-8").read())
+finalize = prepare | {
+    "action": "finalize",
+    "external_evidence": {
+        "generation": 4,
+        "materialized": True,
+        "process_state": "running",
+        "probe_state": "healthy",
+        "heartbeat_observed_at_unix_secs": outbox["prepared_at_unix_secs"],
+        "process_observed_at_unix_secs": outbox["prepared_at_unix_secs"],
+        "probe_observed_at_unix_secs": outbox["prepared_at_unix_secs"],
+    },
+}
+completed = transact(finalize)
+if completed["phase"] != "completed" or completed["generation"] != 4:
+    raise SystemExit("healthy replacement did not commit generation 4")
+if os.path.exists(outbox_path):
+    raise SystemExit("completed replacement retained its host outbox")
+replayed = transact(prepare)
+if replayed["phase"] != "completed" or replayed["generation"] != 4:
+    raise SystemExit("completed replacement replay was not idempotent")
+
+before_generated = open(os.environ["WEB_CIPHERTEXT"], "rb").read()
+generated = base | {
+    "action": "prepare",
+    "operation_ref": "op_webreplacegen001",
+    "source": "generated",
+}
+peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+peer.connect(os.environ["WEB_SOCKET"])
+body = json.dumps(generated, separators=(",", ":")).encode()
+peer.sendall(struct.pack(">I", len(body)) + body)
+preflight = read_response(peer)
+if preflight["phase"] != "preflighted" or preflight["expects_value"]:
+    raise SystemExit("generated replacement unexpectedly requested a value")
+generated_prepared = read_response(peer)
+peer.close()
+if generated_prepared["phase"] != "prepared" or generated_prepared["generation"] != 5:
+    raise SystemExit("generated replacement did not stage monotonic generation 5")
+if open(os.environ["WEB_CIPHERTEXT"], "rb").read() == before_generated:
+    raise SystemExit("generated replacement did not stage new ciphertext")
+generated_rollback = generated | {"action": "rollback"}
+generated_rolled_back = transact(generated_rollback)
+if generated_rolled_back["phase"] != "rolled_back" or generated_rolled_back["generation"] != 5:
+    raise SystemExit("generated replacement rollback was not terminal")
+if open(os.environ["WEB_CIPHERTEXT"], "rb").read() != before_generated:
+    raise SystemExit("generated replacement rollback did not restore exact prior ciphertext")
+if os.path.exists(os.path.join(os.environ["WEB_OUTBOX"], "op_webreplacegen001.json")):
+    raise SystemExit("generated replacement rollback retained its host outbox")
+PY
+
+cmp -s "${web_original_ciphertext}" "${web_ciphertext}" &&
+  fail "successful replacement retained the previous ciphertext"
+web_replacement_decrypted="${runtime}/web-replacement-decrypted.secret"
+age -d -i "${identity_file}" -o "${web_replacement_decrypted}" \
+  "${web_ciphertext}" >>"${log}" 2>&1
+chmod 600 "${web_replacement_decrypted}"
+[ "$(cat "${web_replacement_decrypted}")" = "${web_replacement_canary}" ] ||
+  fail "successful replacement ciphertext did not recover the new input"
+[ "$(find "${store_dir}" -type f -name '*.rollback.*' -print -quit)" = "" ] ||
+  fail "terminal replacement retained central rollback material"
+
 for action in secret.lifecycle consumer.validate consumer.reload; do
   grep -F "\"action\":\"${action}\"" "${audit_path}" >/dev/null ||
     fail "entry audit evidence missing ${action}"
@@ -601,5 +821,11 @@ if grep -F "${web_canary}" "${log}" "${web_log}" "${audit_path}" \
   "${state_dir}"/*.json "${web_ciphertext}" >/dev/null 2>&1; then
   fail "web canary leaked into output, audit, journal, crash output, or ciphertext"
 fi
+for canary in "${web_failed_replacement_canary}" "${web_replacement_canary}"; do
+  if grep -F "${canary}" "${log}" "${web_log}" "${audit_path}" \
+    "${state_dir}"/*.json "${web_ciphertext}" >/dev/null 2>&1; then
+    fail "replacement canary leaked into output, audit, journal, crash output, or ciphertext"
+  fi
+done
 
-printf 'ok: lifecycle-entry smoke passed admin and private web transactions, crash reconciliation, duplicate idempotency, and value-free evidence value_returned=false\n'
+printf 'ok: lifecycle-entry smoke passed create, imported/generated replacement, restart-safe rollback, monotonic commit, duplicate idempotency, and value-free evidence value_returned=false\n'

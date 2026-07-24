@@ -242,7 +242,7 @@ func validateManagedControlRequest(request managedTransactionRequest) error {
 		!validManagedRef("svc_", request.ServiceRef) ||
 		!validManagedRef("slot_", request.SlotRef) ||
 		!validManagedRef("decl_", request.DeclarationFingerprint) ||
-		request.OperationKind != "create" ||
+		(request.OperationKind != "create" && request.OperationKind != "replace") ||
 		(request.Source != "generated" && request.Source != "import") ||
 		request.Action == "finalize" && !validManagedExternalEvidence(request.ExternalEvidence) ||
 		request.Action == "rollback" && request.ExternalEvidence != nil ||

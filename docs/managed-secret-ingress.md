@@ -114,8 +114,8 @@ storage without clearing the authenticated session.
   contain the submitted bytes.
 
 The client boundary admits signed `create` and `replace` operation kinds.
-JANUS-362 supplies the staged replacement/rollback executor; the current Rust
-catalog remains fail-closed for replacement until that reviewed executor is
-installed. The Go transport test proves a downstream denial stops before the
-value frame; the Rust catalog resolver test independently proves `replace` is
-currently rejected as `web_transaction_request_invalid`.
+Replacement uses the staged JANUS-362 executor only when Rust finds an exact
+reviewed replacement catalog entry and a current active generation. A denied
+replacement never causes the client to send the imported value frame; the
+Rust catalog resolver independently proves `replace` is denied without that
+exact entry.

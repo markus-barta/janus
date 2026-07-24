@@ -101,23 +101,33 @@ type managedPharosOperationStatus struct {
 }
 
 type managedPharosOperationSummary struct {
-	OperationRef           string                      `json:"operation_ref"`
-	OperationKind          string                      `json:"operation_kind"`
-	HostRef                string                      `json:"host_ref"`
-	ServiceRef             string                      `json:"service_ref"`
-	SlotRef                string                      `json:"slot_ref"`
-	DeclarationFingerprint string                      `json:"declaration_fingerprint"`
-	Generation             uint64                      `json:"generation"`
-	Phase                  string                      `json:"phase"`
-	ReasonCode             *string                     `json:"reason_code"`
-	CreatedAtUnixSeconds   int64                       `json:"created_at_unix_secs"`
-	UpdatedAtUnixSeconds   int64                       `json:"updated_at_unix_secs"`
-	Health                 *managedPharosHealthSummary `json:"health"`
-	ValueReturned          bool                        `json:"value_returned"`
+	OperationRef           string                        `json:"operation_ref"`
+	OperationKind          string                        `json:"operation_kind"`
+	HostRef                string                        `json:"host_ref"`
+	ServiceRef             string                        `json:"service_ref"`
+	SlotRef                string                        `json:"slot_ref"`
+	DeclarationFingerprint string                        `json:"declaration_fingerprint"`
+	Generation             uint64                        `json:"generation"`
+	Phase                  string                        `json:"phase"`
+	ReasonCode             *string                       `json:"reason_code"`
+	CreatedAtUnixSeconds   int64                         `json:"created_at_unix_secs"`
+	UpdatedAtUnixSeconds   int64                         `json:"updated_at_unix_secs"`
+	Health                 *managedPharosHealthSummary   `json:"health"`
+	Rollback               *managedPharosRollbackSummary `json:"rollback,omitempty"`
+	ValueReturned          bool                          `json:"value_returned"`
 }
 
 type managedPharosHealthSummary struct {
 	Generation                     uint64 `json:"generation"`
+	Outcome                        string `json:"outcome"`
+	HeartbeatObservedAtUnixSeconds int64  `json:"heartbeat_observed_at_unix_secs"`
+	ProcessObservedAtUnixSeconds   int64  `json:"process_observed_at_unix_secs"`
+	ProbeObservedAtUnixSeconds     int64  `json:"probe_observed_at_unix_secs"`
+	AcceptedAtUnixSeconds          int64  `json:"accepted_at_unix_secs"`
+}
+
+type managedPharosRollbackSummary struct {
+	RestoredGeneration             uint64 `json:"restored_generation"`
 	Outcome                        string `json:"outcome"`
 	HeartbeatObservedAtUnixSeconds int64  `json:"heartbeat_observed_at_unix_secs"`
 	ProcessObservedAtUnixSeconds   int64  `json:"process_observed_at_unix_secs"`
@@ -352,7 +362,7 @@ func (bridge *managedOperationBridge) reconcile(ctx context.Context, request man
 			return managedTransactionResult{}, managedTransactionError("managed_operation_state_unavailable")
 		}
 		return result, nil
-	case "failed", "superseded":
+	case "failed", "rolled_back", "superseded":
 		result, err := bridge.transaction.Rollback(ctx, record)
 		if err != nil {
 			return managedTransactionResult{}, err
@@ -470,11 +480,25 @@ func (status managedPharosOperationStatus) valid() bool {
 }
 
 func validManagedPharosHealth(operation managedPharosOperationSummary) bool {
+	if operation.Phase == "rolled_back" {
+		rollback := operation.Rollback
+		return operation.Health == nil &&
+			operation.OperationKind == "replace" &&
+			rollback != nil &&
+			rollback.RestoredGeneration > 0 &&
+			rollback.RestoredGeneration < operation.Generation &&
+			rollback.Outcome == "healthy" &&
+			rollback.HeartbeatObservedAtUnixSeconds > 0 &&
+			rollback.ProcessObservedAtUnixSeconds > 0 &&
+			rollback.ProbeObservedAtUnixSeconds > 0 &&
+			rollback.AcceptedAtUnixSeconds > 0
+	}
 	if operation.Phase != "active" {
-		return operation.Health == nil
+		return operation.Health == nil && operation.Rollback == nil
 	}
 	health := operation.Health
 	return health != nil &&
+		operation.Rollback == nil &&
 		health.Generation == operation.Generation &&
 		health.Outcome == "healthy" &&
 		health.HeartbeatObservedAtUnixSeconds > 0 &&
@@ -515,7 +539,7 @@ func (status managedPharosOperationStatus) externalEvidence() (managedExternalAc
 
 func validManagedOperationPhase(value string) bool {
 	switch value {
-	case "install_pending", "installing", "reload_pending", "reloading", "verify_pending", "verifying", "active", "failed", "superseded":
+	case "install_pending", "installing", "reload_pending", "reloading", "verify_pending", "verifying", "active", "rolled_back", "failed", "superseded":
 		return true
 	default:
 		return false
@@ -533,6 +557,14 @@ func (store *managedOperationBridgeStore) putPrepared(record managedOperationBri
 			return errors.New("managed operation bridge conflict")
 		}
 		return nil
+	}
+	for _, existing := range store.document.Operations {
+		if existing.HostRef == record.HostRef &&
+			existing.ServiceRef == record.ServiceRef &&
+			existing.SlotRef == record.SlotRef &&
+			(existing.Phase == "prepared" || existing.Phase == "registered") {
+			return errors.New("managed operation bridge slot conflict")
+		}
 	}
 	if len(store.document.Operations) >= managedOperationBridgeMaxEntries {
 		return errors.New("managed operation bridge capacity")
@@ -646,7 +678,7 @@ func validateManagedOperationBridgeDocument(document managedOperationBridgeDocum
 
 func validateManagedOperationBridgeRecord(record managedOperationBridgeRecord) error {
 	if !validManagedRef("op_", record.OperationRef) ||
-		record.OperationKind != "create" ||
+		(record.OperationKind != "create" && record.OperationKind != "replace") ||
 		(record.Source != "generated" && record.Source != "import") ||
 		!validManagedRef("host_", record.HostRef) ||
 		!validManagedRef("svc_", record.ServiceRef) ||

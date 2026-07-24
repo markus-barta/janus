@@ -333,6 +333,108 @@ func TestManagedBridgeReconciliationIsTerminalAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestManagedBridgeReplacementRollbackIsBoundAndIdempotent(t *testing.T) {
+	root := t.TempDir()
+	store, err := newManagedOperationBridgeStore(filepath.Join(root, "bridge.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := managedBridgeRecord("op_20000002")
+	record.OperationKind = "replace"
+	record.Generation = 2
+	if err := store.putPrepared(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.setPhase(record.OperationRef, "registered", 1_800_000_001); err != nil {
+		t.Fatal(err)
+	}
+	statusServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(managedPharosOperationStatus{
+			Schema:        managedOperationStatusSchema,
+			SchemaVersion: 1,
+			Operation: managedPharosOperationSummary{
+				OperationRef:           record.OperationRef,
+				OperationKind:          record.OperationKind,
+				HostRef:                record.HostRef,
+				ServiceRef:             record.ServiceRef,
+				SlotRef:                record.SlotRef,
+				DeclarationFingerprint: record.DeclarationFingerprint,
+				Generation:             record.Generation,
+				Phase:                  "rolled_back",
+				CreatedAtUnixSeconds:   1_800_000_000,
+				UpdatedAtUnixSeconds:   1_800_000_010,
+				Rollback: &managedPharosRollbackSummary{
+					RestoredGeneration:             1,
+					Outcome:                        "healthy",
+					HeartbeatObservedAtUnixSeconds: 1_800_000_009,
+					ProcessObservedAtUnixSeconds:   1_800_000_009,
+					ProbeObservedAtUnixSeconds:     1_800_000_009,
+					AcceptedAtUnixSeconds:          1_800_000_010,
+				},
+				ValueReturned: false,
+			},
+			ValueReturned: false,
+		})
+	}))
+	defer statusServer.Close()
+	pharos, err := newManagedPharosOperationClient(
+		statusServer.URL,
+		strings.Repeat("i", 32),
+		statusServer.Client(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &fakeManagedTransactionBackend{}
+	bridge := &managedOperationBridge{
+		transaction: backend,
+		pharos:      pharos,
+		store:       store,
+		now:         func() time.Time { return time.Unix(1_800_000_011, 0) },
+	}
+	request := managedHostReconcileRequest{
+		Schema:        managedHostReconcileRequestSchema,
+		SchemaVersion: 1,
+		OperationRef:  record.OperationRef,
+		HostRef:       record.HostRef,
+		Generation:    record.Generation,
+	}
+	for range 2 {
+		result, err := bridge.reconcile(context.Background(), request)
+		if err != nil || result.Phase != "rolled_back" || result.ValueReturned {
+			t.Fatalf("replacement rollback reconciliation failed: %#v %v", result, err)
+		}
+	}
+	if backend.rollbackCount != 2 || backend.finalizeCount != 0 {
+		t.Fatalf("replacement rollback was not idempotently dispatched: %#v", backend)
+	}
+	rolledBack, ok := store.get(record.OperationRef)
+	if !ok || rolledBack.Phase != "rolled_back" {
+		t.Fatalf("bridge did not persist replacement rollback: %#v", rolledBack)
+	}
+}
+
+func TestManagedBridgeRejectsConcurrentOperationsForOneSlot(t *testing.T) {
+	store, err := newManagedOperationBridgeStore(filepath.Join(t.TempDir(), "bridge.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := managedBridgeRecord("op_20000003")
+	if err := store.putPrepared(first); err != nil {
+		t.Fatal(err)
+	}
+	second := managedBridgeRecord("op_20000004")
+	second.OperationKind = "replace"
+	second.Generation = 2
+	if err := store.putPrepared(second); err == nil {
+		t.Fatal("concurrent create/replace operations for one slot were admitted")
+	}
+	if _, ok := store.get(second.OperationRef); ok {
+		t.Fatal("rejected slot conflict was persisted")
+	}
+}
+
 func TestManagedBridgeFailedWriteRestoresInMemoryState(t *testing.T) {
 	root := t.TempDir()
 	stateDir := filepath.Join(root, "state")
