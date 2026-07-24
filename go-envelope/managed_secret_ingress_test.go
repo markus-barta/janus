@@ -280,7 +280,7 @@ func TestManagedSetupPageRequiresPasskeyBeforeRenderingValueInput(t *testing.T) 
 	}
 	for header, expected := range map[string]string{
 		"Content-Security-Policy":      "script-src 'none'",
-		"Referrer-Policy":              "no-referrer",
+		"Referrer-Policy":              "origin",
 		"Cross-Origin-Resource-Policy": "same-origin",
 	} {
 		if got := response.Header().Get(header); !strings.Contains(got, expected) {

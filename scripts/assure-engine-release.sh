@@ -25,6 +25,10 @@ echo "==> janus engine release assurance: reviewed adversarial recovery corpus"
 python3 scripts/run-adversarial-scenarios.py --self-test
 python3 scripts/run-adversarial-scenarios.py
 
+echo "==> janus engine release assurance: managed-service secret UX"
+python3 scripts/run-managed-service-ux-assurance.py --self-test
+python3 scripts/run-managed-service-ux-assurance.py --stack rust
+
 echo "==> janus engine release assurance: cargo tests"
 cargo test --all --locked
 

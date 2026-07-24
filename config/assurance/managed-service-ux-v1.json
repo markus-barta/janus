@@ -1,0 +1,352 @@
+{
+  "schema": "inspr.janus.managed-service-ux-assurance.v1",
+  "schema_version": 1,
+  "reviewed_on": "2026-07-24",
+  "review_valid_days": 90,
+  "timeout_seconds": 120,
+  "required_families": [
+    "browser-lifecycle",
+    "host-custody",
+    "identity-authority",
+    "intent-binding",
+    "non-disclosure",
+    "request-integrity",
+    "workflow-recovery"
+  ],
+  "review_requirements": [
+    "human-threat-model",
+    "model-diverse-security"
+  ],
+  "scenarios": [
+    {
+      "id": "origin-fetch-metadata-content-boundary",
+      "family": "request-integrity",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedIngressRejectsIntegrityFailuresBeforeValueReadOrConsume",
+      "value_returned": false
+    },
+    {
+      "id": "csrf-before-value-read",
+      "family": "request-integrity",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedIngressRejectsBadCSRFBeforeReadingValue",
+      "value_returned": false
+    },
+    {
+      "id": "intent-identity-time-audience-forgery",
+      "family": "identity-authority",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedIntentRejectsIdentityTimeAudienceDriftAndTampering",
+      "value_returned": false
+    },
+    {
+      "id": "passwordless-subject-state-role-freshness",
+      "family": "identity-authority",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedStepUpCompletionBindsSubjectStateRoleAndFreshAssertion",
+      "value_returned": false
+    },
+    {
+      "id": "oidc-callback-bound-passwordless",
+      "family": "identity-authority",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestOIDCCallbackCompletesOnlyBoundPasswordlessStepUp",
+      "value_returned": false
+    },
+    {
+      "id": "step-up-cookie-tamper-expiry",
+      "family": "identity-authority",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedStepUpCookieTamperAndExpiryFailClosed",
+      "value_returned": false
+    },
+    {
+      "id": "signed-source-policy-binding",
+      "family": "intent-binding",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedIntentRejectsSourceOutsideSignedDeclarationBeforeReplayConsume",
+      "value_returned": false
+    },
+    {
+      "id": "manifest-scope-fingerprint-drift",
+      "family": "intent-binding",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedManifestResolverRecomputesFingerprintAndFailsClosed",
+      "value_returned": false
+    },
+    {
+      "id": "fixed-return-origin-no-redirect",
+      "family": "intent-binding",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedHTTPFetcherRejectsRedirectAndUntrustedDenialShape",
+      "value_returned": false
+    },
+    {
+      "id": "exact-host-envelope-idor",
+      "family": "intent-binding",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedBridgeDeliversOnlyBoundCiphertextToExactHost",
+      "value_returned": false
+    },
+    {
+      "id": "import-consume-before-read-zeroize",
+      "family": "non-disclosure",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedImportConsumesIntentBeforeReadingAndZeroizesValue",
+      "value_returned": false
+    },
+    {
+      "id": "typed-transaction-denial-redaction",
+      "family": "non-disclosure",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedTransactionDenialCannotEchoValue",
+      "value_returned": false
+    },
+    {
+      "id": "browser-import-cross-system-value-free",
+      "family": "non-disclosure",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedBrowserImportRegistersHostDeliveryAndFinalizesWithoutValueReturn",
+      "value_returned": false
+    },
+    {
+      "id": "duplicate-submit-replay-denied",
+      "family": "workflow-recovery",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedDuplicateSubmitCannotReplayImport",
+      "value_returned": false
+    },
+    {
+      "id": "bridge-terminal-restart-idempotency",
+      "family": "workflow-recovery",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedBridgeReconciliationIsTerminalAndIdempotent",
+      "value_returned": false
+    },
+    {
+      "id": "replacement-rollback-idempotency",
+      "family": "workflow-recovery",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedBridgeReplacementRollbackIsBoundAndIdempotent",
+      "value_returned": false
+    },
+    {
+      "id": "same-slot-concurrency-denied",
+      "family": "workflow-recovery",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedBridgeRejectsConcurrentOperationsForOneSlot",
+      "value_returned": false
+    },
+    {
+      "id": "removal-quarantine-due-only-purge",
+      "family": "workflow-recovery",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedBrowserRemovalCarriesNoValueQuarantinesAndPurgesOnlyWhenDue",
+      "value_returned": false
+    },
+    {
+      "id": "removal-failure-review-required",
+      "family": "workflow-recovery",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedFailedRemovalRequiresReviewAndNeverRestoresAutomatically",
+      "value_returned": false
+    },
+    {
+      "id": "host-recipient-and-producer-authority",
+      "family": "host-custody",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::recipient_and_janus_signature_are_both_required",
+      "value_returned": false
+    },
+    {
+      "id": "host-scope-slot-generation-binding",
+      "family": "host-custody",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::exact_host_scope_slot_declaration_epoch_and_generation_are_enforced",
+      "value_returned": false
+    },
+    {
+      "id": "host-offline-reboot-rollback",
+      "family": "host-custody",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::rollback_and_offline_reboot_restore_the_exact_previous_generation",
+      "value_returned": false
+    },
+    {
+      "id": "host-expiry-and-rollback-window",
+      "family": "host-custody",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::expired_envelopes_and_expired_rollback_windows_fail_closed",
+      "value_returned": false
+    },
+    {
+      "id": "host-symlink-hardlink-tamper",
+      "family": "host-custody",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::partial_symlink_hardlink_and_tampered_cache_objects_are_rejected",
+      "value_returned": false
+    },
+    {
+      "id": "host-retirement-and-bounds",
+      "family": "host-custody",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::retired_host_removes_runtime_and_bounded_input_rejects_oversize",
+      "value_returned": false
+    },
+    {
+      "id": "host-persistence-canary-redaction",
+      "family": "non-disclosure",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::errors_status_and_persisted_metadata_never_echo_the_canary",
+      "value_returned": false
+    },
+    {
+      "id": "host-quarantine-interruption-recovery",
+      "family": "workflow-recovery",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::quarantine_recovers_interrupted_write_restores_and_purges_only_when_due",
+      "value_returned": false
+    },
+    {
+      "id": "central-quarantine-binding-recovery",
+      "family": "workflow-recovery",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-provider-age",
+      "test_name": "tests::quarantine_is_bound_recoverable_due_only_and_never_returns_a_value",
+      "value_returned": false
+    },
+    {
+      "id": "recipient-key-rotation-no-return",
+      "family": "host-custody",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-provider-age",
+      "test_name": "tests::recipient_admin_ops_reencrypt_without_returning_values",
+      "value_returned": false
+    },
+    {
+      "id": "typed-web-request-rejects-values-paths",
+      "family": "intent-binding",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janusd",
+      "test_name": "runtime::lifecycle_entry::web_transaction::tests::request_json_rejects_value_and_path_fields",
+      "value_returned": false
+    },
+    {
+      "id": "typed-web-response-no-debug-value",
+      "family": "non-disclosure",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janusd",
+      "test_name": "runtime::lifecycle_entry::web_transaction::tests::response_is_value_free_and_has_no_debug_surface",
+      "value_returned": false
+    },
+    {
+      "id": "lifecycle-crash-retry-removal-smoke",
+      "family": "workflow-recovery",
+      "stack": "rust",
+      "runner": "shell",
+      "working_directory": ".",
+      "target": "scripts/smoke-janusd-lifecycle-entry.sh",
+      "test_name": "",
+      "value_returned": false
+    },
+    {
+      "id": "real-browser-passwordless-history-logout-removal",
+      "family": "browser-lifecycle",
+      "stack": "browser",
+      "runner": "npm",
+      "working_directory": ".",
+      "target": "test:managed-browser",
+      "test_name": "",
+      "value_returned": false
+    }
+  ]
+}

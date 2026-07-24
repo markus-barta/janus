@@ -308,6 +308,11 @@ func (app *App) managedSetupEnabled() bool {
 func managedSecretResponseBoundary(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store, no-transform")
 	w.Header().Set("Content-Encoding", "identity")
+	// Chromium serializes a form POST Origin as "null" under no-referrer,
+	// which makes the exact same-origin mutation gate deny the legitimate
+	// passwordless flow. origin preserves the non-null Origin required by the
+	// first-party POST without forwarding the intent-bearing path.
+	w.Header().Set("Referrer-Policy", "origin")
 }
 
 func exactManagedIntentQuery(raw *url.URL) (string, bool) {

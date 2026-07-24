@@ -9,7 +9,7 @@ name: go-envelope
 on:
   push:
     branches: [main]
-    paths: ['go-envelope/**', 'config/assurance/**', 'config/release-channels/**', 'scripts/**', '.github/workflows/go-envelope.yml']
+    paths: ['go-envelope/**', 'browser-qa/**', 'package.json', 'package-lock.json', 'config/assurance/**', 'config/release-channels/**', 'scripts/**', '.github/workflows/go-envelope.yml']
   # Always report the branch-required Go check on pull requests. Pushes retain
   # the focused path filter above.
   pull_request:
@@ -34,11 +34,28 @@ jobs:
         with:
           go-version: '1.26.5'
           cache-dependency-path: go-envelope/go.sum
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.23.1
+          cache: npm
       - run: go build ./...
       - run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
       - run: go vet ./...
       - run: go test ./...
+      - name: managed-service Go assurance
+        working-directory: .
+        run: |
+          python3 scripts/run-managed-service-ux-assurance.py --self-test
+          python3 scripts/run-managed-service-ux-assurance.py --stack go
+      - name: install managed-service browser assurance
+        working-directory: .
+        run: |
+          npm ci --ignore-scripts
+          npx playwright install --with-deps chromium
+      - name: managed-service real-browser assurance
+        working-directory: .
+        run: python3 scripts/run-managed-service-ux-assurance.py --stack browser
       - name: cross-surface Go minimization proof
         run: python3 ../scripts/run-minimization-proof.py --stack go
       - name: Gitleaks history and negative fixture

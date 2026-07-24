@@ -59,6 +59,7 @@ def validate_workflows() -> None:
     go = (ROOT / ".github/workflows/go-envelope.yml").read_text()
     security = (ROOT / ".github/workflows/security.yml").read_text()
     local = (ROOT / "scripts/run-security-gates.sh").read_text()
+    browser_package = json.loads((ROOT / "package.json").read_text())
     for workflow in (rust, go):
         require("scripts/test-gitleaks.sh" in workflow, "release workflow lacks Gitleaks")
         require("0.72.0" in workflow, "release workflow lacks pinned Trivy")
@@ -77,6 +78,35 @@ def validate_workflows() -> None:
     )
     require("staticcheck@v0.7.0" in go, "staticcheck pin is not wired")
     require("govulncheck@v1.6.0" in go, "govulncheck pin is not wired")
+    require(
+        re.search(
+            r"^\s+python3 scripts/run-managed-service-ux-assurance\.py --stack go\s*$",
+            go,
+            re.MULTILINE,
+        )
+        is not None
+        and re.search(
+            r"^\s*run:\s*python3 scripts/run-managed-service-ux-assurance\.py --stack browser\s*$",
+            go,
+            re.MULTILINE,
+        )
+        is not None,
+        "Go release CI lacks managed-service Go/browser assurance",
+    )
+    require(
+        re.search(
+            r"^python3 scripts/run-managed-service-ux-assurance\.py --stack rust$",
+            (ROOT / "scripts/assure-engine-release.sh").read_text(),
+            re.MULTILINE,
+        )
+        is not None,
+        "Rust release CI lacks managed-service host assurance",
+    )
+    require(
+        browser_package.get("scripts", {}).get("test:managed-browser")
+        == "node browser-qa/run-managed-browser-assurance.mjs",
+        "managed-service browser assurance bypasses its artifact boundary",
+    )
     require(
         'GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" python3 scripts/check-security-gates.py --check-installed-tools --tool gitleaks --tool govulncheck --tool staticcheck --tool trivy'
         in go,

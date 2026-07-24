@@ -1,0 +1,12 @@
+{
+  "name": "janus-browser-assurance",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:managed-browser": "node browser-qa/run-managed-browser-assurance.mjs"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
+    "@playwright/test": "1.61.1"
+  }
+}
